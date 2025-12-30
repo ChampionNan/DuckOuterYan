@@ -1,0 +1,2 @@
+create or replace temp view r1 as SELECT * FROM R where exists (SELECT 1 FROM S WHERE R.dst = S.src);
+select r1.src as v1, r1.dst as v2, S.src as v3, S.dst as v4, T.src as v5, T.dst as v6 from r1 right outer join (S FULL outer join T on S.dst = T.src) on r1.dst = S.src;
