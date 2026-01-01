@@ -87,8 +87,8 @@ test_desimplification() {
     compare_pair "$BASE_DIR_4/q3.sql" "$BASE_DIR_4/q3_r.sql"
 }
 
-test_aggregation() {
-    local BASE_DIR_5="outerjoin_test/aggregation"
+test_count() {
+    local BASE_DIR_5="outerjoin_test/count"
     echo "---- Testing Aggregation Queries ----"
     compare_pair "$BASE_DIR_5/q1.sql" "$BASE_DIR_5/q1_r.sql"
     compare_pair "$BASE_DIR_5/q1.sql" "$BASE_DIR_5/q1_2.sql"
@@ -100,6 +100,20 @@ test_aggregation() {
     compare_pair "$BASE_DIR_5/q4.sql" "$BASE_DIR_5/q4_2.sql"
     compare_pair "$BASE_DIR_5/q5.sql" "$BASE_DIR_5/q5_r.sql"
     compare_pair "$BASE_DIR_5/q5.sql" "$BASE_DIR_5/q5_2.sql"
+}
+
+test_aggregation() {
+    local BASE_DIR_6="outerjoin_test/aggregation"
+    echo "---- Testing Advanced Aggregation Queries ----"
+    compare_pair "$BASE_DIR_6/q1.sql" "$BASE_DIR_6/q1_r.sql"
+    compare_pair "$BASE_DIR_6/q2.sql" "$BASE_DIR_6/q2_r.sql"
+    compare_pair "$BASE_DIR_6/q3.sql" "$BASE_DIR_6/q3_r.sql"
+    compare_pair "$BASE_DIR_6/q4.sql" "$BASE_DIR_6/q4_r.sql"
+    compare_pair "$BASE_DIR_6/q5.sql" "$BASE_DIR_6/q5_r.sql"
+    compare_pair "$BASE_DIR_6/q6.sql" "$BASE_DIR_6/q6_r.sql"
+    compare_pair "$BASE_DIR_6/q7.sql" "$BASE_DIR_6/q7_r.sql"
+    compare_pair "$BASE_DIR_6/q8.sql" "$BASE_DIR_6/q8_r.sql"
+    compare_pair "$BASE_DIR_6/q9.sql" "$BASE_DIR_6/q9_r.sql"
 }
 
 # Parse command line argument
@@ -123,6 +137,9 @@ case $TEST_NUM in
         test_desimplification
         ;;
     5)
+        test_count
+        ;;
+    6) 
         test_aggregation
         ;;
     all)
@@ -130,13 +147,17 @@ case $TEST_NUM in
         test_association2
         test_simplification
         test_desimplification
+        test_count
+        test_aggregation    
         ;;
     *)
-        echo "Usage: $0 [1|2|3|4|all]"
+        echo "Usage: $0 [1|2|3|4|5|6|all]"
         echo "  1 - Test Association 1"
         echo "  2 - Test Association 2"
         echo "  3 - Test Simplification"
         echo "  4 - Test Desimplification"
+        echo "  5 - Test Count"
+        echo "  6 - Test Aggregation"
         echo "  all (default) - Run all tests"
         exit 1
         ;;
