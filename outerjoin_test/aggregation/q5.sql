@@ -1,0 +1,1 @@
+SELECT R.src, COUNT(*) as cnt FROM R LEFT OUTER JOIN S ON R.dst = S.src FULL OUTER JOIN T ON S.dst = T.src GROUP BY R.src;

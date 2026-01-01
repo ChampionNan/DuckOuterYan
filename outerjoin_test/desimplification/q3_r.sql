@@ -1,0 +1,3 @@
+create or replace temp view s1 as select * from S where exists (select 1 from R where R.dst = S.src);
+create or replace temp view t1 as select * from T where exists (select 1 from s1 where T.src = s1.dst);
+select R.src as v1, R.dst as v2, S.src as v3, S.dst as v4, T.src as v5, T.dst as v6, K.src as v7, K.dst as v8 from R full outer join (s1 as S full outer join (t1 as T full outer join K on T.dst = K.src) on S.dst = T.src) on R.dst = S.src;

@@ -1,0 +1,2 @@
+create or replace temp view s1 as select * from S where exists (select 1 from R where R.dst = S.src);
+select R.src, count(*) as cnt from R full outer join (s1 full outer join T on s1.dst = T.src) on R.dst = s1.src group by R.src;

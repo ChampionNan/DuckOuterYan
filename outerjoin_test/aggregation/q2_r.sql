@@ -1,0 +1,11 @@
+create or replace temp view s1 as select * from S where exists (select 1 from T where S.dst = T.src);
+create or replace temp view r1 as select * from R where exists (select 1 from s1 where R.dst = s1.src);
+create or replace temp view s2 as select * from s1 where exists (select 1 from r1 where s1.src = r1.dst);
+create or replace temp view t1 as select * from T where exists (select 1 from s2 where T.src = s2.dst);
+create or replace temp view aggk as select K.src, count(*) as annot from K group by K.src;
+create or replace temp view joint as select t1.src, t1.dst, aggk.annot from t1 full outer join aggk on t1.dst = aggk.src;
+create or replace temp view aggt as select src,  sum(COALESCE(annot, 1)) as annot from joint group by joint.src;
+create or replace temp view joins as select s2.src, s2.dst, aggt.annot from s2 right outer join aggt on s2.dst = aggt.src;
+create or replace temp view aggs as select src, sum(COALESCE(annot, 1)) as annot from joins group by joins.src;
+create or replace temp view joinr as select r1.src, r1.dst, aggs.annot from r1 right outer join aggs on r1.dst = aggs.src;
+select joinr.src, sum(COALESCE(annot, 1)) as cnt from joinr group by joinr.src;
