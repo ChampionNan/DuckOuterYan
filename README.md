@@ -1,3 +1,36 @@
+# Yannakakis<sup>+</sup>
+
+## Build
+
+You can build this repository in the same way as the original DuckDB. A `Makefile` wraps the build process. For available build targets and configuration flags, see the [DuckDB Build Configuration Guide](https://duckdb.org/docs/stable/dev/building/build_configuration.html).
+
+```bash
+make                   # Build optimized release version
+make release           # Same as 'make'
+make debug             # Build with debug symbols
+GEN=ninja make         # Use Ninja as backend
+BUILD_BENCHMARK=1 make # Build with benchmark support
+```
+
+## Experiement
+### Test Queries
+Under `./outerjoin_test`, storage file is `rstk_db`. Auto test script is `auto_run.sh`, need to change `DUCK_NUM` PATH. 
+```sh
+# bash auto_run storage_file query_directory
+$ bash auto_run.sh rstk outerjoin_test/aggregation
+```
+
+### Correctness
+`compare_equal_batch.sh` call `compare_equal.sh`. For new testing directory, add new case in `compare_equal.sh`. 
+```sh
+$ bash compare_equal_batch.sh 5       # call test case 5
+$ bash compare_equal_batch.sh [all]   # call all test cases
+```
+
+### Running time
+
+---
+
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="logo/DuckDB_Logo-horizontal.svg">
