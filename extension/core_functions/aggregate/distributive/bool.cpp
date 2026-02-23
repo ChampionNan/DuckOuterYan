@@ -107,7 +107,7 @@ AggregateFunction BoolOrFun::GetFunction() {
 	    LogicalType(LogicalTypeId::BOOLEAN), LogicalType::BOOLEAN);
 	fun.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
 	fun.SetDistinctDependent(AggregateDistinctDependent::NOT_DISTINCT_DEPENDENT);
-	return fun;
+	return fun.SetStructStateExport(GetBoolAndStateType);
 }
 
 AggregateFunction BoolAndFun::GetFunction() {

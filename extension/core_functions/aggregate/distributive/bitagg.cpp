@@ -31,7 +31,7 @@ LogicalType GetBitStateType(const AggregateFunction &function) {
 LogicalType GetBitStringStateType(const AggregateFunction &function) {
 	child_list_t<LogicalType> child_types;
 	child_types.emplace_back("is_set", LogicalType::BOOLEAN);
-	child_types.emplace_back("value", LogicalType::BIT);
+	child_types.emplace_back("value", function.return_type);
 	return LogicalType::STRUCT(std::move(child_types));
 }
 
