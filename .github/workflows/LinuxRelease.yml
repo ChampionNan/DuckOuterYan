@@ -290,11 +290,14 @@ jobs:
         name: duckdb-binaries-linux-amd64
         path: linux-release-artifacts
 
-    - name: Extract DuckDB Linux release library
+    - name: Extract DuckDB Linux release artifacts
       shell: bash
       run: |
         mkdir -p build/release/src
+        unzip -j linux-release-artifacts/duckdb_cli-linux-amd64.zip "duckdb" -d build/release
+        chmod +x build/release/duckdb
         unzip -j linux-release-artifacts/libduckdb-linux-amd64.zip "libduckdb.so*" -d build/release/src
+        ls -lah build/release/duckdb
         ls -lah build/release/src/libduckdb.so*
 
     - name: Run Tests
