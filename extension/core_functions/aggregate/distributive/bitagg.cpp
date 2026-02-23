@@ -21,10 +21,10 @@ template <class T>
 LogicalType GetBitStateType(const AggregateFunction &function) {
 	child_list_t<LogicalType> child_types;
 	child_types.emplace_back("is_set", LogicalType::BOOLEAN);
-	
+
 	LogicalType value_type = function.return_type;
 	child_types.emplace_back("value", value_type);
-	
+
 	return LogicalType::STRUCT(std::move(child_types));
 }
 
@@ -230,8 +230,9 @@ AggregateFunctionSet BitAndFun::GetFunctions() {
 		bit_and.AddFunction(GetBitfieldUnaryAggregate<BitAndOperation>(type));
 	}
 
-	auto bit_string_fun = AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringAndOperation>(
-	    LogicalType::BIT, LogicalType::BIT);
+	auto bit_string_fun =
+	    AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringAndOperation>(
+	        LogicalType::BIT, LogicalType::BIT);
 	bit_string_fun.SetStructStateExport(GetBitStringStateType);
 	bit_and.AddFunction(bit_string_fun);
 	return bit_and;
@@ -242,8 +243,9 @@ AggregateFunctionSet BitOrFun::GetFunctions() {
 	for (auto &type : LogicalType::Integral()) {
 		bit_or.AddFunction(GetBitfieldUnaryAggregate<BitOrOperation>(type));
 	}
-	auto bit_string_fun = AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringOrOperation>(
-	    LogicalType::BIT, LogicalType::BIT);
+	auto bit_string_fun =
+	    AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringOrOperation>(
+	        LogicalType::BIT, LogicalType::BIT);
 	bit_string_fun.SetStructStateExport(GetBitStringStateType);
 	bit_or.AddFunction(bit_string_fun);
 	return bit_or;
@@ -254,8 +256,9 @@ AggregateFunctionSet BitXorFun::GetFunctions() {
 	for (auto &type : LogicalType::Integral()) {
 		bit_xor.AddFunction(GetBitfieldUnaryAggregate<BitXorOperation>(type));
 	}
-	auto bit_string_fun = AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringXorOperation>(
-	    LogicalType::BIT, LogicalType::BIT);
+	auto bit_string_fun =
+	    AggregateFunction::UnaryAggregateDestructor<BitState<string_t>, string_t, string_t, BitStringXorOperation>(
+	        LogicalType::BIT, LogicalType::BIT);
 	bit_string_fun.SetStructStateExport(GetBitStringStateType);
 	bit_xor.AddFunction(bit_string_fun);
 	return bit_xor;
