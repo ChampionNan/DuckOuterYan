@@ -345,8 +345,6 @@ jobs:
     runs-on: ubuntu-22.04
     needs: linux-release-cli
     if: ${{ inputs.skip_tests != 'true' }}
-    env:
-      GEN: ninja
 
     steps:
     - uses: actions/checkout@v4
@@ -358,15 +356,17 @@ jobs:
       with:
         python-version: '3.12'
 
-    - name: Install Ninja
-      shell: bash
-      run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+    - uses: actions/download-artifact@v4
+      with:
+        name: duckdb-binaries-linux-amd64
+        path: linux-release-artifacts
 
-    - uses: ./.github/actions/ccache-action
-
-    - name: Build
+    - name: Extract Linux release library
       shell: bash
-      run: make
+      run: |
+        mkdir -p build/release/src
+        unzip -j linux-release-artifacts/libduckdb-linux-amd64.zip "libduckdb.so*" -d build/release/src
+        ls -lah build/release/src/libduckdb.so*
 
     - name: Symbol Leakage Test
       shell: bash
