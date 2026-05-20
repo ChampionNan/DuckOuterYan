@@ -219,8 +219,16 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 			build_col_types.emplace_back(types[cid]);
 		}
 
-		// Try the bitmap path first. nullptr → fall back to HashFilter.
-		auto bitmap = KeyBitmap::TryBuild(context, *gstate.total_data, build_col_ids, build_col_types, budget);
+		// Try the bitmap path first unless the optimizer's stats-prefilter
+		// pre-decided to skip it (SemiJoinFilter::force_hash() — set when
+		// outer_yan_stats_prefilter is on AND base-table min/max for the
+		// build key predicted overflow). The runtime overflow check inside
+		// TryBuild remains the correctness guarantee; force_hash is purely
+		// an optimization to avoid the wasted min/max scan.
+		unique_ptr<KeyBitmap> bitmap;
+		if (!filter->force_hash()) {
+			bitmap = KeyBitmap::TryBuild(context, *gstate.total_data, build_col_ids, build_col_types, budget);
+		}
 		if (bitmap) {
 			filter->FinalizeAsBitmap(std::move(bitmap));
 		} else {

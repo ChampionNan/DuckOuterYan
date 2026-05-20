@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -20,6 +21,8 @@
 
 namespace duckdb {
 
+class ClientContext;
+class LogicalGet;
 class LogicalSJBuild;
 
 //! Semi-join (SJBuild / SJProbe) insertion pass.
@@ -51,7 +54,15 @@ public:
 	//! mutated) plan. The OJT inside `tree` has already been consumed by
 	//! `OJTToLogicalPlan`; this pass reads only the pair lists and
 	//! `table_to_relation`.
-	unique_ptr<LogicalOperator> Apply(unique_ptr<LogicalOperator> plan, const OuterYanTree &tree);
+	//!
+	//! When `stats_prefilter_enabled` is true, each fresh SemiJoinFilter is
+	//! consulted against base-table min/max statistics for its single-column
+	//! build key; if the implied bitmap byte footprint exceeds
+	//! `bitmap_byte_budget`, the filter is tagged `ForceHash` so
+	//! PhysicalSJBuild::Finalize skips the bitmap attempt.
+	unique_ptr<LogicalOperator> Apply(unique_ptr<LogicalOperator> plan, const OuterYanTree &tree,
+	                                  ClientContext &context, idx_t bitmap_byte_budget,
+	                                  bool stats_prefilter_enabled);
 
 private:
 	//! Dedup key — two OuterYanSemiPairs share a SemiJoinFilter iff their
@@ -98,6 +109,21 @@ private:
 	                     unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
 	                     unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
 	                     const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map);
+
+	//! Recursively walk `node` and return the first LogicalGet whose
+	//! `table_index.index` equals `table_idx`. Returns nullptr if no match.
+	static optional_ptr<LogicalGet> FindLogicalGet(LogicalOperator &node, idx_t table_idx);
+
+	//! Stats-prefilter helper. Walks `root` for the LogicalGet matching
+	//! `binding.table_index`, then queries its base-table statistics for
+	//! column `binding.column_index`. On success, writes [min, max] cast to
+	//! int64 into `out_min` / `out_max` and returns true. Returns false when:
+	//! no matching LogicalGet, the column index is out of range, the table
+	//! function exposes no statistics callback, the stats lack a min/max, or
+	//! the BIGINT cast fails (e.g. UBIGINT overflow). Static so it can be
+	//! exercised directly in tests without instantiating the pass.
+	static bool LookupBaseStatsRange(LogicalOperator &root, ColumnBinding binding, ClientContext &context,
+	                                 int64_t &out_min, int64_t &out_max);
 };
 
 } // namespace duckdb

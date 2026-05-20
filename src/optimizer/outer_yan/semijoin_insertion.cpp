@@ -1,9 +1,13 @@
 #include "duckdb/optimizer/outer_yan/semijoin_insertion.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 #include "duckdb/planner/operator/logical_sj_probe.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
 
 #include <algorithm>
 
@@ -151,8 +155,69 @@ void SemijoinInsertion::Splice(unique_ptr<LogicalOperator> &node,
 	}
 }
 
-unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator> plan,
-                                                     const OuterYanTree &tree) {
+optional_ptr<LogicalGet> SemijoinInsertion::FindLogicalGet(LogicalOperator &node, idx_t table_idx) {
+	if (node.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = node.Cast<LogicalGet>();
+		if (get.table_index.index == table_idx) {
+			return &get;
+		}
+	}
+	for (auto &child : node.children) {
+		if (!child) {
+			continue;
+		}
+		if (auto found = FindLogicalGet(*child, table_idx)) {
+			return found;
+		}
+	}
+	return nullptr;
+}
+
+bool SemijoinInsertion::LookupBaseStatsRange(LogicalOperator &root, ColumnBinding binding, ClientContext &context,
+                                             int64_t &out_min, int64_t &out_max) {
+	auto get_ptr = FindLogicalGet(root, binding.table_index.index);
+	if (!get_ptr) {
+		return false;
+	}
+	auto &get = *get_ptr;
+	// ColumnBinding::column_index is the projection index within
+	// get.GetColumnIds() — matches the binding StatisticsPropagator constructs
+	// at src/optimizer/statistics/operator/propagate_get.cpp:189.
+	auto col_idx_raw = binding.column_index.GetIndexUnsafe();
+	auto &column_ids = get.GetColumnIds();
+	if (col_idx_raw >= column_ids.size()) {
+		return false;
+	}
+	unique_ptr<BaseStatistics> stats;
+	if (get.function.statistics_extended) {
+		TableFunctionGetStatisticsInput input(get.bind_data.get(), column_ids[col_idx_raw]);
+		stats = get.function.statistics_extended(context, input);
+	} else if (get.function.statistics) {
+		stats = get.function.statistics(context, get.bind_data.get(), column_ids[col_idx_raw].GetPrimaryIndex());
+	}
+	if (!stats || !NumericStats::HasMinMax(*stats)) {
+		return false;
+	}
+	Value min_v, max_v;
+	try {
+		min_v = NumericStats::Min(*stats).DefaultCastAs(LogicalType::BIGINT);
+		max_v = NumericStats::Max(*stats).DefaultCastAs(LogicalType::BIGINT);
+	} catch (...) {
+		// UBIGINT / UHUGEINT / other types whose stats don't cleanly cast to
+		// BIGINT are treated as "can't pre-decide" — fall through to runtime.
+		return false;
+	}
+	if (min_v.IsNull() || max_v.IsNull()) {
+		return false;
+	}
+	out_min = min_v.GetValue<int64_t>();
+	out_max = max_v.GetValue<int64_t>();
+	return true;
+}
+
+unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator> plan, const OuterYanTree &tree,
+                                                     ClientContext &context, idx_t bitmap_byte_budget,
+                                                     bool stats_prefilter_enabled) {
 	if (!plan) {
 		return plan;
 	}
@@ -180,6 +245,21 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			filter = make_shared_ptr<SemiJoinFilter>();
 			for (auto &b : key.sorted_bindings) {
 				filter->AddBuildBinding(b);
+			}
+			// Stats-prefilter (opt-in): only single-column keys are bitmap-
+			// eligible. If base-table min/max predicts the implied bitmap
+			// would exceed the byte budget, tag force_hash so
+			// PhysicalSJBuild::Finalize skips the wasted TryBuild scan.
+			if (stats_prefilter_enabled && key.sorted_bindings.size() == 1) {
+				int64_t min_v = 0;
+				int64_t max_v = 0;
+				if (LookupBaseStatsRange(*plan, key.sorted_bindings[0], context, min_v, max_v)) {
+					const auto range = static_cast<uint64_t>(max_v - min_v) + 1ULL;
+					const auto bytes_needed = (range + 7ULL) / 8ULL;
+					if (bytes_needed > bitmap_byte_budget) {
+						filter->ForceHash();
+					}
+				}
 			}
 			dedup.emplace(key, filter);
 			build_filters_by_rid[pair.build].emplace_back(filter);

@@ -1,6 +1,9 @@
 #include "duckdb/optimizer/outer_yan/outer_yan_post.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/execution/operator/join/physical_sj_build.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 
 namespace duckdb {
@@ -54,7 +57,24 @@ void OuterYanPost::MarkAggPushdown(OuterYanTree &tree) {
 
 unique_ptr<LogicalOperator> OuterYanPost::SemijoinInsertOnPlan(unique_ptr<LogicalOperator> plan,
                                                                const OuterYanTree &tree) {
-	return semijoin_insertion.Apply(std::move(plan), tree);
+	const bool prefilter_enabled = IsStatsPrefilterEnabled(context);
+	const idx_t bitmap_budget = PhysicalSJBuild::GetBitmapBudget(context);
+	return semijoin_insertion.Apply(std::move(plan), tree, context, bitmap_budget, prefilter_enabled);
+}
+
+bool OuterYanPost::IsStatsPrefilterEnabled(ClientContext &context) {
+	auto &cfg = ClientConfig::GetConfig(context);
+	auto it = cfg.user_variables.find(kStatsPrefilterVar);
+	// NOTE: ← flip to `true` to enable by default
+	if (it == cfg.user_variables.end() || it->second.IsNull()) {
+		return false;
+	}
+	try {
+		return it->second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+	} catch (...) {
+		throw InvalidInputException("SET VARIABLE %s must be a boolean (got %s)", kStatsPrefilterVar,
+		                            it->second.ToString());
+	}
 }
 
 } // namespace duckdb

@@ -80,12 +80,26 @@ public:
 	// True iff the build set is empty (no probe row survives).
 	bool IsEmpty() const;
 
+	// Plan-time hint: when true, PhysicalSJBuild::Finalize skips
+	// KeyBitmap::TryBuild and builds a HashFilter directly. Set by
+	// SemijoinInsertion when `outer_yan_stats_prefilter` is on AND base-table
+	// stats for the build key predict the bitmap range would exceed the byte
+	// budget. The runtime overflow check inside TryBuild remains the
+	// correctness guarantee; this flag only avoids a wasted min/max scan.
+	void ForceHash() {
+		force_hash_ = true;
+	}
+	bool force_hash() const {
+		return force_hash_;
+	}
+
 private:
 	Kind kind_;
 	unique_ptr<KeyBitmap> bitmap_;
 	shared_ptr<HashFilter> hash_;
 	vector<ColumnBinding> build_bindings_;
 	vector<ColumnBinding> probe_bindings_;
+	bool force_hash_ = false;
 };
 
 } // namespace duckdb

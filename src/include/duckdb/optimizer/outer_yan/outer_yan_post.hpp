@@ -58,6 +58,17 @@ public:
 	//! pass runs on the rebuilt plan, not on the OJT.
 	unique_ptr<LogicalOperator> SemijoinInsertOnPlan(unique_ptr<LogicalOperator> plan, const OuterYanTree &tree);
 
+	//! Per-session knob for the stats-prefilter optimization. Read at the
+	//! start of SemijoinInsertOnPlan; when true, base-table min/max for each
+	//! fresh SemiJoinFilter's single-column build key is checked against the
+	//! bitmap byte budget, and the filter is tagged ForceHash on predicted
+	//! overflow. Default false — base-table stats over a heavily-filtered
+	//! table can over-estimate the post-filter range and wrongly skip the
+	//! bitmap path.
+	//!   SET VARIABLE outer_yan_stats_prefilter = true;
+	static constexpr const char *kStatsPrefilterVar = "outer_yan_stats_prefilter";
+	static bool IsStatsPrefilterEnabled(ClientContext &context);
+
 private:
 	ClientContext &context;
 	Resimplification resimplification;
