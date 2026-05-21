@@ -14,6 +14,9 @@
 namespace duckdb {
 
 bool SemijoinInsertion::BuildKey::operator==(const BuildKey &o) const {
+	if (probe_relation_id != o.probe_relation_id) {
+		return false;
+	}
 	if (sorted_bindings.size() != o.sorted_bindings.size()) {
 		return false;
 	}
@@ -36,6 +39,10 @@ size_t SemijoinInsertion::BuildKeyHash::operator()(const BuildKey &k) const {
 	constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
 	constexpr uint64_t kFnvPrime = 1099511628211ULL;
 	uint64_t h = kFnvOffsetBasis;
+	// Mix in probe_relation_id first so two BuildKeys differing only in
+	// probe relation can't collide via the bindings alone.
+	h ^= static_cast<uint64_t>(k.probe_relation_id);
+	h *= kFnvPrime;
 	for (auto &b : k.sorted_bindings) {
 		h ^= static_cast<uint64_t>(b.table_index.index);
 		h *= kFnvPrime;
@@ -49,6 +56,7 @@ size_t SemijoinInsertion::BuildKeyHash::operator()(const BuildKey &k) const {
 
 SemijoinInsertion::BuildKey SemijoinInsertion::MakeBuildKey(const OuterYanSemiPair &pair) {
 	BuildKey k;
+	k.probe_relation_id = pair.probe;
 	k.sorted_bindings.reserve(pair.keys.size());
 	for (auto &key : pair.keys) {
 		k.sorted_bindings.emplace_back(key.build_binding);

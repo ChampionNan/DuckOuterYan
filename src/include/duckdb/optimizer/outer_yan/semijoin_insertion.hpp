@@ -65,16 +65,22 @@ public:
 	                                  bool stats_prefilter_enabled);
 
 private:
-	//! Dedup key — two OuterYanSemiPairs share a SemiJoinFilter iff their
-	//! `keys[i].build_binding` sets (as multisets) are equal. Probe side,
-	//! probe relation, and pass-of-origin are NOT part of the key.
+	//! Dedup key — two OuterYanSemiPairs share a SemiJoinFilter iff they
+	//! agree on BOTH (a) the sorted set of `keys[i].build_binding` AND
+	//! (b) the probe relation id. Sharing across probe relations was
+	//! removed because the per-probe binding lists accumulated on the
+	//! shared filter would have made `PhysicalSJProbe::ResolveProbeColIds`
+	//! look for bindings in the wrong child schema (silent miscompute /
+	//! InternalException). Two probes from the same relation that reduce
+	//! the same build columns still share — the common case.
 	struct BuildKey {
 		vector<ColumnBinding> sorted_bindings; // sorted by (table_index, column_index)
+		RelationId probe_relation_id = 0;
 		bool operator==(const BuildKey &o) const;
 	};
 
-	//! Hash on `BuildKey::sorted_bindings`. FNV-1a 64-bit
-	//! (https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function).
+	//! Hash on `BuildKey::{sorted_bindings, probe_relation_id}`. FNV-1a
+	//! 64-bit (https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function).
 	struct BuildKeyHash {
 		size_t operator()(const BuildKey &k) const;
 	};

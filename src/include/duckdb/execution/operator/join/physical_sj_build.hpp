@@ -10,6 +10,7 @@
 
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 
@@ -110,6 +111,13 @@ public:
 	//! when unset. Returning 0 forces the HashFilter fallback for all filters
 	//! in this session.
 	static idx_t GetBitmapBudget(ClientContext &context);
+
+	//! Hash-function selector for filters that fall back to HashFilter.
+	//!   SET VARIABLE outer_yan_hash_fn = 'murmur'; -- default, MurmurHash64A
+	//!   SET VARIABLE outer_yan_hash_fn = 'duckdb'; -- CombineHash (XOR)
+	//! Returns the parsed HashKind; throws on unknown value.
+	static constexpr const char *kHashFnVar = "outer_yan_hash_fn";
+	static HashFilter::HashKind GetHashKind(ClientContext &context);
 
 	//! Resolve each filter's BuildBindings to column indices within the
 	//! child operator's output schema. Called by

@@ -45,6 +45,7 @@
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 
+#include <cctype>
 #include <mutex>
 
 namespace duckdb {
@@ -71,6 +72,37 @@ idx_t PhysicalSJBuild::GetBitmapBudget(ClientContext &context) {
 		throw InvalidInputException("SET VARIABLE %s must be a non-negative integer (got %s)", kBitmapBudgetVar,
 		                            it->second.ToString());
 	}
+}
+
+// Per-session selector for the HashFilter hash function used when a filter
+// falls back from KeyBitmap. Default MURMUR_HASH2 matches the prior fixed
+// behavior; "duckdb" routes to HashKeyDuckDB (CombineHash) for A/B
+// performance comparison without recompiling.
+HashFilter::HashKind PhysicalSJBuild::GetHashKind(ClientContext &context) {
+	auto &cfg = ClientConfig::GetConfig(context);
+	auto it = cfg.user_variables.find(kHashFnVar);
+	if (it == cfg.user_variables.end() || it->second.IsNull()) {
+		return HashFilter::HashKind::DUCKDB_COMBINE;
+	}
+	string raw;
+	try {
+		raw = it->second.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+	} catch (...) {
+		throw InvalidInputException("SET VARIABLE %s must be a string ('murmur' or 'duckdb') — got %s", kHashFnVar,
+		                            it->second.ToString());
+	}
+	string lower;
+	lower.reserve(raw.size());
+	for (auto c : raw) {
+		lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+	}
+	if (lower == "murmur" || lower == "murmur_hash2") {
+		return HashFilter::HashKind::MURMUR_HASH2;
+	}
+	if (lower == "duckdb" || lower == "duckdb_combine" || lower == "combine") {
+		return HashFilter::HashKind::DUCKDB_COMBINE;
+	}
+	throw InvalidInputException("SET VARIABLE %s: unknown value '%s' (expected 'murmur' or 'duckdb')", kHashFnVar, raw);
 }
 
 // Map each filter's BuildBindings to column indices within the child's
@@ -232,7 +264,7 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 		if (bitmap) {
 			filter->FinalizeAsBitmap(std::move(bitmap));
 		} else {
-			auto hf = make_shared_ptr<HashFilter>();
+			auto hf = make_shared_ptr<HashFilter>(GetHashKind(context));
 			// Stream materialised data through HashFilter::Build. We re-scan
 			// total_data once per filter that falls back; for the common
 			// case where most filters take the bitmap path, this is rare.
