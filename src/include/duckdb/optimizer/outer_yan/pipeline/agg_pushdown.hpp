@@ -1,14 +1,14 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/agg_pushdown.hpp
+// duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp
 //
 //
 //===----------------------------------------------------------------------===//
 
 #pragma once
 
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 
 namespace duckdb {
 

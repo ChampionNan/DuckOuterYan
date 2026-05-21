@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hash.hpp"

@@ -1,17 +1,17 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/outer_yan_post.hpp
+// duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp
 //
 //
 //===----------------------------------------------------------------------===//
 
 #pragma once
 
-#include "duckdb/optimizer/outer_yan/agg_pushdown.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
-#include "duckdb/optimizer/outer_yan/resimplification.hpp"
-#include "duckdb/optimizer/outer_yan/semijoin_insertion.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/resimplification.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semijoin_insertion.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {

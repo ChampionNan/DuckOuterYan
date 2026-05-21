@@ -1,15 +1,15 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/desimplification.hpp
+// duckdb/optimizer/outer_yan/pipeline/desimplification.hpp
 //
 //
 //===----------------------------------------------------------------------===//
 
 #pragma once
 
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 namespace duckdb {
 

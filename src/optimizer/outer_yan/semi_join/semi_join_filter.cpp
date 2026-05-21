@@ -1,8 +1,8 @@
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
-#include "duckdb/optimizer/outer_yan/key_bitmap.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
 
 namespace duckdb {
 

@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/resimplification.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/resimplification.hpp"
 
 #include "duckdb/common/exception.hpp"
 

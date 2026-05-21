@@ -27,8 +27,8 @@
 #include "duckdb/execution/operator/join/physical_sj_probe.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
-#include "duckdb/optimizer/outer_yan/key_bitmap.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 

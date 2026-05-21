@@ -9,7 +9,7 @@
 #pragma once
 
 #include "duckdb/common/shared_ptr.hpp"
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {

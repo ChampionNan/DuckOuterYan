@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/outer_yan_dp.hpp
+// duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -18,8 +18,8 @@
 #include "duckdb/optimizer/join_order/query_graph.hpp"
 #include "duckdb/optimizer/join_order/query_graph_manager.hpp"
 #include "duckdb/optimizer/join_order/relation_index.hpp"
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {

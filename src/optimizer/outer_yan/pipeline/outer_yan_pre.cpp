@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/outer_yan_pre.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"

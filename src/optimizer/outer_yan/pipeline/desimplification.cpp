@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/desimplification.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/desimplification.hpp"
 
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception.hpp"

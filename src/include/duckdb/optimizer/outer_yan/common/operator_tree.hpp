@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/operator_tree.hpp
+// duckdb/optimizer/outer_yan/common/operator_tree.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -13,7 +13,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 

@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/applicability.hpp"
+#include "duckdb/optimizer/outer_yan/common/applicability.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"

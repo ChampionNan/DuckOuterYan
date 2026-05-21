@@ -1,8 +1,8 @@
-#include "duckdb/optimizer/outer_yan/agg_pushdown.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 #include <algorithm>
 

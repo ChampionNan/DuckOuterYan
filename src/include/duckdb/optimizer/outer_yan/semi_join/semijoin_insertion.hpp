@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/semijoin_insertion.hpp
+// duckdb/optimizer/outer_yan/semi_join/semijoin_insertion.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -13,9 +13,9 @@
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 

@@ -9,7 +9,7 @@
 #pragma once
 
 #include "duckdb/common/shared_ptr.hpp"
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 

@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 //                         DuckDB
 //
-// duckdb/optimizer/outer_yan/resimplification.hpp
+// duckdb/optimizer/outer_yan/pipeline/resimplification.hpp
 //
 //
 //===----------------------------------------------------------------------===//
@@ -9,7 +9,7 @@
 #pragma once
 
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
 
 namespace duckdb {
 

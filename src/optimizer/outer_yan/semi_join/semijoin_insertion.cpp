@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/semijoin_insertion.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semijoin_insertion.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table_function.hpp"

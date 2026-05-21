@@ -1,5 +1,5 @@
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"

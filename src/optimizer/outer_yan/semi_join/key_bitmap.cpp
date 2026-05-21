@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/key_bitmap.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"

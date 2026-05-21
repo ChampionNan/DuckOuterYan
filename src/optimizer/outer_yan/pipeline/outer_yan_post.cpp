@@ -1,10 +1,10 @@
-#include "duckdb/optimizer/outer_yan/outer_yan_post.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/operator/join/physical_sj_build.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 namespace duckdb {
 

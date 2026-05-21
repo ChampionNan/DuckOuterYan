@@ -10,8 +10,8 @@
 
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/execution/physical_operator.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 
 namespace duckdb {

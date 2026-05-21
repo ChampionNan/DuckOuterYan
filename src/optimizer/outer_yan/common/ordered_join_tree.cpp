@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/enum_util.hpp"

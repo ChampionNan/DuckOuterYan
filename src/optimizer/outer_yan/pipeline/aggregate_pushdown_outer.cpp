@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/aggregate_pushdown_outer.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/aggregate_pushdown_outer.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
@@ -7,9 +7,9 @@
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/optimizer/outer_yan/agg_pushdown.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"

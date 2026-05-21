@@ -1,4 +1,4 @@
-#include "duckdb/optimizer/outer_yan/simplification.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
