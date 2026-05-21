@@ -11,7 +11,6 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/planner/column_binding.hpp"
 
 namespace duckdb {
 
@@ -44,21 +43,6 @@ public:
 
 	SemiJoinFilter();
 	~SemiJoinFilter();
-
-	// Bindings — populated by SemijoinInsertion::Apply when the
-	// LogicalSJBuild + LogicalSJProbe pair is emitted.
-	void AddBuildBinding(ColumnBinding b) {
-		build_bindings_.emplace_back(b);
-	}
-	void AddProbeBinding(ColumnBinding b) {
-		probe_bindings_.emplace_back(b);
-	}
-	const vector<ColumnBinding> &BuildBindings() const {
-		return build_bindings_;
-	}
-	const vector<ColumnBinding> &ProbeBindings() const {
-		return probe_bindings_;
-	}
 
 	// Lifecycle. Set once at Finalize.
 	Kind kind() const {
@@ -97,8 +81,6 @@ private:
 	Kind kind_;
 	unique_ptr<KeyBitmap> bitmap_;
 	shared_ptr<HashFilter> hash_;
-	vector<ColumnBinding> build_bindings_;
-	vector<ColumnBinding> probe_bindings_;
 	bool force_hash_ = false;
 };
 

@@ -49,9 +49,9 @@ public:
 	vector<shared_ptr<SemiJoinFilter>> sj_to_create;
 
 	//! For each filter in `sj_to_create`, the list of column indices within
-	//! the operator's input chunks that correspond to that filter's
-	//! BuildBindings. Computed at plan-generation time from
-	//! LogicalSJBuild::children[0]->GetColumnBindings().
+	//! the operator's input chunks that correspond to that filter's build
+	//! keys. Resolved upstream in SemijoinInsertion::SpliceAt against the
+	//! build child's GetColumnBindings(); moved onto this op by plan-gen.
 	vector<vector<idx_t>> build_col_ids_per_filter;
 
 	//! Build-side child meta-pipeline, populated by BuildPipelines /
@@ -118,13 +118,6 @@ public:
 	//! Returns the parsed HashKind; throws on unknown value.
 	static constexpr const char *kHashFnVar = "outer_yan_hash_fn";
 	static HashFilter::HashKind GetHashKind(ClientContext &context);
-
-	//! Resolve each filter's BuildBindings to column indices within the
-	//! child operator's output schema. Called by
-	//! PhysicalPlanGenerator::CreatePlan(LogicalSJBuild&) and
-	//! ::CreatePlanFromRelated when constructing this op. Public static
-	//! so plan_sj_build.cpp can call it without touching internals.
-	static vector<vector<idx_t>> ResolveBuildColIds(class LogicalSJBuild &op);
 };
 
 } // namespace duckdb

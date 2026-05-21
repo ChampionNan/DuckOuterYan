@@ -105,39 +105,6 @@ HashFilter::HashKind PhysicalSJBuild::GetHashKind(ClientContext &context) {
 	throw InvalidInputException("SET VARIABLE %s: unknown value '%s' (expected 'murmur' or 'duckdb')", kHashFnVar, raw);
 }
 
-// Map each filter's BuildBindings to column indices within the child's
-// output schema. Both lists are short (≤ a few entries each), so the
-// quadratic-looking nested loop is fine. Called from
-// PhysicalPlanGenerator::CreatePlan(LogicalSJBuild&) and
-// ::CreatePlanFromRelated at plan-gen time.
-vector<vector<idx_t>> PhysicalSJBuild::ResolveBuildColIds(LogicalSJBuild &op) {
-	auto child_bindings = op.children[0]->GetColumnBindings();
-	vector<vector<idx_t>> result;
-	result.reserve(op.sj_to_create.size());
-	for (auto &filter : op.sj_to_create) {
-		vector<idx_t> ids;
-		ids.reserve(filter->BuildBindings().size());
-		for (auto &binding : filter->BuildBindings()) {
-			bool found = false;
-			for (idx_t i = 0; i < child_bindings.size(); i++) {
-				if (child_bindings[i] == binding) {
-					ids.push_back(i);
-					found = true;
-					break;
-				}
-			}
-			if (!found) {
-				throw InternalException(
-				    "PhysicalSJBuild::ResolveBuildColIds: build binding (%llu, %llu) not found in child's column bindings",
-				    static_cast<unsigned long long>(binding.table_index.index),
-				    static_cast<unsigned long long>(binding.column_index.GetIndexUnsafe()));
-			}
-		}
-		result.emplace_back(std::move(ids));
-	}
-	return result;
-}
-
 PhysicalSJBuild::PhysicalSJBuild(PhysicalPlan &physical_plan, vector<LogicalType> types,
                                  vector<shared_ptr<SemiJoinFilter>> sj_to_create_p,
                                  vector<vector<idx_t>> build_col_ids_per_filter_p,

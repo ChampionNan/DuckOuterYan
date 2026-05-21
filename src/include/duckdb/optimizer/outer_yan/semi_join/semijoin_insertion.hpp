@@ -67,10 +67,10 @@ public:
 private:
 	//! Dedup key — two OuterYanSemiPairs share a SemiJoinFilter iff they
 	//! agree on BOTH (a) the sorted set of `keys[i].build_binding` AND
-	//! (b) the probe relation id. Sharing across probe relations was
-	//! removed because the per-probe binding lists accumulated on the
-	//! shared filter would have made `PhysicalSJProbe::ResolveProbeColIds`
-	//! look for bindings in the wrong child schema (silent miscompute /
+	//! (b) the probe relation id. Sharing across probe relations is
+	//! disallowed because each probe relation has a distinct child schema:
+	//! a single shared probe filter would force `ResolveColIds` to find its
+	//! bindings in the wrong child operator (silent miscompute /
 	//! InternalException). Two probes from the same relation that reduce
 	//! the same build columns still share — the common case.
 	struct BuildKey {
@@ -89,7 +89,9 @@ private:
 	//! LogicalSJProbe above the relation's filter+get unit (or bare get).
 	struct ProbeWrap {
 		shared_ptr<SemiJoinFilter> filter;
-		vector<ColumnBinding> probe_bindings; // order matches pair.keys → filter->BuildBindings()
+		// Order matches pair.keys; resolved to positional column indices in
+		// SpliceAt and stored on LogicalSJProbe::probe_col_ids_per_filter.
+		vector<ColumnBinding> probe_bindings;
 		RelationId related_build_rid;
 	};
 
@@ -105,16 +107,31 @@ private:
 	                   const unordered_map<idx_t, RelationId> &table_to_relation,
 	                   unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
 	                   unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
-	                   const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map);
+	                   const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map,
+	                   const unordered_map<RelationId, vector<vector<ColumnBinding>>> &build_bindings_by_rid);
 
 	//! Wrap `node` with the given relation's probes (innermost-first in
 	//! `probe_wraps[rid]`) and its LogicalSJBuild (outermost). The node may
 	//! be either a bare LogicalGet or a LogicalFilter+LogicalGet unit;
-	//! Splice picks which.
+	//! Splice picks which. Build/probe key ColumnBindings are resolved to
+	//! positional column indices against the child's GetColumnBindings()
+	//! *before* the child is moved into children[], and stored on the
+	//! constructed LogicalSJBuild / LogicalSJProbe — mirroring DPT's
+	//! pre-resolved `bound_cols_*` on FilterPlan.
 	static void SpliceAt(unique_ptr<LogicalOperator> &node, RelationId rid,
 	                     unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
 	                     unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
-	                     const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map);
+	                     const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map,
+	                     const unordered_map<RelationId, vector<vector<ColumnBinding>>> &build_bindings_by_rid);
+
+	//! Resolve each `per_filter_bindings[i]` to positional indices within
+	//! `child_bindings`. Throws InternalException on a missing binding —
+	//! that's a structural plan invariant violation (binding produced
+	//! upstream is not visible to the SJ operator). Both inputs are tiny
+	//! (a few filters; a few keys each), so the linear scan is fine.
+	static vector<vector<idx_t>>
+	ResolveColIds(const vector<ColumnBinding> &child_bindings,
+	              const vector<vector<ColumnBinding>> &per_filter_bindings);
 
 	//! Recursively walk `node` and return the first LogicalGet whose
 	//! `table_index.index` equals `table_idx`. Returns nullptr if no match.

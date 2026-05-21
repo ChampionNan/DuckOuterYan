@@ -31,12 +31,9 @@
 // (multiple materialisations of the same data flowing through different
 // sinks) and wasteful. The cache makes the two entry points idempotent.
 //
-// ORIGINAL TO OuterYan (not in DPT):
-//   - `ResolveBuildColIds` below. DPT's FilterPlan carries `bound_cols_*`
-//     pre-resolved by the optimizer; we instead carry only ColumnBindings
-//     on SemiJoinFilter and resolve to column indices here at lowering
-//     time. Trade-off: simpler optimizer pass, slightly more work at
-//     plan-gen time. The cost is negligible — both lists are tiny.
+// Column-id resolution: now done upstream in SemijoinInsertion::SpliceAt
+// (mirrors DPT's pre-resolved `bound_cols_build` on FilterPlan). Plan-gen
+// just moves LogicalSJBuild::build_col_ids_per_filter onto the physical op.
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/execution/operator/join/physical_sj_build.hpp"
@@ -44,15 +41,6 @@
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 
 namespace duckdb {
-
-// Map each filter's BuildBindings to column indices within the child's
-// output schema. Both lists are short (≤ a few entries each), so the
-// quadratic-looking nested loop is acceptable. Original to OuterYan;
-// see the file-header note above for why we don't carry pre-resolved
-// column ids on SemiJoinFilter like DPT's FilterPlan does.
-// Column-id resolution lives on PhysicalSJBuild as a static method (see
-// physical_sj_build.cpp: ResolveBuildColIds) so all SJ-build plan-gen
-// logic is co-located with the operator class.
 
 // Entry point #1 — called from CreatePlan(LogicalSJProbe&) when wiring up
 // related_sj_build. Reference: DPT plan_create_bf.cpp lines 8–17
@@ -64,9 +52,8 @@ PhysicalSJBuild *PhysicalPlanGenerator::CreatePlanFromRelated(LogicalSJBuild &op
 		return op.physical;
 	}
 	auto &child_plan = CreatePlan(*op.children[0]);
-	auto build_col_ids = ResolveBuildColIds(op);
 	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(op.sj_to_create),
-	                                       std::move(build_col_ids), op.estimated_cardinality);
+	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
 	sj_build.children.push_back(child_plan);
 	op.physical = static_cast<PhysicalSJBuild *>(&sj_build);
 	return op.physical;
@@ -83,9 +70,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalSJBuild &op) {
 		return *op.physical;
 	}
 	auto &child_plan = CreatePlan(*op.children[0]);
-	auto build_col_ids = ResolveBuildColIds(op);
 	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(op.sj_to_create),
-	                                       std::move(build_col_ids), op.estimated_cardinality);
+	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
 	op.physical = static_cast<PhysicalSJBuild *>(&sj_build);
 	sj_build.children.push_back(child_plan);
 	return sj_build;

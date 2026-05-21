@@ -72,10 +72,47 @@ SemijoinInsertion::BuildKey SemijoinInsertion::MakeBuildKey(const OuterYanSemiPa
 	return k;
 }
 
-void SemijoinInsertion::SpliceAt(unique_ptr<LogicalOperator> &node, RelationId rid,
-                                 unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
-                                 unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
-                                 const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map) {
+// Map each filter's ColumnBindings to positional indices within
+// `child_bindings`. Mirrors DPT's pre-resolved `bound_cols_*`. Both inputs
+// are small (≤ a few filters per operator; ≤ a few keys per filter), so
+// the linear scan is fine. A missing binding is an InternalException: the
+// SJ operator's child must produce every binding referenced by the SJ key.
+vector<vector<idx_t>>
+SemijoinInsertion::ResolveColIds(const vector<ColumnBinding> &child_bindings,
+                                 const vector<vector<ColumnBinding>> &per_filter_bindings) {
+	vector<vector<idx_t>> result;
+	result.reserve(per_filter_bindings.size());
+	for (auto &filter_bindings : per_filter_bindings) {
+		vector<idx_t> ids;
+		ids.reserve(filter_bindings.size());
+		for (auto &binding : filter_bindings) {
+			bool found = false;
+			for (idx_t i = 0; i < child_bindings.size(); i++) {
+				if (child_bindings[i] == binding) {
+					ids.push_back(i);
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				throw InternalException(
+				    "SemijoinInsertion::ResolveColIds: binding (%llu, %llu) not found "
+				    "in child's column bindings",
+				    static_cast<unsigned long long>(binding.table_index.index),
+				    static_cast<unsigned long long>(binding.column_index.GetIndexUnsafe()));
+			}
+		}
+		result.emplace_back(std::move(ids));
+	}
+	return result;
+}
+
+void SemijoinInsertion::SpliceAt(
+    unique_ptr<LogicalOperator> &node, RelationId rid,
+    unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
+    unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
+    const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map,
+    const unordered_map<RelationId, vector<vector<ColumnBinding>>> &build_bindings_by_rid) {
 	// Whatever `node` currently is (bare LogicalGet or LogicalFilter+LogicalGet
 	// unit) becomes the innermost — probes wrap it, then a build wraps those.
 	unique_ptr<LogicalOperator> current = std::move(node);
@@ -90,12 +127,14 @@ void SemijoinInsertion::SpliceAt(unique_ptr<LogicalOperator> &node, RelationId r
 			vector<shared_ptr<SemiJoinFilter>> fv;
 			fv.emplace_back(pw.filter);
 			auto probe = make_uniq<LogicalSJProbe>(std::move(fv));
-			// Record this relation's probe bindings on the shared filter.
-			// Each filter is created fresh per BuildKey group in Apply, so
-			// the same (filter, probe_relation) is contributed at most once.
-			for (auto &b : pw.probe_bindings) {
-				pw.filter->AddProbeBinding(b);
-			}
+
+			// Resolve probe key bindings → positional indices against the
+			// current child's output schema BEFORE the child is moved.
+			vector<vector<ColumnBinding>> per_filter_bindings;
+			per_filter_bindings.emplace_back(pw.probe_bindings);
+			probe->probe_col_ids_per_filter =
+			    ResolveColIds(current->GetColumnBindings(), per_filter_bindings);
+
 			auto related_it = build_ptr_map.find(pw.related_build_rid);
 			if (related_it == build_ptr_map.end()) {
 				throw InternalException(
@@ -114,6 +153,19 @@ void SemijoinInsertion::SpliceAt(unique_ptr<LogicalOperator> &node, RelationId r
 	auto build_pending_it = pending_builds.find(rid);
 	if (build_pending_it != pending_builds.end() && build_pending_it->second) {
 		auto build = std::move(build_pending_it->second);
+
+		// Resolve build key bindings → positional indices against the build
+		// child's output schema BEFORE the child is moved. Index-aligned
+		// with build->sj_to_create.
+		auto bb_it = build_bindings_by_rid.find(rid);
+		if (bb_it == build_bindings_by_rid.end()) {
+			throw InternalException(
+			    "SemijoinInsertion: build for relation %llu has no recorded build bindings",
+			    static_cast<unsigned long long>(rid));
+		}
+		build->build_col_ids_per_filter =
+		    ResolveColIds(current->GetColumnBindings(), bb_it->second);
+
 		build->children.emplace_back(std::move(current));
 		current = std::move(build);
 	}
@@ -121,11 +173,12 @@ void SemijoinInsertion::SpliceAt(unique_ptr<LogicalOperator> &node, RelationId r
 	node = std::move(current);
 }
 
-void SemijoinInsertion::Splice(unique_ptr<LogicalOperator> &node,
-                               const unordered_map<idx_t, RelationId> &table_to_relation,
-                               unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
-                               unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
-                               const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map) {
+void SemijoinInsertion::Splice(
+    unique_ptr<LogicalOperator> &node, const unordered_map<idx_t, RelationId> &table_to_relation,
+    unordered_map<RelationId, vector<ProbeWrap>> &probe_wraps,
+    unordered_map<RelationId, unique_ptr<LogicalSJBuild>> &pending_builds,
+    const unordered_map<RelationId, LogicalSJBuild *> &build_ptr_map,
+    const unordered_map<RelationId, vector<vector<ColumnBinding>>> &build_bindings_by_rid) {
 	if (!node) {
 		return;
 	}
@@ -139,7 +192,7 @@ void SemijoinInsertion::Splice(unique_ptr<LogicalOperator> &node,
 		auto &get = node->children[0]->Cast<LogicalGet>();
 		auto it = table_to_relation.find(get.table_index.index);
 		if (it != table_to_relation.end()) {
-			SpliceAt(node, it->second, probe_wraps, pending_builds, build_ptr_map);
+			SpliceAt(node, it->second, probe_wraps, pending_builds, build_ptr_map, build_bindings_by_rid);
 		}
 		return;
 	}
@@ -150,7 +203,7 @@ void SemijoinInsertion::Splice(unique_ptr<LogicalOperator> &node,
 		auto &get = node->Cast<LogicalGet>();
 		auto it = table_to_relation.find(get.table_index.index);
 		if (it != table_to_relation.end()) {
-			SpliceAt(node, it->second, probe_wraps, pending_builds, build_ptr_map);
+			SpliceAt(node, it->second, probe_wraps, pending_builds, build_ptr_map, build_bindings_by_rid);
 		}
 		return;
 	}
@@ -159,7 +212,7 @@ void SemijoinInsertion::Splice(unique_ptr<LogicalOperator> &node,
 	// pushes the SJ wraps DOWN past pushed-down aggregates / projections
 	// sitting between the join and the Get.
 	for (auto &child : node->children) {
-		Splice(child, table_to_relation, probe_wraps, pending_builds, build_ptr_map);
+		Splice(child, table_to_relation, probe_wraps, pending_builds, build_ptr_map, build_bindings_by_rid);
 	}
 }
 
@@ -243,6 +296,10 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	// -------------------------------------------------------------------------
 	unordered_map<BuildKey, shared_ptr<SemiJoinFilter>, BuildKeyHash> dedup;
 	unordered_map<RelationId, vector<shared_ptr<SemiJoinFilter>>> build_filters_by_rid;
+	// Index-aligned with build_filters_by_rid[rid]: entry i is the build-side
+	// ColumnBindings of filter i. Consumed once in SpliceAt to resolve into
+	// positional indices on LogicalSJBuild::build_col_ids_per_filter.
+	unordered_map<RelationId, vector<vector<ColumnBinding>>> build_bindings_by_rid;
 	unordered_map<RelationId, vector<ProbeWrap>> probe_wraps;
 
 	auto process_pair = [&](const OuterYanSemiPair &pair) {
@@ -251,9 +308,6 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		shared_ptr<SemiJoinFilter> filter;
 		if (it == dedup.end()) {
 			filter = make_shared_ptr<SemiJoinFilter>();
-			for (auto &b : key.sorted_bindings) {
-				filter->AddBuildBinding(b);
-			}
 			// Stats-prefilter (opt-in): only single-column keys are bitmap-
 			// eligible. If base-table min/max predicts the implied bitmap
 			// would exceed the byte budget, tag force_hash so
@@ -271,6 +325,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			}
 			dedup.emplace(key, filter);
 			build_filters_by_rid[pair.build].emplace_back(filter);
+			build_bindings_by_rid[pair.build].emplace_back(key.sorted_bindings);
 		} else {
 			filter = it->second;
 		}
@@ -309,7 +364,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	// 3) Walk the rebuilt plan and splice wraps at the filter+get unit (or
 	//    bare get) for every relation that has wraps assigned.
 	// -------------------------------------------------------------------------
-	Splice(plan, tree.table_to_relation, probe_wraps, pending_builds, build_ptr_map);
+	Splice(plan, tree.table_to_relation, probe_wraps, pending_builds, build_ptr_map, build_bindings_by_rid);
 
 	// -------------------------------------------------------------------------
 	// 4) Every pre-created build must have been spliced into the plan. If a
