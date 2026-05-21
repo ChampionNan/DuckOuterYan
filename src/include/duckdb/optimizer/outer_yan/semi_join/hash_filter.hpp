@@ -30,14 +30,26 @@ namespace duckdb {
 // the concatenation of per-column Value::Hash() outputs. Inspired by Apache
 // Arrow Acero's `SwissTable`/`KeyEncoder` and DuckDB's `JoinHashTable` but
 // pared down to exact set-membership (no rowstore, no projection, no probe
-// scan structure). Slot layout:
+// scan structure).
 //
-//     Slot { hash_t full_hash; idx_t key_index_or_EMPTY; }
+// Two storage modes, selected once on the first Build call and immutable
+// thereafter:
 //
-// `slots_` is a power-of-2 array (probed via `hash & mask_`). Stored keys
-// live in `stored_keys_` (one vector<Value> per unique build tuple).
-// Collisions follow linear probing — `(idx + 1) & mask_` — chosen for
-// cache friendliness over double hashing.
+//   BOXED      — generic. Slot { hash_t full_hash; idx_t key_index_or_EMPTY; }.
+//                Stored keys live in `stored_keys_` (one vector<Value> per
+//                unique build tuple). Handles strings, decimals, composite
+//                keys — anything for which boxed Value comparison is needed.
+//
+//   INLINE_64  — fast path for arity-1, 8-byte-fits integer keys. Slot
+//                stores the key directly as uint64_t alongside the hash;
+//                a separate packed occupancy bitmap distinguishes "empty"
+//                slots from any valid 64-bit key value (no in-band
+//                sentinel — required because INT64 can produce every bit
+//                pattern). Eliminates Value boxing and stored_keys_
+//                indirection on the hot probe/build paths.
+//
+// Both modes use a power-of-2 array probed via `hash & mask_` with linear
+// collision probing — chosen for cache friendliness over double hashing.
 //
 // Concurrency model: each thread builds a thread-local HashFilter, all of
 // which are folded into the global one at Combine/Finalize via Merge. So
@@ -79,12 +91,30 @@ public:
 	// filter has seen any Build (catches column-count mismatches early
 	// rather than silently returning false negatives).
 	bool Contains(const vector<Value> &key) const;
+	// Same as Contains but skips the internal HashKey call — caller supplies
+	// the hash from a vectorised pre-pass. Used by HashFilterUseKernel.
+	bool ContainsHashed(const vector<Value> &key, hash_t hash) const;
+
+	// True after first Build flipped this filter into the inline integer
+	// fast path. Kernel callers may dispatch directly to ContainsInline64.
+	bool IsInline64() const {
+		return mode_ == StorageMode::INLINE_64;
+	}
+	// Physical type captured at the inline-mode decision. Tells the kernel
+	// how wide a load to issue on each probe row. Valid only when IsInline64().
+	PhysicalType InlineKeyType() const {
+		return inline_type_;
+	}
+	// Inline-mode probe. Key is the zero-extended 8-byte form of the source
+	// integer (see DecideStorageMode for the canonical extension). `hash`
+	// is the precomputed DUCKDB_COMBINE hash for that row.
+	bool ContainsInline64(uint64_t key, hash_t hash) const;
 
 	idx_t Count() const {
 		return count_;
 	}
 	idx_t Capacity() const {
-		return mask_ + 1;
+		return mode_ == StorageMode::INLINE_64 ? inline_mask_ + 1 : mask_ + 1;
 	}
 	bool IsEmpty() const {
 		return count_ == 0;
@@ -106,16 +136,28 @@ public:
 	// Stack-buffered MurmurHash64A over concatenated per-column digests.
 	// Typical arities (≤ 8 columns) avoid the heap fallback.
 	static hash_t HashKeyMurmur(const vector<Value> &key);
-	// CombineHash (XOR) over per-column Value::Hash() outputs. Equivalent
-	// to running `VectorOperations::Hash` + `::CombineHash` over the same
-	// columns, so build (scalar) and a future vectorized probe path
-	// produce byte-equal hashes.
+	// Byte-equal to `VectorOperations::Hash(col0) + CombineHash(colN…)`.
+	// First column seeds with its raw Hash<T> (NOT CombineHash(0, …)).
+	// Subsequent columns mix-then-XOR using the same constants as
+	// CombineHashScalar in vector_hash.cpp — NOT the plain-XOR CombineHash
+	// in common/types/hash.hpp, which is a different (weaker) function.
+	// Used by the scalar Contains/Build paths so they agree with the
+	// vectorised kernel for any arity.
 	static hash_t HashKeyDuckDB(const vector<Value> &key);
 
 private:
+	enum class StorageMode : uint8_t { BOXED, INLINE_64 };
+
 	struct Slot {
 		hash_t hash;
 		idx_t key_index; // EMPTY_KEY_INDEX when slot is free
+	};
+	// Inline-mode slot. Holds the key inline alongside the hash. Empty
+	// slots are distinguished by `inline_occupancy_`, not by an in-band
+	// sentinel — INT64 may produce any 64-bit pattern.
+	struct InlineSlot {
+		hash_t hash;
+		uint64_t key;
 	};
 
 	static constexpr idx_t EMPTY_KEY_INDEX = NumericLimits<idx_t>::Maximum();
@@ -137,9 +179,35 @@ private:
 	void InsertHashedKey(vector<Value> key, hash_t hash);
 	static bool KeysEqual(const vector<Value> &a, const vector<Value> &b);
 
+	// Decides whether to flip to INLINE_64 on the first Build. Triggers only
+	// when arity == 1 and the column's PhysicalType is one of {INT8, INT16,
+	// INT32, INT64, UINT8, UINT16, UINT32, UINT64}. Once set, the mode is
+	// immutable for the filter's lifetime.
+	void DecideStorageMode(const DataChunk &chunk, const vector<idx_t> &build_col_ids);
+	void EnsureInlineCapacityFor(idx_t additional);
+	void ResizeInline(idx_t new_capacity);
+	// Insert into the inline table. `key` is the zero-extended 8-byte form.
+	void InsertHashedKey64(uint64_t key, hash_t hash);
+	// Occupancy bitmap accessors. 1 bit per slot, packed into uint64 words.
+	bool IsInlineSlotOccupied(idx_t idx) const {
+		return (inline_occupancy_[idx >> 6] >> (idx & 63)) & 1ULL;
+	}
+	void MarkInlineSlotOccupied(idx_t idx) {
+		inline_occupancy_[idx >> 6] |= (1ULL << (idx & 63));
+	}
+
+	// BOXED-mode state.
 	vector<Slot> slots_;
 	idx_t mask_ = 0; // capacity - 1
 	vector<vector<Value>> stored_keys_;
+
+	// INLINE_64-mode state. Populated lazily on transition.
+	vector<InlineSlot> inline_slots_;
+	vector<uint64_t> inline_occupancy_; // packed 1-bit-per-slot
+	idx_t inline_mask_ = 0;
+	PhysicalType inline_type_ = PhysicalType::INVALID;
+
+	StorageMode mode_ = StorageMode::BOXED;
 	idx_t count_ = 0;
 	bool finalized_ = false;
 	// Set on the first Build call. Asserted on subsequent Builds and on
@@ -156,9 +224,16 @@ private:
 // =============================================================================
 //
 // Per-row Contains check, walking `probe_col_ids` to extract each row's key
-// tuple. SIMD acceleration is plausible (batched MurmurHash + gather) but
-// deferred — KeyBitmap is the primary path in plan 3 and the HASH branch
-// is rarely hot.
+// tuple. Dispatches once per chunk on the filter's storage mode:
+//   - INLINE_64 — width-templated key extraction + ContainsInline64, no
+//                 Value materialisation at all on the per-row hot path.
+//   - BOXED     — UnifiedVectorFormat per column + per-row vector<Value>
+//                 build, then ContainsHashed against the precomputed
+//                 vectorised hash.
+// In both modes the per-chunk hash is computed once via the vectorised
+// VectorOperations::Hash / CombineHash path (DUCKDB_COMBINE kind), so the
+// per-row loop never invokes Value::Hash. The MURMUR_HASH2 kind keeps the
+// scalar fallback.
 class HashFilterUseKernel {
 public:
 	//! Narrows `sel` in-place to surviving rows from `input`. `probe_col_ids`

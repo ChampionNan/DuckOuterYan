@@ -2,6 +2,9 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hash.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 
 #include <cstring>
 
@@ -94,13 +97,23 @@ hash_t HashFilter::HashKeyMurmur(const vector<Value> &key) {
 }
 
 hash_t HashFilter::HashKeyDuckDB(const vector<Value> &key) {
-	// Idiomatic DuckDB combine: CombineHash (XOR) over per-column
-	// Value::Hash() outputs. Equivalent to `VectorOperations::Hash` +
-	// `::CombineHash` so a future vectorized hot path would produce the
-	// same `hash_t` per row. No allocation, single MOV + XOR per column.
-	hash_t h = 0;
-	for (auto &v : key) {
-		h = CombineHash(h, v.Hash());
+	// Byte-equal to `VectorOperations::Hash(col0) + CombineHash(colN…)`.
+	// First column seeds with its own raw Hash<T> (matches the vectorised
+	// first-column write). Subsequent columns mix-then-XOR using the same
+	// constants as `CombineHashScalar` in vector_hash.cpp:44 — NOT the
+	// plain-XOR `CombineHash` in common/types/hash.hpp:23, which is a
+	// different (weaker) function used elsewhere in DuckDB.
+	//
+	// Value::Hash() routes through VectorOperations::Hash, so per-element
+	// hashes line up. Combined with the mixing here, the scalar
+	// Contains/Build paths and the vectorised kernel paths produce
+	// byte-equal hashes for any arity.
+	D_ASSERT(!key.empty());
+	hash_t h = key[0].Hash();
+	for (idx_t i = 1; i < key.size(); i++) {
+		h ^= h >> 32;
+		h *= 0xd6e8feb86659fd93ULL;
+		h ^= key[i].Hash();
 	}
 	return h;
 }
@@ -117,8 +130,79 @@ bool HashFilter::KeysEqual(const vector<Value> &a, const vector<Value> &b) {
 	return true;
 }
 
+// =============================================================================
+// Vectorised per-chunk hash — Tier 1 hot path.
+// =============================================================================
+//
+// Produces the same hash_t sequence as calling HashKey(.., DUCKDB_COMBINE) per
+// row — see hash_filter.hpp's HashKeyDuckDB comment. Only valid when the
+// filter's kind() is DUCKDB_COMBINE; callers gate. The const_cast mirrors the
+// pattern in JoinHashTable::Probe — VectorOperations::Hash takes Vector& for
+// API legacy but does not mutate the input.
+static void ComputeChunkHashes(const DataChunk &chunk, const vector<idx_t> &col_ids,
+                               Vector &hashes_out, idx_t row_count) {
+	D_ASSERT(!col_ids.empty());
+	auto &first = const_cast<Vector &>(chunk.data[col_ids[0]]);
+	VectorOperations::Hash(first, hashes_out, row_count);
+	for (idx_t c = 1; c < col_ids.size(); c++) {
+		auto &col = const_cast<Vector &>(chunk.data[col_ids[c]]);
+		VectorOperations::CombineHash(hashes_out, col, row_count);
+	}
+}
+
+// =============================================================================
+// Inline-mode key extraction — zero-extension of fixed-width integers.
+// =============================================================================
+//
+// All source widths map to a uint64_t via bit-preserving cast through the
+// matching unsigned width first. This means INT8(-1) → 0xFF (not
+// 0xFFFFFFFFFFFFFFFF) — important so that small-width values cannot collide
+// with the INT64 bit pattern of an unrelated value across columns. Build and
+// probe extract identically, so the convention is local and self-consistent.
+static uint64_t ExtractInlineKey(const UnifiedVectorFormat &fmt, PhysicalType type, idx_t row) {
+	const auto idx = fmt.sel->get_index(row);
+	switch (type) {
+	case PhysicalType::INT8:
+		return static_cast<uint64_t>(static_cast<uint8_t>(UnifiedVectorFormat::GetData<int8_t>(fmt)[idx]));
+	case PhysicalType::INT16:
+		return static_cast<uint64_t>(static_cast<uint16_t>(UnifiedVectorFormat::GetData<int16_t>(fmt)[idx]));
+	case PhysicalType::INT32:
+		return static_cast<uint64_t>(static_cast<uint32_t>(UnifiedVectorFormat::GetData<int32_t>(fmt)[idx]));
+	case PhysicalType::INT64:
+		return static_cast<uint64_t>(UnifiedVectorFormat::GetData<int64_t>(fmt)[idx]);
+	case PhysicalType::UINT8:
+		return static_cast<uint64_t>(UnifiedVectorFormat::GetData<uint8_t>(fmt)[idx]);
+	case PhysicalType::UINT16:
+		return static_cast<uint64_t>(UnifiedVectorFormat::GetData<uint16_t>(fmt)[idx]);
+	case PhysicalType::UINT32:
+		return static_cast<uint64_t>(UnifiedVectorFormat::GetData<uint32_t>(fmt)[idx]);
+	case PhysicalType::UINT64:
+		return UnifiedVectorFormat::GetData<uint64_t>(fmt)[idx];
+	default:
+		throw InternalException("HashFilter::ExtractInlineKey: unsupported PhysicalType");
+	}
+}
+
+static bool IsInlineEligible(PhysicalType t) {
+	switch (t) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
 HashFilter::HashFilter(HashKind kind) : kind_(kind) {
-	// Pre-allocate the slot array so the hot path never sees an empty table.
+	// Pre-allocate the BOXED slot array so the hot path never sees an empty
+	// table. If DecideStorageMode flips us to INLINE_64 on first Build, the
+	// boxed slots are released and inline slots are allocated in their place.
 	slots_.assign(INITIAL_CAPACITY, Slot {0, EMPTY_KEY_INDEX});
 	mask_ = INITIAL_CAPACITY - 1;
 }
@@ -179,6 +263,83 @@ void HashFilter::InsertHashedKey(vector<Value> key, hash_t hash) {
 	}
 }
 
+// =============================================================================
+// INLINE_64 storage — capacity management and insertion.
+// =============================================================================
+
+void HashFilter::EnsureInlineCapacityFor(idx_t additional) {
+	while (count_ + additional > Capacity() - (Capacity() >> 2)) {
+		if (Capacity() >= MAX_CAPACITY) {
+			throw InternalException("HashFilter: inline capacity exceeds 2^60 slots");
+		}
+		ResizeInline(Capacity() * 2);
+	}
+}
+
+void HashFilter::ResizeInline(idx_t new_capacity) {
+	D_ASSERT((new_capacity & (new_capacity - 1)) == 0);
+	vector<InlineSlot> new_slots(new_capacity, InlineSlot {0, 0});
+	// One bit per slot, packed into uint64 words. Ceil(new_capacity / 64).
+	vector<uint64_t> new_occ((new_capacity + 63) / 64, 0);
+	const idx_t new_mask = new_capacity - 1;
+
+	for (idx_t i = 0; i < inline_slots_.size(); i++) {
+		if (!IsInlineSlotOccupied(i)) {
+			continue;
+		}
+		const auto &src = inline_slots_[i];
+		idx_t idx = src.hash & new_mask;
+		while ((new_occ[idx >> 6] >> (idx & 63)) & 1ULL) {
+			idx = (idx + 1) & new_mask;
+		}
+		new_slots[idx] = src;
+		new_occ[idx >> 6] |= (1ULL << (idx & 63));
+	}
+	inline_slots_ = std::move(new_slots);
+	inline_occupancy_ = std::move(new_occ);
+	inline_mask_ = new_mask;
+}
+
+void HashFilter::InsertHashedKey64(uint64_t key, hash_t hash) {
+	EnsureInlineCapacityFor(1);
+	idx_t idx = hash & inline_mask_;
+	while (true) {
+		if (!IsInlineSlotOccupied(idx)) {
+			inline_slots_[idx] = InlineSlot {hash, key};
+			MarkInlineSlotOccupied(idx);
+			count_++;
+			return;
+		}
+		const auto &slot = inline_slots_[idx];
+		if (slot.hash == hash && slot.key == key) {
+			return; // duplicate, set semantics
+		}
+		idx = (idx + 1) & inline_mask_;
+	}
+}
+
+void HashFilter::DecideStorageMode(const DataChunk &chunk, const vector<idx_t> &build_col_ids) {
+	D_ASSERT(mode_ == StorageMode::BOXED);
+	D_ASSERT(count_ == 0);
+	if (build_col_ids.size() != 1) {
+		return;
+	}
+	const auto pt = chunk.data[build_col_ids[0]].GetType().InternalType();
+	if (!IsInlineEligible(pt)) {
+		return;
+	}
+	// Flip to INLINE_64. Release the boxed slot array allocated by the
+	// constructor — inline state takes its place at the same capacity.
+	mode_ = StorageMode::INLINE_64;
+	inline_type_ = pt;
+	slots_.clear();
+	slots_.shrink_to_fit();
+	mask_ = 0;
+	inline_slots_.assign(INITIAL_CAPACITY, InlineSlot {0, 0});
+	inline_occupancy_.assign((INITIAL_CAPACITY + 63) / 64, 0);
+	inline_mask_ = INITIAL_CAPACITY - 1;
+}
+
 void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_ids) {
 	if (finalized_) {
 		throw InternalException("HashFilter::Build called after Finalize");
@@ -188,12 +349,18 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 	}
 
 	// Capture arity on first call; assert consistency afterwards.
-	if (key_arity_ == 0) {
+	const bool first_build = (key_arity_ == 0);
+	if (first_build) {
 		key_arity_ = build_col_ids.size();
 	} else if (key_arity_ != build_col_ids.size()) {
 		throw InternalException("HashFilter::Build: build_col_ids size changed across Builds (%llu vs %llu)",
 		                        static_cast<unsigned long long>(key_arity_),
 		                        static_cast<unsigned long long>(build_col_ids.size()));
+	}
+	// First-Build dispatch: may flip the filter into INLINE_64 mode for
+	// arity-1 fixed-width integer keys. Decided once; immutable afterwards.
+	if (first_build) {
+		DecideStorageMode(chunk, build_col_ids);
 	}
 
 	const idx_t row_count = chunk.size();
@@ -209,6 +376,33 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 		chunk.data[build_col_ids[c]].ToUnifiedFormat(row_count, formats[c]);
 	}
 
+	// Vectorised per-chunk hash — Tier 1. Byte-equal to the scalar
+	// HashKey(.., DUCKDB_COMBINE) path; the MURMUR_HASH2 fallback hashes
+	// per row inside the loop.
+	Vector hashes_v(LogicalType::HASH);
+	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE);
+	if (vectorised_hash) {
+		ComputeChunkHashes(chunk, build_col_ids, hashes_v, row_count);
+	}
+	const auto hashes = vectorised_hash ? FlatVector::GetData<hash_t>(hashes_v) : nullptr;
+
+	if (mode_ == StorageMode::INLINE_64) {
+		// Inline fast path: single column, fixed-width integer. No Value
+		// materialisation. NULL probe rows are skipped per semi-join
+		// NULL-never-matches semantics.
+		const auto &fmt = formats[0];
+		for (idx_t r = 0; r < row_count; r++) {
+			if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
+				continue;
+			}
+			const uint64_t k = ExtractInlineKey(fmt, inline_type_, r);
+			const hash_t h = vectorised_hash ? hashes[r] : HashKey({chunk.GetValue(build_col_ids[0], r)}, kind_);
+			InsertHashedKey64(k, h);
+		}
+		return;
+	}
+
+	// BOXED path — Value is the storage format the set is keyed on.
 	vector<Value> key;
 	key.reserve(build_col_ids.size());
 
@@ -218,8 +412,7 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 		bool any_null = false;
 		for (idx_t c = 0; c < build_col_ids.size(); c++) {
 			const auto &fmt = formats[c];
-			const auto idx = fmt.sel->get_index(r);
-			if (!fmt.validity.RowIsValid(idx)) {
+			if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
 				any_null = true;
 				break;
 			}
@@ -227,14 +420,12 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 		if (any_null) {
 			continue;
 		}
-
-		// Materialize the key tuple only for rows that pass the null
-		// check; Value is the storage format the set is keyed on.
 		key.clear();
 		for (auto col_id : build_col_ids) {
 			key.emplace_back(chunk.GetValue(col_id, r));
 		}
-		InsertHashedKey(key, HashKey(key, kind_));
+		const hash_t h = vectorised_hash ? hashes[r] : HashKey(key, kind_);
+		InsertHashedKey(key, h);
 	}
 }
 
@@ -246,9 +437,61 @@ bool HashFilter::Contains(const vector<Value> &key) const {
 	// Arity guard — catches column-count mismatches before they silently
 	// degrade into false negatives via differing HashKey / KeysEqual outputs.
 	D_ASSERT(key_arity_ == 0 || key.size() == key_arity_);
-	auto hash = HashKey(key, kind_);
+	// Semi-join semantics: NULL probe keys never match. Short-circuit
+	// before touching HashKey (whose result on a NULL Value is
+	// implementation-defined and would otherwise drive a fruitless probe).
+	for (const auto &v : key) {
+		if (v.IsNull()) {
+			return false;
+		}
+	}
+	return ContainsHashed(key, HashKey(key, kind_));
+}
+
+bool HashFilter::ContainsHashed(const vector<Value> &key, hash_t hash) const {
+	D_ASSERT(key_arity_ == 0 || key.size() == key_arity_);
+	if (mode_ == StorageMode::INLINE_64) {
+		// Caller computed `hash` from the row; we still need the inline
+		// uint64 form of the (sole) key column. Fast path is the kernel
+		// which precomputes both; this scalar entry exists for symmetry
+		// with Contains().
+		D_ASSERT(key.size() == 1);
+		if (key[0].IsNull()) {
+			return false;
+		}
+		uint64_t k;
+		switch (inline_type_) {
+		case PhysicalType::INT8:
+			k = static_cast<uint64_t>(static_cast<uint8_t>(key[0].GetValue<int8_t>()));
+			break;
+		case PhysicalType::INT16:
+			k = static_cast<uint64_t>(static_cast<uint16_t>(key[0].GetValue<int16_t>()));
+			break;
+		case PhysicalType::INT32:
+			k = static_cast<uint64_t>(static_cast<uint32_t>(key[0].GetValue<int32_t>()));
+			break;
+		case PhysicalType::INT64:
+			k = static_cast<uint64_t>(key[0].GetValue<int64_t>());
+			break;
+		case PhysicalType::UINT8:
+			k = static_cast<uint64_t>(key[0].GetValue<uint8_t>());
+			break;
+		case PhysicalType::UINT16:
+			k = static_cast<uint64_t>(key[0].GetValue<uint16_t>());
+			break;
+		case PhysicalType::UINT32:
+			k = static_cast<uint64_t>(key[0].GetValue<uint32_t>());
+			break;
+		case PhysicalType::UINT64:
+			k = key[0].GetValue<uint64_t>();
+			break;
+		default:
+			throw InternalException("HashFilter::ContainsHashed: unsupported inline PhysicalType");
+		}
+		return ContainsInline64(k, hash);
+	}
+
 	idx_t idx = hash & mask_;
-	// Linear probe until we hit empty (definitive miss) or matching slot.
 	while (true) {
 		const auto &slot = slots_[idx];
 		if (slot.key_index == EMPTY_KEY_INDEX) {
@@ -258,6 +501,21 @@ bool HashFilter::Contains(const vector<Value> &key) const {
 			return true;
 		}
 		idx = (idx + 1) & mask_;
+	}
+}
+
+bool HashFilter::ContainsInline64(uint64_t key, hash_t hash) const {
+	D_ASSERT(mode_ == StorageMode::INLINE_64);
+	idx_t idx = hash & inline_mask_;
+	while (true) {
+		if (!IsInlineSlotOccupied(idx)) {
+			return false;
+		}
+		const auto &slot = inline_slots_[idx];
+		if (slot.hash == hash && slot.key == key) {
+			return true;
+		}
+		idx = (idx + 1) & inline_mask_;
 	}
 }
 
@@ -282,13 +540,43 @@ void HashFilterUseKernel::filter(const DataChunk &input, const vector<idx_t> &pr
 		return;
 	}
 
-	// Same UnifiedVectorFormat optimisation as Build — resolve once per
-	// column, do per-row null check without Value allocation.
+	// Resolve UnifiedVectorFormat once per column. No per-row resolution.
 	vector<UnifiedVectorFormat> formats(probe_col_ids.size());
 	for (idx_t c = 0; c < probe_col_ids.size(); c++) {
 		input.data[probe_col_ids[c]].ToUnifiedFormat(row_count, formats[c]);
 	}
 
+	// Vectorised per-chunk hash — Tier 1. Byte-equal to the per-row
+	// HashKey(.., DUCKDB_COMBINE) path. MURMUR_HASH2 keeps the per-row
+	// fallback below.
+	Vector hashes_v(LogicalType::HASH);
+	const bool vectorised_hash = (hash_filter.kind() == HashFilter::HashKind::DUCKDB_COMBINE);
+	if (vectorised_hash) {
+		ComputeChunkHashes(input, probe_col_ids, hashes_v, row_count);
+	}
+	const auto hashes = vectorised_hash ? FlatVector::GetData<hash_t>(hashes_v) : nullptr;
+
+	if (hash_filter.IsInline64()) {
+		// Inline fast path — Tier 2a. Single column, fixed-width integer.
+		// Zero Value materialisation on the per-row loop.
+		const auto &fmt = formats[0];
+		const auto inline_type = hash_filter.InlineKeyType();
+		for (idx_t r = 0; r < row_count; r++) {
+			if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
+				continue;
+			}
+			const uint64_t k = ExtractInlineKey(fmt, inline_type, r);
+			const hash_t h =
+			    vectorised_hash ? hashes[r] : HashFilter::HashKey({input.GetValue(probe_col_ids[0], r)}, hash_filter.kind());
+			if (hash_filter.ContainsInline64(k, h)) {
+				sel.set_index(approved++, r);
+			}
+		}
+		return;
+	}
+
+	// BOXED path — Value tuple per surviving row, hash from the vectorised
+	// pass when available.
 	vector<Value> key;
 	key.reserve(probe_col_ids.size());
 
@@ -296,22 +584,20 @@ void HashFilterUseKernel::filter(const DataChunk &input, const vector<idx_t> &pr
 		bool any_null = false;
 		for (idx_t c = 0; c < probe_col_ids.size(); c++) {
 			const auto &fmt = formats[c];
-			const auto idx = fmt.sel->get_index(r);
-			if (!fmt.validity.RowIsValid(idx)) {
+			if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
 				any_null = true;
 				break;
 			}
 		}
-		// NULL probe keys never match (semi-join semantics).
 		if (any_null) {
 			continue;
 		}
-
 		key.clear();
 		for (auto col_id : probe_col_ids) {
 			key.emplace_back(input.GetValue(col_id, r));
 		}
-		if (hash_filter.Contains(key)) {
+		const hash_t h = vectorised_hash ? hashes[r] : HashFilter::HashKey(key, hash_filter.kind());
+		if (hash_filter.ContainsHashed(key, h)) {
 			sel.set_index(approved++, r);
 		}
 	}
