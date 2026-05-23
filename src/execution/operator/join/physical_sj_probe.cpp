@@ -26,13 +26,27 @@
 
 #include "duckdb/execution/operator/join/physical_sj_probe.hpp"
 
+#include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 
 namespace duckdb {
+
+// Per-thread scratch chunk lives in OperatorState (DuckDB convention) and is
+// initialised once with the per-client allocator so memory is accounted to the
+// right ClientContext rather than the process-global DefaultAllocator.
+class SJProbeOperatorState : public CachingOperatorState {
+public:
+	SJProbeOperatorState(ClientContext &context, const vector<LogicalType> &types) {
+		working.Initialize(Allocator::Get(context), types);
+	}
+
+	DataChunk working;
+};
 
 PhysicalSJProbe::PhysicalSJProbe(PhysicalPlan &physical_plan, vector<LogicalType> types,
                                  vector<shared_ptr<SemiJoinFilter>> sj_to_use_p,
@@ -47,8 +61,7 @@ PhysicalSJProbe::PhysicalSJProbe(PhysicalPlan &physical_plan, vector<LogicalType
 }
 
 unique_ptr<OperatorState> PhysicalSJProbe::GetOperatorState(ExecutionContext &context) const {
-	(void)context;
-	return make_uniq<CachingOperatorState>();
+	return make_uniq<SJProbeOperatorState>(context.client, types);
 }
 
 // ===========================================================================
@@ -74,7 +87,6 @@ OperatorResultType PhysicalSJProbe::ExecuteInternal(ExecutionContext &context, D
                                                     GlobalOperatorState &gstate, OperatorState &state) const {
 	(void)context;
 	(void)gstate;
-	(void)state;
 
 	const idx_t row_count = input.size();
 	if (row_count == 0) {
@@ -87,6 +99,9 @@ OperatorResultType PhysicalSJProbe::ExecuteInternal(ExecutionContext &context, D
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 
+	auto &op_state = state.Cast<SJProbeOperatorState>();
+	auto &working = op_state.working;
+
 	// Iteratively narrow `surviving` (a selection vector over the ORIGINAL
 	// input row indices). Start with the identity mapping [0..row_count).
 	SelectionVector surviving(STANDARD_VECTOR_SIZE);
@@ -95,17 +110,9 @@ OperatorResultType PhysicalSJProbe::ExecuteInternal(ExecutionContext &context, D
 	}
 	idx_t surviving_count = row_count;
 
-	// Scratch chunk reused across filters when slicing is needed. Initialised
-	// lazily.
-	DataChunk working;
-	bool working_initialised = false;
 	auto active_chunk = [&]() -> DataChunk & {
 		if (surviving_count == row_count) {
 			return input;
-		}
-		if (!working_initialised) {
-			working.Initialize(Allocator::DefaultAllocator(), input.GetTypes());
-			working_initialised = true;
 		}
 		working.Slice(input, surviving, surviving_count);
 		return working;

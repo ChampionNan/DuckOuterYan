@@ -56,44 +56,43 @@ inline int64_t LoadKeyAsInt64(LogicalTypeId id, const_data_ptr_t data, idx_t idx
 
 } // namespace
 
-unique_ptr<KeyBitmap> KeyBitmap::TryBuild(ClientContext &context,
-                                          const ColumnDataCollection &build_data,
-                                          const vector<idx_t> &build_col_ids,
-                                          const vector<LogicalType> &build_col_types,
-                                          idx_t byte_budget) {
-	// 0. Sanity.
+// =============================================================================
+// Eligibility — bitmap-path gating used by both the sequential TryBuild and
+// the parallel SJBuildBitmapInitEvent dispatch in PhysicalSJBuild::Finalize.
+// =============================================================================
+KeyBitmap::EligibilityResult KeyBitmap::CheckEligibility(const vector<idx_t> &build_col_ids,
+                                                         const vector<LogicalType> &build_col_types) {
+	EligibilityResult r {false, 0, LogicalTypeId::INVALID};
 	if (build_col_ids.empty() || build_col_ids.size() != build_col_types.size()) {
-		return nullptr;
+		return r;
 	}
 	// v1: single-column only. Composite-key flattening is plan-3 open question 1.
 	if (build_col_ids.size() != 1) {
-		return nullptr;
+		return r;
 	}
-	if (byte_budget == 0) {
-		// PRAGMA outer_yan_bitmap_max_bytes = 0 forces HashFilter.
-		return nullptr;
-	}
-
-	// 1. Type gate.
 	auto type_id = build_col_types[0].id();
 	if (!IsBitmapEligibleType(type_id)) {
-		return nullptr;
+		return r;
 	}
-	auto col_id = build_col_ids[0];
+	r.eligible = true;
+	r.col_id = build_col_ids[0];
+	r.type_id = type_id;
+	return r;
+}
 
-	// 2. First pass — min / max over the non-NULL keys.
-	int64_t min_key = NumericLimits<int64_t>::Maximum();
-	int64_t max_key = NumericLimits<int64_t>::Minimum();
-	idx_t non_null_rows = 0;
+// =============================================================================
+// Per-task min/max scan. FetchChunk-based so calls over disjoint chunk
+// ranges have no shared state — the basis of within-filter parallelism.
+// =============================================================================
+KeyBitmap::MinMaxRange KeyBitmap::ScanMinMaxRange(const ColumnDataCollection &build_data, idx_t col_id,
+                                                  LogicalTypeId type_id, idx_t chunk_from, idx_t chunk_to) {
+	MinMaxRange r {NumericLimits<int64_t>::Maximum(), NumericLimits<int64_t>::Minimum(), 0};
 
 	DataChunk scan_chunk;
 	build_data.InitializeScanChunk(scan_chunk);
-
-	ColumnDataParallelScanState gstate;
-	ColumnDataLocalScanState lstate;
-	build_data.InitializeScan(gstate);
-
-	while (build_data.Scan(gstate, lstate, scan_chunk)) {
+	for (idx_t ci = chunk_from; ci < chunk_to; ci++) {
+		scan_chunk.Reset();
+		build_data.FetchChunk(ci, scan_chunk);
 		auto &v = scan_chunk.data[col_id];
 		UnifiedVectorFormat format;
 		v.ToUnifiedFormat(scan_chunk.size(), format);
@@ -104,46 +103,66 @@ unique_ptr<KeyBitmap> KeyBitmap::TryBuild(ClientContext &context,
 				continue;
 			}
 			int64_t value = LoadKeyAsInt64(type_id, data, idx);
-			if (value < min_key) {
-				min_key = value;
+			if (value < r.min_key) {
+				r.min_key = value;
 			}
-			if (value > max_key) {
-				max_key = value;
+			if (value > r.max_key) {
+				r.max_key = value;
 			}
-			non_null_rows++;
+			r.non_null_rows++;
 		}
-		scan_chunk.Reset();
 	}
+	return r;
+}
 
-	if (non_null_rows == 0) {
-		// Build relation is empty (or all-NULL) — still emit a bitmap with
-		// zero capacity so the probe correctly filters everything.
+KeyBitmap::MinMaxRange KeyBitmap::ReduceMinMax(const vector<MinMaxRange> &locals) {
+	MinMaxRange r {NumericLimits<int64_t>::Maximum(), NumericLimits<int64_t>::Minimum(), 0};
+	for (const auto &l : locals) {
+		r.non_null_rows += l.non_null_rows;
+		if (l.non_null_rows == 0) {
+			continue;
+		}
+		if (l.min_key < r.min_key) {
+			r.min_key = l.min_key;
+		}
+		if (l.max_key > r.max_key) {
+			r.max_key = l.max_key;
+		}
+	}
+	return r;
+}
+
+// =============================================================================
+// Allocate — size the bitmap, range-check against budget, zero the storage.
+// =============================================================================
+unique_ptr<KeyBitmap> KeyBitmap::Allocate(ClientContext &context, const MinMaxRange &range,
+                                          const LogicalType &key_type, idx_t byte_budget) {
+	if (range.non_null_rows == 0) {
+		// Build relation is empty (or all-NULL) — emit a bitmap with zero
+		// capacity so the probe correctly filters everything.
 		auto bm = make_uniq<KeyBitmap>();
 		bm->min_key_ = 0;
 		bm->max_key_ = -1;
 		bm->bit_count_ = 0;
 		bm->pop_count_ = 0;
-		bm->key_type_ = build_col_types[0];
+		bm->key_type_ = key_type;
 		return bm;
 	}
 
-	// 3. Range check.
 	// (max - min + 1) bits required. Use uint64_t arithmetic since the
 	// range can exceed int64_t bounds in pathological cases.
-	uint64_t range = static_cast<uint64_t>(max_key - min_key) + 1ULL;
-	uint64_t bytes_needed = (range + 7ULL) / 8ULL;
+	uint64_t range_size = static_cast<uint64_t>(range.max_key - range.min_key) + 1ULL;
+	uint64_t bytes_needed = (range_size + 7ULL) / 8ULL;
 	if (bytes_needed > byte_budget) {
 		return nullptr;
 	}
 
-	// 4. Allocate.
-	uint64_t words_needed = (range + 63ULL) / 64ULL;
-
+	uint64_t words_needed = (range_size + 63ULL) / 64ULL;
 	auto bm = make_uniq<KeyBitmap>();
-	bm->min_key_ = min_key;
-	bm->max_key_ = max_key;
+	bm->min_key_ = range.min_key;
+	bm->max_key_ = range.max_key;
 	bm->bit_count_ = NumericCast<idx_t>(words_needed * 64ULL);
-	bm->key_type_ = build_col_types[0];
+	bm->key_type_ = key_type;
 
 	auto &buffer_manager = BufferManager::GetBufferManager(context);
 	auto &allocator = buffer_manager.GetBufferAllocator();
@@ -153,10 +172,29 @@ unique_ptr<KeyBitmap> KeyBitmap::TryBuild(ClientContext &context,
 	auto aligned = (raw + 63ULL) & ~63ULL;
 	bm->words_ = reinterpret_cast<uint64_t *>(aligned);
 	std::memset(bm->words_, 0, words_needed * sizeof(uint64_t));
+	return bm;
+}
 
-	// 5. Second pass — set bits.
-	build_data.InitializeScan(gstate);
-	while (build_data.Scan(gstate, lstate, scan_chunk)) {
+// =============================================================================
+// FillBitsRange — per-task bit-set kernel. PARALLEL=true uses
+// __atomic_or_fetch (relaxed) so concurrent tasks setting bits in the same
+// word are race-free. PARALLEL=false keeps the plain `|=` for the sequential
+// TryBuild fast path; the templated form lets both compile to a tight loop.
+// =============================================================================
+template <bool PARALLEL>
+void KeyBitmap::FillBitsRange(const ColumnDataCollection &build_data, idx_t col_id, LogicalTypeId type_id,
+                              idx_t chunk_from, idx_t chunk_to) {
+	if (bit_count_ == 0) {
+		return;
+	}
+	const int64_t min_key = min_key_;
+	uint64_t *__restrict words = words_;
+
+	DataChunk scan_chunk;
+	build_data.InitializeScanChunk(scan_chunk);
+	for (idx_t ci = chunk_from; ci < chunk_to; ci++) {
+		scan_chunk.Reset();
+		build_data.FetchChunk(ci, scan_chunk);
 		auto &v = scan_chunk.data[col_id];
 		UnifiedVectorFormat format;
 		v.ToUnifiedFormat(scan_chunk.size(), format);
@@ -167,20 +205,64 @@ unique_ptr<KeyBitmap> KeyBitmap::TryBuild(ClientContext &context,
 				continue;
 			}
 			int64_t value = LoadKeyAsInt64(type_id, data, idx);
-			// Guarded by the min/max from pass 1; bit_idx is always in range.
+			// Guarded by the min/max reduce; bit_idx is always in range.
 			uint64_t bit_idx = static_cast<uint64_t>(value - min_key);
-			bm->words_[bit_idx >> 6] |= (1ULL << (bit_idx & 63ULL));
+			const uint64_t mask = 1ULL << (bit_idx & 63ULL);
+			if (PARALLEL) {
+				__atomic_or_fetch(&words[bit_idx >> 6], mask, __ATOMIC_RELAXED);
+			} else {
+				words[bit_idx >> 6] |= mask;
+			}
 		}
-		scan_chunk.Reset();
 	}
+}
 
-	// 6. Popcount — used by IsEmpty (and one day by selectivity estimation).
+// Explicit instantiations — bodies live above so they are visible at the
+// instantiation point and the symbol is emitted in this TU.
+template void KeyBitmap::FillBitsRange<true>(const ColumnDataCollection &, idx_t, LogicalTypeId, idx_t, idx_t);
+template void KeyBitmap::FillBitsRange<false>(const ColumnDataCollection &, idx_t, LogicalTypeId, idx_t, idx_t);
+
+void KeyBitmap::FinalizePopCount() {
+	const idx_t words_needed = bit_count_ / 64;
 	idx_t pop = 0;
-	for (uint64_t w = 0; w < words_needed; w++) {
-		pop += static_cast<idx_t>(__builtin_popcountll(bm->words_[w]));
+	for (idx_t w = 0; w < words_needed; w++) {
+		pop += static_cast<idx_t>(__builtin_popcountll(words_[w]));
 	}
-	bm->pop_count_ = pop;
+	pop_count_ = pop;
+}
 
+// =============================================================================
+// Sequential entry point — thin wrapper over the helpers above. The parallel
+// build path in PhysicalSJBuild::Finalize invokes the helpers individually
+// via SJBuildBitmapInitEvent / SJBuildBitmapFillEvent.
+// =============================================================================
+unique_ptr<KeyBitmap> KeyBitmap::TryBuild(ClientContext &context,
+                                          const ColumnDataCollection &build_data,
+                                          const vector<idx_t> &build_col_ids,
+                                          const vector<LogicalType> &build_col_types,
+                                          idx_t byte_budget) {
+	auto elig = CheckEligibility(build_col_ids, build_col_types);
+	if (!elig.eligible) {
+		return nullptr;
+	}
+	if (byte_budget == 0) {
+		// PRAGMA outer_yan_bitmap_max_bytes = 0 forces HashFilter — short-
+		// circuit before the (possibly large) min/max scan.
+		return nullptr;
+	}
+
+	const idx_t chunk_count = build_data.ChunkCount();
+	auto range = ScanMinMaxRange(build_data, elig.col_id, elig.type_id, 0, chunk_count);
+	auto bm = Allocate(context, range, build_col_types[0], byte_budget);
+	if (!bm) {
+		return nullptr;
+	}
+	if (bm->bit_count_ == 0) {
+		// Empty build — Allocate already returned the zero-capacity bitmap.
+		return bm;
+	}
+	bm->FillBitsRange<false>(build_data, elig.col_id, elig.type_id, 0, chunk_count);
+	bm->FinalizePopCount();
 	return bm;
 }
 
@@ -210,28 +292,47 @@ void KeyBitmap::ProbeBatch(const DataChunk &input,
 		return;
 	}
 
-	auto type_id = key_type_.id();
-	auto col_id = probe_col_ids[0];
+	const auto type_id = key_type_.id();
+	const auto col_id = probe_col_ids[0];
 	auto &v = input.data[col_id];
 
 	UnifiedVectorFormat format;
 	v.ToUnifiedFormat(input.size(), format);
-	auto data = const_data_ptr_cast(format.data);
+	const auto data = const_data_ptr_cast(format.data);
 
-	for (idx_t i = 0; i < input.size(); i++) {
-		auto idx = format.sel->get_index(i);
-		// NULL probe key never matches (semi-join semantics).
-		if (!format.validity.RowIsValid(idx)) {
-			continue;
-		}
-		int64_t value = LoadKeyAsInt64(type_id, data, idx);
-		// Out-of-range definitively means "not in build set" — no hash fallback.
-		if (value < min_key_ || value > max_key_) {
-			continue;
-		}
-		uint64_t bit_idx = static_cast<uint64_t>(value - min_key_);
-		uint64_t hit = (words_[bit_idx >> 6] >> (bit_idx & 63ULL)) & 1ULL;
-		if (hit) {
+	// Two-pass branchless DuckDB-style kernel. Pass 1 is pure straight-line
+	// arithmetic over the row range and auto-vectorises; pass 2 is a gather +
+	// AND which is too scattered to SIMDise but is at least branch-free up to
+	// the final emit-on-survive store.
+	const idx_t n = input.size();
+	const bool can_have_null = format.validity.CanHaveNull();
+	const int64_t min_key = min_key_;
+	const int64_t max_key = max_key_;
+	const uint64_t *__restrict words = words_;
+
+	alignas(64) uint64_t bit_idx_buf[STANDARD_VECTOR_SIZE];
+	alignas(64) uint8_t ok_buf[STANDARD_VECTOR_SIZE];
+
+	// Pass 1 — derive (valid && in_range) and a safe bit_idx for every row.
+	// `bit_idx` is clamped to 0 for masked-out rows so the pass-2 gather is
+	// always inside `words_[0 .. bit_count_/64)` and never reads OOB.
+	for (idx_t i = 0; i < n; i++) {
+		const auto idx = format.sel->get_index_unsafe(i);
+		const int64_t value = LoadKeyAsInt64(type_id, data, idx);
+		const uint8_t valid = can_have_null ? uint8_t(format.validity.RowIsValidUnsafe(idx)) : uint8_t(1);
+		const uint8_t in_range = uint8_t((value >= min_key) & (value <= max_key));
+		const uint8_t ok = uint8_t(valid & in_range);
+		ok_buf[i] = ok;
+		bit_idx_buf[i] = ok ? uint64_t(value - min_key) : uint64_t(0);
+	}
+
+	// Pass 2 — gather word, extract bit, emit on (ok & hit). The branch on
+	// emit is data-dependent on the result and unavoidable for a compaction
+	// store; everything else is straight-line.
+	for (idx_t i = 0; i < n; i++) {
+		const uint64_t bi = bit_idx_buf[i];
+		const uint64_t hit = (words[bi >> 6] >> (bi & 63ULL)) & 1ULL;
+		if (hit & ok_buf[i]) {
 			sel.set_index(approved++, i);
 		}
 	}

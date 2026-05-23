@@ -83,6 +83,41 @@ public:
 	// the arity and asserts it on subsequent Builds + every Contains.
 	void Build(const DataChunk &chunk, const vector<idx_t> &build_col_ids);
 
+	// =========================================================================
+	// Parallel-build primitives (Stage 2).
+	// =========================================================================
+	//
+	// Used by SJBuildHashInsertEvent in physical_sj_build.cpp to drive a
+	// chunk-sharded parallel build of the INLINE_64 table. Mirrors the role
+	// JoinHashTable plays for mainline DuckDB's PhysicalHashJoin: the table is
+	// pre-sized once on the orchestrating thread, then concurrent workers
+	// claim slots via atomic occupancy-bit fetch_or.
+	//
+	// BOXED mode is NOT supported on the parallel path in Stage 2 — it is the
+	// fallback for varchar / decimal / composite keys, used by the existing
+	// sequential `Build`. Callers gate via IsInline64Eligible.
+
+	//! True iff `col_types` is arity-1 and the column's PhysicalType lands in
+	//! the INLINE_64-eligible set (INT8/16/32/64, UINT8/16/32/64). Called
+	//! from PhysicalSJBuild::Finalize before deciding to schedule the
+	//! SJBuildHashInsertEvent vs. fall through to sequential BOXED Build.
+	static bool IsInline64Eligible(const vector<LogicalType> &col_types);
+
+	//! Pre-size the INLINE_64 table for `upper_bound_count` inserts. Sets
+	//! mode_ to INLINE_64, picks `inline_type_` from `key_type`'s PhysicalType,
+	//! captures arity 1, and allocates `inline_slots_` / `inline_occupancy_`
+	//! at `NextPowerOfTwo(upper_bound_count * 2)`. Requires `count_ == 0`
+	//! (no Build call yet). After ReserveInline returns, multiple threads may
+	//! call BuildChunkInline64<true> concurrently — the table never resizes.
+	void ReserveInline(const LogicalType &key_type, idx_t upper_bound_count);
+
+	//! Per-chunk insert into the pre-sized INLINE_64 table.
+	//! PARALLEL=true: claim slot via __atomic_fetch_or on inline_occupancy_,
+	//! then non-atomic store to the 16-byte slot (single-writer-per-slot).
+	//! PARALLEL=false: identical iteration shape, plain `|=` for occupancy.
+	template <bool PARALLEL>
+	void BuildChunkInline64(const DataChunk &chunk, const vector<idx_t> &build_col_ids);
+
 	// Marks the filter probe-ready. Currently just a flag; reserved for
 	// future repack / shrink-to-fit optimisations.
 	void Finalize();
@@ -178,6 +213,12 @@ private:
 	// `hash` so Build doesn't re-hash on the fast path.
 	void InsertHashedKey(vector<Value> key, hash_t hash);
 	static bool KeysEqual(const vector<Value> &a, const vector<Value> &b);
+
+	// Insert into the inline table. Templated on PARALLEL so the parallel
+	// path (DuckDB-style CAS-on-occupancy) and the sequential fast path share
+	// the same probe logic. Both specialisations are instantiated in the cpp.
+	template <bool PARALLEL>
+	void InsertHashedKey64Templated(uint64_t key, hash_t hash);
 
 	// Decides whether to flip to INLINE_64 on the first Build. Triggers only
 	// when arity == 1 and the column's PhysicalType is one of {INT8, INT16,

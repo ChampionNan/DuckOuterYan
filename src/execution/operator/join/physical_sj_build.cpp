@@ -40,6 +40,8 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
+#include "duckdb/parallel/base_pipeline_event.hpp"
+#include "duckdb/parallel/executor_task.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/thread_context.hpp"
@@ -180,20 +182,333 @@ SinkCombineResultType PhysicalSJBuild::Combine(ExecutionContext &context, Operat
 	return SinkCombineResultType::FINISHED;
 }
 
+// =============================================================================
+// Sequential HashFilter build — used for force_hash filters, ineligible
+// types/composites, and as the in-FinishEvent fallback when the bitmap range
+// exceeds the byte budget. Parallel HashFilter build is Stage 2 (deferred).
+// =============================================================================
+static void BuildOneFilterAsHash(ClientContext &context, const ColumnDataCollection &total_data,
+                                 const shared_ptr<SemiJoinFilter> &filter, const vector<idx_t> &build_col_ids,
+                                 HashFilter::HashKind hash_kind) {
+	(void)context;
+	auto hf = make_shared_ptr<HashFilter>(hash_kind);
+	DataChunk scan_chunk;
+	total_data.InitializeScanChunk(scan_chunk);
+	ColumnDataScanState scan_state;
+	total_data.InitializeScan(scan_state);
+	while (total_data.Scan(scan_state, scan_chunk)) {
+		hf->Build(scan_chunk, build_col_ids);
+		scan_chunk.Reset();
+	}
+	hf->Finalize();
+	filter->FinalizeAsHash(std::move(hf));
+}
+
+// =============================================================================
+// Within-filter parallel KeyBitmap build (Stage 1).
+//
+// Layout — mirrors HashJoinTableInitEvent → HashJoinFinalizeEvent:
+//
+//   SJBuildBitmapInitEvent
+//     Schedule    : N SJBuildBitmapScanTask (parallel min/max over chunks)
+//     FinishEvent : reduce → Allocate → dispatch FillEvent or hash fallback
+//   SJBuildBitmapFillEvent
+//     Schedule    : N SJBuildBitmapFillTask (parallel atomic-OR bit-set)
+//     FinishEvent : FinalizePopCount → filter->FinalizeAsBitmap
+//
+// Each filter dispatches its own chain independently from Finalize. Across-
+// filter and within-filter parallelism compose naturally — DuckDB's task
+// scheduler load-balances on its own; no explicit thread-count knob.
+// =============================================================================
+
+//! Tasks-per-event chunking, matching HashJoinFinalizeEvent::CHUNKS_PER_TASK.
+static constexpr idx_t SJ_BUILD_CHUNKS_PER_TASK = 64;
+
+//! Per-filter scratch shared between SJBuildBitmapInitEvent and its dispatched
+//! SJBuildBitmapFillEvent. `partials` is written by the init tasks (each task
+//! writes its own slot, no contention); `bitmap` is published in the init
+//! event's FinishEvent and read by all fill tasks.
+struct SJBuildFilterScratch {
+	vector<KeyBitmap::MinMaxRange> partials;
+	unique_ptr<KeyBitmap> bitmap;
+};
+
+class SJBuildBitmapScanTask : public ExecutorTask {
+public:
+	SJBuildBitmapScanTask(shared_ptr<Event> event_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                      SJBuildGlobalSinkState &gstate_p, shared_ptr<SJBuildFilterScratch> scratch_p, idx_t task_idx_p,
+	                      idx_t chunk_from_p, idx_t chunk_to_p, idx_t col_id_p, LogicalTypeId type_id_p)
+	    : ExecutorTask(context_p, std::move(event_p), op_p), gstate(gstate_p), scratch(std::move(scratch_p)),
+	      task_idx(task_idx_p), chunk_from(chunk_from_p), chunk_to(chunk_to_p), col_id(col_id_p), type_id(type_id_p) {
+	}
+
+	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		(void)mode;
+		scratch->partials[task_idx] =
+		    KeyBitmap::ScanMinMaxRange(*gstate.total_data, col_id, type_id, chunk_from, chunk_to);
+		event->FinishTask();
+		return TaskExecutionResult::TASK_FINISHED;
+	}
+
+	string TaskType() const override {
+		return "SJBuildBitmapScanTask";
+	}
+
+private:
+	SJBuildGlobalSinkState &gstate;
+	shared_ptr<SJBuildFilterScratch> scratch;
+	idx_t task_idx;
+	idx_t chunk_from;
+	idx_t chunk_to;
+	idx_t col_id;
+	LogicalTypeId type_id;
+};
+
+class SJBuildBitmapFillTask : public ExecutorTask {
+public:
+	SJBuildBitmapFillTask(shared_ptr<Event> event_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                      SJBuildGlobalSinkState &gstate_p, shared_ptr<SJBuildFilterScratch> scratch_p,
+	                      idx_t chunk_from_p, idx_t chunk_to_p, idx_t col_id_p, LogicalTypeId type_id_p)
+	    : ExecutorTask(context_p, std::move(event_p), op_p), gstate(gstate_p), scratch(std::move(scratch_p)),
+	      chunk_from(chunk_from_p), chunk_to(chunk_to_p), col_id(col_id_p), type_id(type_id_p) {
+	}
+
+	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		(void)mode;
+		scratch->bitmap->FillBitsRange<true>(*gstate.total_data, col_id, type_id, chunk_from, chunk_to);
+		event->FinishTask();
+		return TaskExecutionResult::TASK_FINISHED;
+	}
+
+	string TaskType() const override {
+		return "SJBuildBitmapFillTask";
+	}
+
+private:
+	SJBuildGlobalSinkState &gstate;
+	shared_ptr<SJBuildFilterScratch> scratch;
+	idx_t chunk_from;
+	idx_t chunk_to;
+	idx_t col_id;
+	LogicalTypeId type_id;
+};
+
+//! Fill event declared before Init so the Init's FinishEvent body can name it.
+class SJBuildBitmapFillEvent : public BasePipelineEvent {
+public:
+	SJBuildBitmapFillEvent(Pipeline &pipeline_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                       SJBuildGlobalSinkState &gstate_p, idx_t filter_idx_p, idx_t col_id_p,
+	                       LogicalTypeId type_id_p, shared_ptr<SJBuildFilterScratch> scratch_p)
+	    : BasePipelineEvent(pipeline_p), context(context_p), op(op_p), gstate(gstate_p), filter_idx(filter_idx_p),
+	      col_id(col_id_p), type_id(type_id_p), scratch(std::move(scratch_p)) {
+	}
+
+	void Schedule() override {
+		const idx_t cc = gstate.total_data->ChunkCount();
+		const idx_t num_tasks = MaxValue<idx_t>((cc + SJ_BUILD_CHUNKS_PER_TASK - 1) / SJ_BUILD_CHUNKS_PER_TASK, 1);
+		vector<shared_ptr<Task>> tasks;
+		tasks.reserve(num_tasks);
+		for (idx_t t = 0; t < num_tasks; t++) {
+			const idx_t cf = t * SJ_BUILD_CHUNKS_PER_TASK;
+			const idx_t ct = MinValue<idx_t>(cf + SJ_BUILD_CHUNKS_PER_TASK, cc);
+			tasks.push_back(make_uniq<SJBuildBitmapFillTask>(shared_from_this(), context, op, gstate, scratch, cf, ct,
+			                                                 col_id, type_id));
+		}
+		SetTasks(std::move(tasks));
+	}
+
+	void FinishEvent() override {
+		scratch->bitmap->FinalizePopCount();
+		op.sj_to_create[filter_idx]->FinalizeAsBitmap(std::move(scratch->bitmap));
+	}
+
+private:
+	ClientContext &context;
+	const PhysicalSJBuild &op;
+	SJBuildGlobalSinkState &gstate;
+	idx_t filter_idx;
+	idx_t col_id;
+	LogicalTypeId type_id;
+	shared_ptr<SJBuildFilterScratch> scratch;
+};
+
+// =============================================================================
+// Parallel INLINE_64 HashFilter build (Stage 2).
+//
+// Single-phase event — Schedule both sizes the table and fans out the
+// chunk-sharded insert tasks. The table is pre-sized for
+// `total_data.Count() * 2`, so the load factor stays ≤ 0.5 and no thread
+// ever has to resize while inserting. Atomic occupancy-bit fetch_or in
+// HashFilter::InsertHashedKey64Templated<true> serialises slot claims, then
+// the winning thread is the sole writer of the 16-byte InlineSlot.
+//
+// Dispatched from PhysicalSJBuild::Finalize for force_hash / non-bitmap-
+// eligible / budget=0 filters when their key is INLINE_64-eligible, and
+// from SJBuildBitmapInitEvent::FinishEvent on the bitmap-overflow path.
+// BOXED-mode keys (varchar, decimal, composite) keep falling through to
+// the sequential BuildOneFilterAsHash — Stage 3 work.
+// =============================================================================
+class SJBuildHashInsertTask : public ExecutorTask {
+public:
+	SJBuildHashInsertTask(shared_ptr<Event> event_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                      SJBuildGlobalSinkState &gstate_p, shared_ptr<HashFilter> hf_p,
+	                      const vector<idx_t> &build_col_ids_p, idx_t chunk_from_p, idx_t chunk_to_p)
+	    : ExecutorTask(context_p, std::move(event_p), op_p), gstate(gstate_p), hf(std::move(hf_p)),
+	      build_col_ids(build_col_ids_p), chunk_from(chunk_from_p), chunk_to(chunk_to_p) {
+	}
+
+	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		(void)mode;
+		DataChunk scan_chunk;
+		gstate.total_data->InitializeScanChunk(scan_chunk);
+		for (idx_t ci = chunk_from; ci < chunk_to; ci++) {
+			scan_chunk.Reset();
+			gstate.total_data->FetchChunk(ci, scan_chunk);
+			hf->BuildChunkInline64<true>(scan_chunk, build_col_ids);
+		}
+		event->FinishTask();
+		return TaskExecutionResult::TASK_FINISHED;
+	}
+
+	string TaskType() const override {
+		return "SJBuildHashInsertTask";
+	}
+
+private:
+	SJBuildGlobalSinkState &gstate;
+	shared_ptr<HashFilter> hf;
+	//! Borrowed reference; lifetime tied to the PhysicalSJBuild operator,
+	//! which outlives every task scheduled from this Finalize.
+	const vector<idx_t> &build_col_ids;
+	idx_t chunk_from;
+	idx_t chunk_to;
+};
+
+class SJBuildHashInsertEvent : public BasePipelineEvent {
+public:
+	SJBuildHashInsertEvent(Pipeline &pipeline_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                       SJBuildGlobalSinkState &gstate_p, idx_t filter_idx_p, HashFilter::HashKind hash_kind_p)
+	    : BasePipelineEvent(pipeline_p), context(context_p), op(op_p), gstate(gstate_p), filter_idx(filter_idx_p),
+	      hash_kind(hash_kind_p) {
+	}
+
+	void Schedule() override {
+		const auto &build_col_ids = op.build_col_ids_per_filter[filter_idx];
+		const auto &key_type = op.types[build_col_ids[0]];
+
+		// Pre-size for total_data.Count() — upper bound on inserts after
+		// NULL-filtering. Doubled in ReserveInline to keep load factor
+		// ≤ 0.5 under worst-case all-unique + duplicate-race inputs.
+		hf = make_shared_ptr<HashFilter>(hash_kind);
+		hf->ReserveInline(key_type, gstate.total_data->Count());
+
+		const idx_t cc = gstate.total_data->ChunkCount();
+		const idx_t num_tasks = MaxValue<idx_t>((cc + SJ_BUILD_CHUNKS_PER_TASK - 1) / SJ_BUILD_CHUNKS_PER_TASK, 1);
+		vector<shared_ptr<Task>> tasks;
+		tasks.reserve(num_tasks);
+		for (idx_t t = 0; t < num_tasks; t++) {
+			const idx_t cf = t * SJ_BUILD_CHUNKS_PER_TASK;
+			const idx_t ct = MinValue<idx_t>(cf + SJ_BUILD_CHUNKS_PER_TASK, cc);
+			tasks.push_back(make_uniq<SJBuildHashInsertTask>(shared_from_this(), context, op, gstate, hf, build_col_ids,
+			                                                 cf, ct));
+		}
+		SetTasks(std::move(tasks));
+	}
+
+	void FinishEvent() override {
+		hf->Finalize();
+		op.sj_to_create[filter_idx]->FinalizeAsHash(std::move(hf));
+	}
+
+private:
+	ClientContext &context;
+	const PhysicalSJBuild &op;
+	SJBuildGlobalSinkState &gstate;
+	idx_t filter_idx;
+	HashFilter::HashKind hash_kind;
+	shared_ptr<HashFilter> hf;
+};
+
+class SJBuildBitmapInitEvent : public BasePipelineEvent {
+public:
+	SJBuildBitmapInitEvent(Pipeline &pipeline_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
+	                       SJBuildGlobalSinkState &gstate_p, idx_t filter_idx_p, idx_t bitmap_budget_p,
+	                       HashFilter::HashKind hash_kind_p, idx_t col_id_p, LogicalTypeId type_id_p)
+	    : BasePipelineEvent(pipeline_p), context(context_p), op(op_p), gstate(gstate_p), filter_idx(filter_idx_p),
+	      bitmap_budget(bitmap_budget_p), hash_kind(hash_kind_p), col_id(col_id_p), type_id(type_id_p) {
+	}
+
+	void Schedule() override {
+		const idx_t cc = gstate.total_data->ChunkCount();
+		const idx_t num_tasks = MaxValue<idx_t>((cc + SJ_BUILD_CHUNKS_PER_TASK - 1) / SJ_BUILD_CHUNKS_PER_TASK, 1);
+		scratch = make_shared_ptr<SJBuildFilterScratch>();
+		scratch->partials.resize(num_tasks);
+		vector<shared_ptr<Task>> tasks;
+		tasks.reserve(num_tasks);
+		for (idx_t t = 0; t < num_tasks; t++) {
+			const idx_t cf = t * SJ_BUILD_CHUNKS_PER_TASK;
+			const idx_t ct = MinValue<idx_t>(cf + SJ_BUILD_CHUNKS_PER_TASK, cc);
+			tasks.push_back(make_uniq<SJBuildBitmapScanTask>(shared_from_this(), context, op, gstate, scratch, t, cf, ct,
+			                                                 col_id, type_id));
+		}
+		SetTasks(std::move(tasks));
+	}
+
+	void FinishEvent() override {
+		const auto reduced = KeyBitmap::ReduceMinMax(scratch->partials);
+		const auto &build_col_ids = op.build_col_ids_per_filter[filter_idx];
+		const auto &key_type = op.types[build_col_ids[0]];
+		auto bm = KeyBitmap::Allocate(context, reduced, key_type, bitmap_budget);
+		if (!bm) {
+			// Range exceeded budget — fall back to HashFilter. Every
+			// KeyBitmap-eligible type (INTEGER, BIGINT, UINTEGER, DATE) is
+			// also HashFilter::IsInline64Eligible, so the parallel INLINE_64
+			// path is always available here. Chained from this FinishEvent
+			// so it runs on the scheduler's thread pool, not blocking other
+			// filters' events on the FinishEvent thread.
+			vector<LogicalType> build_col_types {key_type};
+			D_ASSERT(HashFilter::IsInline64Eligible(build_col_types));
+			auto hash_event =
+			    make_shared_ptr<SJBuildHashInsertEvent>(*pipeline, context, op, gstate, filter_idx, hash_kind);
+			this->InsertEvent(std::move(hash_event));
+			return;
+		}
+		if (bm->BitCount() == 0) {
+			// Empty / all-NULL build — Allocate returned the zero-capacity
+			// stub bitmap; no bits to set, finalize directly.
+			op.sj_to_create[filter_idx]->FinalizeAsBitmap(std::move(bm));
+			return;
+		}
+		scratch->bitmap = std::move(bm);
+		auto fill_event = make_shared_ptr<SJBuildBitmapFillEvent>(*pipeline, context, op, gstate, filter_idx, col_id,
+		                                                          type_id, scratch);
+		this->InsertEvent(std::move(fill_event));
+	}
+
+private:
+	ClientContext &context;
+	const PhysicalSJBuild &op;
+	SJBuildGlobalSinkState &gstate;
+	idx_t filter_idx;
+	idx_t bitmap_budget;
+	HashFilter::HashKind hash_kind;
+	idx_t col_id;
+	LogicalTypeId type_id;
+	shared_ptr<SJBuildFilterScratch> scratch;
+};
+
 // Reference: DPT physical_create_bf.cpp `PhysicalCreateBF::Finalize` (line ~403).
 // Differences from DPT:
 //   - No is_successful / give-up logic (plan-3 non-goal).
 //   - No FinalizeMinMax / dynamic table filter (plan-3 non-goal).
 //   - Bitmap-first + hash fallback per filter (plan-3 §"Build flow").
-//   - Single-threaded over filters; we don't schedule a CreateBFFinalizeEvent
-//     because the bitmap path's heavy work (bit-set + popcount) is already
-//     vectorised inside KeyBitmap and the per-filter cost is bounded by
-//     `outer_yan_bitmap_max_bytes`. Parallelisation across filters is a
-//     future optimisation.
+//   - Within-filter parallel KeyBitmap build via SJBuildBitmap{Init,Fill}Event,
+//     matching the parallelism axis of mainline `PhysicalHashJoin` so the
+//     benchmark comparison is apples-to-apples. Parallel HashFilter build is
+//     deferred to Stage 2 — force_hash and bitmap-overflow paths stay
+//     sequential through BuildOneFilterAsHash.
 SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                            OperatorSinkFinalizeInput &input) const {
-	(void)pipeline;
-	(void)event;
 	auto &gstate = input.global_state.Cast<SJBuildGlobalSinkState>();
 
 	// Fold per-thread collections into the global one.
@@ -203,12 +518,12 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 	gstate.local_data_collections.clear();
 
 	const auto budget = GetBitmapBudget(context);
+	const auto hash_kind = GetHashKind(context);
 
 	for (idx_t f = 0; f < sj_to_create.size(); f++) {
-		auto &filter = sj_to_create[f];
+		const auto &filter = sj_to_create[f];
 		const auto &build_col_ids = build_col_ids_per_filter[f];
 
-		// Resolve build column types from this operator's output schema.
 		vector<LogicalType> build_col_types;
 		build_col_types.reserve(build_col_ids.size());
 		for (auto cid : build_col_ids) {
@@ -218,35 +533,26 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 			build_col_types.emplace_back(types[cid]);
 		}
 
-		// Try the bitmap path first unless the optimizer's stats-prefilter
-		// pre-decided to skip it (SemiJoinFilter::force_hash() — set when
-		// outer_yan_stats_prefilter is on AND base-table min/max for the
-		// build key predicted overflow). The runtime overflow check inside
-		// TryBuild remains the correctness guarantee; force_hash is purely
-		// an optimization to avoid the wasted min/max scan.
-		unique_ptr<KeyBitmap> bitmap;
-		if (!filter->force_hash()) {
-			bitmap = KeyBitmap::TryBuild(context, *gstate.total_data, build_col_ids, build_col_types, budget);
-		}
-		if (bitmap) {
-			filter->FinalizeAsBitmap(std::move(bitmap));
-		} else {
-			auto hf = make_shared_ptr<HashFilter>(GetHashKind(context));
-			// Stream materialised data through HashFilter::Build. We re-scan
-			// total_data once per filter that falls back; for the common
-			// case where most filters take the bitmap path, this is rare.
-			DataChunk scan_chunk;
-			gstate.total_data->InitializeScanChunk(scan_chunk);
-			ColumnDataParallelScanState scan_state;
-			ColumnDataLocalScanState local_scan_state;
-			gstate.total_data->InitializeScan(scan_state);
-			while (gstate.total_data->Scan(scan_state, local_scan_state, scan_chunk)) {
-				hf->Build(scan_chunk, build_col_ids);
-				scan_chunk.Reset();
+		const auto elig = KeyBitmap::CheckEligibility(build_col_ids, build_col_types);
+		if (filter->force_hash() || !elig.eligible || budget == 0) {
+			// Hash path. Prefer the parallel INLINE_64 event chain when the
+			// key type permits; BOXED keys (varchar / decimal / composite)
+			// still take the sequential BuildOneFilterAsHash fallback.
+			if (HashFilter::IsInline64Eligible(build_col_types)) {
+				auto hash_event = make_shared_ptr<SJBuildHashInsertEvent>(pipeline, context, *this, gstate, f, hash_kind);
+				event.InsertEvent(std::move(hash_event));
+			} else {
+				BuildOneFilterAsHash(context, *gstate.total_data, filter, build_col_ids, hash_kind);
 			}
-			hf->Finalize();
-			filter->FinalizeAsHash(std::move(hf));
+			continue;
 		}
+
+		// Bitmap path — dispatch the parallel init→fill event chain. The
+		// chained events run independently per filter; load balancing across
+		// filters and within-filter tasks is handled by DuckDB's scheduler.
+		auto init_event = make_shared_ptr<SJBuildBitmapInitEvent>(pipeline, context, *this, gstate, f, budget,
+		                                                          hash_kind, elig.col_id, elig.type_id);
+		event.InsertEvent(std::move(init_event));
 	}
 	return SinkFinalizeType::READY;
 }

@@ -1,11 +1,14 @@
 #include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
 
+#include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
+#include <atomic>
 #include <cstring>
 
 namespace duckdb {
@@ -300,23 +303,73 @@ void HashFilter::ResizeInline(idx_t new_capacity) {
 	inline_mask_ = new_mask;
 }
 
+// Sequential entry point — kept for the existing Build path. Equivalent to
+// InsertHashedKey64Templated<false>; preserved as a non-template wrapper so
+// the rest of the cpp can call without writing `<false>` everywhere.
 void HashFilter::InsertHashedKey64(uint64_t key, hash_t hash) {
-	EnsureInlineCapacityFor(1);
+	InsertHashedKey64Templated<false>(key, hash);
+}
+
+// =============================================================================
+// Templated inline-slot insert. PARALLEL=true follows the JoinHashTable
+// pattern: occupancy bit is the claim, set via __atomic_fetch_or with ACQ_REL;
+// the winning thread is the sole writer of the 16-byte InlineSlot, so the
+// slot store is plain non-atomic. A release fence publishes the slot data;
+// readers (other concurrent inserters checking for duplicates) acquire-fence
+// before reading. The race window (winner has bit but hasn't fenced) is
+// benign — losers fail the duplicate check and probe forward, at worst
+// producing duplicate slots that Contains tolerates under set semantics.
+//
+// PARALLEL=false retains the original tight scalar path (no atomics, plain
+// `|=`, count_++). EnsureInlineCapacityFor is invoked only on the sequential
+// path; the parallel path requires ReserveInline up front (table is pre-sized
+// and never resizes during parallel insert).
+// =============================================================================
+template <bool PARALLEL>
+void HashFilter::InsertHashedKey64Templated(uint64_t key, hash_t hash) {
+	D_ASSERT(mode_ == StorageMode::INLINE_64);
+	if (!PARALLEL) {
+		EnsureInlineCapacityFor(1);
+	}
 	idx_t idx = hash & inline_mask_;
 	while (true) {
-		if (!IsInlineSlotOccupied(idx)) {
-			inline_slots_[idx] = InlineSlot {hash, key};
-			MarkInlineSlotOccupied(idx);
-			count_++;
-			return;
-		}
-		const auto &slot = inline_slots_[idx];
-		if (slot.hash == hash && slot.key == key) {
-			return; // duplicate, set semantics
+		if (PARALLEL) {
+			const idx_t word = idx >> 6;
+			const uint64_t mask = 1ULL << (idx & 63);
+			const uint64_t old = __atomic_fetch_or(&inline_occupancy_[word], mask, __ATOMIC_ACQ_REL);
+			if (!(old & mask)) {
+				// We won the slot — sole writer; non-atomic store is safe.
+				inline_slots_[idx].hash = hash;
+				inline_slots_[idx].key = key;
+				std::atomic_thread_fence(std::memory_order_release);
+				__atomic_fetch_add(&count_, idx_t(1), __ATOMIC_RELAXED);
+				return;
+			}
+			// Lost — best-effort duplicate check. If the writer has already
+			// release-fenced, our acquire-fence makes the slot data visible.
+			std::atomic_thread_fence(std::memory_order_acquire);
+			const auto &slot = inline_slots_[idx];
+			if (slot.hash == hash && slot.key == key) {
+				return;
+			}
+		} else {
+			if (!IsInlineSlotOccupied(idx)) {
+				inline_slots_[idx] = InlineSlot {hash, key};
+				MarkInlineSlotOccupied(idx);
+				count_++;
+				return;
+			}
+			const auto &slot = inline_slots_[idx];
+			if (slot.hash == hash && slot.key == key) {
+				return; // duplicate, set semantics
+			}
 		}
 		idx = (idx + 1) & inline_mask_;
 	}
 }
+
+template void HashFilter::InsertHashedKey64Templated<true>(uint64_t, hash_t);
+template void HashFilter::InsertHashedKey64Templated<false>(uint64_t, hash_t);
 
 void HashFilter::DecideStorageMode(const DataChunk &chunk, const vector<idx_t> &build_col_ids) {
 	D_ASSERT(mode_ == StorageMode::BOXED);
@@ -339,6 +392,85 @@ void HashFilter::DecideStorageMode(const DataChunk &chunk, const vector<idx_t> &
 	inline_occupancy_.assign((INITIAL_CAPACITY + 63) / 64, 0);
 	inline_mask_ = INITIAL_CAPACITY - 1;
 }
+
+bool HashFilter::IsInline64Eligible(const vector<LogicalType> &col_types) {
+	if (col_types.size() != 1) {
+		return false;
+	}
+	return IsInlineEligible(col_types[0].InternalType());
+}
+
+void HashFilter::ReserveInline(const LogicalType &key_type, idx_t upper_bound_count) {
+	D_ASSERT(count_ == 0);
+	D_ASSERT(key_arity_ == 0);
+	if (!IsInlineEligible(key_type.InternalType())) {
+		throw InternalException("HashFilter::ReserveInline: key type %s is not INLINE_64-eligible",
+		                        key_type.ToString());
+	}
+
+	mode_ = StorageMode::INLINE_64;
+	inline_type_ = key_type.InternalType();
+	key_arity_ = 1;
+
+	// Capacity sized so the load factor stays ≤ 0.5 even when every input
+	// row maps to a distinct key (worst case for open-addressed probe
+	// chains). Doubling matches the load factor JoinHashTable runs with in
+	// mainline. NextPowerOfTwo enforces the mask-based bucket invariant.
+	const idx_t target = MaxValue<idx_t>(upper_bound_count, INITIAL_CAPACITY);
+	const idx_t capacity = NumericCast<idx_t>(NextPowerOfTwo(static_cast<uint64_t>(target) * 2ULL));
+	if (capacity > MAX_CAPACITY) {
+		throw InternalException("HashFilter::ReserveInline: capacity exceeds 2^60 slots");
+	}
+
+	// Release the boxed-mode slot array allocated by the constructor.
+	slots_.clear();
+	slots_.shrink_to_fit();
+	mask_ = 0;
+
+	inline_slots_.assign(capacity, InlineSlot {0, 0});
+	inline_occupancy_.assign((capacity + 63) / 64, 0);
+	inline_mask_ = capacity - 1;
+}
+
+// =============================================================================
+// Per-chunk insert into the pre-sized INLINE_64 table. Shared shape between
+// the sequential Build's inline branch (PARALLEL=false) and the parallel
+// SJBuildHashInsertTask path (PARALLEL=true). Format resolution and
+// vectorised per-chunk hashing match the existing Build hot path; only the
+// inner InsertHashedKey64Templated differs between the two specialisations.
+// =============================================================================
+template <bool PARALLEL>
+void HashFilter::BuildChunkInline64(const DataChunk &chunk, const vector<idx_t> &build_col_ids) {
+	D_ASSERT(mode_ == StorageMode::INLINE_64);
+	D_ASSERT(build_col_ids.size() == 1);
+
+	const idx_t row_count = chunk.size();
+	if (row_count == 0) {
+		return;
+	}
+
+	UnifiedVectorFormat fmt;
+	chunk.data[build_col_ids[0]].ToUnifiedFormat(row_count, fmt);
+
+	Vector hashes_v(LogicalType::HASH);
+	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE);
+	if (vectorised_hash) {
+		ComputeChunkHashes(chunk, build_col_ids, hashes_v, row_count);
+	}
+	const auto hashes = vectorised_hash ? FlatVector::GetData<hash_t>(hashes_v) : nullptr;
+
+	for (idx_t r = 0; r < row_count; r++) {
+		if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
+			continue;
+		}
+		const uint64_t k = ExtractInlineKey(fmt, inline_type_, r);
+		const hash_t h = vectorised_hash ? hashes[r] : HashKey({chunk.GetValue(build_col_ids[0], r)}, kind_);
+		InsertHashedKey64Templated<PARALLEL>(k, h);
+	}
+}
+
+template void HashFilter::BuildChunkInline64<true>(const DataChunk &, const vector<idx_t> &);
+template void HashFilter::BuildChunkInline64<false>(const DataChunk &, const vector<idx_t> &);
 
 void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_ids) {
 	if (finalized_) {
@@ -368,17 +500,22 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 		return;
 	}
 
-	// Resolve UnifiedVectorFormat per column ONCE. The previous
-	// `chunk.GetValue(col, row)` loop did this resolution + a Value
-	// allocation per cell, which dominates the build cost.
+	if (mode_ == StorageMode::INLINE_64) {
+		// Inline fast path — delegate to the templated helper that drives
+		// the same loop under both sequential Build and parallel
+		// SJBuildHashInsertTask.
+		BuildChunkInline64<false>(chunk, build_col_ids);
+		return;
+	}
+
+	// BOXED path — Value is the storage format the set is keyed on. Format
+	// + vectorised hash resolution is BOXED-local; the INLINE_64 path does
+	// its own (identical) setup inside BuildChunkInline64.
 	vector<UnifiedVectorFormat> formats(build_col_ids.size());
 	for (idx_t c = 0; c < build_col_ids.size(); c++) {
 		chunk.data[build_col_ids[c]].ToUnifiedFormat(row_count, formats[c]);
 	}
 
-	// Vectorised per-chunk hash — Tier 1. Byte-equal to the scalar
-	// HashKey(.., DUCKDB_COMBINE) path; the MURMUR_HASH2 fallback hashes
-	// per row inside the loop.
 	Vector hashes_v(LogicalType::HASH);
 	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE);
 	if (vectorised_hash) {
@@ -386,23 +523,6 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 	}
 	const auto hashes = vectorised_hash ? FlatVector::GetData<hash_t>(hashes_v) : nullptr;
 
-	if (mode_ == StorageMode::INLINE_64) {
-		// Inline fast path: single column, fixed-width integer. No Value
-		// materialisation. NULL probe rows are skipped per semi-join
-		// NULL-never-matches semantics.
-		const auto &fmt = formats[0];
-		for (idx_t r = 0; r < row_count; r++) {
-			if (!fmt.validity.RowIsValid(fmt.sel->get_index(r))) {
-				continue;
-			}
-			const uint64_t k = ExtractInlineKey(fmt, inline_type_, r);
-			const hash_t h = vectorised_hash ? hashes[r] : HashKey({chunk.GetValue(build_col_ids[0], r)}, kind_);
-			InsertHashedKey64(k, h);
-		}
-		return;
-	}
-
-	// BOXED path — Value is the storage format the set is keyed on.
 	vector<Value> key;
 	key.reserve(build_col_ids.size());
 

@@ -37,17 +37,88 @@ class KeyBitmap {
 public:
 	KeyBitmap();
 
+	// =========================================================================
+	// Sequential build entry point.
+	// =========================================================================
+	//
 	// Two-pass build over a materialised ColumnDataCollection. Returns nullptr
 	// on any disqualifying condition; caller falls back to HashFilter.
 	//
 	// `build_col_ids` identify the join-key column(s) within rows of
 	// `build_data`. `build_col_types` must align (same length, same order).
 	// `byte_budget` is the per-filter cap from PRAGMA outer_yan_bitmap_max_bytes.
+	//
+	// Now a thin wrapper over the parallel-build helpers (CheckEligibility →
+	// ScanMinMaxRange → Allocate → FillBitsRange<false> → FinalizePopCount).
+	// The same primitives are driven from PhysicalSJBuild's SJBuildBitmap*Event
+	// chain when running within-filter parallelism.
 	static unique_ptr<KeyBitmap> TryBuild(ClientContext &context,
 	                                      const ColumnDataCollection &build_data,
 	                                      const vector<idx_t> &build_col_ids,
 	                                      const vector<LogicalType> &build_col_types,
 	                                      idx_t byte_budget);
+
+	// =========================================================================
+	// Parallel-build helpers (Stage 1).
+	// =========================================================================
+	//
+	// These helpers split the sequential TryBuild into stages that can be
+	// driven by SJBuildBitmapInitEvent (parallel min/max scan + allocation)
+	// and SJBuildBitmapFillEvent (parallel bit-set + popcount), mirroring the
+	// HashJoinTableInitEvent → HashJoinFinalizeEvent chain.
+
+	//! Per-chunk-range reduction returned by ScanMinMaxRange. `non_null_rows`
+	//! lets the reduce step distinguish "empty build" (emit empty bitmap)
+	//! from "range too wide" (fall back to HashFilter).
+	struct MinMaxRange {
+		int64_t min_key;
+		int64_t max_key;
+		idx_t non_null_rows;
+	};
+
+	//! Eligibility verdict — single-column, bitmap-eligible physical type.
+	//! Computed once in PhysicalSJBuild::Finalize before deciding whether to
+	//! dispatch the parallel bitmap event chain or fall straight to hash.
+	struct EligibilityResult {
+		bool eligible;
+		idx_t col_id;
+		LogicalTypeId type_id;
+	};
+	static EligibilityResult CheckEligibility(const vector<idx_t> &build_col_ids,
+	                                          const vector<LogicalType> &build_col_types);
+
+	//! Per-task min/max scan of [chunk_from, chunk_to) of `build_data`. Thread-
+	//! safe across calls: uses ColumnDataCollection::FetchChunk(idx), so each
+	//! task owns its own DataChunk and never touches a shared scan cursor.
+	static MinMaxRange ScanMinMaxRange(const ColumnDataCollection &build_data, idx_t col_id,
+	                                   LogicalTypeId type_id, idx_t chunk_from, idx_t chunk_to);
+
+	//! Single-threaded reduction over per-task MinMaxRange results. Called
+	//! from SJBuildBitmapInitEvent::FinishEvent.
+	static MinMaxRange ReduceMinMax(const vector<MinMaxRange> &locals);
+
+	//! Allocate a KeyBitmap sized for `range`. Returns nullptr when the
+	//! required bytes exceed `byte_budget` — caller falls back to HashFilter.
+	//! When `range.non_null_rows == 0`, returns a special empty bitmap
+	//! (min=0, max=-1, bit_count=0); the probe path filters everything against
+	//! such a bitmap (IsEmpty short-circuits ProbeBatch).
+	static unique_ptr<KeyBitmap> Allocate(ClientContext &context, const MinMaxRange &range,
+	                                      const LogicalType &key_type, idx_t byte_budget);
+
+	//! Per-task bit-set of [chunk_from, chunk_to) into this bitmap's word
+	//! array. Thread-safe across concurrent calls when PARALLEL=true: per-bit
+	//! writes use __atomic_or_fetch with memory_order_relaxed (we only need
+	//! atomicity of the OR, not ordering between bits — the bit-set is a
+	//! commutative monoid). PARALLEL=false uses plain `|=` for the sequential
+	//! TryBuild fast path.
+	template <bool PARALLEL>
+	void FillBitsRange(const ColumnDataCollection &build_data, idx_t col_id, LogicalTypeId type_id,
+	                   idx_t chunk_from, idx_t chunk_to);
+
+	//! Compute popcount across all words. Single-threaded; called from
+	//! SJBuildBitmapFillEvent::FinishEvent after all FillBitsRange tasks
+	//! have finished. Stored in `pop_count_` and consumed by IsEmpty().
+	void FinalizePopCount();
 
 	// Scalar single-row probe. Used by tests; not on the hot path.
 	bool Probe(int64_t flat_key) const;
