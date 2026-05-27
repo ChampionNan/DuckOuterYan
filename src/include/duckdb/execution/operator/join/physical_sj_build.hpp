@@ -50,7 +50,7 @@ public:
 
 	//! For each filter in `sj_to_create`, the list of column indices within
 	//! the operator's input chunks that correspond to that filter's build
-	//! keys. Resolved upstream in SemijoinInsertion::SpliceAt against the
+	//! keys. Resolved upstream in SemijoinInsertion::InsertAtBase against the
 	//! build child's GetColumnBindings(); moved onto this op by plan-gen.
 	vector<vector<idx_t>> build_col_ids_per_filter;
 

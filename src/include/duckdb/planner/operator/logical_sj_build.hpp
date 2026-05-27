@@ -42,7 +42,7 @@ public:
 
 	//! For each filter in `sj_to_create`, the column indices within the
 	//! child's output schema corresponding to that filter's build keys.
-	//! Resolved by SemijoinInsertion::SpliceAt at the moment the child is
+	//! Resolved by SemijoinInsertion::InsertAtBase at the moment the child is
 	//! attached (mirrors DPT's pre-resolved `bound_cols_build` on FilterPlan).
 	//! Plan-gen moves this onto PhysicalSJBuild verbatim.
 	vector<vector<idx_t>> build_col_ids_per_filter;

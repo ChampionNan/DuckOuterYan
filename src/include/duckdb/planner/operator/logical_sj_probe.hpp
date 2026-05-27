@@ -42,7 +42,7 @@ public:
 
 	//! For each filter in `sj_to_use`, the column indices within the child's
 	//! output schema corresponding to that filter's probe keys. Resolved by
-	//! SemijoinInsertion::SpliceAt; plan-gen moves it onto PhysicalSJProbe.
+	//! SemijoinInsertion::InsertAtBase; plan-gen moves it onto PhysicalSJProbe.
 	vector<vector<idx_t>> probe_col_ids_per_filter;
 
 public:

@@ -18,7 +18,7 @@
 //   - `Make<PhysicalT>` — arena allocation, see plan_filter.cpp.
 //   - `CreatePlan(*op.children[0])` — DuckDB standard recursive lowering.
 //
-// Column-id resolution: now done upstream in SemijoinInsertion::SpliceAt
+// Column-id resolution: now done upstream in SemijoinInsertion::InsertAtBase
 // (mirrors DPT's pre-resolved `bound_cols_probe`). Plan-gen just moves
 // LogicalSJProbe::probe_col_ids_per_filter onto the physical op.
 //

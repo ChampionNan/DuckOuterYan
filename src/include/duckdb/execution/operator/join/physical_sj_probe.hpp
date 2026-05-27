@@ -42,7 +42,7 @@ public:
 
 	//! For each filter in `sj_to_use`, the list of column indices within
 	//! input chunks corresponding to that filter's probe keys. Resolved
-	//! upstream in SemijoinInsertion::SpliceAt; moved onto this op by plan-gen.
+	//! upstream in SemijoinInsertion::InsertAtBase; moved onto this op by plan-gen.
 	vector<vector<idx_t>> probe_col_ids_per_filter;
 
 	//! Back-pointers to upstream PhysicalSJBuild operators (one per filter).

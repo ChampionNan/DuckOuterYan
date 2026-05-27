@@ -31,7 +31,7 @@
 // (multiple materialisations of the same data flowing through different
 // sinks) and wasteful. The cache makes the two entry points idempotent.
 //
-// Column-id resolution: now done upstream in SemijoinInsertion::SpliceAt
+// Column-id resolution: now done upstream in SemijoinInsertion::InsertAtBase
 // (mirrors DPT's pre-resolved `bound_cols_build` on FilterPlan). Plan-gen
 // just moves LogicalSJBuild::build_col_ids_per_filter onto the physical op.
 //===----------------------------------------------------------------------===//
