@@ -81,8 +81,6 @@ public:
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk,
-	                         OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;
@@ -90,6 +88,13 @@ public:
 	bool ParallelSource() const override {
 		return true;
 	}
+
+protected:
+	//! Post-refactor (commit 25284961d6) DuckDB moved the virtual hook from
+	//! GetData to a protected GetDataInternal; the public GetData is a
+	//! non-virtual wrapper on PhysicalOperator that adds bookkeeping.
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 
 public:
 	// Pipeline wiring.

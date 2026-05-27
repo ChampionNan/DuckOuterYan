@@ -534,25 +534,24 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 		}
 
 		const auto elig = KeyBitmap::CheckEligibility(build_col_ids, build_col_types);
-		if (filter->force_hash() || !elig.eligible || budget == 0) {
-			// Hash path. Prefer the parallel INLINE_64 event chain when the
-			// key type permits; BOXED keys (varchar / decimal / composite)
-			// still take the sequential BuildOneFilterAsHash fallback.
-			if (HashFilter::IsInline64Eligible(build_col_types)) {
-				auto hash_event = make_shared_ptr<SJBuildHashInsertEvent>(pipeline, context, *this, gstate, f, hash_kind);
-				event.InsertEvent(std::move(hash_event));
-			} else {
-				BuildOneFilterAsHash(context, *gstate.total_data, filter, build_col_ids, hash_kind);
-			}
-			continue;
-		}
+		const bool must_hash = filter->force_hash() || !elig.eligible || budget == 0;
+		const bool hash_is_parallelizable = HashFilter::IsInline64Eligible(build_col_types);
 
-		// Bitmap path — dispatch the parallel init→fill event chain. The
-		// chained events run independently per filter; load balancing across
-		// filters and within-filter tasks is handled by DuckDB's scheduler.
-		auto init_event = make_shared_ptr<SJBuildBitmapInitEvent>(pipeline, context, *this, gstate, f, budget,
-		                                                          hash_kind, elig.col_id, elig.type_id);
-		event.InsertEvent(std::move(init_event));
+		if (must_hash && hash_is_parallelizable) {
+			// Parallel INLINE_64 hash — atomic-CAS slot claim via SJBuildHashInsertEvent.
+			auto hash_event = make_shared_ptr<SJBuildHashInsertEvent>(pipeline, context, *this, gstate, f, hash_kind);
+			event.InsertEvent(std::move(hash_event));
+		} else if (must_hash) {
+			// Sequential BOXED hash (varchar / decimal / composite).
+			// Parallel BOXED build is Stage 3, not yet implemented.
+			BuildOneFilterAsHash(context, *gstate.total_data, filter, build_col_ids, hash_kind);
+		} else {
+			// Parallel bitmap init→fill event chain; scheduler load-balances
+			// across filters and within-filter tasks.
+			auto init_event = make_shared_ptr<SJBuildBitmapInitEvent>(pipeline, context, *this, gstate, f, budget,
+			                                                          hash_kind, elig.col_id, elig.type_id);
+			event.InsertEvent(std::move(init_event));
+		}
 	}
 	return SinkFinalizeType::READY;
 }
@@ -603,8 +602,8 @@ unique_ptr<LocalSourceState> PhysicalSJBuild::GetLocalSourceState(ExecutionConte
 	return make_uniq<SJBuildLocalSourceState>();
 }
 
-SourceResultType PhysicalSJBuild::GetData(ExecutionContext &context, DataChunk &chunk,
-                                          OperatorSourceInput &input) const {
+SourceResultType PhysicalSJBuild::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+                                                  OperatorSourceInput &input) const {
 	(void)context;
 	auto &gstate = input.global_state.Cast<SJBuildGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<SJBuildLocalSourceState>();
