@@ -35,12 +35,17 @@ class LogicalGet;
 //! `OuterYanTree::{bottom_up_pairs, top_down_pairs}`.
 //!
 //! Algorithm:
-//!   1. Group all pairs by their shared-filter key — sorted set of
-//!      `keys[i].build_binding` plus the probe relation id. Each group
-//!      corresponds to one shared `SemiJoinFilter`. Iteration order is
-//!      bottom_up first, then top_down. Within a probe relation, earlier-
-//!      iterated pairs end up earlier in `probe_wraps_[rid]`, which makes
-//!      them the *first-applied* filters inside the merged LogicalSJProbe.
+//!   1. Group all pairs by their shared-filter key — the sorted set of
+//!      `keys[i].build_binding`. Each group corresponds to one shared
+//!      `SemiJoinFilter`. Sharing spans probe relations: the filter is a
+//!      read-only build-side data container after Finalize, and each probe
+//!      relation gets its own LogicalSJProbe (own child schema, own
+//!      ResolveColIds), so two pairs that build on the same column set
+//!      collapse to one filter materialisation regardless of where they
+//!      are probed. Iteration order is bottom_up first, then top_down.
+//!      Within a probe relation, earlier-iterated pairs end up earlier in
+//!      `probe_wraps_[rid]`, which makes them the *first-applied* filters
+//!      inside the merged LogicalSJProbe.
 //!   2. Pre-create one `LogicalSJBuild` per build relation carrying all
 //!      filters for that relation; keep raw pointers so probes can wire up
 //!      `related_sj_build`.

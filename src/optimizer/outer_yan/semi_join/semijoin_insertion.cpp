@@ -248,13 +248,17 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	//    probe relation, earlier-iterated pairs end up earlier in
 	//    probe_wraps_[rid] → first to apply inside PhysicalSJProbe.
 	//
-	//    The keyMapping key is function-local: a sorted set of build-side
-	//    ColumnBindings paired with the probe relation id (canonicalises
-	//    {R.a, R.b} == {R.b, R.a}; partitions across probe relations because
-	//    their child schemas differ — see class header). Lives only inside
-	//    Apply, so we use std::pair instead of introducing a new struct.
+	//    The keyMapping key is function-local: the sorted set of build-side
+	//    ColumnBindings (canonicalises {R.a, R.b} == {R.b, R.a}). Sharing
+	//    spans probe relations — the filter is a read-only build-side data
+	//    container after Finalize, and each probe relation gets its own
+	//    LogicalSJProbe with its own ResolveColIds, so a shared filter does
+	//    not couple their schemas. This collapses adjacent "build twice on
+	//    the same column" duplicates inside LogicalSJBuild::sj_to_create.
+	//    Lives only inside Apply, so we use the binding vector directly
+	//    instead of introducing a new struct.
 	// -------------------------------------------------------------------------
-	using ShareKey = std::pair<RelationId, vector<ColumnBinding>>;
+	using ShareKey = vector<ColumnBinding>;
 	struct ShareKeyHash {
 		// FNV-1a 64-bit. Reference:
 		//   - http://www.isthe.com/chongo/tech/comp/fnv/
@@ -265,9 +269,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
 			constexpr uint64_t kFnvPrime = 1099511628211ULL;
 			uint64_t h = kFnvOffsetBasis;
-			h ^= static_cast<uint64_t>(k.first);
-			h *= kFnvPrime;
-			for (auto &b : k.second) {
+			for (auto &b : k) {
 				h ^= static_cast<uint64_t>(b.table_index.index);
 				h *= kFnvPrime;
 				// ProjectionIndex::index is private — go through the
@@ -293,7 +295,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			          // ProjectionIndex exposes operator< on its internal index.
 			          return a.column_index < b.column_index;
 		          });
-		return {pair.probe, std::move(bindings)};
+		return bindings;
 	};
 
 	unordered_map<ShareKey, shared_ptr<SemiJoinFilter>, ShareKeyHash> keyMapping;
@@ -311,10 +313,10 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			// eligible. If base-table min/max predicts the implied bitmap
 			// would exceed the byte budget, tag force_hash so
 			// PhysicalSJBuild::Finalize skips the wasted TryBuild scan.
-			if (stats_prefilter_enabled && key.second.size() == 1) {
+			if (stats_prefilter_enabled && key.size() == 1) {
 				int64_t min_v = 0;
 				int64_t max_v = 0;
-				if (LookupBaseStatsRange(*plan, key.second[0], context, min_v, max_v)) {
+				if (LookupBaseStatsRange(*plan, key[0], context, min_v, max_v)) {
 					const auto range = static_cast<uint64_t>(max_v - min_v) + 1ULL;
 					const auto bytes_needed = (range + 7ULL) / 8ULL;
 					if (bytes_needed > bitmap_byte_budget) {
@@ -323,7 +325,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 				}
 			}
 			build_filters_by_rid[pair.build].emplace_back(filter);
-			build_bindings_by_rid_[pair.build].emplace_back(key.second);
+			build_bindings_by_rid_[pair.build].emplace_back(key);
 			keyMapping.emplace(std::move(key), filter);
 		} else {
 			filter = it->second;
