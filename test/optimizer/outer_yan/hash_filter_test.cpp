@@ -4,7 +4,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
 
 using namespace duckdb;
 

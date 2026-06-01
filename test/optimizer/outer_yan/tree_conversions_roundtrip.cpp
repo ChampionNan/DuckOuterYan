@@ -4,7 +4,7 @@
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/parser/statement/logical_plan_statement.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 

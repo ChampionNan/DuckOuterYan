@@ -3,9 +3,9 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 #include <functional>
 

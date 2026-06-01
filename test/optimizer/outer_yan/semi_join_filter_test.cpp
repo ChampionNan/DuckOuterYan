@@ -2,10 +2,9 @@
 #include "test_helpers.hpp"
 
 #include "duckdb.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
-#include "duckdb/optimizer/outer_yan/key_bitmap.hpp"
-#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
-#include "duckdb/planner/column_binding.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 
 using namespace duckdb;
 
@@ -25,22 +24,27 @@ TEST_CASE("outer_yan semi_join_filter: fresh instance is UNDECIDED",
 	REQUIRE(f.IsEmpty());
 }
 
-TEST_CASE("outer_yan semi_join_filter: build/probe binding accumulation",
+TEST_CASE("outer_yan semi_join_filter: force_hash hint defaults off and is settable",
           "[outer_yan][semi_join_filter]") {
+	// `force_hash` is a plan-time hint consumed by PhysicalSJBuild::Finalize to
+	// skip the KeyBitmap min/max scan; it is off until SemijoinInsertion sets it
+	// and must never, on its own, finalise the filter or change its kind.
 	SemiJoinFilter f;
-	REQUIRE(f.BuildBindings().empty());
-	REQUIRE(f.ProbeBindings().empty());
+	REQUIRE_FALSE(f.force_hash());
+	f.ForceHash();
+	REQUIRE(f.force_hash());
+	REQUIRE(f.kind() == SemiJoinFilter::Kind::UNDECIDED);
+	REQUIRE_FALSE(f.finalized());
+}
 
-	f.AddBuildBinding(ColumnBinding(5, 0));
-	f.AddBuildBinding(ColumnBinding(5, 2));
-	f.AddProbeBinding(ColumnBinding(7, 1));
-
-	REQUIRE(f.BuildBindings().size() == 2);
-	REQUIRE(f.BuildBindings()[0].table_index == 5);
-	REQUIRE(f.BuildBindings()[0].column_index == 0);
-	REQUIRE(f.BuildBindings()[1].column_index == 2);
-	REQUIRE(f.ProbeBindings().size() == 1);
-	REQUIRE(f.ProbeBindings()[0].table_index == 7);
+TEST_CASE("outer_yan semi_join_filter: hash() returns the finalized filter by reference",
+          "[outer_yan][semi_join_filter]") {
+	// `hash()` and `hash_shared()` must resolve to the same underlying object.
+	SemiJoinFilter f;
+	auto hf = make_shared_ptr<HashFilter>();
+	f.FinalizeAsHash(hf);
+	REQUIRE(&f.hash() == hf.get());
+	REQUIRE(f.hash_shared().get() == hf.get());
 }
 
 TEST_CASE("outer_yan semi_join_filter: FinalizeAsHash transitions to HASH and IsEmpty delegates",

@@ -6,7 +6,7 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/optimizer/outer_yan/key_bitmap.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/key_bitmap.hpp"
 
 using namespace duckdb;
 

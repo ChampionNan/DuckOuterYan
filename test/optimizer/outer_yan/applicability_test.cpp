@@ -3,8 +3,8 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/optimizer/outer_yan/applicability.hpp"
-#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/applicability.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 using namespace duckdb;
 

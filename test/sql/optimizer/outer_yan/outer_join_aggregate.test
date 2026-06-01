@@ -1,11 +1,12 @@
 # name: test/sql/optimizer/outer_yan/outer_join_aggregate.test
 # description: OuterYan optimizer — aggregation root selection over outer-join
 #              chains. Verifies correctness across all OuterYanAggregationType
-#              variants (COUNT_STAR / COUNT / SUM / MIN/MAX / DISTINCT). The
-#              actual aggregate-pushdown rewrite is currently a stub
-#              (aggregate_pushdown_outer.cpp:23-34), so these tests only assert
-#              result equivalence with the disabled-baseline; pushdown depth
-#              will be asserted once plan 4 lands.
+#              variants (COUNT_STAR / COUNT / SUM / MIN/MAX / DISTINCT).
+#              Variants 1..10 compare the full OuterYan pipeline against the
+#              baseline (pre/dp/post disabled). The pass-isolation section at the
+#              end keeps pre/dp/post enabled and toggles only
+#              `aggregate_pushdown_outer` (aggregate_pushdown_outer.cpp), so the
+#              pushdown rewrite is correctness-pinned on its own.
 # group: [outer_yan]
 
 statement ok
@@ -323,7 +324,139 @@ FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
 statement ok
 SET disabled_optimizers TO ''
 
-# TODO once aggregate_pushdown_outer lands: assert EXPLAIN places the
-# aggregate below the join with the correct group set; per OuterYanAggType
-# (COUNT_STAR / MINMAX / SUM / DISTINCT) verify push_into_child decision
-# matches the OJT marker. See plan 4-aggregate-pushdown-outer.md.
+# ============================================================================
+# Pass isolation — aggregate_pushdown_outer. Variants 1..10 above compare the
+# whole OuterYan pipeline against the baseline (pre/dp/post all disabled), which
+# never exercises the pushdown pass on its own. The blocks below keep pre/dp/post
+# enabled and toggle ONLY `aggregate_pushdown_outer`, so any divergence is
+# attributable to the pushdown rewrite itself. Each aggregate shape
+# (COUNT_STAR / SUM / MIN-MAX / plain-SUM / DISTINCT) must be invariant under
+# the toggle.
+# ============================================================================
+
+# COUNT_STAR — pushdown disabled, then enabled.
+statement ok
+SET disabled_optimizers TO 'aggregate_pushdown_outer'
+
+query I
+SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+8
+
+statement ok
+SET disabled_optimizers TO ''
+
+query I
+SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+8
+
+# SUM over GROUP BY.
+statement ok
+SET disabled_optimizers TO 'aggregate_pushdown_outer'
+
+query II rowsort
+SELECT a.id, SUM(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+GROUP BY a.id
+----
+1	1000
+2	NULL
+3	6200
+4	4000
+5	NULL
+
+statement ok
+SET disabled_optimizers TO ''
+
+query II rowsort
+SELECT a.id, SUM(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+GROUP BY a.id
+----
+1	1000
+2	NULL
+3	6200
+4	4000
+5	NULL
+
+# MIN/MAX over GROUP BY.
+statement ok
+SET disabled_optimizers TO 'aggregate_pushdown_outer'
+
+query III rowsort
+SELECT a.id, MIN(b.bx), MAX(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+GROUP BY a.id
+----
+1	100	1000
+2	200	NULL
+3	300	3100
+4	NULL	4000
+5	NULL	NULL
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, MIN(b.bx), MAX(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+GROUP BY a.id
+----
+1	100	1000
+2	200	NULL
+3	300	3100
+4	NULL	4000
+5	NULL	NULL
+
+# Plain SUM, no GROUP BY, deepest relation of a 4-way chain.
+statement ok
+SET disabled_optimizers TO 'aggregate_pushdown_outer'
+
+query I
+SELECT SUM(d.dx)
+FROM a LEFT JOIN b ON a.id = b.id
+       LEFT JOIN c ON a.id = c.id
+       LEFT JOIN d ON a.id = d.id
+----
+50000
+
+statement ok
+SET disabled_optimizers TO ''
+
+query I
+SELECT SUM(d.dx)
+FROM a LEFT JOIN b ON a.id = b.id
+       LEFT JOIN c ON a.id = c.id
+       LEFT JOIN d ON a.id = d.id
+----
+50000
+
+# SELECT DISTINCT.
+statement ok
+SET disabled_optimizers TO 'aggregate_pushdown_outer'
+
+query II rowsort
+SELECT DISTINCT a.id, b.bx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100
+1	110
+2	200
+3	300
+4	NULL
+5	NULL
+
+statement ok
+SET disabled_optimizers TO ''
+
+query II rowsort
+SELECT DISTINCT a.id, b.bx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100
+1	110
+2	200
+3	300
+4	NULL
+5	NULL
