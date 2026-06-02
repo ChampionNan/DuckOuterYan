@@ -34,32 +34,32 @@ class LogicalGet;
 //! `OuterYanPre::{BottomUpPass, TopDownPass}` and stored on
 //! `OuterYanTree::{bottom_up_pairs, top_down_pairs}`.
 //!
-//! Algorithm:
-//!   1. Group all pairs by their shared-filter key — the sorted set of
-//!      `keys[i].build_binding`. Each group corresponds to one shared
-//!      `SemiJoinFilter`. Sharing spans probe relations: the filter is a
-//!      read-only build-side data container after Finalize, and each probe
-//!      relation gets its own LogicalSJProbe (own child schema, own
-//!      ResolveColIds), so two pairs that build on the same column set
-//!      collapse to one filter materialisation regardless of where they
-//!      are probed. Iteration order is bottom_up first, then top_down.
-//!      Within a probe relation, earlier-iterated pairs end up earlier in
-//!      `probe_wraps_[rid]`, which makes them the *first-applied* filters
-//!      inside the merged LogicalSJProbe.
-//!   2. Pre-create one `LogicalSJBuild` per build relation carrying all
-//!      filters for that relation; keep raw pointers so probes can wire up
-//!      `related_sj_build`.
+//! Algorithm (mirrors RPT's create/use insertion, generalised to honour the
+//! recorded two-pass schedule instead of a fixed nest shape):
+//!   1. Walk pairs in decision order — `bottom_up_pairs` (pass 0), then
+//!      `top_down_pairs` (pass 1). Pairs are grouped by shared-filter key
+//!      (the sorted set of `keys[i].build_binding`, canonicalising {a,b} ==
+//!      {b,a}) so two pairs that build the same column set share one
+//!      `SemiJoinFilter`. The LogicalSJBuild that materialises a filter is
+//!      remembered alongside it, so a reused filter's probe wires straight to
+//!      that build — no separate relation→build map.
+//!   2. For each pair, append a build to its build relation's nest stack and
+//!      a probe to its probe relation's nest stack (`stacks_`). A new op
+//!      coalesces into the relation's current top op only when that op is the
+//!      same kind AND from the same pass; a kind change or a pass boundary
+//!      opens a fresh op. This reproduces the schedule verbatim — including
+//!      the `probe → build → probe` interleavings an outer-join schedule can
+//!      emit — while collapsing only genuinely adjacent same-kind steps.
 //!   3. Walk the rebuilt plan pre-order. At every "base unit" (a bare
 //!      LogicalGet, or a LogicalFilter+LogicalGet) known to
-//!      `tree.table_to_relation`, insert ONE merged LogicalSJProbe holding
-//!      every probe filter for that relation (innermost over the base),
-//!      then the relation's LogicalSJBuild (outermost). Non-base nodes
-//!      recurse so the wraps land as close to the LogicalGet as possible.
+//!      `tree.table_to_relation`, splice that relation's whole nest stack
+//!      above the base, innermost-first. Non-base nodes recurse so the stack
+//!      lands as close to the LogicalGet as possible.
 //!
-//! Per-relation insertion is adjacency-safe: each call produces at most one
-//! LogicalSJBuild and at most one LogicalSJProbe directly above the base,
-//! so the plan never grows a `build → probe → probe → build` chain at a
-//! single base.
+//! Cross-pass safety is structural: `bottom_up` is fully processed before
+//! `top_down`, and every new op nests outside the current one, so a bottom-up
+//! build can never end up above a top-down probe that (transitively) depends
+//! on it — no build/probe pipeline cycle.
 class SemijoinInsertion {
 public:
 	//! Insert LogicalSJBuild / LogicalSJProbe operators into `plan` based on
@@ -78,19 +78,25 @@ public:
 	                                  bool stats_prefilter_enabled);
 
 private:
-	//! One probe-side contribution from a single OuterYanSemiPair. Multiple
-	//! ProbeWraps for the same probe relation are merged by
-	//! MakeProbeOperator into ONE LogicalSJProbe holding all filters,
-	//! mirroring LogicalSJBuild's "all filters in one op" pattern.
-	struct ProbeWrap {
-		shared_ptr<SemiJoinFilter> filter;
-		//! Order matches the originating pair.keys; resolved to positional
-		//! column indices in MakeProbeOperator and stored on
-		//! LogicalSJProbe::probe_col_ids_per_filter.
-		vector<ColumnBinding> probe_bindings;
-		//! The pair's build relation id — used to look up the corresponding
-		//! LogicalSJBuild for `related_sj_build` wiring.
-		RelationId related_build_rid = 0;
+	//! One semi-join operator (LogicalSJBuild or LogicalSJProbe) parked in a
+	//! base relation's nest stack until the plan walk splices it in. Holds the
+	//! still-unresolved key bindings for each filter the op carries, plus the
+	//! pass that produced it so cross-pass ops never coalesce. The build phase
+	//! appends a filter into `op` when this entry is the stack's current top
+	//! AND a same-kind, same-pass match; otherwise it pushes a new entry.
+	struct StackOp {
+		StackOp(unique_ptr<LogicalOperator> op, bool is_build, bool top_down,
+		        vector<vector<ColumnBinding>> bindings_per_filter)
+		    : op(std::move(op)), is_build(is_build), top_down(top_down),
+		      bindings_per_filter(std::move(bindings_per_filter)) {
+		}
+		unique_ptr<LogicalOperator> op; //!< LogicalSJBuild | LogicalSJProbe
+		bool is_build;                  //!< true: build, false: probe
+		bool top_down;                  //!< false: bottom_up pass, true: top_down pass
+		//! One binding list per filter in `op`, in the op's filter order.
+		//! InsertAtBase resolves these to positional ids against the base
+		//! schema, into build_col_ids_per_filter / probe_col_ids_per_filter.
+		vector<vector<ColumnBinding>> bindings_per_filter;
 	};
 
 	//! True iff `node` is a LogicalFilter whose single child is a
@@ -107,27 +113,12 @@ private:
 	//! stop" rule covers both base-unit shapes without an exception case.
 	void InsertionTraverse(unique_ptr<LogicalOperator> &node);
 
-	//! Insertion action at one base unit. Wraps `node` with the merged
-	//! LogicalSJProbe (innermost) and then the relation's pre-created
-	//! LogicalSJBuild (outermost). Both child-binding resolutions happen
-	//! BEFORE the child is moved into `children[]`.
+	//! Insertion action at one base unit. Splices `stacks_[rid]` above `node`
+	//! front (innermost) → back (outermost), resolving each op's key bindings
+	//! against the base schema before moving the child in. Empties the stack to
+	//! mark the relation spliced (checked after the walk). No-op when the
+	//! relation has no stack.
 	void InsertAtBase(unique_ptr<LogicalOperator> &node, RelationId rid);
-
-	//! Construct the merged LogicalSJProbe for relation `rid` (one
-	//! operator, N filters). Filter ordering inside `sj_to_use` matches
-	//! the order of `probe_wraps_[rid]` (bottom_up pairs first, then
-	//! top_down), so PhysicalSJProbe::ExecuteInternal applies the
-	//! earliest-decided filter first. Returns nullptr if the relation has
-	//! no probe contributions.
-	unique_ptr<LogicalSJProbe> MakeProbeOperator(RelationId rid,
-	                                             const vector<ColumnBinding> &child_bindings);
-
-	//! Move the pre-created LogicalSJBuild for `rid` out of
-	//! `pending_builds_`, resolve its build-key bindings against
-	//! `child_bindings`, and return it. Returns nullptr if no build was
-	//! pre-created for this relation.
-	unique_ptr<LogicalSJBuild> TakeBuildOperator(RelationId rid,
-	                                             const vector<ColumnBinding> &child_bindings);
 
 	//! Resolve each `per_filter_bindings[i]` to positional indices within
 	//! `child_bindings`. Throws InternalException on a missing binding —
@@ -154,20 +145,17 @@ private:
 	                                 int64_t &out_min, int64_t &out_max);
 
 	// ─── Walk state ─────────────────────────────────────────────────────
-	// Populated by Apply, consumed by InsertionTraverse / InsertAtBase /
-	// MakeProbeOperator / TakeBuildOperator. Cleared at the start of every
-	// Apply so the instance is safely re-usable (OuterYanPost owns a
-	// single SemijoinInsertion across multiple plans).
+	// Populated by Apply's build phase, consumed by InsertionTraverse /
+	// InsertAtBase. Cleared at the start of every Apply so the instance is
+	// safely re-usable (OuterYanPost owns a single SemijoinInsertion across
+	// multiple plans).
 	//
-	// Ordering invariant on probe_wraps_[rid]: front entry is the
-	// earliest-decided filter. Apply populates bottom_up pairs first, then
-	// top_down, so PhysicalSJProbe::ExecuteInternal applies them in
-	// decision order.
+	// `stacks_[rid]` is the ordered nest stack for relation `rid`: front =
+	// innermost (closest to the LogicalGet), back = outermost. The build-phase
+	// append order — bottom_up pairs then top_down — is exactly the
+	// bottom-to-top order the operators take above the base.
 	const unordered_map<idx_t, RelationId> *table_to_relation_ = nullptr;
-	unordered_map<RelationId, vector<ProbeWrap>> probe_wraps_;
-	unordered_map<RelationId, unique_ptr<LogicalSJBuild>> pending_builds_;
-	unordered_map<RelationId, LogicalSJBuild *> build_ptr_map_;
-	unordered_map<RelationId, vector<vector<ColumnBinding>>> build_bindings_by_rid_;
+	unordered_map<RelationId, vector<StackOp>> stacks_;
 };
 
 } // namespace duckdb

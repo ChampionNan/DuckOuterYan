@@ -52,79 +52,28 @@ bool SemijoinInsertion::IsFilterGetBase(const LogicalOperator &node) {
 	       node.children[0]->type == LogicalOperatorType::LOGICAL_GET;
 }
 
-unique_ptr<LogicalSJProbe>
-SemijoinInsertion::MakeProbeOperator(RelationId rid, const vector<ColumnBinding> &child_bindings) {
-	auto probe_it = probe_wraps_.find(rid);
-	if (probe_it == probe_wraps_.end() || probe_it->second.empty()) {
-		return nullptr;
-	}
-	auto &wraps = probe_it->second;
-
-	// Three index-aligned vectors for the merged operator. Front-to-back
-	// over `wraps` puts the earliest-decided filter at index 0, so
-	// PhysicalSJProbe::ExecuteInternal applies it first.
-	vector<shared_ptr<SemiJoinFilter>> filters;
-	vector<vector<ColumnBinding>> per_filter_bindings;
-	vector<LogicalSJBuild *> related_builds;
-	filters.reserve(wraps.size());
-	per_filter_bindings.reserve(wraps.size());
-	related_builds.reserve(wraps.size());
-
-	for (auto &pw : wraps) {
-		filters.emplace_back(pw.filter);
-		per_filter_bindings.emplace_back(pw.probe_bindings);
-		auto rb_it = build_ptr_map_.find(pw.related_build_rid);
-		if (rb_it == build_ptr_map_.end()) {
-			throw InternalException(
-			    "SemijoinInsertion: probe references unknown build relation %llu",
-			    static_cast<unsigned long long>(pw.related_build_rid));
-		}
-		related_builds.emplace_back(rb_it->second);
-	}
-
-	auto probe = make_uniq<LogicalSJProbe>(std::move(filters));
-	probe->probe_col_ids_per_filter = ResolveColIds(child_bindings, per_filter_bindings);
-	for (auto *rb : related_builds) {
-		probe->AddDownStreamOperator(rb);
-	}
-	return probe;
-}
-
-unique_ptr<LogicalSJBuild>
-SemijoinInsertion::TakeBuildOperator(RelationId rid, const vector<ColumnBinding> &child_bindings) {
-	auto it = pending_builds_.find(rid);
-	if (it == pending_builds_.end() || !it->second) {
-		return nullptr;
-	}
-	auto build = std::move(it->second);
-
-	auto bb_it = build_bindings_by_rid_.find(rid);
-	if (bb_it == build_bindings_by_rid_.end()) {
-		throw InternalException(
-		    "SemijoinInsertion: build for relation %llu has no recorded build bindings",
-		    static_cast<unsigned long long>(rid));
-	}
-	build->build_col_ids_per_filter = ResolveColIds(child_bindings, bb_it->second);
-	return build;
-}
-
 void SemijoinInsertion::InsertAtBase(unique_ptr<LogicalOperator> &node, RelationId rid) {
-	// Whatever `node` currently is (bare LogicalGet or LogicalFilter+LogicalGet
-	// unit) becomes the innermost. At most one merged probe wraps it; at most
-	// one build wraps that. By construction the chain is never deeper than
-	// `build → probe → base` at a single InsertAtBase call.
+	auto it = stacks_.find(rid);
+	if (it == stacks_.end() || it->second.empty()) {
+		return;
+	}
+	// LogicalSJBuild / LogicalSJProbe are schema pass-through, so every op in
+	// the stack sees the base's column bindings — resolve all key bindings
+	// against this one set rather than re-deriving them per level.
+	const auto base_bindings = node->GetColumnBindings();
+
 	unique_ptr<LogicalOperator> current = std::move(node);
-
-	if (auto probe = MakeProbeOperator(rid, current->GetColumnBindings())) {
-		probe->children.emplace_back(std::move(current));
-		current = std::move(probe);
+	for (auto &entry : it->second) { // front (innermost) → back (outermost)
+		auto resolved = ResolveColIds(base_bindings, entry.bindings_per_filter);
+		if (entry.is_build) {
+			entry.op->Cast<LogicalSJBuild>().build_col_ids_per_filter = std::move(resolved);
+		} else {
+			entry.op->Cast<LogicalSJProbe>().probe_col_ids_per_filter = std::move(resolved);
+		}
+		entry.op->children.emplace_back(std::move(current));
+		current = std::move(entry.op);
 	}
-
-	if (auto build = TakeBuildOperator(rid, current->GetColumnBindings())) {
-		build->children.emplace_back(std::move(current));
-		current = std::move(build);
-	}
-
+	it->second.clear(); // empty stack == "spliced"; the post-walk check relies on this
 	node = std::move(current);
 }
 
@@ -236,27 +185,22 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 
 	// Re-use safety. OuterYanPost owns one SemijoinInsertion across plans;
 	// clear any state left over from a prior Apply.
-	probe_wraps_.clear();
-	pending_builds_.clear();
-	build_ptr_map_.clear();
-	build_bindings_by_rid_.clear();
+	stacks_.clear();
 	table_to_relation_ = nullptr;
 
 	// -------------------------------------------------------------------------
-	// 1) Group pairs by shared-filter key → one shared SemiJoinFilter per
-	//    group. Iteration order is bottom_up first, then top_down. Within a
-	//    probe relation, earlier-iterated pairs end up earlier in
-	//    probe_wraps_[rid] → first to apply inside PhysicalSJProbe.
+	// Build phase. Walk pairs in decision order (bottom_up then top_down),
+	// growing each relation's nest stack and coalescing only adjacent
+	// same-pass, same-kind ops.
 	//
 	//    The keyMapping key is function-local: the sorted set of build-side
 	//    ColumnBindings (canonicalises {R.a, R.b} == {R.b, R.a}). Sharing
 	//    spans probe relations — the filter is a read-only build-side data
 	//    container after Finalize, and each probe relation gets its own
 	//    LogicalSJProbe with its own ResolveColIds, so a shared filter does
-	//    not couple their schemas. This collapses adjacent "build twice on
-	//    the same column" duplicates inside LogicalSJBuild::sj_to_create.
-	//    Lives only inside Apply, so we use the binding vector directly
-	//    instead of introducing a new struct.
+	//    not couple their schemas. Each entry also stores the LogicalSJBuild
+	//    that materialises the filter, so a reused filter's probe wires to it
+	//    directly — no separate relation→build map.
 	// -------------------------------------------------------------------------
 	using ShareKey = vector<ColumnBinding>;
 	struct ShareKeyHash {
@@ -281,32 +225,91 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		}
 	};
 
-	auto construct_key = [](const OuterYanSemiPair &pair) -> ShareKey {
-		vector<ColumnBinding> bindings;
-		bindings.reserve(pair.keys.size());
-		for (auto &k : pair.keys) {
-			bindings.emplace_back(k.build_binding);
-		}
-		std::sort(bindings.begin(), bindings.end(),
-		          [](const ColumnBinding &a, const ColumnBinding &b) {
-			          if (a.table_index.index != b.table_index.index) {
-				          return a.table_index.index < b.table_index.index;
-			          }
-			          // ProjectionIndex exposes operator< on its internal index.
-			          return a.column_index < b.column_index;
-		          });
-		return bindings;
+	// Sort a pair's keys by build binding. The shared filter hashes/compares
+	// columns positionally (HashFilter folds them in list order), so build-col
+	// position c must be the join partner of probe-col position c — both sides
+	// must therefore share one column order. Sorting the (build, probe) keys
+	// together also canonicalises {a,b} == {b,a} for filter sharing: pairs with
+	// the same build-column set yield the same ShareKey, and each derives its
+	// probe order from this same sort, so it matches the shared build order.
+	auto sorted_keys = [](const OuterYanSemiPair &pair) -> vector<OuterYanSemiKey> {
+		auto keys = pair.keys; // copy; sorted by build binding below
+		std::sort(keys.begin(), keys.end(), [](const OuterYanSemiKey &a, const OuterYanSemiKey &b) {
+			const auto &ba = a.build_binding;
+			const auto &bb = b.build_binding;
+			if (ba.table_index.index != bb.table_index.index) {
+				return ba.table_index.index < bb.table_index.index;
+			}
+			// ProjectionIndex exposes operator< on its internal index.
+			return ba.column_index < bb.column_index;
+		});
+		return keys;
 	};
 
-	unordered_map<ShareKey, shared_ptr<SemiJoinFilter>, ShareKeyHash> keyMapping;
-	// Filters per build relation, used to construct LogicalSJBuilds in
-	// Phase 2. Local because it does not survive into Phase 3.
-	unordered_map<RelationId, vector<shared_ptr<SemiJoinFilter>>> build_filters_by_rid;
+	unordered_map<ShareKey, std::pair<shared_ptr<SemiJoinFilter>, LogicalSJBuild *>, ShareKeyHash> keyMapping;
 
-	auto process_pair = [&](const OuterYanSemiPair &pair) {
-		auto key = construct_key(pair);
+	// Append `filter` as a build on relation `rid`'s stack. Coalesces into the
+	// current top op when it is a same-pass build; otherwise opens a new
+	// LogicalSJBuild. Returns the (possibly pre-existing) build op so the
+	// paired probe can reference it: the op lives on the heap behind the
+	// stack's unique_ptr, so the pointer stays valid across later stack growth
+	// and across the eventual splice into the plan.
+	auto push_build = [&](RelationId rid, bool top_down, const shared_ptr<SemiJoinFilter> &filter,
+	                      const vector<ColumnBinding> &build_keys) -> LogicalSJBuild * {
+		auto &stk = stacks_[rid];
+		if (!stk.empty() && stk.back().is_build && stk.back().top_down == top_down) {
+			auto &build = stk.back().op->Cast<LogicalSJBuild>();
+			build.sj_to_create.emplace_back(filter);
+			stk.back().bindings_per_filter.emplace_back(build_keys);
+			return &build;
+		}
+		auto build = make_uniq<LogicalSJBuild>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		auto *raw = build.get();
+		vector<vector<ColumnBinding>> binds;
+		binds.emplace_back(build_keys);
+		stk.emplace_back(std::move(build), /*is_build=*/true, top_down, std::move(binds));
+		return raw;
+	};
+
+	// Append `filter` as a probe of `build` on relation `rid`'s stack.
+	// Coalesces into a same-pass probe top; otherwise opens a new
+	// LogicalSJProbe. Each filter keeps its own related build, index-aligned
+	// with sj_to_use.
+	auto push_probe = [&](RelationId rid, bool top_down, const shared_ptr<SemiJoinFilter> &filter,
+	                      vector<ColumnBinding> probe_keys, LogicalSJBuild *build) {
+		auto &stk = stacks_[rid];
+		if (!stk.empty() && !stk.back().is_build && stk.back().top_down == top_down) {
+			auto &probe = stk.back().op->Cast<LogicalSJProbe>();
+			probe.sj_to_use.emplace_back(filter);
+			probe.AddDownStreamOperator(build);
+			stk.back().bindings_per_filter.emplace_back(std::move(probe_keys));
+			return;
+		}
+		auto probe = make_uniq<LogicalSJProbe>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		probe->AddDownStreamOperator(build);
+		vector<vector<ColumnBinding>> binds;
+		binds.emplace_back(std::move(probe_keys));
+		stk.emplace_back(std::move(probe), /*is_build=*/false, top_down, std::move(binds));
+	};
+
+	auto process_pair = [&](const OuterYanSemiPair &pair, bool top_down) {
+		// One sort drives both sides: `key` is the sorted build-binding set
+		// (the ShareKey), and `probe_keys` are the probe bindings in that same
+		// order, so build_col_ids[c] and probe_col_ids[c] are join partners —
+		// for this pair and for any other pair that reuses the shared filter.
+		const auto skeys = sorted_keys(pair);
+		ShareKey key;
+		vector<ColumnBinding> probe_keys;
+		key.reserve(skeys.size());
+		probe_keys.reserve(skeys.size());
+		for (auto &k : skeys) {
+			key.emplace_back(k.build_binding);
+			probe_keys.emplace_back(k.probe_binding);
+		}
+
 		auto it = keyMapping.find(key);
 		shared_ptr<SemiJoinFilter> filter;
+		LogicalSJBuild *build = nullptr;
 		if (it == keyMapping.end()) {
 			filter = make_shared_ptr<SemiJoinFilter>();
 			// Stats-prefilter (opt-in): only single-column keys are bitmap-
@@ -324,60 +327,42 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 					}
 				}
 			}
-			build_filters_by_rid[pair.build].emplace_back(filter);
-			build_bindings_by_rid_[pair.build].emplace_back(key);
-			keyMapping.emplace(std::move(key), filter);
+			// A fresh filter is built exactly once, on its build relation, in
+			// the pass that first decided it.
+			build = push_build(pair.build, top_down, filter, key);
+			keyMapping.emplace(std::move(key), std::make_pair(filter, build));
 		} else {
-			filter = it->second;
+			filter = it->second.first;
+			build = it->second.second;
 		}
 
-		ProbeWrap pw;
-		pw.filter = filter;
-		pw.related_build_rid = pair.build;
-		pw.probe_bindings.reserve(pair.keys.size());
-		for (auto &k : pair.keys) {
-			pw.probe_bindings.emplace_back(k.probe_binding);
-		}
-		probe_wraps_[pair.probe].emplace_back(std::move(pw));
+		push_probe(pair.probe, top_down, filter, std::move(probe_keys), build);
 	};
 
 	for (auto &p : bu) {
-		process_pair(p);
+		process_pair(p, /*top_down=*/false);
 	}
 	for (auto &p : td) {
-		process_pair(p);
+		process_pair(p, /*top_down=*/true);
 	}
 
 	// -------------------------------------------------------------------------
-	// 2) Pre-create one LogicalSJBuild per build relation, holding ALL
-	//    filters for that relation. Keep raw pointers in build_ptr_map_ so
-	//    cross-relation probes can wire to the build's Finalize before the
-	//    build itself has been inserted into the plan.
-	// -------------------------------------------------------------------------
-	for (auto &entry : build_filters_by_rid) {
-		auto rid = entry.first;
-		auto build = make_uniq<LogicalSJBuild>(std::move(entry.second));
-		build_ptr_map_[rid] = build.get();
-		pending_builds_.emplace(rid, std::move(build));
-	}
-
-	// -------------------------------------------------------------------------
-	// 3) Walk the rebuilt plan and insert wraps at the filter+get unit (or
-	//    bare get) for every relation that has wraps assigned.
+	// Splice phase. Walk the rebuilt plan and splice each relation's nest
+	// stack above its base unit (Filter+Get, or bare Get).
 	// -------------------------------------------------------------------------
 	table_to_relation_ = &tree.table_to_relation;
 	InsertionTraverse(plan);
 
 	// -------------------------------------------------------------------------
-	// 4) Every pre-created build must have been inserted into the plan. If a
-	//    pending build is still around, the rebuilt plan is missing the
-	//    LogicalGet for that relation — a structural inconsistency.
+	// Every relation that accrued a nest stack must have been spliced at its
+	// base (InsertAtBase empties the stack). A non-empty leftover means the
+	// rebuilt plan is missing that relation's base unit — a structural error.
 	// -------------------------------------------------------------------------
-	for (auto &kv : pending_builds_) {
-		if (kv.second) {
+	for (auto &kv : stacks_) {
+		if (!kv.second.empty()) {
 			throw InternalException(
-			    "SemijoinInsertion: build for relation %llu was not inserted "
-			    "(LogicalGet for table_index not found in rebuilt plan)",
+			    "SemijoinInsertion: semi-join ops for relation %llu were not inserted "
+			    "(base unit for table_index not found in rebuilt plan)",
 			    static_cast<unsigned long long>(kv.first));
 		}
 	}
