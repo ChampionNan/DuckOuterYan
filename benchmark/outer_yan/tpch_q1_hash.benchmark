@@ -1,0 +1,25 @@
+# name: benchmark/outer_yan/tpch_q1_hash.benchmark
+# description: OuterYan SJ prefilter — TH-Q1 customer→orders→lineitem, HASH path.
+#              outer_yan_bitmap_max_bytes=0 forces HashFilter on every key type;
+#              SJProbe pre-filters dim-side entries before the outer join.
+# group: [outer_yan_perf]
+
+name TH-Q1 LEFT-LEFT chain [Hash]
+group outer_yan_perf
+
+require tpch
+
+load
+CALL dbgen(sf=1);
+SET VARIABLE outer_yan_bitmap_max_bytes = 0;
+SET disabled_optimizers TO '';
+
+run
+SELECT c_custkey,
+       COUNT(o_orderkey)    AS order_count,
+       COUNT(l_linenumber)  AS line_count,
+       SUM(l_extendedprice) AS revenue
+FROM customer
+LEFT JOIN orders   ON c_custkey  = o_custkey
+LEFT JOIN lineitem ON o_orderkey = l_orderkey
+GROUP BY c_custkey

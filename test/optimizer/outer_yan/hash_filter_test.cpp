@@ -388,3 +388,80 @@ TEST_CASE("outer_yan hash_filter_kernel: composite-key probe filtering",
 	REQUIRE(sel.get_index(1) == 2);
 	REQUIRE(sel.get_index(2) == 3);
 }
+
+// ============================================================================
+// Additional coverage: MURMUR_HASH2 kind, IsInline64Eligible, IsInline64 flag,
+// KeyArity.
+// ============================================================================
+
+TEST_CASE("outer_yan hash_filter: MURMUR_HASH2 kind — Build+Contains end-to-end",
+          "[outer_yan][hash_filter]") {
+	HashFilter f(HashFilter::HashKind::MURMUR_HASH2);
+	REQUIRE(f.kind() == HashFilter::HashKind::MURMUR_HASH2);
+
+	auto chunk = MakeIntChunk({10, 20, 30});
+	f.Build(chunk, {0});
+	f.Finalize();
+
+	REQUIRE(f.Count() == 3);
+	REQUIRE(f.Contains({Value::INTEGER(10)}));
+	REQUIRE(f.Contains({Value::INTEGER(20)}));
+	REQUIRE(f.Contains({Value::INTEGER(30)}));
+	REQUIRE_FALSE(f.Contains({Value::INTEGER(0)}));
+	REQUIRE_FALSE(f.Contains({Value::INTEGER(40)}));
+}
+
+TEST_CASE("outer_yan hash_filter: IsInline64Eligible — integer types eligible, others not",
+          "[outer_yan][hash_filter]") {
+	// Arity-1 integer types land in INLINE_64.
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::TINYINT}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::SMALLINT}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::INTEGER}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::BIGINT}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::UTINYINT}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::USMALLINT}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::UINTEGER}));
+	REQUIRE(HashFilter::IsInline64Eligible({LogicalType::UBIGINT}));
+
+	// Non-integer types → not eligible.
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({LogicalType::VARCHAR}));
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({LogicalType::FLOAT}));
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({LogicalType::DECIMAL(10, 2)}));
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({LogicalType::DATE}));
+
+	// Composite key → not eligible regardless of element types.
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({LogicalType::INTEGER, LogicalType::INTEGER}));
+	REQUIRE_FALSE(HashFilter::IsInline64Eligible({}));
+}
+
+TEST_CASE("outer_yan hash_filter: IsInline64() + InlineKeyType() set after integer Build",
+          "[outer_yan][hash_filter]") {
+	HashFilter f;
+	REQUIRE_FALSE(f.IsInline64());
+
+	auto chunk = MakeIntChunk({1, 2, 3});
+	f.Build(chunk, {0});
+	// INTEGER triggers INLINE_64 storage mode.
+	REQUIRE(f.IsInline64());
+	REQUIRE(f.InlineKeyType() == PhysicalType::INT32);
+
+	// Functional check: Contains still works correctly in INLINE_64 mode.
+	REQUIRE(f.Contains({Value::INTEGER(1)}));
+	REQUIRE(f.Contains({Value::INTEGER(2)}));
+	REQUIRE_FALSE(f.Contains({Value::INTEGER(99)}));
+}
+
+TEST_CASE("outer_yan hash_filter: KeyArity() is 0 before Build and matches col count after",
+          "[outer_yan][hash_filter]") {
+	HashFilter f;
+	REQUIRE(f.KeyArity() == 0);
+
+	auto single = MakeIntChunk({1, 2});
+	f.Build(single, {0});
+	REQUIRE(f.KeyArity() == 1);
+
+	HashFilter g;
+	auto combo = MakeIntStringChunk({1}, {"a"});
+	g.Build(combo, {0, 1});
+	REQUIRE(g.KeyArity() == 2);
+}

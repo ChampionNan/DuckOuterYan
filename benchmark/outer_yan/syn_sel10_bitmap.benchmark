@@ -1,0 +1,31 @@
+# name: benchmark/outer_yan/syn_sel10_bitmap.benchmark
+# description: OuterYan SJ prefilter — synthetic 90%-filter-rate, BITMAP path.
+#
+#   fact  : 1M rows, id 1..1M  (preserved side; always fully present in result)
+#   dim   : 1M rows, id = i*10 for i in 1..1M  →  ids {10, 20, ..., 10M}
+#           Only ids {10, 20, ..., 1 000 000} match fact (100K of 1M = 10%).
+#           SJProbe removes the other 900K dim rows BEFORE hash-table build.
+#   anchor: 1M rows, id 1..1M  (100% overlap, acts as the third relation)
+#
+#   Speedup expectation: 10x reduction in hash-table size →
+#   significant speedup at this filter rate vs. the DuckDB baseline.
+# group: [outer_yan_perf]
+
+name SYN sel=10% (90% filtered) [Bitmap]
+group outer_yan_perf
+
+load
+CREATE OR REPLACE TABLE fact   AS SELECT i               AS id, (i*7) % 1000000 AS val  FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE dim    AS SELECT (i * 10)        AS id, (i*3)            AS attr FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE anchor AS SELECT i               AS id,  i               AS aid  FROM range(1, 1000001) t(i);
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+SET disabled_optimizers TO '';
+
+run
+SELECT fact.id,
+       COUNT(dim.attr)    AS attr_count,
+       COUNT(anchor.aid)  AS anchor_count
+FROM fact
+LEFT JOIN dim    ON fact.id = dim.id
+LEFT JOIN anchor ON fact.id = anchor.id
+GROUP BY fact.id
