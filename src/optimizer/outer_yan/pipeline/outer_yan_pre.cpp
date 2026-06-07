@@ -67,6 +67,9 @@ void OuterYanPre::BottomUpPass(OuterYanTree &tree, OJTNode &node) {
 		BottomUpPass(tree, *edge.child);
 		// Phase 1 fires on R_p RIGHT R_i (child preserved) or R_p INNER R_i.
 		if (edge.kind == JoinType::RIGHT || edge.kind == JoinType::INNER) {
+			if (edge.bottom_up_eliminated) {
+				continue;
+			}
 			OuterYanSemiPair pair;
 			pair.build = edge.child->relation_id; // R_i provides keys
 			pair.probe = node.relation_id;        // R_p is filtered
@@ -82,11 +85,13 @@ void OuterYanPre::TopDownPass(OuterYanTree &tree, OJTNode &node) {
 	for (auto &edge : node.children) {
 		// Phase 2 fires on R_p LEFT R_i (parent preserved) or R_p INNER R_i.
 		if (edge.kind == JoinType::LEFT || edge.kind == JoinType::INNER) {
-			OuterYanSemiPair pair;
-			pair.build = node.relation_id;        // R_p provides keys
-			pair.probe = edge.child->relation_id; // R_i is filtered
-			ExtractSemiKeys(tree, pair.build, pair.probe, edge, pair);
-			tree.top_down_pairs.push_back(std::move(pair));
+			if (!edge.top_down_eliminated) {
+				OuterYanSemiPair pair;
+				pair.build = node.relation_id;        // R_p provides keys
+				pair.probe = edge.child->relation_id; // R_i is filtered
+				ExtractSemiKeys(tree, pair.build, pair.probe, edge, pair);
+				tree.top_down_pairs.push_back(std::move(pair));
+			}
 		}
 		TopDownPass(tree, *edge.child);
 	}

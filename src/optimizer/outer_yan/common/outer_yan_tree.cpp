@@ -497,6 +497,91 @@ void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 //! Simplification / Desimplification join-kind mutations), returns a fresh
 //! OJT without persisting it. `BuildOJT` and `ConstructOJT` are thin
 //! wrappers that choose where to store the result.
+// True iff the base-relation subtree at `base_op` carries a predicate that
+// reduces its row set before an SJBuild sitting above it can materialise:
+// either a LOGICAL_FILTER wrapper in the original plan, or any entry in
+// `filter_records` that references only `relation_id`.
+static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
+                               const vector<unique_ptr<OuterYanFilterRecord>> &filter_records) {
+	if (base_op && base_op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		return true;
+	}
+	for (const auto &rec : filter_records) {
+		if (rec && rec->filter && rec->referenced_relations.size() == 1 &&
+		    *rec->referenced_relations.begin() == relation_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Post-OJT-build DFS. Assigns bottom_up_eliminated / top_down_eliminated on
+// every OJTEdge once the tree is fully assembled. Call on the OJT root with
+// top_down_probed_by_parent = false.
+//
+// OJT edge-kind convention (established by CheckOuterYanJoinFlip in BuildOJTImpl):
+//   edge.kind always reads as "parent KIND child", regardless of the original
+//   LHS/RHS orientation in the LogicalPlan. LEFT and RIGHT are flipped when
+//   necessary so the kind consistently labels the parent's role:
+//     INNER  — both sides inner; fires in both bottom-up AND top-down passes.
+//     LEFT   — parent is the preserved (outer) side, child is null-extended;
+//              fires only in the top-down pass  (R_child ⋉ R_parent).
+//     RIGHT  — child is the preserved (outer) side, parent is null-extended;
+//              fires only in the bottom-up pass (R_parent ⋉ R_child).
+//     OUTER  — both sides preserved (full outer); fires in neither pass.
+static void ComputeEliminationFlags(OJTNode &node, bool top_down_probed_by_parent,
+                                     const vector<unique_ptr<OuterYanFilterRecord>> &filter_records) {
+	// Does any child contribute a bottom-up probe on `node`?
+	// Per the convention above, RIGHT or INNER → bottom-up fires:
+	//   build = child, probe = node  (R_node ⋉ R_child).
+	bool node_has_bottom_up_probe = false;
+	for (const auto &edge : node.children) {
+		if (edge.kind == JoinType::RIGHT || edge.kind == JoinType::INNER) {
+			node_has_bottom_up_probe = true;
+			break;
+		}
+	}
+	const bool node_has_predicates =
+	    HasBasePredicates(node.base_op, node.relation_id, filter_records);
+
+	for (auto &edge : node.children) {
+		if (!edge.child) {
+			continue;
+		}
+
+		// Bottom-up: R_node ⋉ R_child (build=child, probe=node).
+		// Fires when edge.kind ∈ {RIGHT, INNER} — child is preserved or inner,
+		// so the bottom-up pass uses child's keys to reduce the parent (node).
+		// Redundant iff child's SJBuild sees all its base rows: child is
+		// PK-side, a terminal leaf (no probes from below reduce it first),
+		// and has no base predicates.
+		if (edge.kind == JoinType::RIGHT || edge.kind == JoinType::INNER) {
+			edge.bottom_up_eliminated =
+			    edge.child_is_pk && edge.child->children.empty() &&
+			    !HasBasePredicates(edge.child->base_op, edge.child->relation_id, filter_records);
+		}
+
+		// Top-down: R_child ⋉ R_node (build=node, probe=child).
+		// Fires when edge.kind ∈ {LEFT, INNER} — parent (node) is preserved
+		// or inner, so the top-down pass uses the parent's keys to reduce the
+		// child. Redundant iff node's SJBuild sees all its base rows: node is
+		// PK-side, has no predicates, no bottom-up probes from its own
+		// children, and no top-down probe from its grandparent.
+		if (edge.kind == JoinType::LEFT || edge.kind == JoinType::INNER) {
+			const bool parent_is_pk = !edge.child_is_pk && edge.has_pk_fk_constraint;
+			edge.top_down_eliminated = parent_is_pk && !node_has_predicates &&
+			                           !node_has_bottom_up_probe && !top_down_probed_by_parent;
+		}
+
+		// A LEFT or INNER outgoing edge top-down-probes the child (node
+		// builds, child probes). Pass this down so the child's own
+		// top_down_eliminated evaluations can account for it.
+		const bool child_top_down_probed =
+		    (edge.kind == JoinType::LEFT || edge.kind == JoinType::INNER);
+		ComputeEliminationFlags(*edge.child, child_top_down_probed, filter_records);
+	}
+}
+
 unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 	if (!HasOT()) {
 		throw InternalException("OuterYanTree::BuildOJTImpl: ot is null");
@@ -627,6 +712,10 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 	if (ojt_root_id == DConstants::INVALID_INDEX) {
 		throw InternalException("OuterYanTree::BuildOJTImpl: OJT root not assigned");
 	}
+	// Elimination flags require the fully-assembled tree; compute after all
+	// edges are attached so terminal-leaf checks reflect the final structure.
+	ComputeEliminationFlags(*node_pointer[ojt_root_id], /*top_down_probed_by_parent=*/false,
+	                        filter_records);
 	return make_uniq<OrderedJoinTree>(std::move(nodes_by_id[ojt_root_id]));
 }
 

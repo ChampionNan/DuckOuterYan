@@ -49,10 +49,21 @@ struct OJTNode;
 //! lowering to LogicalPlan, driven by these markers.
 struct OJTEdge {
 	//! Current edge classification (may have been transformed by Desimplification).
+	//! Always oriented as "parent KIND child" — LEFT/RIGHT are flipped by
+	//! CheckOuterYanJoinFlip in BuildOJTImpl when the OJT places the original
+	//! RHS relation as the parent, so the kind consistently labels the parent's
+	//! role regardless of LHS/RHS position in the original LogicalPlan:
+	//!   INNER  — both sides inner; fires in both bottom-up AND top-down passes.
+	//!   LEFT   — parent is the preserved (outer) side, child is null-extended;
+	//!            fires only in the top-down pass  (R_child ⋉ R_parent).
+	//!   RIGHT  — child is the preserved (outer) side, parent is null-extended;
+	//!            fires only in the bottom-up pass (R_parent ⋉ R_child).
+	//!   OUTER  — both sides preserved (full outer); fires in neither pass.
 	OuterYanJoinKind kind = JoinType::INNER;
 	//! Original edge classification, recorded before Desimplification rules were
-	//! applied. Resimplification uses this to revert back to the original join
-	//! type when the chosen ordering makes the rewrite redundant.
+	//! applied. Follows the same "parent KIND child" orientation as `kind`.
+	//! Resimplification uses this to revert back to the original join type when
+	//! the chosen ordering makes the rewrite redundant.
 	OuterYanJoinKind original_kind = JoinType::INNER;
 	//! Build order of the underlying join in the original logical plan.
 	//! 1-based, starting from the bottommost join (`order = 1`) up to the
@@ -94,6 +105,30 @@ struct OJTEdge {
 	//! `false` — parent is PK side, child is FK side.
 	//! Undefined when `has_pk_fk_constraint` is false.
 	bool child_is_pk = false;
+	//! Bottom-up semi-join R_parent ⋉ R_child on this edge is provably
+	//! redundant; OuterYanPre::BottomUpPass skips the pair. Set by
+	//! BuildOJTImpl after the full tree is assembled. True iff:
+	//!   (1) child_is_pk — child's join key is unique.
+	//!   (2) child is a terminal leaf — no OJT children reduce it before
+	//!       its SJBuild materialises (stack: SJBuild ← GET, no probe
+	//!       operators in between).
+	//!   (3) child has no base predicates — no LOGICAL_FILTER above its
+	//!       GET and no single-relation filter_record targets it.
+	//! FK referential integrity (every FK value in parent matches a PK
+	//! value in child) is assumed implicitly when (1)-(3) hold.
+	bool bottom_up_eliminated = false;
+	//! Top-down semi-join R_child ⋉ R_parent on this edge is provably
+	//! redundant; OuterYanPre::TopDownPass skips the pair. True iff:
+	//!   (1) parent is the PK side (!child_is_pk && has_pk_fk_constraint).
+	//!   (2) parent has no base predicates.
+	//!   (3) parent has no bottom-up probes — none of its OJT children
+	//!       connect via RIGHT or INNER (those would sit below its
+	//!       top-down SJBuild and reduce it first).
+	//!   (4) parent has no top-down probe from its grandparent — i.e.
+	//!       parent is the OJT root, or its incoming edge has kind RIGHT.
+	//! FK referential integrity (every FK value in child matches a PK
+	//! value in parent) is assumed implicitly when (1)-(4) hold.
+	bool top_down_eliminated = false;
 };
 
 //! Node in the Ordered Join Tree.
