@@ -37,6 +37,11 @@ struct OJTNode;
 //! L547`). Data lives directly on `OJTEdge::has_pk_fk_constraint`.
 class AggPushdown {
 public:
+	//! Maximum surviving GROUP BY columns for a push to be considered
+	//! profitable. Mirrors `GROUP_BY_NUM` from the reference implementation
+	//! (`aggregation_pushdown.cpp@38d165ee`).
+	static constexpr idx_t kGroupByNum = 2;
+
 	//! Populate `tree.agg_pushdown_decisions`. Idempotent: an existing
 	//! vector is cleared before writing.
 	void Apply(OuterYanTree &tree);

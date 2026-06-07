@@ -82,7 +82,7 @@ void SemijoinInsertion::InsertionTraverse(unique_ptr<LogicalOperator> &node) {
 		return;
 	}
 
-	// Base unit A: LogicalFilter + LogicalGet treated atomically.
+	// Base unit A: LogicalFilter + LogicalGet treated as a unit, insert above filter.
 	if (IsFilterGetBase(*node)) {
 		auto &get = node->children[0]->Cast<LogicalGet>();
 		auto it = table_to_relation_->find(get.table_index.index);
@@ -339,6 +339,16 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		push_probe(pair.probe, top_down, filter, std::move(probe_keys), build);
 	};
 
+	// Round order is a hard phase barrier, not a heuristic — the two-phase
+	// Yannakakis full reducer (the O(IN + OUT) guarantee). A top_down reduction
+	// may run only after EVERY bottom_up reduction has finished: the bottom-up
+	// sweep culminates in the final semi-join reduce at the root, and only then
+	// does the top-down sweep propagate the reduced result back to the leaves.
+	// Consequence: a bottom_up build always finalises before any top_down op,
+	// which is precisely why cross-round ops must never coalesce — the
+	// `top_down == top_down` gate in push_build / push_probe. A bottom_up build
+	// and a top_down build sit on opposite ends of that dependency chain and
+	// cannot share one operator (merging them would close a Finalize cycle).
 	for (auto &p : bu) {
 		process_pair(p, /*top_down=*/false);
 	}
