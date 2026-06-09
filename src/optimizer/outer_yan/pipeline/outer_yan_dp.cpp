@@ -625,7 +625,9 @@ unique_ptr<OTNode> OuterYanDP::MaterializeNode(JoinRelationSet &set, OuterYanTre
 		leaf->kind = OTNode::Kind::RELATION;
 		leaf->origin = src->origin;
 		leaf->relation_id = rel_id;
-		leaf->is_pk = src->is_pk;
+		// Recalculate from origin rather than copying src->is_pk — the copy
+		// chain through prior MaterializeNode calls may have drifted.
+		leaf->is_pk = OuterYanTree::CheckPKFK(*leaf->origin);
 		leaf->stats = src->stats;
 		return leaf;
 	}

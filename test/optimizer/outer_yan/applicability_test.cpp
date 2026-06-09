@@ -22,8 +22,21 @@ void SeedApplicability(Connection &con) {
 //! White-box: extract the logical plan and call OuterYanApplicability::Check.
 //! Returns the populated ApplicabilityResult so the test can inspect both the
 //! `applicable` flag and the `reason` diagnostic.
+//!
+//! OuterYan passes are disabled before ExtractPlan so the returned plan is in
+//! the same state OuterYanPre would receive it (after expression rewriting /
+//! filter pushdown, but without SJ operators already inserted).
 ApplicabilityResult ApplicabilityOf(Connection &con, const string &sql) {
+	// Disable OuterYan, join_order (runs in the else branch when OuterYan is
+	// off), and column_lifetime (inserts compression projections that rewrite
+	// table_index values in column bindings, confusing applicability checks).
+	// This gives the plan in the same state OuterYanPre normally receives it.
+	REQUIRE_NO_FAIL(con.Query(
+	    "SET disabled_optimizers TO "
+	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
+	    "column_lifetime,statistics_propagation'"));
 	auto plan = con.ExtractPlan(sql);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
 	return OuterYanApplicability::Check(*plan);
 }

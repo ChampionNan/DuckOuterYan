@@ -596,12 +596,28 @@ static void ComputeEliminationFlags(OJTNode &node, bool top_down_probed_by_paren
 	}
 }
 
+static void CollectRelationNodes(OTNode &node, vector<OTNode *> &out) {
+	if (node.kind == OTNode::Kind::RELATION) {
+		if (node.relation_id >= out.size()) {
+			out.resize(node.relation_id + 1, nullptr);
+		}
+		out[node.relation_id] = &node;
+		return;
+	}
+	CollectRelationNodes(*node.children[0], out);
+	CollectRelationNodes(*node.children[1], out);
+}
+
 unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 	if (!HasOT()) {
 		throw InternalException("OuterYanTree::BuildOJTImpl: ot is null");
 	}
 
-	const auto &ot_relations = ot_relations_by_id;
+	// Build a fresh relation-node index from the live OT tree.
+	// ot_relations_by_id may be stale after RebuildOT replaces the root with
+	// new OTNode allocations; walking the current root is always correct.
+	vector<OTNode *> ot_relations;
+	CollectRelationNodes(ot->Root(), ot_relations);
 	const auto &ot_joins = ot_joins_by_order;
 
 	if (ot_relations.empty()) {

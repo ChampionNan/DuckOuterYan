@@ -933,6 +933,13 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	    tree.root_aggregation.type != OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
 	}
+	// Skip if semi-join operators are present: AggregatePushdownRewriter
+	// does not model SJBuild/SJProbe pipeline dependencies, so restructuring
+	// the join tree around these operators can break build→probe ordering.
+	// TODO: teach the rewriter to treat SJBuild as a pushdown barrier.
+	if (!tree.bottom_up_pairs.empty() || !tree.top_down_pairs.empty()) {
+		return plan;
+	}
 
 	// Stage A — speculative refinement on a throwaway deep copy.
 	auto plan_copy = plan->Copy(optimizer.context);

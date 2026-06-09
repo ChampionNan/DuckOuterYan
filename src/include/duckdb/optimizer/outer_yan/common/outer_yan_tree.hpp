@@ -81,6 +81,12 @@ public:
 	//! `LogicalOperator::Copy`).
 	unique_ptr<LogicalOperator> OJTToLogicalPlan(ClientContext &context);
 
+	//! Returns true iff the base-relation subtree rooted at `op` has a
+	//! primary-key or unique constraint on any projected column.  Used by
+	//! BuildOT and MaterializeNode; public so OuterYanDP can recalculate
+	//! is_pk when cloning RELATION nodes.
+	static bool CheckPKFK(LogicalOperator &op);
+
 	// ----------------------------------------------------------------------
 	// Accessors for passes.
 	// ----------------------------------------------------------------------
@@ -167,8 +173,6 @@ private:
 	                                       unordered_set<idx_t> &out);
 	static optional<idx_t> LookupSingleRelation(const Expression &expr,
 	                                            const unordered_map<idx_t, RelationId> &table_to_relation);
-	static bool CheckPKFK(LogicalOperator &op);
-
 	// Shared OJT-assembly body. Called by `BuildOJT` (stores into `ojt`) and
 	// `ConstructOJT` (returns without persisting).
 	unique_ptr<OrderedJoinTree> BuildOJTImpl();

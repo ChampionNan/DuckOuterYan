@@ -33,8 +33,19 @@ void SeedPasses(Connection &con) {
 
 //! Build the full IR pipeline up to OJT for `sql`. Returns the populated
 //! OuterYanTree so callers can inspect OT, OJT, and applicability.
+//!
+//! OuterYan passes are disabled before ExtractPlan so the plan is in the same
+//! state OuterYanPre would receive it — no SJ operators already inserted.
 unique_ptr<OuterYanTree> BuildIRFor(Connection &con, const string &sql) {
+	// Disable OuterYan + join_order + column_lifetime so ExtractPlan returns
+	// the plan in the same state OuterYanPre would receive it (no SJ ops, no
+	// column-lifetime compression projections rewriting table_index values).
+	REQUIRE_NO_FAIL(con.Query(
+	    "SET disabled_optimizers TO "
+	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
+	    "column_lifetime,statistics_propagation'"));
 	auto plan = con.ExtractPlan(sql);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
 	auto tree = make_uniq<OuterYanTree>();
 	if (!tree->CheckApplicability(*plan)) {

@@ -50,6 +50,10 @@ public:
 public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+	// Structural deep copy that shares SemiJoinFilter shared_ptrs. Overrides
+	// the default serialize-based Copy so AggregatePushdownOuter can clone the
+	// plan without hitting the unimplemented Serialize path.
+	unique_ptr<LogicalOperator> Copy(ClientContext &context) const override;
 
 	idx_t EstimateCardinality(ClientContext &context) override;
 	vector<ColumnBinding> GetColumnBindings() override;

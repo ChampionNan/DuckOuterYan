@@ -8,6 +8,9 @@
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+// OuterYan SJ operators — added manually, not auto-generated.
+#include "duckdb/planner/operator/logical_sj_build.hpp"
+#include "duckdb/planner/operator/logical_sj_probe.hpp"
 
 namespace duckdb {
 
@@ -186,6 +189,13 @@ unique_ptr<LogicalOperator> LogicalOperator::Deserialize(Deserializer &deseriali
 		break;
 	case LogicalOperatorType::LOGICAL_WINDOW:
 		result = LogicalWindow::Deserialize(deserializer);
+		break;
+	// OuterYan semi-join operators — structural-only deserialization.
+	case LogicalOperatorType::LOGICAL_SJ_BUILD:
+		result = LogicalSJBuild::Deserialize(deserializer);
+		break;
+	case LogicalOperatorType::LOGICAL_SJ_PROBE:
+		result = LogicalSJProbe::Deserialize(deserializer);
 		break;
 	default:
 		throw SerializationException("Unsupported type for deserialization of LogicalOperator!");

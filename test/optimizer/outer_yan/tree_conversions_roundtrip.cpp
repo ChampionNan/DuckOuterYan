@@ -43,14 +43,22 @@ void AssertRoundtripMatches(Connection &con, const string &sql) {
 	auto reference = con.Query(sql);
 	REQUIRE_FALSE(reference->HasError());
 
-	// Disable the optimizer so ExtractPlan returns the raw bound plan.
-	// JOIN_ORDER and COLUMN_LIFETIME can rewire column bindings in ways that
-	// confuse LookupSingleRelation; the OT pipeline needs the original
-	// LogicalGet table indices.
-	REQUIRE_NO_FAIL(con.Query("PRAGMA disable_optimizer"));
+	// Disable only the OuterYan passes and JOIN_ORDER so ExtractPlan returns
+	// the plan as OuterYanPre would see it: after expression rewriting,
+	// filter pushdown, and PROJECTION_PULLUP, but without join reordering or
+	// SJ insertion.  Turning off all optimizers is avoided — other passes
+	// are part of the plan OuterYan must handle.
+	REQUIRE_NO_FAIL(con.Query(
+	    "SET disabled_optimizers TO "
+	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
+	    "column_lifetime,statistics_propagation'"));
 	auto plan = con.ExtractPlan(sql);
-	REQUIRE_NO_FAIL(con.Query("PRAGMA enable_optimizer"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
+
+	// Print the plan so that LookupSingleRelation failures can be diagnosed.
+	fprintf(stderr, "\n=== ExtractPlan plan for: %s\n", sql.c_str());
+	plan->Print();
 
 	OuterYanTree tree;
 	LogicalPlanToOT(std::move(plan), tree);

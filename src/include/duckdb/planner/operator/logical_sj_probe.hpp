@@ -48,6 +48,8 @@ public:
 public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);
+	// Structural deep copy that shares SemiJoinFilter shared_ptrs. See SJBuild.
+	unique_ptr<LogicalOperator> Copy(ClientContext &context) const override;
 
 	idx_t EstimateCardinality(ClientContext &context) override;
 	vector<ColumnBinding> GetColumnBindings() override;
