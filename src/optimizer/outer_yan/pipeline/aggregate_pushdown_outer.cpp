@@ -26,11 +26,6 @@
 
 namespace duckdb {
 
-//! Forward declaration of DuckDB's `sum` aggregate factory. The definition
-//! lives in `extension/core_functions/aggregate/distributive/sum.cpp`. The
-//! reference implementation uses the same symbol.
-AggregateFunction GetSumAggregate(PhysicalType type);
-
 // ===========================================================================
 // AggregatePushdownRewriter
 // ===========================================================================
@@ -275,10 +270,7 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 			sum_args.push_back(
 			    make_uniq<BoundColumnRefExpression>(child_types[annot_idx], child_bindings[annot_idx]));
 
-			auto sum_function = GetSumAggregate(child_types[annot_idx].InternalType());
-			if (sum_function.name.empty()) {
-				sum_function.name = "sum";
-			}
+			auto sum_function = LookupAggregate(context, "sum", child_types[annot_idx]);
 			FunctionBinder function_binder(context);
 			auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(sum_args), nullptr,
 			                                                     AggregateType::NON_DISTINCT);
@@ -326,12 +318,7 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 			}
 			vector<unique_ptr<Expression>> args;
 			args.push_back(make_uniq<BoundColumnRefExpression>(child_types[i], child_bindings[i]));
-			AggregateFunction agg_func = (matching->function_name == "sum")
-			                                 ? GetSumAggregate(child_types[i].InternalType())
-			                                 : LookupAggregate(context, matching->function_name, child_types[i]);
-			if (matching->function_name == "sum" && agg_func.name.empty()) {
-				agg_func.name = "sum";
-			}
+			AggregateFunction agg_func = LookupAggregate(context, matching->function_name, child_types[i]);
 			FunctionBinder function_binder(context);
 			auto expr = function_binder.BindAggregateFunction(agg_func, std::move(args), nullptr,
 			                                                 AggregateType::NON_DISTINCT);
@@ -838,10 +825,7 @@ AggregatePushdownOuter::ReplaceRootSum(unique_ptr<LogicalOperator> plan,
 			}
 			vector<unique_ptr<Expression>> args;
 			args.push_back(make_uniq<BoundColumnRefExpression>(child_types[i], child_bindings[i]));
-			auto sum_function = GetSumAggregate(child_types[i].InternalType());
-			if (sum_function.name.empty()) {
-				sum_function.name = "sum";
-			}
+			auto sum_function = LookupAggregate(optimizer.context, "sum", child_types[i]);
 			FunctionBinder function_binder(optimizer.context);
 			auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(args), nullptr,
 			                                                     AggregateType::NON_DISTINCT);
@@ -914,10 +898,7 @@ AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan
 	// Rebuild the root aggregate's first expression as `sum(annot)`.
 	vector<unique_ptr<Expression>> sum_args;
 	sum_args.push_back(make_uniq<BoundColumnRefExpression>(annot_type, annot_binding));
-	auto sum_function = GetSumAggregate(annot_type.InternalType());
-	if (sum_function.name.empty()) {
-		sum_function.name = "sum";
-	}
+	auto sum_function = LookupAggregate(optimizer.context, "sum", annot_type);
 	FunctionBinder function_binder(optimizer.context);
 	auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(sum_args), nullptr,
 	                                                     AggregateType::NON_DISTINCT);

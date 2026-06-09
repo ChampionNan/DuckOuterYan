@@ -397,7 +397,21 @@ bool HashFilter::IsInline64Eligible(const vector<LogicalType> &col_types) {
 	if (col_types.size() != 1) {
 		return false;
 	}
-	return IsInlineEligible(col_types[0].InternalType());
+	// Check the LogicalType id, not PhysicalType: DATE and DECIMAL also map to
+	// INT32/INT64 physically but must use the BOXED path to preserve semantics.
+	switch (col_types[0].id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+		return true;
+	default:
+		return false;
+	}
 }
 
 void HashFilter::ReserveInline(const LogicalType &key_type, idx_t upper_bound_count) {
@@ -453,7 +467,7 @@ void HashFilter::BuildChunkInline64(const DataChunk &chunk, const vector<idx_t> 
 	chunk.data[build_col_ids[0]].ToUnifiedFormat(row_count, fmt);
 
 	Vector hashes_v(LogicalType::HASH);
-	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE);
+	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE) && (row_count <= STANDARD_VECTOR_SIZE);
 	if (vectorised_hash) {
 		ComputeChunkHashes(chunk, build_col_ids, hashes_v, row_count);
 	}
@@ -517,7 +531,7 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 	}
 
 	Vector hashes_v(LogicalType::HASH);
-	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE);
+	const bool vectorised_hash = (kind_ == HashKind::DUCKDB_COMBINE) && (row_count <= STANDARD_VECTOR_SIZE);
 	if (vectorised_hash) {
 		ComputeChunkHashes(chunk, build_col_ids, hashes_v, row_count);
 	}
@@ -551,6 +565,66 @@ void HashFilter::Build(const DataChunk &chunk, const vector<idx_t> &build_col_id
 
 void HashFilter::Finalize() {
 	finalized_ = true;
+}
+
+static Value InlineKeyToValue(uint64_t raw, PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:   return Value::TINYINT(static_cast<int8_t>(raw));
+	case PhysicalType::INT16:  return Value::SMALLINT(static_cast<int16_t>(raw));
+	case PhysicalType::INT32:  return Value::INTEGER(static_cast<int32_t>(raw));
+	case PhysicalType::INT64:  return Value::BIGINT(static_cast<int64_t>(raw));
+	case PhysicalType::UINT8:  return Value::UTINYINT(static_cast<uint8_t>(raw));
+	case PhysicalType::UINT16: return Value::USMALLINT(static_cast<uint16_t>(raw));
+	case PhysicalType::UINT32: return Value::UINTEGER(static_cast<uint32_t>(raw));
+	case PhysicalType::UINT64: return Value::UBIGINT(raw);
+	default: throw InternalException("HashFilter::Merge: unsupported inline key type %s",
+	                                 TypeIdToString(type));
+	}
+}
+
+void HashFilter::Merge(HashFilter &other) {
+	if (finalized_) {
+		throw InternalException("HashFilter::Merge: cannot merge into a finalized filter");
+	}
+	if (other.mode_ == StorageMode::BOXED) {
+		for (idx_t i = 0; i < other.slots_.size(); i++) {
+			const auto &slot = other.slots_[i];
+			if (slot.key_index == EMPTY_KEY_INDEX) {
+				continue;
+			}
+			InsertHashedKey(other.stored_keys_[slot.key_index], slot.hash);
+		}
+	} else { // INLINE_64
+		if (mode_ == StorageMode::INLINE_64) {
+			for (idx_t i = 0; i < other.inline_slots_.size(); i++) {
+				if (!other.IsInlineSlotOccupied(i)) {
+					continue;
+				}
+				InsertHashedKey64(other.inline_slots_[i].key, other.inline_slots_[i].hash);
+			}
+		} else {
+			// dst is BOXED — convert each inline key to a Value and insert.
+			for (idx_t i = 0; i < other.inline_slots_.size(); i++) {
+				if (!other.IsInlineSlotOccupied(i)) {
+					continue;
+				}
+				vector<Value> key {InlineKeyToValue(other.inline_slots_[i].key, other.inline_type_)};
+				InsertHashedKey(std::move(key), other.inline_slots_[i].hash);
+			}
+		}
+	}
+	// Reset other to a fresh empty BOXED filter (same kind).
+	other.slots_.assign(INITIAL_CAPACITY, Slot {0, EMPTY_KEY_INDEX});
+	other.mask_              = INITIAL_CAPACITY - 1;
+	other.stored_keys_.clear();
+	other.inline_slots_.clear();
+	other.inline_occupancy_.clear();
+	other.inline_mask_       = 0;
+	other.inline_type_       = PhysicalType::INVALID;
+	other.mode_              = StorageMode::BOXED;
+	other.count_             = 0;
+	other.finalized_         = false;
+	other.key_arity_         = 0;
 }
 
 bool HashFilter::Contains(const vector<Value> &key) const {

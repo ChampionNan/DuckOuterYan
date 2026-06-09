@@ -10,7 +10,7 @@ using namespace duckdb;
 
 namespace {
 
-void Seed(Connection &con) {
+void SeedApplicability(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(id INTEGER, ax INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INTEGER, bx INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(id INTEGER, cx INTEGER)"));
@@ -39,7 +39,7 @@ TEST_CASE("outer_yan applicability: rejects pure-INNER 2-relation join",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con, "SELECT a.id, b.bx FROM a JOIN b ON a.id = b.id");
 	REQUIRE_FALSE(result.applicable);
 }
@@ -48,7 +48,7 @@ TEST_CASE("outer_yan applicability: rejects pure-INNER 3-relation chain",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id");
 	REQUIRE_FALSE(result.applicable);
@@ -58,7 +58,7 @@ TEST_CASE("outer_yan applicability: rejects 2-relation LEFT OUTER (too few rels)
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con, "SELECT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id");
 	REQUIRE_FALSE(result.applicable);
 }
@@ -67,7 +67,7 @@ TEST_CASE("outer_yan applicability: accepts 3-relation LEFT-LEFT chain",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -80,7 +80,7 @@ TEST_CASE("outer_yan applicability: accepts mix of INNER + LEFT",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a INNER JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -91,7 +91,7 @@ TEST_CASE("outer_yan applicability: accepts LEFT/RIGHT mix",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "RIGHT JOIN c ON a.id = c.id");
@@ -102,7 +102,7 @@ TEST_CASE("outer_yan applicability: accepts FULL OUTER in chain",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a FULL OUTER JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -113,7 +113,7 @@ TEST_CASE("outer_yan applicability: rejects theta predicate",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id < b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -125,7 +125,7 @@ TEST_CASE("outer_yan applicability: rejects expression on join key",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id + 1 = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -136,7 +136,7 @@ TEST_CASE("outer_yan applicability: rejects IS NOT DISTINCT FROM (NULL-tolerant)
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id IS NOT DISTINCT FROM b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -147,7 +147,7 @@ TEST_CASE("outer_yan applicability: rejects cross product",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id, c");
 	REQUIRE_FALSE(result.applicable);
@@ -157,7 +157,7 @@ TEST_CASE("outer_yan applicability: rejects set op above join",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id "
 	    "UNION ALL SELECT a.id, c.cx FROM a LEFT JOIN c ON a.id = c.id");
@@ -168,7 +168,7 @@ TEST_CASE("outer_yan applicability: rejects window operator above join",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, ROW_NUMBER() OVER (PARTITION BY a.id) AS rn "
 	    "FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id");
@@ -179,7 +179,7 @@ TEST_CASE("outer_yan applicability: rejects cyclic 3-relation graph",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx "
 	    "FROM a LEFT JOIN b ON a.id = b.id "
@@ -191,7 +191,7 @@ TEST_CASE("outer_yan applicability: accepts root aggregation (COUNT_STAR)",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id");
 	REQUIRE(result.applicable);
@@ -202,7 +202,7 @@ TEST_CASE("outer_yan applicability: accepts GROUP BY at root",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, COUNT(b.bx) FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id GROUP BY a.id");
@@ -214,7 +214,7 @@ TEST_CASE("outer_yan applicability: relation table-index mapping is populated wh
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -236,7 +236,7 @@ TEST_CASE("outer_yan applicability: edges hold valid LogicalComparisonJoin point
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -251,7 +251,7 @@ TEST_CASE("outer_yan applicability: rejection populates reason string",
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	// Pure-INNER bail-out — should populate a reason.
 	auto result = ApplicabilityOf(con,
 	    "SELECT a.id, b.bx, c.cx FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id");
@@ -267,7 +267,7 @@ TEST_CASE("outer_yan applicability: OuterYanTree::CheckApplicability accepts on 
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto plan = con.ExtractPlan(
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -281,7 +281,7 @@ TEST_CASE("outer_yan applicability: OuterYanTree::CheckApplicability rejects pur
           "[outer_yan][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedApplicability(con);
 	auto plan = con.ExtractPlan(
 	    "SELECT a.id, b.bx FROM a JOIN b ON a.id = b.id");
 	REQUIRE(plan);

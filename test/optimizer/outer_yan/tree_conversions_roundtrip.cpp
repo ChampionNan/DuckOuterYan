@@ -12,7 +12,7 @@ using namespace duckdb;
 
 namespace {
 
-void Seed(Connection &con) {
+void SeedRoundtrip(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(id INTEGER, ax INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INTEGER, bx INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(id INTEGER, cx INTEGER)"));
@@ -23,7 +23,7 @@ void Seed(Connection &con) {
 
 //! Wider seed for 4..6 relation cases.
 void SeedWide(Connection &con) {
-	Seed(con);
+	SeedRoundtrip(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE d(id INTEGER, dx INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE e(id INTEGER, ex INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE f(id INTEGER, fx INTEGER)"));
@@ -43,7 +43,13 @@ void AssertRoundtripMatches(Connection &con, const string &sql) {
 	auto reference = con.Query(sql);
 	REQUIRE_FALSE(reference->HasError());
 
+	// Disable the optimizer so ExtractPlan returns the raw bound plan.
+	// JOIN_ORDER and COLUMN_LIFETIME can rewire column bindings in ways that
+	// confuse LookupSingleRelation; the OT pipeline needs the original
+	// LogicalGet table indices.
+	REQUIRE_NO_FAIL(con.Query("PRAGMA disable_optimizer"));
 	auto plan = con.ExtractPlan(sql);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA enable_optimizer"));
 	REQUIRE(plan);
 
 	OuterYanTree tree;
@@ -76,7 +82,7 @@ TEST_CASE("outer_yan tree_conversions: 2-relation INNER join roundtrip",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx "
 	                            "FROM a INNER JOIN b ON a.id = b.id "
 	                            "ORDER BY a.id, b.bx");
@@ -86,7 +92,7 @@ TEST_CASE("outer_yan tree_conversions: 2-relation LEFT join roundtrip",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// Exercises LEFT_OUTER. Whether the OJT places A or B as parent depends
 	// on the optimizer's chosen build order; either orientation must be
 	// rebuilt with semantics-preserving JoinType (RIGHT-flip path covered
@@ -100,7 +106,7 @@ TEST_CASE("outer_yan tree_conversions: 3-relation chain INNER roundtrip",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
 	                            "FROM a "
 	                            "INNER JOIN b ON a.id = b.id "
@@ -113,7 +119,7 @@ TEST_CASE("outer_yan tree_conversions: 3-relation chain LEFT roundtrip "
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// A LEFT JOIN B LEFT JOIN C — when the OJT's degree-driven parent pick
 	// places B as the OJT-parent of the (A,B) edge, `edge.kind` must flip
 	// from LEFT_OUTER to RIGHT_OUTER so the rebuilt join still preserves A.
@@ -130,7 +136,7 @@ TEST_CASE("outer_yan tree_conversions: single-relation residual filter roundtrip
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// `a.ax > 15` is a single-relation residual; OJTToLogicalPlan step 2
 	// must consume it onto leaf A (smallest covering set).
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx "
@@ -143,7 +149,7 @@ TEST_CASE("outer_yan tree_conversions: multi-relation residual filter roundtrip"
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// `a.ax + c.cx > 1010` references {A, C} — must land at the lowest
 	// fused subplan that covers both (step 3 pushdown), not at the root.
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
@@ -203,7 +209,7 @@ TEST_CASE("outer_yan tree_conversions: RIGHT-flip via OJT parent-orientation",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// `b RIGHT JOIN a` mirrors `a LEFT JOIN b`. After OJT construction the
 	// parent might be on the other side, forcing the rebuilt JoinType to
 	// flip RIGHT → LEFT (or vice versa). The roundtrip assertion catches a
@@ -219,7 +225,7 @@ TEST_CASE("outer_yan tree_conversions: FULL OUTER head + LEFT tail roundtrip",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
 	                            "FROM a "
 	                            "FULL OUTER JOIN b ON a.id = b.id "
@@ -247,7 +253,7 @@ TEST_CASE("outer_yan tree_conversions: multi-condition equi-join roundtrip",
           "[outer_yan][tree_conversions]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// Compound key on the (a, b) edge — both conditions are plain equi-joins
 	// on distinct column pairs; both must be preserved.
 	AssertRoundtripMatches(con,
@@ -271,7 +277,7 @@ TEST_CASE("outer_yan tree_conversions: residual filter via projection (UNSUPPORT
           "[outer_yan][tree_conversions][.]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedRoundtrip(con);
 	// Subquery-induced projection rebinds columns to a fresh table_index;
 	// a WHERE on the rebinding column produces a residual filter whose
 	// referenced relations are empty from the OT's point of view.

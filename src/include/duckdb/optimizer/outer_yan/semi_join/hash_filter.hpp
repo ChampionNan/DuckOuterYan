@@ -122,6 +122,12 @@ public:
 	// future repack / shrink-to-fit optimisations.
 	void Finalize();
 
+	// Absorbs all keys from `other` into this filter (set union), then resets
+	// `other` to an empty state. Called once at Finalize time from the
+	// orchestrating thread to fold thread-local filters into the global one.
+	// Throws if this filter is already finalized.
+	void Merge(HashFilter &other);
+
 	// Per-row existence test. Asserts `key.size() == KeyArity()` once the
 	// filter has seen any Build (catches column-count mismatches early
 	// rather than silently returning false negatives).
@@ -167,7 +173,7 @@ public:
 	static hash_t MurmurHash64A(const void *data, idx_t len, uint64_t seed = 0);
 	// Dispatch on `kind`. Single entry point used by Build / Contains so
 	// the two paths can never disagree on which hash they're computing.
-	static hash_t HashKey(const vector<Value> &key, HashKind kind);
+	static hash_t HashKey(const vector<Value> &key, HashKind kind = HashKind::DUCKDB_COMBINE);
 	// Stack-buffered MurmurHash64A over concatenated per-column digests.
 	// Typical arities (≤ 8 columns) avoid the heap fallback.
 	static hash_t HashKeyMurmur(const vector<Value> &key);

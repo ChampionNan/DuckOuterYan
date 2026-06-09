@@ -207,6 +207,8 @@ private:
 			return BuildThroughAggregate(op, depth);
 		case LogicalOperatorType::LOGICAL_DISTINCT:
 			return BuildThroughDistinct(op, depth);
+		case LogicalOperatorType::LOGICAL_ORDER_BY:
+			return BuildThroughOrderBy(op, depth);
 		default:
 			throw NotImplementedException("LogicalPlanToOT: unsupported operator %s",
 			                              EnumUtil::ToString(op.type));
@@ -327,6 +329,18 @@ private:
 				col.binding = child_bindings[i];
 				info.columns.push_back(std::move(col));
 			}
+		}
+		return BuildNode(*op.children[0], depth);
+	}
+
+	//! Record the ORDER BY node so `OJTToLogicalPlan` can re-attach it above
+	//! the rebuilt join plan. The ORDER BY itself is transparent to the OT.
+	unique_ptr<OTNode> BuildThroughOrderBy(LogicalOperator &op, idx_t depth) {
+		if (op.children.size() != 1) {
+			throw InternalException("LogicalOrder with %llu children", op.children.size());
+		}
+		if (!tree.root_order_by) {
+			tree.root_order_by = &op;
 		}
 		return BuildNode(*op.children[0], depth);
 	}
@@ -699,9 +713,19 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 		    CheckOuterYanJoinFlip(ot_info.original_join_kind, parent_is_left);
 		edge.order = ot_join->order;
 		edge.parent_relation_id = parent_id;
-		// Move owned join metadata into the OJT edge; OT JOIN's `info` is null
-		// from here on and OT is not consulted after BuildOJT.
-		edge.info = std::move(ot_join->info);
+		// Deep-copy OTJoin into the OJT edge so the OT node retains its
+		// `info` for OuterYanDP (which runs after the transient OJT is dropped).
+		auto edge_info = make_uniq<OTJoin>();
+		edge_info->join_kind           = ot_info.join_kind;
+		edge_info->original_join_kind  = ot_info.original_join_kind;
+		edge_info->cond_left_relation_id  = ot_info.cond_left_relation_id;
+		edge_info->cond_right_relation_id = ot_info.cond_right_relation_id;
+		edge_info->distinct_count      = ot_info.distinct_count;
+		edge_info->conditions.reserve(ot_info.conditions.size());
+		for (const auto &cond : ot_info.conditions) {
+			edge_info->conditions.push_back(cond.Copy());
+		}
+		edge.info = std::move(edge_info);
 		edge.has_pk_fk_constraint = left_pk || right_pk;
 		edge.child_is_pk = child_pk;
 		edge.child = std::move(nodes_by_id[child_id]);
@@ -948,9 +972,16 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 		filter_records_status[i] = true;
 	}
 
-	// Release wrapper-owned resources whose lifetime ends here.
-	source_plan.reset();
 	ojt.reset();
+	// Re-attach a root ORDER BY that was stripped during BuildOT, so the
+	// rebuilt plan preserves the original result ordering.
+	if (root_order_by) {
+		D_ASSERT(source_plan.get() == root_order_by);
+		source_plan->children[0] = std::move(plan);
+		source_plan->ResolveOperatorTypes();
+		return std::move(source_plan);
+	}
+	source_plan.reset();
 	return plan;
 }
 

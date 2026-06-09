@@ -20,7 +20,7 @@ using namespace duckdb;
 
 namespace {
 
-void Seed(Connection &con) {
+void SeedPasses(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(id INTEGER, ax INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INTEGER, bx INTEGER)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(id INTEGER, cx INTEGER)"));
@@ -70,7 +70,7 @@ TEST_CASE("outer_yan passes: OT::IsValid holds on 3-relation LEFT chain",
           "[outer_yan][passes][ot]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -84,7 +84,7 @@ TEST_CASE("outer_yan passes: OT shape — 3-relation chain has 2 JOINs + 3 RELAT
           "[outer_yan][passes][ot]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -97,7 +97,7 @@ TEST_CASE("outer_yan passes: OT shape — 4-relation chain has 3 JOINs + 4 RELAT
           "[outer_yan][passes][ot]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx, d.dx "
 	    "FROM a LEFT JOIN b ON a.id = b.id "
@@ -112,7 +112,7 @@ TEST_CASE("outer_yan passes: OT relation_id uniqueness — each base relation di
           "[outer_yan][passes][ot]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -129,7 +129,7 @@ TEST_CASE("outer_yan passes: ot_joins_by_order is sorted ascending by `order`",
           "[outer_yan][passes][ot]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx, d.dx "
 	    "FROM a LEFT JOIN b ON a.id = b.id "
@@ -154,7 +154,7 @@ TEST_CASE("outer_yan passes: null-rejecting WHERE simplifies LEFT to INNER",
           "[outer_yan][passes][simplify]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	// `b.bx > 0` rejects rows where b.bx is NULL, so the LEFT JOIN simplifies
 	// to INNER on the (a,b) edge.
 	auto tree = BuildIRFor(con,
@@ -181,7 +181,7 @@ TEST_CASE("outer_yan passes: no simplification when WHERE preserves NULLs",
           "[outer_yan][passes][simplify]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	// `b.bx IS NULL OR b.bx > 0` does NOT reject NULL → LEFT stays LEFT.
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
@@ -211,7 +211,7 @@ TEST_CASE("outer_yan passes: semi-join pair recording populates both phases",
           "[outer_yan][passes][semi]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	// We need to drive the FULL `optimizer.cpp` pipeline (not just BuildOJT)
 	// because OuterYanPre is what records pairs. Easiest: run a query and
 	// confirm via EXPLAIN that SJ_BUILD + SJ_PROBE are inserted (downstream
@@ -234,7 +234,7 @@ TEST_CASE("outer_yan passes: OJT has the same relation count as OT",
           "[outer_yan][passes][ojt]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id");
@@ -256,7 +256,7 @@ TEST_CASE("outer_yan passes: OJT root has subtree containing all relations",
           "[outer_yan][passes][ojt]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con,
 	    "SELECT a.id, b.bx, c.cx, d.dx "
 	    "FROM a LEFT JOIN b ON a.id = b.id "
@@ -285,7 +285,7 @@ TEST_CASE("outer_yan passes: DP+rebuild preserves results — 3-way LEFT chain",
           "[outer_yan][passes][dp]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 
 	const string sql = "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	                   "LEFT JOIN c ON a.id = c.id ORDER BY a.id, b.bx NULLS FIRST";
@@ -307,7 +307,7 @@ TEST_CASE("outer_yan passes: DP+rebuild preserves results — 4-way LEFT chain",
           "[outer_yan][passes][dp]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 
 	const string sql = "SELECT a.id, b.bx, c.cx, d.dx "
 	                   "FROM a LEFT JOIN b ON a.id = b.id "
@@ -328,7 +328,7 @@ TEST_CASE("outer_yan passes: DP+rebuild preserves results — FULL OUTER in head
           "[outer_yan][passes][dp]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 
 	const string sql = "SELECT a.id, b.bx, c.cx "
 	                   "FROM a FULL OUTER JOIN b ON a.id = b.id "
@@ -355,7 +355,7 @@ TEST_CASE("outer_yan passes: applicability rejection short-circuits — no OT bu
           "[outer_yan][passes][applicability]") {
 	DuckDB db(nullptr);
 	Connection con(db);
-	Seed(con);
+	SeedPasses(con);
 	auto tree = BuildIRFor(con, "SELECT a.id, b.bx FROM a JOIN b ON a.id = b.id");
 	REQUIRE_FALSE(tree->Applicability().applicable);
 	REQUIRE_FALSE(tree->HasOT());

@@ -104,7 +104,7 @@ inline OuterYanJoinKind CheckOuterYanJoinFlip(OuterYanJoinKind kind,
 	return parent_is_left ? kind : FlipOuterYanJoinKind(kind);
 }
 
-bool Fail(string *reason, const string &msg) {
+inline bool Fail(string *reason, const string &msg) {
 	if (reason) {
 		*reason = msg;
 	}

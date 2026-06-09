@@ -317,7 +317,7 @@ void KeyBitmap::ProbeBatch(const DataChunk &input,
 	// `bit_idx` is clamped to 0 for masked-out rows so the pass-2 gather is
 	// always inside `words_[0 .. bit_count_/64)` and never reads OOB.
 	for (idx_t i = 0; i < n; i++) {
-		const auto idx = format.sel->get_index_unsafe(i);
+		const auto idx = format.sel->get_index(i);
 		const int64_t value = LoadKeyAsInt64(type_id, data, idx);
 		const uint8_t valid = can_have_null ? uint8_t(format.validity.RowIsValidUnsafe(idx)) : uint8_t(1);
 		const uint8_t in_range = uint8_t((value >= min_key) & (value <= max_key));

@@ -27,9 +27,9 @@ ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
 		v.result.applicable = false;
 		return std::move(v.result);
 	}
-	if (v.result.relations.size() < 2) {
+	if (v.result.relations.size() < 3) {
 		v.result.applicable = false;
-		v.result.reason = "fewer than two base relations in join skeleton";
+		v.result.reason = "fewer than three base relations in join skeleton";
 		return std::move(v.result);
 	}
 	if (!v.has_outer) {

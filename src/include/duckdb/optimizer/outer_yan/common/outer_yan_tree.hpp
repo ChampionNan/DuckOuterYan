@@ -148,6 +148,11 @@ public:
 	//! dense, position-indexed mirror of the join post-order seen by
 	//! `LogicalOperatorVisitor::VisitOperator`.
 	vector<OuterYanAggPushdownDecision> agg_pushdown_decisions;
+	//! Non-owning pointer to the root LogicalOrder node in `source_plan`, set
+	//! by `BuildOT` when the plan is topped by LOGICAL_ORDER_BY. `OJTToLogicalPlan`
+	//! re-attaches it above the rebuilt plan so the query result ordering is
+	//! preserved through the roundtrip.
+	LogicalOperator *root_order_by = nullptr;
 
 private:
 	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can
