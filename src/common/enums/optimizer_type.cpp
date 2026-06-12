@@ -53,6 +53,7 @@ static const DefaultOptimizerType internal_optimizer_types[] = {
     {"outer_yan_dp", OptimizerType::OUTER_YAN_DP},
     {"outer_yan_post", OptimizerType::OUTER_YAN_POST},
     {"aggregate_pushdown_outer", OptimizerType::AGGREGATE_PUSHDOWN_OUTER},
+    {"outer_yan", OptimizerType::OUTER_YAN},
     {nullptr, OptimizerType::INVALID}};
 
 string OptimizerTypeToString(OptimizerType type) {

@@ -83,7 +83,7 @@ FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
 1	100	1000
 3	300	3000
 
-# 2-relation LEFT OUTER (rejected for too-few-relations).
+# 2-relation LEFT OUTER (now accepted by the gate; results must match on/off).
 statement ok
 SET disabled_optimizers TO ''
 

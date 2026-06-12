@@ -52,6 +52,7 @@
 #include "duckdb/planner/planner.hpp"
 
 #include "duckdb/optimizer/operator_binding_printer.hpp"
+#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
 
@@ -80,7 +81,7 @@ Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context),
 	rewriter.rules.push_back(make_uniq<PredicateFactoringRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<ListComprehensionRewriteRule>(rewriter));
 
-#ifdef DEBUG
+#ifndef NDEBUG
 	for (auto &rule : rewriter.rules) {
 		// root not defined in rule
 		D_ASSERT(rule->root);
@@ -251,8 +252,20 @@ void Optimizer::RunBuiltInOptimizers() {
 	// printer.Print(plan, context);  // Prints to stdout
 	bool outer_yan_active = false;
 	OuterYanTree outer_yan_tree;
-	RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
+	if (!OptimizerDisabled(OptimizerType::OUTER_YAN)) RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
 		outer_yan_active = outer_yan_tree.CheckApplicability(*plan);
+#ifndef NDEBUG
+		{
+			const auto &app = outer_yan_tree.Applicability();
+			if (app.applicable) {
+				Printer::Print("[OuterYan] applicable: " + to_string(app.relations.size()) +
+				               " relations, " + to_string(app.edges.size()) + " edges" +
+				               (app.has_root_aggregate ? ", has_root_agg" : ""));
+			} else if (!app.relations.empty()) {
+				Printer::Print("[OuterYan] not applicable: " + app.reason);
+			}
+		}
+#endif
 		if (outer_yan_active) {
 			OuterYanPre outer_yan_pre;
 			outer_yan_pre.Optimize(std::move(plan), outer_yan_tree);

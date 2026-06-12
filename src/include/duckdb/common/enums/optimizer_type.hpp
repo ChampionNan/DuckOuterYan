@@ -55,6 +55,7 @@ enum class OptimizerType : uint32_t {
 	OUTER_YAN_DP = 38,
 	OUTER_YAN_POST = 39,
 	AGGREGATE_PUSHDOWN_OUTER = 40,
+	OUTER_YAN = 41,
 };
 
 string OptimizerTypeToString(OptimizerType type);

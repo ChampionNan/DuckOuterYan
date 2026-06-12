@@ -166,14 +166,6 @@ FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
 ----
 logical_opt	<!REGEX>:.*SJ_PROBE.*
 
-# 2-relation LEFT OUTER (less than 3 relations? actually >=2; rejected for
-# different reason — pure-OUTER 2-relation has nothing to reorder).
-# Whatever the precise reason, the gate should not emit SJ ops.
-query II
-EXPLAIN SELECT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id
-----
-logical_opt	<!REGEX>:.*SJ_PROBE.*
-
 # Theta predicate ("equi-only" gate, applicability.cpp:160).
 query II
 EXPLAIN SELECT a.id, b.bx, c.cx

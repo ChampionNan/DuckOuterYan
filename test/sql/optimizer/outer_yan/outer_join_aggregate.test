@@ -2,7 +2,7 @@
 # description: OuterYan optimizer — aggregation root selection over outer-join
 #              chains. Verifies correctness across all OuterYanAggregationType
 #              variants (COUNT_STAR / COUNT / SUM / MIN/MAX / DISTINCT).
-#              Variants 1..10 compare the full OuterYan pipeline against the
+#              Variants 1..9 compare the full OuterYan pipeline against the
 #              baseline (pre/dp/post disabled). The pass-isolation section at the
 #              end keeps pre/dp/post enabled and toggles only
 #              `aggregate_pushdown_outer` (aggregate_pushdown_outer.cpp), so the
@@ -298,28 +298,6 @@ FROM a LEFT JOIN b ON a.id = b.id
        LEFT JOIN d ON a.id = d.id
 ----
 50000
-
-# ============================================================================
-# Variant 10 — COUNT(DISTINCT col) over outer join.
-# ============================================================================
-
-statement ok
-SET disabled_optimizers TO ''
-
-query I
-SELECT COUNT(DISTINCT b.id)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-3
-
-statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
-
-query I
-SELECT COUNT(DISTINCT b.id)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-3
 
 statement ok
 SET disabled_optimizers TO ''

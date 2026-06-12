@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
@@ -104,6 +105,9 @@ void OuterYanDP::Optimize(OuterYanTree &tree) {
 
 	RebuildOT(tree, full_set);
 	tree.BuildOJT();
+#ifdef DEBUG
+	Printer::Print("[OuterYanDP] result OJT:\n" + tree.OJT().PrintAsTree());
+#endif
 }
 
 // ============================================================================

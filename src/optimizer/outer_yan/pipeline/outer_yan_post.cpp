@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/execution/operator/join/physical_sj_build.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -20,6 +21,9 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 	// SemijoinInsertOnPlan. Aggregation-driven root anchoring is already
 	// enforced by OuterYanDP, so the OJT seen here is order-correct.
 	Resimplify(tree);
+#ifdef DEBUG
+	Printer::Print("[OuterYanPost] after Resimplify:\n" + tree.OJT().PrintAsTree());
+#endif
 
 	// Record the per-edge aggregate-pushdown gate while the OJT is still
 	// live. Must run before OJTToLogicalPlan because the marker reads

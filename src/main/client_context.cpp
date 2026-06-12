@@ -760,7 +760,7 @@ void ClientContext::PreprocessStatements(vector<unique_ptr<SQLStatement>> &state
 	preprocessor.Preprocess(*lock, statements, transaction_context_state);
 }
 
-unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query) {
+unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query, bool resolve_column_bindings) {
 	auto lock = LockContext();
 
 	auto statements = ParseStatementsInternal(*lock, query);
@@ -781,9 +781,11 @@ unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query) {
 			plan = optimizer.Optimize(std::move(plan));
 		}
 
-		ColumnBindingResolver resolver;
-		resolver.Verify(*plan);
-		resolver.VisitOperator(*plan);
+		if (resolve_column_bindings) {
+			ColumnBindingResolver resolver;
+			resolver.Verify(*plan);
+			resolver.VisitOperator(*plan);
+		}
 
 		plan->ResolveOperatorTypes();
 	});

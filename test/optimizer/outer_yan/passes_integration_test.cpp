@@ -44,7 +44,10 @@ unique_ptr<OuterYanTree> BuildIRFor(Connection &con, const string &sql) {
 	    "SET disabled_optimizers TO "
 	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
 	    "column_lifetime,statistics_propagation'"));
-	auto plan = con.ExtractPlan(sql);
+	// `resolve_column_bindings=false`: skip ExtractPlan's trailing
+	// ColumnBindingResolver so join conditions stay BoundColumnRefs (table_index
+	// intact). OuterYanPre runs before that pass in the real pipeline.
+	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
 	auto tree = make_uniq<OuterYanTree>();

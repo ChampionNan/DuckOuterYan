@@ -195,8 +195,13 @@ public:
 	//! Parse statements from a query
 	DUCKDB_API vector<unique_ptr<SQLStatement>> ParseStatements(const string &query);
 
-	//! Extract the logical plan of a query
-	DUCKDB_API unique_ptr<LogicalOperator> ExtractPlan(const string &query);
+	//! Extract the logical plan of a query. When `resolve_column_bindings` is
+	//! false the trailing ColumnBindingResolver pass is skipped, so expressions
+	//! stay BoundColumnRefExpressions (table_index intact) — the form a
+	//! mid-optimizer pass such as OuterYanPre observes, rather than positional
+	//! BoundReferenceExpressions.
+	DUCKDB_API unique_ptr<LogicalOperator> ExtractPlan(const string &query,
+	                                                   bool resolve_column_bindings = true);
 	DUCKDB_API void PreprocessStatements(vector<unique_ptr<SQLStatement>> &statements);
 
 	//! Runs a function with a valid transaction context, potentially starting a transaction if the context is in auto

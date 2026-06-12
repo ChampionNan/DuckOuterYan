@@ -1,10 +1,52 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
+
+#ifndef NDEBUG
+// ============================================================================
+// Debug helpers — OuterYanPre
+// ============================================================================
+
+static string OYRelName(const OuterYanTree &tree, RelationId rel_id) {
+	if (rel_id >= tree.ot_relations_by_id.size() || !tree.ot_relations_by_id[rel_id]) {
+		return "<R" + to_string(rel_id) + "?>";
+	}
+	const auto *base = FindBaseOp(tree.ot_relations_by_id[rel_id]->origin);
+	if (!base || base->type != LogicalOperatorType::LOGICAL_GET) {
+		return "R" + to_string(rel_id);
+	}
+	auto tbl = base->Cast<LogicalGet>().GetTable();
+	return tbl ? tbl->name : ("R" + to_string(rel_id));
+}
+
+static string PrintSemiPairs(const OuterYanTree &tree) {
+	std::ostringstream os;
+	auto lbl = [&](RelationId r) { return OYRelName(tree, r); };
+	os << "  bottom_up [parent := parent ⋉ child] (" << tree.bottom_up_pairs.size() << "):\n";
+	for (const auto &p : tree.bottom_up_pairs) {
+		os << "    build=" << lbl(p.build) << "  probe=" << lbl(p.probe);
+		for (const auto &k : p.keys) {
+			os << "  [" << k.build_binding.ToString() << " ⋉ " << k.probe_binding.ToString() << "]";
+		}
+		os << "\n";
+	}
+	os << "  top_down  [child  := child  ⋉ parent] (" << tree.top_down_pairs.size() << "):\n";
+	for (const auto &p : tree.top_down_pairs) {
+		os << "    build=" << lbl(p.build) << "  probe=" << lbl(p.probe);
+		for (const auto &k : p.keys) {
+			os << "  [" << k.build_binding.ToString() << " ⋉ " << k.probe_binding.ToString() << "]";
+		}
+		os << "\n";
+	}
+	return os.str();
+}
+#endif // DEBUG
 
 void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree) {
 	// Applicability is the caller's responsibility (see `optimizer.cpp`: the
@@ -30,13 +72,29 @@ void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree)
 	//   6. AllPairsSatisfy      -- post-condition: every (P, D) pair in an OK
 	//                              cell.
 	tree.BuildOT(std::move(plan));
+#ifndef NDEBUG
+	Printer::Print("[OuterYanPre] after BuildOT:\n" + tree.ConstructOJT()->PrintAsTree());
+#endif
+
 	Simplify(tree);
+#ifndef NDEBUG
+	Printer::Print("[OuterYanPre] after Simplify:\n" + tree.ConstructOJT()->PrintAsTree());
+#endif
+
 	{
 		auto post_simp_ojt = tree.ConstructOJT();
 		BottomUpPass(tree, post_simp_ojt->Root());
 		TopDownPass(tree, post_simp_ojt->Root());
 	}
+#ifndef NDEBUG
+	Printer::Print("[OuterYanPre] semi-join pairs:\n" + PrintSemiPairs(tree));
+#endif
+
 	Desimplify(tree);
+#ifndef NDEBUG
+	Printer::Print("[OuterYanPre] after Desimplify:\n" + tree.ConstructOJT()->PrintAsTree());
+#endif
+
 	if (!desimplification.AllPairsSatisfy(tree)) {
 		throw InternalException(
 		    "OuterYanPre::Optimize: desimplification did not reach a fully "

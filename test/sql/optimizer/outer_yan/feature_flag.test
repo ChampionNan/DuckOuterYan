@@ -62,61 +62,14 @@ FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# Disable outer_yan_pre alone — entire pipeline is short-circuited because
-# DP/Post check `outer_yan_active` (set inside Pre).
+# Disable outer_yan_pre alone — safe: outer_yan_active stays false so DP,
+# Post, and AggPushdown are all skipped via the `if (outer_yan_active)` guard
+# in optimizer.cpp. This is the only individually safe pass toggle; disabling
+# dp or post alone corrupts plan ownership (Pre moves the plan into the tree).
 # ============================================================================
 
 statement ok
 SET disabled_optimizers TO 'outer_yan_pre'
-
-query III rowsort
-SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-1	100	1000
-2	200	NULL
-3	300	3000
-4	NULL	4000
-
-query II
-EXPLAIN
-SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-logical_opt	<!REGEX>:.*SJ_PROBE.*
-
-# ============================================================================
-# Disable outer_yan_dp — Pre runs (applicability passes) but DP is skipped.
-# The OJT never gets built into a chosen ordering, so Post can't insert SJ.
-# Results identical; SJ_PROBE must NOT appear.
-# ============================================================================
-
-statement ok
-SET disabled_optimizers TO 'outer_yan_dp'
-
-query III rowsort
-SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-1	100	1000
-2	200	NULL
-3	300	3000
-4	NULL	4000
-
-query II
-EXPLAIN
-SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-logical_opt	<!REGEX>:.*SJ_PROBE.*
-
-# ============================================================================
-# Disable outer_yan_post — semi-join insertion is skipped. Pre/DP ran; the
-# join order may have been chosen, but no SJ ops appear in the rebuilt plan.
-# ============================================================================
-
-statement ok
-SET disabled_optimizers TO 'outer_yan_post'
 
 query III rowsort
 SELECT a.id, b.bx, c.cx

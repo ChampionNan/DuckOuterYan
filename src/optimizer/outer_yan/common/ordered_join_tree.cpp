@@ -33,7 +33,7 @@ string OrderedJoinTree::RelationLabel(const OJTNode &node) {
 		auto &get = base->Cast<LogicalGet>();
 		auto table_entry = get.GetTable();
 		string name = table_entry ? table_entry->name : "<no_table>";
-		return StringUtil::Format("%s, table_index=%llu", name.c_str(), get.table_index.index);
+		return StringUtil::Format("%s [table_index=%llu]", name.c_str(), get.table_index.index);
 	}
 	return EnumUtil::ToString(base->type);
 }
@@ -65,7 +65,7 @@ void OrderedJoinTree::PrintNodeRecursive(const OJTNode &node, std::ostringstream
 		os << (is_last_child ? "└──" : "├──");
 		os << "[order=" << incoming_order << ", " << EnumUtil::ToString(incoming_kind) << "]── ";
 	}
-	os << "R" << node.relation_id << " [" << RelationLabel(node) << "]";
+	os << RelationLabel(node);
 	if (!node.filters.empty()) {
 		os << " filters=" << node.filters.size();
 	}
@@ -103,11 +103,24 @@ string OrderedJoinTree::Print() const {
 	std::sort(edges.begin(), edges.end(),
 	          [](const OJTEdge *a, const OJTEdge *b) { return a->order < b->order; });
 
+	// Short alias map for edge reference labels
+	unordered_map<idx_t, string> alias;
+	for (auto *n : nodes) {
+		const auto *base = FindBaseOp(n->base_op);
+		if (base && base->type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = base->Cast<LogicalGet>();
+			auto te = get.GetTable();
+			alias[n->relation_id] = te ? te->name : "<no_table>";
+		} else {
+			alias[n->relation_id] = StringUtil::Format("R%llu", n->relation_id);
+		}
+	}
+
 	os << "OJT: " << nodes.size() << " relations, " << edges.size() << " joins\n";
-	os << "root: R" << r.relation_id << "\n";
+	os << "root: " << alias[r.relation_id] << "\n";
 	os << "relations:\n";
 	for (auto *n : nodes) {
-		os << "  R" << n->relation_id << " = " << RelationLabel(*n);
+		os << "  " << RelationLabel(*n);
 		if (!n->filters.empty()) {
 			os << " (filters=" << n->filters.size() << ")";
 		}
@@ -115,8 +128,8 @@ string OrderedJoinTree::Print() const {
 	}
 	os << "edges (parent --KIND/order--> child):\n";
 	for (auto *e : edges) {
-		os << "  R" << e->parent_relation_id << " --" << EnumUtil::ToString(e->kind) << "/" << e->order
-		   << "--> R" << e->child->relation_id << "\n";
+		os << "  " << alias[e->parent_relation_id] << " --" << EnumUtil::ToString(e->kind) << "/" << e->order
+		   << "--> " << alias[e->child->relation_id] << "\n";
 	}
 	return os.str();
 }

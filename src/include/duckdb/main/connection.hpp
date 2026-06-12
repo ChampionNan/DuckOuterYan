@@ -136,8 +136,11 @@ public:
 
 	//! Extract a set of SQL statements from a specific query
 	DUCKDB_API vector<unique_ptr<SQLStatement>> ExtractStatements(const string &query);
-	//! Extract the logical plan that corresponds to a query
-	DUCKDB_API unique_ptr<LogicalOperator> ExtractPlan(const string &query);
+	//! Extract the logical plan that corresponds to a query. Pass
+	//! `resolve_column_bindings=false` to keep BoundColumnRefExpressions instead
+	//! of positional BoundReferenceExpressions (see ClientContext::ExtractPlan).
+	DUCKDB_API unique_ptr<LogicalOperator> ExtractPlan(const string &query,
+	                                                   bool resolve_column_bindings = true);
 
 	//! Appends a ColumnDataCollection to the described table.
 	DUCKDB_API void Append(TableDescription &description, ColumnDataCollection &collection);

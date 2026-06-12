@@ -49,40 +49,71 @@ GEN=ninja make debug
 
 ### C++ unit tests only
 
-Run the full OuterYan unit suite:
+The `unittest` binary selects C++ tests by Catch2 tag. Each `.cpp` file has its
+own second-level tag; the tag is the second string argument to every `TEST_CASE`.
+
+Run the full OuterYan C++ suite:
 
 ```bash
 build/debug/test/unittest "[outer_yan]"
 ```
 
-Run a single sub-suite by tag:
+Run one file at a time:
 
 ```bash
-build/debug/test/unittest "[outer_yan][applicability]"
-build/debug/test/unittest "[outer_yan][hash_filter]"
-build/debug/test/unittest "[outer_yan][key_bitmap]"
-build/debug/test/unittest "[outer_yan][semi_join_filter]"
-build/debug/test/unittest "[outer_yan][tree_conversions]"
-build/debug/test/unittest "[outer_yan][passes]"
+build/debug/test/unittest "[outer_yan][applicability]"    # applicability_test.cpp
+build/debug/test/unittest "[outer_yan][hash_filter]"      # hash_filter_test.cpp
+build/debug/test/unittest "[outer_yan][key_bitmap]"       # key_bitmap_test.cpp
+build/debug/test/unittest "[outer_yan][semi_join_filter]" # semi_join_filter_test.cpp
+build/debug/test/unittest "[outer_yan][tree_conversions]" # tree_conversions_roundtrip.cpp
+build/debug/test/unittest "[outer_yan][passes]"           # passes_integration_test.cpp
+```
+
+Run one specific test case (exact `TEST_CASE` name string):
+
+```bash
+build/debug/test/unittest "outer_yan applicability: rejects theta predicate"
+```
+
+List all case names in a sub-suite:
+
+```bash
+build/debug/test/unittest --list-tests "[outer_yan][applicability]"
 ```
 
 ### SQL end-to-end tests
 
+`sqllogictest` is **not** a separate binary — all SQL tests run through `unittest`.
+Pass the file path directly as the selector.
+
+Run all SQL + C++ tests in the group:
+
 ```bash
-build/debug/test/unittest "[outer_yan]"         # covers sql group=outer_yan
+build/debug/test/unittest "[outer_yan]"
 ```
 
-Or via the sqllogictest runner directly:
+Run one SQL file at a time:
 
 ```bash
-build/debug/test/sqllogictest test/sql/optimizer/outer_yan/*.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/acyclic_query.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/bitmap_budget.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/fallback.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/feature_flag.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/outer_join_aggregate.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/outer_join_chain.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/semijoin_passes.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpch_outer.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpcds_outer.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpch_semi_join_comparison.test
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpcds_semi_join_comparison.test
 ```
 
 Slow tests (require TPC-H / TPC-DS extensions):
 
 ```bash
-build/debug/test/sqllogictest test/sql/optimizer/outer_yan/tpch_outer.test_slow
-build/debug/test/sqllogictest test/sql/optimizer/outer_yan/tpcds_outer.test_slow
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpch_outer.test_slow
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpcds_outer.test_slow
+build/debug/test/unittest test/sql/optimizer/outer_yan/tpcds_semi_join_comparison.test_slow
 ```
 
 ### With sanitizers
@@ -99,14 +130,10 @@ PRAGMA enable_verification;
 PRAGMA verify_parallelism;
 PRAGMA explain_output='optimized_only';
 
--- Isolate the whole OuterYan pipeline:
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';
-
--- Isolate individual passes:
-SET disabled_optimizers TO 'outer_yan_pre';
-SET disabled_optimizers TO 'outer_yan_dp';
-SET disabled_optimizers TO 'outer_yan_post';
-SET disabled_optimizers TO 'aggregate_pushdown_outer';
+-- Safe disable options (dp / post alone break plan ownership; do not use):
+SET disabled_optimizers TO 'outer_yan_pre';                        -- short-circuits whole pipeline
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';  -- explicit all-off
+SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- independent; always safe
 
 -- Bitmap budget control:
 SET VARIABLE outer_yan_bitmap_max_bytes = 0;          -- force HashFilter
@@ -126,7 +153,6 @@ Tests `OuterYanApplicability::Check` (white-box) and
 |---|---|
 | rejects pure-INNER 2-relation join | Pure-INNER with no outer → `applicable = false` |
 | rejects pure-INNER 3-relation chain | Three-way inner chain → `applicable = false` |
-| rejects 2-relation LEFT OUTER (too few rels) | Fewer than 3 relations → `applicable = false` |
 | accepts 3-relation LEFT-LEFT chain | Canonical accepted shape → `applicable = true`, 3 relations, ≥2 edges |
 | accepts mix of INNER + LEFT | One outer is sufficient → `applicable = true` |
 | accepts LEFT/RIGHT mix | Mixed outer direction → `applicable = true` |
@@ -314,7 +340,6 @@ accepted queries with OuterYan enabled vs disabled.
 
 **Rejected shapes** (no `SJ_PROBE`):
 - Pure-INNER 2-relation and 3-relation chains
-- 2-relation LEFT OUTER
 - Theta predicate (`<`)
 - Expression on join key (`a.id + 1 = b.id`)
 - `IS NOT DISTINCT FROM` (NULL-tolerant equi)
@@ -342,19 +367,23 @@ accepted queries with OuterYan enabled vs disabled.
 Each block runs the same query twice: OuterYan enabled, then disabled.
 Identical result sets prove fallback is semantics-preserving.
 
-Covers: pure-INNER 2-relation, pure-INNER 3-relation, 2-relation LEFT,
+Covers: pure-INNER 2-relation, pure-INNER 3-relation,
 theta predicate, expression on key, `IS NOT DISTINCT FROM`, `EXISTS`,
 `NOT EXISTS`, `UNION ALL`, window function, cyclic join graph, cross product,
 correlated subquery.
 
-### `feature_flag.test` — Individual pass toggling
+### `feature_flag.test` — Safe pass disable combinations
+
+`outer_yan_pre` is the only individually safe toggle: disabling it keeps
+`outer_yan_active = false`, so DP / Post / AggPushdown are all skipped by
+the `if (outer_yan_active)` guard in `optimizer.cpp`. Disabling `dp` or
+`post` alone corrupts plan ownership because Pre has already moved the plan
+into the tree.
 
 | Scenario | Expected behavior |
 |---|---|
 | All passes enabled | `SJ_PROBE` in EXPLAIN |
-| `outer_yan_pre` disabled | Entire pipeline short-circuited; no `SJ_PROBE` |
-| `outer_yan_dp` disabled | Pre runs; DP skipped; no `SJ_PROBE` |
-| `outer_yan_post` disabled | Pre+DP run; no SJ operators inserted |
+| `outer_yan_pre` disabled | `outer_yan_active` stays false; entire pipeline short-circuited; no `SJ_PROBE` |
 | All three disabled | Full revert to baseline JoinOrderOptimizer |
 | Re-enable after disable | `SJ_PROBE` reappears; toggle is reversible |
 | Pure-INNER query under `outer_yan_pre` disabled | Same baseline; no interference |
@@ -399,7 +428,6 @@ keeps pre/dp/post enabled and toggles only `aggregate_pushdown_outer`.
 | 7 | `COUNT(*)` on 4-way chain |
 | 8 | Aggregation with mixed LEFT/RIGHT/FULL |
 | 9 | `SUM(d.dx)` from deepest relation in 4-way chain |
-| 10 | `COUNT(DISTINCT b.id)` |
 | Pass-isolation | Each of COUNT_STAR, SUM, MIN/MAX, plain SUM, DISTINCT toggled under `aggregate_pushdown_outer` only |
 
 ### `semijoin_passes.test` — SJ_BUILD / SJ_PROBE presence per join type

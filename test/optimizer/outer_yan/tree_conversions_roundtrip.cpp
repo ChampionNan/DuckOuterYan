@@ -52,7 +52,12 @@ void AssertRoundtripMatches(Connection &con, const string &sql) {
 	    "SET disabled_optimizers TO "
 	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
 	    "column_lifetime,statistics_propagation'"));
-	auto plan = con.ExtractPlan(sql);
+	// `resolve_column_bindings=false`: ExtractPlan otherwise appends a
+	// ColumnBindingResolver pass (after the optimizer) that rewrites join
+	// conditions into positional BoundReferenceExpressions, which
+	// LogicalPlanToOT cannot map to base relations. OuterYanPre runs *inside*
+	// the optimizer, before that pass, so this faithfully reproduces its input.
+	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
 
@@ -294,7 +299,7 @@ TEST_CASE("outer_yan tree_conversions: residual filter via projection (UNSUPPORT
 	                   "      FROM a INNER JOIN b ON a.id = b.id) AS t "
 	                   "WHERE t.b_total > 150 "
 	                   "ORDER BY t.id";
-	auto plan = con.ExtractPlan(sql);
+	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
 	REQUIRE(plan);
 	OuterYanTree tree;
 	REQUIRE_THROWS_AS(LogicalPlanToOT(std::move(plan), tree), NotImplementedException);

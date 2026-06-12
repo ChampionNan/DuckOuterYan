@@ -21,15 +21,16 @@ void OuterYanApplicability::CollectColumnTables(const Expression &expr,
 ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
 	OuterYanApplicability v;
 	auto &entry = v.SkeletonRoot(plan);
+
+	if (entry.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		v.result.applicable = false;
+		v.result.reason = "not a SELECT join query";
+		return std::move(v.result);
+	}
 	v.VisitOperator(entry);
 
 	if (v.rejected) {
 		v.result.applicable = false;
-		return std::move(v.result);
-	}
-	if (v.result.relations.size() < 3) {
-		v.result.applicable = false;
-		v.result.reason = "fewer than three base relations in join skeleton";
 		return std::move(v.result);
 	}
 	if (!v.has_outer) {
@@ -42,32 +43,21 @@ ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
 }
 
 LogicalOperator &OuterYanApplicability::SkeletonRoot(LogicalOperator &plan) {
-	LogicalOperator *cur = &plan;
-	auto skip_pf = [&]() {
-		while (cur->type == LogicalOperatorType::LOGICAL_PROJECTION ||
-		       cur->type == LogicalOperatorType::LOGICAL_FILTER) {
-			if (cur->children.empty()) {
-				return;
-			}
+	auto *cur = &plan;
+	auto peel = [&]() {
+		while (!cur->children.empty() &&
+		       (cur->type == LogicalOperatorType::LOGICAL_PROJECTION ||
+		        cur->type == LogicalOperatorType::LOGICAL_FILTER)) {
 			cur = cur->children[0].get();
 		}
 	};
-	skip_pf();
-	if (cur->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+	peel();
+	if ((cur->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY ||
+	     cur->type == LogicalOperatorType::LOGICAL_DISTINCT) &&
+	    !cur->children.empty()) {
 		result.has_root_aggregate = true;
-		if (!cur->children.empty()) {
-			cur = cur->children[0].get();
-		}
-		skip_pf();
-	} else if (cur->type == LogicalOperatorType::LOGICAL_DISTINCT) {
-		// SELECT DISTINCT root — treated as a root-agg shape for the
-		// pushdown classifier (handled by BuildThroughDistinct in
-		// BuildOT). Strip the LogicalDistinct and continue peeling.
-		result.has_root_aggregate = true;
-		if (!cur->children.empty()) {
-			cur = cur->children[0].get();
-		}
-		skip_pf();
+		cur = cur->children[0].get();
+		peel();
 	}
 	return *cur;
 }
