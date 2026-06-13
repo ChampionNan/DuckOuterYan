@@ -367,3 +367,6 @@ tools/pythonpkg/duckdb_build/
 *_db*
 lsqb*
 *_data
+
+# project-local agent instructions (kept untracked)
+CLAUDE.md

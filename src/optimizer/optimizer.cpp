@@ -252,6 +252,18 @@ void Optimizer::RunBuiltInOptimizers() {
 	// printer.Print(plan, context);  // Prints to stdout
 	bool outer_yan_active = false;
 	OuterYanTree outer_yan_tree;
+	// EXPLAIN wraps the statement in a LOGICAL_EXPLAIN node whose child is the
+	// real plan. OuterYan must run on that inner plan so the printed plan
+	// reflects what executes. It rebuilds the plan it is given and, between its
+	// Pre and Post passes, transiently leaves `plan` empty — RunOptimizer's
+	// inter-pass Verify tolerates a null `plan` but would dereference a
+	// LOGICAL_EXPLAIN holding a null child. So detach the wrapper, run OuterYan
+	// on the inner plan exactly as for a normal query, and re-attach it below.
+	unique_ptr<LogicalOperator> explain_wrapper;
+	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && plan->children.size() == 1) {
+		explain_wrapper = std::move(plan);
+		plan = std::move(explain_wrapper->children[0]);
+	}
 	if (!OptimizerDisabled(OptimizerType::OUTER_YAN)) RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
 		outer_yan_active = outer_yan_tree.CheckApplicability(*plan);
 #ifndef NDEBUG
@@ -300,6 +312,11 @@ void Optimizer::RunBuiltInOptimizers() {
 		});
 	}
 
+	// Re-attach the EXPLAIN wrapper around the now-optimized inner plan.
+	if (explain_wrapper) {
+		explain_wrapper->children[0] = std::move(plan);
+		plan = std::move(explain_wrapper);
+	}
 
 	RunOptimizer(OptimizerType::JOIN_ELIMINATION, [&]() {
 		JoinElimination join_elimination;

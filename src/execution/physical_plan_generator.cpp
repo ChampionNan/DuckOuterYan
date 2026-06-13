@@ -13,6 +13,9 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 #include "duckdb/planner/operator/logical_sj_probe.hpp"
+#include "duckdb/execution/operator/join/physical_sj_build.hpp"
+#include "duckdb/execution/operator/join/physical_sj_probe.hpp"
+#include "duckdb/common/exception.hpp"
 
 namespace duckdb {
 
@@ -24,8 +27,35 @@ PhysicalPlanGenerator::~PhysicalPlanGenerator() {
 
 unique_ptr<PhysicalPlan> PhysicalPlanGenerator::Plan(unique_ptr<LogicalOperator> op) {
 	auto &plan = ResolveAndPlan(std::move(op));
+	// All OuterYan semi-join builds are now planned and registered by filter id;
+	// re-derive each probe's build dependency (related_sj_build) from those ids.
+	LinkSemiJoinProbes();
 	plan.Verify();
 	return std::move(physical_plan);
+}
+
+shared_ptr<SemiJoinFilter> &PhysicalPlanGenerator::GetOrCreateSJFilter(idx_t id) {
+	auto &slot = sj_filter_by_id[id];
+	if (!slot) {
+		slot = make_shared_ptr<SemiJoinFilter>();
+	}
+	return slot;
+}
+
+void PhysicalPlanGenerator::LinkSemiJoinProbes() {
+	for (auto *probe : sj_probes_to_link) {
+		probe->related_sj_build.clear();
+		probe->related_sj_build.reserve(probe->filter_ids.size());
+		for (auto id : probe->filter_ids) {
+			auto entry = sj_build_by_id.find(id);
+			if (entry == sj_build_by_id.end()) {
+				throw InternalException("PhysicalSJProbe: no PhysicalSJBuild registered for filter id %llu "
+				                        "(build operator missing from the plan)",
+				                        static_cast<unsigned long long>(id));
+			}
+			probe->related_sj_build.push_back(entry->second);
+		}
+	}
 }
 
 PhysicalOperator &PhysicalPlanGenerator::ResolveAndPlan(unique_ptr<LogicalOperator> op) {

@@ -17,10 +17,13 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
 
 namespace duckdb {
 class ClientContext;
 class ColumnDataCollection;
+class PhysicalSJBuild;
+class PhysicalSJProbe;
 
 class PhysicalPlan {
 public:
@@ -174,8 +177,24 @@ private:
 	ClientContext &context;
 	unique_ptr<PhysicalPlan> physical_plan;
 
+	//! OuterYan semi-join filter registry (per physical plan). Build and probe
+	//! resolve the SAME runtime SemiJoinFilter by stable filter id, so the
+	//! build↔probe association survives plan Copy/Serialize/Deserialize (e.g.
+	//! statement verification) where raw pointers / shared_ptr identity do not.
+	unordered_map<idx_t, shared_ptr<SemiJoinFilter>> sj_filter_by_id;
+	//! id → the PhysicalSJBuild that produces that filter; populated as builds
+	//! are planned, consumed by LinkSemiJoinProbes().
+	unordered_map<idx_t, PhysicalSJBuild *> sj_build_by_id;
+	//! Probes awaiting related_sj_build re-derivation (builds may be planned
+	//! after the probe in tree order, so linking happens once at the end).
+	vector<PhysicalSJProbe *> sj_probes_to_link;
+
 private:
 	PhysicalOperator &ResolveAndPlan(unique_ptr<LogicalOperator> logical);
+	//! Resolve (creating on first use) the shared runtime filter for `id`.
+	shared_ptr<SemiJoinFilter> &GetOrCreateSJFilter(idx_t id);
+	//! Re-derive related_sj_build for every registered probe from sj_build_by_id.
+	void LinkSemiJoinProbes();
 	unique_ptr<PhysicalPlan> PlanInternal(LogicalOperator &logical);
 	bool PreserveInsertionOrder(PhysicalOperator &plan);
 	bool UseBatchIndex(PhysicalOperator &plan);

@@ -136,7 +136,17 @@ OperatorResultType PhysicalSJProbe::ExecuteInternal(ExecutionContext &context, D
 			HashFilterUseKernel::filter(chunk_in, probe_col_ids, filter->hash(), pass_sel, pass_count);
 			break;
 		case SemiJoinFilter::Kind::UNDECIDED:
-			throw InternalException("PhysicalSJProbe: SJBuild::Finalize did not run before probe");
+			// Hard invariant: by the time any probe row is processed, the paired
+			// SJBuild must have finalized this filter. The probe pipeline depends
+			// on the build pipeline's Finalize (PhysicalSJProbe::BuildPipelines ->
+			// related_sj_build[i]->BuildPipelinesFromRelated -> AddDependency), and
+			// the shared filter identity survives plan Copy/Serialize/Deserialize
+			// via the id registry, so an UNDECIDED kind here means the wiring is
+			// broken. We refuse to silently skip the reduction — the algorithm's
+			// correctness depends on the semi-join filter actually being applied.
+			throw InternalException(
+			    "PhysicalSJProbe: filter still UNDECIDED at probe time — paired SJBuild Finalize "
+			    "did not run before the probe (build/probe wiring lost across plan copy?)");
 		}
 
 		if (pass_count == 0) {

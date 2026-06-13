@@ -103,7 +103,7 @@ logical_opt	<REGEX>:.*SJ_PROBE.*
 # ============================================================================
 
 statement ok
-PRAGMA explain_output='default'
+PRAGMA explain_output='all'
 
 statement ok
 SET disabled_optimizers TO ''

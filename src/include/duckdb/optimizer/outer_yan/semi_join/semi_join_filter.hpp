@@ -21,15 +21,19 @@ class HashFilter;
 // SemiJoinFilter — tagged-union carrier between SJBuild and SJProbe.
 // =============================================================================
 //
-// Plan 3 contract. Both `LogicalSJBuild::sj_to_create` and
-// `LogicalSJProbe::sj_to_use` hold `vector<shared_ptr<SemiJoinFilter>>`
-// pointing at the same instances. The shared_ptr IS the binding (RPT
-// pattern); no registry / handle id.
+// Plan 3 contract. At the logical level both `LogicalSJBuild::sj_to_create`
+// and `LogicalSJProbe::sj_to_use` hold `vector<shared_ptr<SemiJoinFilter>>`
+// pointing at the same instances. That shared_ptr identity does NOT survive
+// plan Copy/Serialize/Deserialize (statement verification, plan caching),
+// so the durable build↔probe binding is a stable integer `filter_id` carried
+// on the logical ops; at physical planning PhysicalPlanGenerator resolves one
+// runtime SemiJoinFilter per id (GetOrCreateSJFilter) and re-derives the
+// probe's related-build dependency from those ids (LinkSemiJoinProbes).
 //
-// `kind` is set ONCE by `PhysicalSJBuild::Finalize` (either bitmap if the
-// build keys' range fits the PRAGMA outer_yan_bitmap_max_bytes budget, or
-// hash filter as fallback). The probe path branches once on `kind`
-// outside the per-tuple loop — no per-row branch.
+// `kind` is set ONCE by `PhysicalSJBuild::Finalize`. SemijoinInsertion pins
+// every filter to HASH (ForceHash) so the kind is type-stable and the probe
+// never has to handle a bitmap/undecided case — the probe path branches once
+// on `kind` outside the per-tuple loop, and treats UNDECIDED as a hard error.
 //
 // Cross-thread visibility of the kind / payload writes is handled by the
 // DuckDB pipeline scheduler: the probe pipeline depends on the build

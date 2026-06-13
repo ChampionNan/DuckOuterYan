@@ -6,6 +6,7 @@
 #include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 #include <algorithm>
@@ -42,10 +43,17 @@ unique_ptr<OuterYanTree> BuildIRFor(Connection &con, const string &sql) {
 	// Disable OuterYan + join_order + column_lifetime so ExtractPlan returns
 	// the plan in the same state OuterYanPre would receive it (no SJ ops, no
 	// column-lifetime compression projections rewriting table_index values).
+	// Also disable filter_pushdown + outer_join_simplification: both natively
+	// rewrite a null-rejected LEFT join to INNER before OuterYan runs, which
+	// would hide OuterYan's own Simplify pass (the (a,b) edge would already read
+	// INNER with no record it was ever LEFT). Keeping them off lets the LEFT join
+	// and its residual filter reach BuildOT intact, so Simplify below is what
+	// lowers the kind while preserving `original_kind`.
 	REQUIRE_NO_FAIL(con.Query(
 	    "SET disabled_optimizers TO "
 	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
-	    "column_lifetime,statistics_propagation'"));
+	    "column_lifetime,statistics_propagation,filter_pushdown,"
+	    "outer_join_simplification'"));
 	// `resolve_column_bindings=false`: skip ExtractPlan's trailing
 	// ColumnBindingResolver so join conditions stay BoundColumnRefs (table_index
 	// intact). OuterYanPre runs before that pass in the real pipeline.
@@ -57,6 +65,11 @@ unique_ptr<OuterYanTree> BuildIRFor(Connection &con, const string &sql) {
 		return tree;
 	}
 	tree->BuildOT(std::move(plan));
+	// Mirror production OuterYanPre order (BuildOT -> Simplify -> BuildOJT):
+	// Simplify lowers outer joins to INNER where a recorded null-rejecting
+	// filter permits, mutating only `OTJoin::join_kind` and leaving
+	// `original_join_kind` so BuildOJT can surface the kind/original_kind split.
+	Simplification().Apply(*tree);
 	tree->BuildOJT();
 	return tree;
 }

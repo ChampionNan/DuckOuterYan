@@ -52,10 +52,22 @@ PhysicalSJBuild *PhysicalPlanGenerator::CreatePlanFromRelated(LogicalSJBuild &op
 		return op.physical;
 	}
 	auto &child_plan = CreatePlan(*op.children[0]);
-	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(op.sj_to_create),
+	// Resolve each filter from the per-plan id registry so the paired probe gets
+	// the SAME runtime SemiJoinFilter (the logical sj_to_create shared_ptrs are
+	// not trustworthy after a plan Copy/Serialize/Deserialize).
+	vector<shared_ptr<SemiJoinFilter>> filters;
+	filters.reserve(op.filter_ids.size());
+	for (auto id : op.filter_ids) {
+		filters.push_back(GetOrCreateSJFilter(id));
+	}
+	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(filters),
 	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
+	auto &typed = sj_build.Cast<PhysicalSJBuild>();
 	sj_build.children.push_back(child_plan);
-	op.physical = static_cast<PhysicalSJBuild *>(&sj_build);
+	for (auto id : op.filter_ids) {
+		sj_build_by_id[id] = &typed;
+	}
+	op.physical = &typed;
 	return op.physical;
 }
 
@@ -70,10 +82,19 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalSJBuild &op) {
 		return *op.physical;
 	}
 	auto &child_plan = CreatePlan(*op.children[0]);
-	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(op.sj_to_create),
+	vector<shared_ptr<SemiJoinFilter>> filters;
+	filters.reserve(op.filter_ids.size());
+	for (auto id : op.filter_ids) {
+		filters.push_back(GetOrCreateSJFilter(id));
+	}
+	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(filters),
 	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
-	op.physical = static_cast<PhysicalSJBuild *>(&sj_build);
+	auto &typed = sj_build.Cast<PhysicalSJBuild>();
+	op.physical = &typed;
 	sj_build.children.push_back(child_plan);
+	for (auto id : op.filter_ids) {
+		sj_build_by_id[id] = &typed;
+	}
 	return sj_build;
 }
 

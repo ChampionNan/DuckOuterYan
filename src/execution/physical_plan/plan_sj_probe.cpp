@@ -46,24 +46,25 @@ namespace duckdb {
 PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalSJProbe &op) {
 	auto &child_plan = CreatePlan(*op.children[0]);
 
-	// Build the related_sj_build pointer list BEFORE constructing the
-	// PhysicalSJProbe (it's a constructor argument-adjacent field). Each
-	// CreatePlanFromRelated call may construct the related PhysicalSJBuild
-	// on first encounter; subsequent encounters reuse the cached pointer.
-	vector<PhysicalSJBuild *> related;
-	related.reserve(op.related_sj_build.size());
-	for (auto *logical_build : op.related_sj_build) {
-		if (!logical_build) {
-			throw InternalException("plan_sj_probe: null related_sj_build entry");
-		}
-		related.emplace_back(CreatePlanFromRelated(*logical_build));
+	// Resolve each probed filter from the per-plan id registry, so it is the SAME
+	// runtime SemiJoinFilter the paired build finalizes. We deliberately do NOT
+	// trust op.sj_to_use / op.related_sj_build here: plan Copy/Serialize/-
+	// Deserialize (statement verification, plan caching) hand the probe fresh,
+	// unshared filters and an empty related list. related_sj_build is re-derived
+	// from filter_ids once the whole plan is built (LinkSemiJoinProbes), because
+	// the build may be planned after this probe in tree order.
+	vector<shared_ptr<SemiJoinFilter>> filters;
+	filters.reserve(op.filter_ids.size());
+	for (auto id : op.filter_ids) {
+		filters.push_back(GetOrCreateSJFilter(id));
 	}
 
-	auto &sj_probe = Make<PhysicalSJProbe>(child_plan.GetTypes(), std::move(op.sj_to_use),
+	auto &sj_probe = Make<PhysicalSJProbe>(child_plan.GetTypes(), std::move(filters),
 	                                       std::move(op.probe_col_ids_per_filter), op.estimated_cardinality);
 	auto &probe_typed = sj_probe.Cast<PhysicalSJProbe>();
-	probe_typed.related_sj_build = std::move(related);
+	probe_typed.filter_ids = op.filter_ids;
 	sj_probe.children.push_back(child_plan);
+	sj_probes_to_link.push_back(&probe_typed);
 	return sj_probe;
 }
 

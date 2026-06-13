@@ -45,9 +45,16 @@ public:
 	//! upstream in SemijoinInsertion::InsertAtBase; moved onto this op by plan-gen.
 	vector<vector<idx_t>> probe_col_ids_per_filter;
 
-	//! Back-pointers to upstream PhysicalSJBuild operators (one per filter).
-	//! Set during physical plan generation from LogicalSJProbe::related_sj_build.
+	//! Back-pointers to upstream PhysicalSJBuild operators (one per distinct
+	//! build). Re-derived after the whole plan is built by matching `filter_ids`
+	//! against the generator's id→build registry, so the dependency survives plan
+	//! Copy/Serialize/Deserialize (the logical raw pointers do not).
 	vector<PhysicalSJBuild *> related_sj_build;
+
+	//! Stable filter ids (index-aligned with `sj_to_use`), copied from the
+	//! LogicalSJProbe. Used only during plan generation to resolve shared filters
+	//! and the related builds; not consulted at execution.
+	vector<idx_t> filter_ids;
 
 public:
 	// Operator interface

@@ -15,6 +15,9 @@ void LogicalSJProbe::Serialize(Serializer &serializer) const {
 	LogicalOperator::Serialize(serializer);
 	serializer.WriteProperty(200, "num_filters", (idx_t)sj_to_use.size());
 	serializer.WriteProperty(201, "probe_col_ids_per_filter", probe_col_ids_per_filter);
+	// Stable filter ids re-establish build↔probe filter sharing + the build
+	// dependency after the roundtrip (related_sj_build pointers do not survive).
+	serializer.WriteProperty(202, "filter_ids", filter_ids);
 }
 
 unique_ptr<LogicalOperator> LogicalSJProbe::Copy(ClientContext &context) const {
@@ -23,6 +26,7 @@ unique_ptr<LogicalOperator> LogicalSJProbe::Copy(ClientContext &context) const {
 	// the copy is never executed, so pipeline wiring is irrelevant.
 	auto copy = make_uniq<LogicalSJProbe>(sj_to_use);
 	copy->probe_col_ids_per_filter = probe_col_ids_per_filter;
+	copy->filter_ids = filter_ids;
 	for (const auto &child : children) {
 		copy->children.push_back(child->Copy(context));
 	}
@@ -33,6 +37,7 @@ unique_ptr<LogicalOperator> LogicalSJProbe::Copy(ClientContext &context) const {
 unique_ptr<LogicalOperator> LogicalSJProbe::Deserialize(Deserializer &deserializer) {
 	auto num_filters = deserializer.ReadProperty<idx_t>(200, "num_filters");
 	auto probe_col_ids = deserializer.ReadProperty<vector<vector<idx_t>>>(201, "probe_col_ids_per_filter");
+	auto filter_ids = deserializer.ReadProperty<vector<idx_t>>(202, "filter_ids");
 	vector<shared_ptr<SemiJoinFilter>> filters;
 	filters.reserve(num_filters);
 	for (idx_t i = 0; i < num_filters; i++) {
@@ -40,6 +45,7 @@ unique_ptr<LogicalOperator> LogicalSJProbe::Deserialize(Deserializer &deserializ
 	}
 	auto result = make_uniq<LogicalSJProbe>(std::move(filters));
 	result->probe_col_ids_per_filter = std::move(probe_col_ids);
+	result->filter_ids = std::move(filter_ids);
 	return result;
 }
 

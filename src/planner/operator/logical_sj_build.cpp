@@ -18,6 +18,9 @@ void LogicalSJBuild::Serialize(Serializer &serializer) const {
 	// has empty (UNDECIDED) filters; valid for plan analysis but not execution.
 	serializer.WriteProperty(200, "num_filters", (idx_t)sj_to_create.size());
 	serializer.WriteProperty(201, "build_col_ids_per_filter", build_col_ids_per_filter);
+	// Stable filter ids re-establish build↔probe filter sharing after the
+	// roundtrip (live filter objects cannot survive serialization).
+	serializer.WriteProperty(202, "filter_ids", filter_ids);
 }
 
 unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
@@ -28,6 +31,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
 	// copy is never executed.
 	auto copy = make_uniq<LogicalSJBuild>(sj_to_create);
 	copy->build_col_ids_per_filter = build_col_ids_per_filter;
+	copy->filter_ids = filter_ids;
 	for (const auto &child : children) {
 		copy->children.push_back(child->Copy(context));
 	}
@@ -38,6 +42,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
 unique_ptr<LogicalOperator> LogicalSJBuild::Deserialize(Deserializer &deserializer) {
 	auto num_filters = deserializer.ReadProperty<idx_t>(200, "num_filters");
 	auto build_col_ids = deserializer.ReadProperty<vector<vector<idx_t>>>(201, "build_col_ids_per_filter");
+	auto filter_ids = deserializer.ReadProperty<vector<idx_t>>(202, "filter_ids");
 	vector<shared_ptr<SemiJoinFilter>> filters;
 	filters.reserve(num_filters);
 	for (idx_t i = 0; i < num_filters; i++) {
@@ -45,6 +50,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Deserialize(Deserializer &deserializ
 	}
 	auto result = make_uniq<LogicalSJBuild>(std::move(filters));
 	result->build_col_ids_per_filter = std::move(build_col_ids);
+	result->filter_ids = std::move(filter_ids);
 	return result;
 }
 

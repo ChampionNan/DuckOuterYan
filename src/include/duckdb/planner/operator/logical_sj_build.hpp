@@ -47,6 +47,15 @@ public:
 	//! Plan-gen moves this onto PhysicalSJBuild verbatim.
 	vector<vector<idx_t>> build_col_ids_per_filter;
 
+	//! Stable, plan-local id for each filter in `sj_to_create` (index-aligned),
+	//! assigned at semi-join insertion. The paired LogicalSJProbe carries the
+	//! same id for the same filter. Unlike the shared_ptr / raw-pointer wiring,
+	//! these ids survive plan Copy / Serialize / Deserialize (e.g. statement
+	//! verification): the physical plan generator resolves them through a
+	//! per-plan registry so build and probe share one runtime SemiJoinFilter and
+	//! the probe re-derives its build dependency.
+	vector<idx_t> filter_ids;
+
 public:
 	void Serialize(Serializer &serializer) const override;
 	static unique_ptr<LogicalOperator> Deserialize(Deserializer &deserializer);

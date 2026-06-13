@@ -246,7 +246,16 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		return keys;
 	};
 
-	unordered_map<ShareKey, std::pair<shared_ptr<SemiJoinFilter>, LogicalSJBuild *>, ShareKeyHash> keyMapping;
+	// Each shared filter gets a stable, plan-local id (see LogicalSJBuild::filter_ids):
+	// it lets the physical plan generator re-establish build↔probe filter sharing
+	// and the build dependency after plan Copy/Serialize/Deserialize.
+	struct FilterEntry {
+		shared_ptr<SemiJoinFilter> filter;
+		LogicalSJBuild *build;
+		idx_t id;
+	};
+	unordered_map<ShareKey, FilterEntry, ShareKeyHash> keyMapping;
+	idx_t next_filter_id = 0;
 
 	// Append `filter` as a build on relation `rid`'s stack. Coalesces into the
 	// current top op when it is a same-pass build; otherwise opens a new
@@ -255,15 +264,17 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	// stack's unique_ptr, so the pointer stays valid across later stack growth
 	// and across the eventual splice into the plan.
 	auto push_build = [&](RelationId rid, bool top_down, const shared_ptr<SemiJoinFilter> &filter,
-	                      const vector<ColumnBinding> &build_keys) -> LogicalSJBuild * {
+	                      const vector<ColumnBinding> &build_keys, idx_t filter_id) -> LogicalSJBuild * {
 		auto &stk = stacks_[rid];
 		if (!stk.empty() && stk.back().is_build && stk.back().top_down == top_down) {
 			auto &build = stk.back().op->Cast<LogicalSJBuild>();
 			build.sj_to_create.emplace_back(filter);
+			build.filter_ids.emplace_back(filter_id);
 			stk.back().bindings_per_filter.emplace_back(build_keys);
 			return &build;
 		}
 		auto build = make_uniq<LogicalSJBuild>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		build->filter_ids.emplace_back(filter_id);
 		auto *raw = build.get();
 		vector<vector<ColumnBinding>> binds;
 		binds.emplace_back(build_keys);
@@ -276,16 +287,18 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	// LogicalSJProbe. Each filter keeps its own related build, index-aligned
 	// with sj_to_use.
 	auto push_probe = [&](RelationId rid, bool top_down, const shared_ptr<SemiJoinFilter> &filter,
-	                      vector<ColumnBinding> probe_keys, LogicalSJBuild *build) {
+	                      vector<ColumnBinding> probe_keys, LogicalSJBuild *build, idx_t filter_id) {
 		auto &stk = stacks_[rid];
 		if (!stk.empty() && !stk.back().is_build && stk.back().top_down == top_down) {
 			auto &probe = stk.back().op->Cast<LogicalSJProbe>();
 			probe.sj_to_use.emplace_back(filter);
+			probe.filter_ids.emplace_back(filter_id);
 			probe.AddDownStreamOperator(build);
 			stk.back().bindings_per_filter.emplace_back(std::move(probe_keys));
 			return;
 		}
 		auto probe = make_uniq<LogicalSJProbe>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		probe->filter_ids.emplace_back(filter_id);
 		probe->AddDownStreamOperator(build);
 		vector<vector<ColumnBinding>> binds;
 		binds.emplace_back(std::move(probe_keys));
@@ -310,8 +323,18 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		auto it = keyMapping.find(key);
 		shared_ptr<SemiJoinFilter> filter;
 		LogicalSJBuild *build = nullptr;
+		idx_t filter_id;
 		if (it == keyMapping.end()) {
 			filter = make_shared_ptr<SemiJoinFilter>();
+			filter_id = next_filter_id++;
+			// Plan-3 correctness contract: the probe must always apply a *decided*
+			// filter. Pin every shared filter to the hash representation so
+			// PhysicalSJBuild::Finalize deterministically produces a HashFilter
+			// (a single, type-stable probe path) — never a kind that depends on
+			// bitmap eligibility, and never left UNDECIDED. The build↔probe filter
+			// identity is carried by `filter_id` through plan Copy/Serialize/
+			// Deserialize; see PhysicalPlanGenerator::GetOrCreateSJFilter.
+			filter->ForceHash();
 			// Stats-prefilter (opt-in): only single-column keys are bitmap-
 			// eligible. If base-table min/max predicts the implied bitmap
 			// would exceed the byte budget, tag force_hash so
@@ -329,14 +352,15 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			}
 			// A fresh filter is built exactly once, on its build relation, in
 			// the pass that first decided it.
-			build = push_build(pair.build, top_down, filter, key);
-			keyMapping.emplace(std::move(key), std::make_pair(filter, build));
+			build = push_build(pair.build, top_down, filter, key, filter_id);
+			keyMapping.emplace(std::move(key), FilterEntry {filter, build, filter_id});
 		} else {
-			filter = it->second.first;
-			build = it->second.second;
+			filter = it->second.filter;
+			build = it->second.build;
+			filter_id = it->second.id;
 		}
 
-		push_probe(pair.probe, top_down, filter, std::move(probe_keys), build);
+		push_probe(pair.probe, top_down, filter, std::move(probe_keys), build, filter_id);
 	};
 
 	// Round order is a hard phase barrier, not a heuristic — the two-phase
