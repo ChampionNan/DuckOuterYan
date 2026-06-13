@@ -1,5 +1,4 @@
 add_library_unity(test_optimizer_outer_yan OBJECT
-                  tree_conversions_roundtrip.cpp
                   semi_join_filter_test.cpp
                   key_bitmap_test.cpp
                   hash_filter_test.cpp

@@ -207,8 +207,6 @@ private:
 			return BuildThroughAggregate(op, depth);
 		case LogicalOperatorType::LOGICAL_DISTINCT:
 			return BuildThroughDistinct(op, depth);
-		case LogicalOperatorType::LOGICAL_ORDER_BY:
-			return BuildThroughOrderBy(op, depth);
 		default:
 			throw NotImplementedException("LogicalPlanToOT: unsupported operator %s",
 			                              EnumUtil::ToString(op.type));
@@ -279,14 +277,16 @@ private:
 		return child_node;
 	}
 
-	//! Peel a root LogicalProjection. The projection's output schema is not
-	//! preserved across OuterYan (the rebuilt plan handles column lifetime via
-	//! downstream passes), so no metadata is captured here.
+	//! Peel a root LogicalProjection — the column-pruning cap above the join
+	//! skeleton. Record it as the splice anchor (deepest projection wins, so its
+	//! child is the skeleton root); `OJTToLogicalPlan` re-attaches the rebuilt
+	//! skeleton beneath it, preserving the original output schema.
 	unique_ptr<OTNode> BuildThroughProjection(LogicalOperator &op, idx_t depth) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalProjection with %llu children",
 			                        op.children.size());
 		}
+		tree.root_projection = &op;
 		return BuildNode(*op.children[0], depth);
 	}
 
@@ -329,18 +329,6 @@ private:
 				col.binding = child_bindings[i];
 				info.columns.push_back(std::move(col));
 			}
-		}
-		return BuildNode(*op.children[0], depth);
-	}
-
-	//! Record the ORDER BY node so `OJTToLogicalPlan` can re-attach it above
-	//! the rebuilt join plan. The ORDER BY itself is transparent to the OT.
-	unique_ptr<OTNode> BuildThroughOrderBy(LogicalOperator &op, idx_t depth) {
-		if (op.children.size() != 1) {
-			throw InternalException("LogicalOrder with %llu children", op.children.size());
-		}
-		if (!tree.root_order_by) {
-			tree.root_order_by = &op;
 		}
 		return BuildNode(*op.children[0], depth);
 	}
@@ -989,11 +977,12 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	}
 
 	ojt.reset();
-	// Re-attach a root ORDER BY that was stripped during BuildOT, so the
-	// rebuilt plan preserves the original result ordering.
-	if (root_order_by) {
-		D_ASSERT(source_plan.get() == root_order_by);
-		source_plan->children[0] = std::move(plan);
+	// Re-attach the root projection (the column-pruning cap) stripped during
+	// BuildOT: splice the rebuilt skeleton into its child slot so the output
+	// schema survives the roundtrip. The projection rode along intact on
+	// source_plan; only its child pointer is rewritten.
+	if (root_projection) {
+		root_projection->children[0] = std::move(plan);
 		source_plan->ResolveOperatorTypes();
 		return std::move(source_plan);
 	}

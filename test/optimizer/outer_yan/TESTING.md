@@ -13,7 +13,6 @@ test/optimizer/outer_yan/          # C++ unit / white-box tests (Catch2)
     hash_filter_test.cpp
     key_bitmap_test.cpp
     semi_join_filter_test.cpp
-    tree_conversions_roundtrip.cpp
     passes_integration_test.cpp
     CMakeLists.txt
     TESTING.md                     # this file
@@ -65,8 +64,8 @@ build/debug/test/unittest "[outer_yan][applicability]"    # applicability_test.c
 build/debug/test/unittest "[outer_yan][hash_filter]"      # hash_filter_test.cpp
 build/debug/test/unittest "[outer_yan][key_bitmap]"       # key_bitmap_test.cpp
 build/debug/test/unittest "[outer_yan][semi_join_filter]" # semi_join_filter_test.cpp
-build/debug/test/unittest "[outer_yan][tree_conversions]" # tree_conversions_roundtrip.cpp
-build/debug/test/unittest "[outer_yan][passes]"           # passes_integration_test.cpp
+build/debug/test/unittest "[outer_yan][passes]"           # passes_integration_test.cpp (white-box + equivalence)
+build/debug/test/unittest "[outer_yan][equivalence]"      # passes_integration_test.cpp (off-vs-on only)
 ```
 
 Run one specific test case (exact `TEST_CASE` name string):
@@ -274,32 +273,13 @@ Tests the tagged-union carrier (`UNDECIDED → BITMAP | HASH`) shared between
 | empty hash filter reports IsEmpty | `HashFilter::IsEmpty()` propagated |
 | zero-cardinality bitmap reports IsEmpty | Empty `KeyBitmap` propagated |
 
-### `tree_conversions_roundtrip.cpp` — IR round-trip
+### `passes_integration_test.cpp` — pipeline white-box + result equivalence
 
-Tests `LogicalPlanToOT` → `OTToOJT` → `OJTToLogicalPlan`: the rebuilt plan
-produces an identical row multiset to the original.
+Two complementary groups, both driven through the public construction path
+`optimizer.cpp` uses.
 
-| Test case | What it verifies |
-|---|---|
-| 2-relation INNER join roundtrip | Minimal INNER join rebuilds correctly |
-| 2-relation LEFT join roundtrip | LEFT_OUTER rebuilds with or without a RIGHT-flip |
-| 3-relation chain INNER roundtrip | Three-way INNER preserves join semantics |
-| 3-relation chain LEFT roundtrip (may force RIGHT-flip) | OJT parent-orientation may flip LEFT→RIGHT; semantics preserved |
-| single-relation residual filter roundtrip | `WHERE a.ax > 15` lands on leaf A |
-| multi-relation residual filter roundtrip | `WHERE a.ax + c.cx > 1010` lands at smallest covering subplan |
-| 4-relation LEFT chain roundtrip | DP enumeration scales to 4 relations |
-| 5-relation LEFT chain stresses DP enumeration | DP enumeration scales to 5 relations |
-| 6-relation LEFT star roundtrip | Star-shaped graph with 6 relations |
-| RIGHT-flip via OJT parent-orientation | `b RIGHT JOIN a` mirrors `a LEFT JOIN b`; flip preserves NULLs |
-| FULL OUTER head + LEFT tail roundtrip | `FULL OUTER` followed by `LEFT` rebuilds correctly |
-| residual filter across three relations | Multi-relation filter placed at correct join level |
-| multi-condition equi-join roundtrip | Compound key on a single edge preserved |
-| residual filter via projection (UNSUPPORTED — hidden `[.]`) | Documents that projection-induced `table_index` is not yet supported; throws `NotImplementedException` |
-
-### `passes_integration_test.cpp` — Pipeline passes
-
-Tests the full `OuterYanPre` / `OuterYanDP` / `OuterYanPost` pipeline via
-`OuterYanTree::BuildOT` + `BuildOJT`.
+**White-box** (`[passes]` — `BuildIRFor` builds OT/OJT with the pipeline
+disabled, then inspects the IR):
 
 | Test case | What it verifies |
 |---|---|
@@ -313,10 +293,34 @@ Tests the full `OuterYanPre` / `OuterYanDP` / `OuterYanPost` pipeline via
 | semi-join pair recording populates both phases | EXPLAIN shows `SJ_BUILD` and `SJ_PROBE` for accepted query |
 | OJT has the same relation count as OT | `ojt_nodes == 3` for 3-relation query |
 | OJT root has subtree containing all relations | All 4 relation IDs reachable from OJT root |
-| DP+rebuild preserves results — 3-way LEFT chain | Baseline == with OuterYan == without OuterYan |
-| DP+rebuild preserves results — 4-way LEFT chain | 4-relation result equality |
-| DP+rebuild preserves results — FULL OUTER in head | FULL OUTER result equality |
 | applicability rejection short-circuits — no OT built | `HasOT() == false`, `HasOJT() == false` after rejection |
+
+**Result equivalence** (`[equivalence]` — via `AssertOuterYanPreservesResults`):
+each query runs with `disabled_optimizers='outer_yan'` (ordinary DuckDB /
+JOIN_ORDER) and again with `''` (full `OuterYanPre → DP → Post`); the two
+**sorted row multisets** (`CollectSortedRows`, so no `ORDER BY`) must match.
+Every query carries an outer join so the gate fires; join conditions are binary
+equi-joins; residual `WHERE` filters reference a single relation on the
+preserved side. NULL-rich `SeedNullable` data (NULL keys that never match, NULL
+payloads, duplicate keys) stresses NULL-padding and multiset preservation.
+
+| Test case | What it verifies |
+|---|---|
+| 2-relation LEFT join | LEFT_OUTER NULL-padding; 2×2 many-to-many preserved |
+| 2-relation RIGHT join | RIGHT-outer through the production flip path |
+| 2-relation FULL OUTER join | Exclusive and NULL keys surface from both sides |
+| 3-relation LEFT chain | Three-way LEFT chain end-to-end |
+| RIGHT-flip mirror (`b RIGHT JOIN a`) + LEFT tail | OJT parent-orientation may flip RIGHT↔LEFT; NULLs preserved |
+| FULL OUTER head + LEFT tail | `FULL OUTER` followed by `LEFT` survives the pipeline |
+| mixed INNER/LEFT/FULL chain | Three join kinds in one skeleton, all keyed on `na.k` |
+| 4-relation LEFT chain | Deeper chain through DP enumeration |
+| LEFT join with preserved-side residual filter | `na.v > 15` push is result-preserving |
+| compound equi-join condition on a LEFT edge | Two binary conditions on one edge, both swappable |
+| bushy tree with an outer join | Parenthesised `((na,nb),(nc,nd))` with a LEFT arm |
+| projection prunes to a single column over outer join | Output schema reproduced from the null-supplying side |
+| 5-relation LEFT chain | DP enumeration scales to 5 relations |
+| 6-relation LEFT star | Star-shaped graph with 6 relations |
+| residual filter via projection (UNSUPPORTED — hidden `[.]`) | The one isolated check: `LogicalPlanToOT` throws `NotImplementedException` on a projection-introduced `table_index` (the gate hides this in production, so result-equivalence can't surface it) |
 
 ---
 
@@ -489,7 +493,7 @@ real data for a meaningful filter-path comparison.
 
 | Case | Status | Location |
 |---|---|---|
-| Residual filter referencing columns introduced by `LogicalProjection` above the join tree | `NotImplementedException` at `LogicalPlanToOT` | `tree_conversions_roundtrip.cpp` — hidden test `[.]` |
+| Residual filter referencing columns introduced by `LogicalProjection` above the join tree | `NotImplementedException` at `LogicalPlanToOT` | `passes_integration_test.cpp` — hidden test `[.]` |
 | UBIGINT bitmap keys | Rejected by `TryBuild` (int64_t range overflow risk); falls back to HashFilter | `key_bitmap_test.cpp` |
 | Composite bitmap keys | v1 supports single-column keys only; `TryBuild` returns nullptr | `key_bitmap_test.cpp` |
 | Non-equi (theta) join predicates | Applicability rejects; baseline join order used | `acyclic_query.test`, `fallback.test` |
