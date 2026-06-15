@@ -277,16 +277,17 @@ private:
 		return child_node;
 	}
 
-	//! Peel a root LogicalProjection — the column-pruning cap above the join
-	//! skeleton. Record it as the splice anchor (deepest projection wins, so its
-	//! child is the skeleton root); `OJTToLogicalPlan` re-attaches the rebuilt
-	//! skeleton beneath it, preserving the original output schema.
+	//! Peel a root LogicalProjection — a cap above the join skeleton. Record it
+	//! as the current splice anchor; the recursion below overwrites the anchor
+	//! with any deeper cap, so the FINAL anchor is the operator directly above
+	//! the skeleton root. `OJTToLogicalPlan` re-attaches the rebuilt skeleton
+	//! into that slot, preserving every cap above it.
 	unique_ptr<OTNode> BuildThroughProjection(LogicalOperator &op, idx_t depth) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalProjection with %llu children",
 			                        op.children.size());
 		}
-		tree.root_projection = &op;
+		tree.root_skeleton_parent = &op;
 		return BuildNode(*op.children[0], depth);
 	}
 
@@ -301,6 +302,12 @@ private:
 		}
 		auto &agg = op.Cast<LogicalAggregate>();
 		ClassifyRootAggregate(agg);
+		// The aggregate is a cap that MUST survive the OJT roundtrip (unlike a
+		// pruning projection it carries the COUNT/SUM/GROUP BY semantics).
+		// Record it as the splice anchor; a deeper cap (the aggregate's own
+		// input projection) overwrites it during recursion, so the skeleton is
+		// re-attached directly beneath whatever sits lowest.
+		tree.root_skeleton_parent = &op;
 		return BuildNode(*op.children[0], depth);
 	}
 
@@ -330,6 +337,9 @@ private:
 				info.columns.push_back(std::move(col));
 			}
 		}
+		// DISTINCT is a cap that must survive the roundtrip; record it as the
+		// splice anchor (a deeper projection below it overwrites it).
+		tree.root_skeleton_parent = &op;
 		return BuildNode(*op.children[0], depth);
 	}
 
@@ -645,86 +655,70 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 	idx_t ojt_root_id = DConstants::INVALID_INDEX;
 	const idx_t n_joins = ot_joins.size();
 
-	for (idx_t step = 0; step < n_joins; step++) {
-		idx_t idx = n_joins - 1 - step;
-		auto *ot_join = ot_joins[idx];
-		if (!ot_join->info) {
-			throw InternalException(
-			    "OuterYanTree::BuildOJTImpl: OT JOIN node has null info");
+	for (auto *jn : ot_joins) {
+		if (!jn || !jn->info) {
+			throw InternalException("OuterYanTree::BuildOJTImpl: OT JOIN node has null info");
 		}
+	}
+
+	// Bug-C crash fix. The OJT is grown by BFS over the join-edge graph from a
+	// chosen root, NOT by walking joins in reverse `order`. The order-walk assumed
+	// a left/right-deep SPINE (each next join shares an endpoint with what is
+	// already attached) and threw "connectivity invariant violated" on the bushy
+	// orders the DP can materialise. BFS attaches a join the instant exactly ONE
+	// endpoint is already in the tree (parent), the other being the child — true
+	// for a tree of edges at ANY shape, so no "neither endpoint attached" state
+	// arises. The root choice ("extends" heuristic on the top join) and the edge
+	// construction (CheckOuterYanJoinFlip, OTJoin deep-copy, PK/FK) are unchanged;
+	// edges connect ONLY the two real condition-referenced relations. NOTE: this
+	// fixes the CRASH only; a separate, upstream Simplify/Desimplify defect drops
+	// RIGHT/FULL OUTER NULL-padded rows (present on spines too — see KNOWN_BUGS.md),
+	// independent of this assembly.
+
+	// Root: side of the top join that does NOT continue into the next-deepest
+	// join (identical to the previous step-0 heuristic).
+	{
+		auto &root_info = *ot_joins[n_joins - 1]->info;
+		idx_t left_rel = root_info.cond_left_relation_id;
+		idx_t right_rel = root_info.cond_right_relation_id;
+		bool left_extends = false;
+		bool right_extends = false;
+		if (n_joins >= 2) {
+			auto &next_info = *ot_joins[n_joins - 2]->info;
+			idx_t nl = next_info.cond_left_relation_id;
+			idx_t nr = next_info.cond_right_relation_id;
+			left_extends = (left_rel == nl || left_rel == nr);
+			right_extends = (right_rel == nl || right_rel == nr);
+		}
+		ojt_root_id = (left_extends && !right_extends) ? right_rel : left_rel;
+	}
+
+	// Index joins by the relations their condition references.
+	unordered_map<idx_t, vector<OTNode *>> joins_by_relation;
+	for (auto *jn : ot_joins) {
+		joins_by_relation[jn->info->cond_left_relation_id].push_back(jn);
+		joins_by_relation[jn->info->cond_right_relation_id].push_back(jn);
+	}
+
+	auto attach_edge = [&](idx_t parent_id, idx_t child_id, OTNode *ot_join) {
 		auto &ot_info = *ot_join->info;
 		idx_t left_rel = ot_info.cond_left_relation_id;
-		idx_t right_rel = ot_info.cond_right_relation_id;
-
-		idx_t parent_id;
-		idx_t child_id;
-		if (step == 0) {
-			bool left_extends = false;
-			bool right_extends = false;
-			if (n_joins >= 2) {
-				auto *next_join = ot_joins[idx - 1];
-				D_ASSERT(next_join->info);
-				idx_t nl = next_join->info->cond_left_relation_id;
-				idx_t nr = next_join->info->cond_right_relation_id;
-				left_extends = (left_rel == nl || left_rel == nr);
-				right_extends = (right_rel == nl || right_rel == nr);
-			}
-			if (left_extends && !right_extends) {
-				parent_id = right_rel;
-				child_id = left_rel;
-			} else if (!left_extends && right_extends) {
-				parent_id = left_rel;
-				child_id = right_rel;
-			} else {
-				parent_id = left_rel;
-				child_id = right_rel;
-			}
-			ojt_root_id = parent_id;
-			attached.insert(parent_id);
-			attached.insert(child_id);
-		} else {
-			bool l_in = attached.count(left_rel) > 0;
-			bool r_in = attached.count(right_rel) > 0;
-			if (l_in && r_in) {
-				throw NotImplementedException(
-				    "OuterYanTree::BuildOJTImpl: cyclic join graph (both endpoints already in OJT)");
-			}
-			if (!l_in && !r_in) {
-				throw InternalException(
-				    "OuterYanTree::BuildOJTImpl: top-down step found neither endpoint in the partial "
-				    "OJT (connectivity invariant violated)");
-			}
-			if (l_in) {
-				parent_id = left_rel;
-				child_id = right_rel;
-			} else {
-				parent_id = right_rel;
-				child_id = left_rel;
-			}
-			attached.insert(child_id);
-		}
-
-		// PK/FK is a per-relation property cached at BuildOT time.
 		bool left_pk = ot_relations[left_rel]->is_pk;
-		bool right_pk = ot_relations[right_rel]->is_pk;
+		bool right_pk = ot_relations[ot_info.cond_right_relation_id]->is_pk;
 		bool child_pk = (child_id == left_rel) ? left_pk : right_pk;
-
 		bool parent_is_left = (parent_id == left_rel);
 
 		OJTEdge edge;
 		edge.kind = CheckOuterYanJoinFlip(ot_info.join_kind, parent_is_left);
-		edge.original_kind =
-		    CheckOuterYanJoinFlip(ot_info.original_join_kind, parent_is_left);
+		edge.original_kind = CheckOuterYanJoinFlip(ot_info.original_join_kind, parent_is_left);
 		edge.order = ot_join->order;
 		edge.parent_relation_id = parent_id;
-		// Deep-copy OTJoin into the OJT edge so the OT node retains its
-		// `info` for OuterYanDP (which runs after the transient OJT is dropped).
 		auto edge_info = make_uniq<OTJoin>();
-		edge_info->join_kind           = ot_info.join_kind;
-		edge_info->original_join_kind  = ot_info.original_join_kind;
-		edge_info->cond_left_relation_id  = ot_info.cond_left_relation_id;
+		edge_info->join_kind = ot_info.join_kind;
+		edge_info->original_join_kind = ot_info.original_join_kind;
+		edge_info->cond_left_relation_id = ot_info.cond_left_relation_id;
 		edge_info->cond_right_relation_id = ot_info.cond_right_relation_id;
-		edge_info->distinct_count      = ot_info.distinct_count;
+		edge_info->distinct_count = ot_info.distinct_count;
 		edge_info->conditions.reserve(ot_info.conditions.size());
 		for (const auto &cond : ot_info.conditions) {
 			edge_info->conditions.push_back(cond.Copy());
@@ -733,10 +727,43 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 		edge.has_pk_fk_constraint = left_pk || right_pk;
 		edge.child_is_pk = child_pk;
 		edge.child = std::move(nodes_by_id[child_id]);
-
 		node_pointer[parent_id]->children.push_back(std::move(edge));
+	};
+
+	attached.insert(ojt_root_id);
+	vector<idx_t> frontier;
+	frontier.push_back(ojt_root_id);
+	unordered_set<const OTNode *> processed_joins;
+	for (idx_t f = 0; f < frontier.size(); f++) {
+		const idx_t parent_rel = frontier[f];
+		auto it = joins_by_relation.find(parent_rel);
+		if (it == joins_by_relation.end()) {
+			continue;
+		}
+		for (auto *jn : it->second) {
+			if (processed_joins.count(jn)) {
+				continue;
+			}
+			idx_t cl = jn->info->cond_left_relation_id;
+			idx_t cr = jn->info->cond_right_relation_id;
+			idx_t child_rel = (cl == parent_rel) ? cr : cl;
+			if (attached.count(child_rel)) {
+				throw NotImplementedException(
+				    "OuterYanTree::BuildOJTImpl: cyclic join graph (both endpoints already in OJT)");
+			}
+			processed_joins.insert(jn);
+			attach_edge(parent_rel, child_rel, jn);
+			attached.insert(child_rel);
+			frontier.push_back(child_rel);
+		}
 	}
 
+	if (processed_joins.size() != n_joins) {
+		throw InternalException(
+		    "OuterYanTree::BuildOJTImpl: %llu of %llu joins unreached from the root (disconnected OT)",
+		    static_cast<unsigned long long>(processed_joins.size()),
+		    static_cast<unsigned long long>(n_joins));
+	}
 	if (ojt_root_id == DConstants::INVALID_INDEX) {
 		throw InternalException("OuterYanTree::BuildOJTImpl: OJT root not assigned");
 	}
@@ -977,12 +1004,16 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	}
 
 	ojt.reset();
-	// Re-attach the root projection (the column-pruning cap) stripped during
-	// BuildOT: splice the rebuilt skeleton into its child slot so the output
-	// schema survives the roundtrip. The projection rode along intact on
-	// source_plan; only its child pointer is rewritten.
-	if (root_projection) {
-		root_projection->children[0] = std::move(plan);
+	// Re-attach the peeled cap chain stripped during BuildOT: splice the
+	// rebuilt skeleton into the deepest cap's child slot so EVERY cap above it
+	// — a root aggregate (COUNT/SUM/GROUP BY), a DISTINCT, the output
+	// projection — survives the roundtrip. The cap chain rode along intact on
+	// `source_plan`; only the skeleton-parent's child pointer is rewritten.
+	// (Peeled filters were emptied into residual records and re-pushed above,
+	// so the anchor is the nearest projection/aggregate/distinct, never a
+	// filter.)
+	if (root_skeleton_parent) {
+		root_skeleton_parent->children[0] = std::move(plan);
 		source_plan->ResolveOperatorTypes();
 		return std::move(source_plan);
 	}

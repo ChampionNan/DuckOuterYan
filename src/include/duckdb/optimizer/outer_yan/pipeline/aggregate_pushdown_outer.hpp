@@ -68,6 +68,15 @@ public:
 		return agg_columns;
 	}
 
+	//! After `Rewrite`, remap the root aggregate's GROUP BY key expressions
+	//! through the chained binding map. Pushes re-index the join output via
+	//! annot projections, so a group key that referenced a base column (e.g.
+	//! `a.id [0.0]`) must follow to its post-push binding — otherwise the root
+	//! aggregate dangles and `ColumnBindingResolver::Verify` fails. The
+	//! aggregate's own argument expressions are rebuilt later by the
+	//! orchestrator's `ReplaceRoot*`, so only the groups are touched here.
+	void RemapRootAggregateGroups(LogicalOperator &plan);
+
 private:
 	//! Build the `LogicalProjection ← LogicalAggregate ← child_node`
 	//! scaffold (or `LogicalDistinct ← child_node` for `SELECT_DISTINCT`)

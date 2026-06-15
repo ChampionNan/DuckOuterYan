@@ -1,0 +1,2 @@
+SET disabled_optimizers TO 'outer_yan';
+SELECT * FROM region LEFT OUTER JOIN nation ON r_regionkey=n_regionkey RIGHT OUTER JOIN supplier ON n_nationkey=s_nationkey INNER JOIN customer ON s_nationkey=c_nationkey;

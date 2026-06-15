@@ -1,0 +1,236 @@
+# name: test/sql/optimizer/outer_yan/graph_full_query.test
+# description: OuterYan optimizer — wide full-output ("name every column")
+#              equivalence over the generated graph dataset (data_generation.py,
+#              tables R1..R10 = chains with broken/partial/complete links and
+#              large BIGINT ids). Loaded with SELECT DISTINCT so each join key is
+#              unique: that removes the exact-row-duplicate fan-out (which would
+#              blow a deep chain up to millions of rows — many-to-many fan-out is
+#              instead covered by passes_integration_test.cpp's SeedNullable),
+#              while keeping the broken/partial chains and NULL padding that
+#              stress the OJT/SJ roundtrip. Each query lists ALL columns (no
+#              SELECT * — joins would alias-collide on src/dst — and no nested
+#              subqueries), run with OuterYan disabled vs enabled; the two row
+#              multisets must match (symmetric difference = 0). Relation counts
+#              span 3..10 and every join kind (INNER/LEFT/RIGHT/FULL) is mixed in.
+# group: [outer_yan]
+
+statement ok
+CREATE TABLE R1 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R1.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R2 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R2.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R3 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R3.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R4 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R4.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R5 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R5.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R6 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R6.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R7 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R7.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R8 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R8.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R9 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R9.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE R10 AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R10.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+# R/S/T/K aliases for the graph-shaped queries (R.dst = S.src chain).
+statement ok
+CREATE VIEW R AS SELECT * FROM R1;
+
+statement ok
+CREATE VIEW S AS SELECT * FROM R2;
+
+statement ok
+CREATE VIEW T AS SELECT * FROM R3;
+
+statement ok
+CREATE VIEW K AS SELECT * FROM R4;
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# 4-rel graph, LEFT/LEFT/INNER (simplification shape).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE g_off AS
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src INNER JOIN K ON T.dst = K.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE g_on AS
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src INNER JOIN K ON T.dst = K.src;
+
+query I
+SELECT * FROM sym_diff('g_off', 'g_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# 4-rel graph, INNER/INNER/FULL (desimplification shape).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE g_off AS
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE g_on AS
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src;
+
+query I
+SELECT * FROM sym_diff('g_off', 'g_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# 5-rel chain, mixed LEFT/INNER/FULL/RIGHT.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE g_off AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src
+        FULL OUTER JOIN R4 ON R3.dst=R4.src RIGHT OUTER JOIN R5 ON R4.dst=R5.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE g_on AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src
+        FULL OUTER JOIN R4 ON R3.dst=R4.src RIGHT OUTER JOIN R5 ON R4.dst=R5.src;
+
+query I
+SELECT * FROM sym_diff('g_off', 'g_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# 7-rel chain, INNER + LEFT mix (RIGHT/FULL coverage is in the 4- and 5-rel
+# cases above; here the focus is DP/OJT breadth at 7 relations).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE g_off AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,R6.src a11,R6.dst a12,R7.src a13,R7.dst a14
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        INNER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE g_on AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,R6.src a11,R6.dst a12,R7.src a13,R7.dst a14
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        INNER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src;
+
+query I
+SELECT * FROM sym_diff('g_off', 'g_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# 10-rel LEFT chain — stresses DP enumeration breadth.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE g_off AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,
+       R6.src a11,R6.dst a12,R7.src a13,R7.dst a14,R8.src a15,R8.dst a16,R9.src a17,R9.dst a18,R10.src a19,R10.dst a20
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src LEFT OUTER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        LEFT OUTER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src
+        LEFT OUTER JOIN R8 ON R7.dst=R8.src LEFT OUTER JOIN R9 ON R8.dst=R9.src
+        LEFT OUTER JOIN R10 ON R9.dst=R10.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE g_on AS
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,
+       R6.src a11,R6.dst a12,R7.src a13,R7.dst a14,R8.src a15,R8.dst a16,R9.src a17,R9.dst a18,R10.src a19,R10.dst a20
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src LEFT OUTER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        LEFT OUTER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src
+        LEFT OUTER JOIN R8 ON R7.dst=R8.src LEFT OUTER JOIN R9 ON R8.dst=R9.src
+        LEFT OUTER JOIN R10 ON R9.dst=R10.src;
+
+query I
+SELECT * FROM sym_diff('g_off', 'g_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ----------------------------------------------------------------------------
+# BARE-QUERY EXECUTION GUARD. The on/off comparison above materialises each query
+# with `CREATE TABLE AS`, which optimises to a DIFFERENT plan than a bare
+# `SELECT` and so MASKS optimizer defects (different column-pruning ⇒ a different,
+# sometimes bushy, DP order). These run the SPINE-order shapes as the bare query
+# a user actually writes (OuterYan ON) — they execute correctly. The 5-relation
+# BUSHY order is intentionally NOT here: it crashes BuildOJTImpl (Bug C, an
+# InternalError the sqllogictest harness cannot pin) — see KNOWN_BUGS.md and the
+# `compare_onoff.sh` repro. Do not "fix" the crash by re-rooting the OJT: that
+# returns WRONG rows (the OT→OJT orientation is not free for outer joins).
+statement ok
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src INNER JOIN K ON T.dst = K.src;
+
+statement ok
+SELECT R.src v1, R.dst v2, S.src v3, S.dst v4, T.src v5, T.dst v6, K.src v7, K.dst v8
+FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src;
+
+statement ok
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,R6.src a11,R6.dst a12,R7.src a13,R7.dst a14
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        INNER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src;
+
+statement ok
+SELECT R1.src a1,R1.dst a2,R2.src a3,R2.dst a4,R3.src a5,R3.dst a6,R4.src a7,R4.dst a8,R5.src a9,R5.dst a10,
+       R6.src a11,R6.dst a12,R7.src a13,R7.dst a14,R8.src a15,R8.dst a16,R9.src a17,R9.dst a18,R10.src a19,R10.dst a20
+FROM R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src LEFT OUTER JOIN R3 ON R2.dst=R3.src
+        LEFT OUTER JOIN R4 ON R3.dst=R4.src LEFT OUTER JOIN R5 ON R4.dst=R5.src
+        LEFT OUTER JOIN R6 ON R5.dst=R6.src LEFT OUTER JOIN R7 ON R6.dst=R7.src
+        LEFT OUTER JOIN R8 ON R7.dst=R8.src LEFT OUTER JOIN R9 ON R8.dst=R9.src
+        LEFT OUTER JOIN R10 ON R9.dst=R10.src;

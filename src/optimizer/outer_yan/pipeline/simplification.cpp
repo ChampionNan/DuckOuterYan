@@ -35,6 +35,20 @@ namespace duckdb {
 // 3. `null_rej` is passed by value into recursive calls so additions made
 //    while walking one subtree do not contaminate the sibling subtree.
 
+// Snapshot every JOIN's post-Simplify kind into `original_join_kind`, the
+// baseline that Desimplification rewrites from and Resimplification reverts to.
+// The raw kind set at BuildOT was only provisional: Resimplify's inverse is
+// Desimplify, so it must undo only Desimplify's reorder-enabling rewrites and
+// never re-introduce outerness that Simplify (order-independently) removed.
+static void RebaseOriginalKinds(OTNode &node) {
+	if (node.kind != OTNode::Kind::JOIN) {
+		return;
+	}
+	node.info->original_join_kind = node.info->join_kind;
+	RebaseOriginalKinds(*node.children[0]);
+	RebaseOriginalKinds(*node.children[1]);
+}
+
 void Simplification::Apply(OuterYanTree &tree) {
 	if (!tree.HasOT()) {
 		return;
@@ -57,6 +71,10 @@ void Simplification::Apply(OuterYanTree &tree) {
 	}
 
 	VisitNode(tree, tree.OT().Root(), std::move(null_rej));
+
+	// Done after the single top-down VisitNode walk so it captures the final
+	// simplified kind, not an intermediate one.
+	RebaseOriginalKinds(tree.OT().Root());
 }
 
 const unordered_set<idx_t> &Simplification::ComputeSubtreeRelations(OTNode &node) {
@@ -118,6 +136,7 @@ void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
 	const bool rhs_nullrej =
 	    SubtreeIntersectsNullRejection(*node.children[1], null_rej);
 
+	const OuterYanJoinKind kind_before = join_info.join_kind;
 	switch (join_info.join_kind) {
 	case JoinType::INNER:
 		break;
@@ -145,6 +164,10 @@ void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
 	default:
 		throw InternalException("OuterYan Simplification: unexpected join type %s",
 		                        EnumUtil::ToString(join_info.join_kind));
+	}
+
+	if (join_info.join_kind != kind_before) {
+		tree.stage_stats.simplify_collapses++;
 	}
 
 	// (b) Extend null_rej with the relations the (possibly rewritten) join

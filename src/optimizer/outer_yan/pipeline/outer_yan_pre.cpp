@@ -1,16 +1,15 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/printer.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 namespace duckdb {
 
-#ifndef NDEBUG
 // ============================================================================
-// Debug helpers — OuterYanPre
+// Trace helpers — OuterYanPre (only invoked when DUCKDB_OYTRACE is set)
 // ============================================================================
 
 static string OYRelName(const OuterYanTree &tree, RelationId rel_id) {
@@ -46,7 +45,6 @@ static string PrintSemiPairs(const OuterYanTree &tree) {
 	}
 	return os.str();
 }
-#endif // DEBUG
 
 void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree) {
 	// Applicability is the caller's responsibility (see `optimizer.cpp`: the
@@ -72,28 +70,32 @@ void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree)
 	//   6. AllPairsSatisfy      -- post-condition: every (P, D) pair in an OK
 	//                              cell.
 	tree.BuildOT(std::move(plan));
-#ifndef NDEBUG
-	Printer::Print("[OuterYanPre] after BuildOT:\n" + tree.ConstructOJT()->PrintAsTree());
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("after BuildOT (OT rendered as OJT)", tree.ConstructOJT()->PrintAsTree(true));
+	}
 
 	Simplify(tree);
-#ifndef NDEBUG
-	Printer::Print("[OuterYanPre] after Simplify:\n" + tree.ConstructOJT()->PrintAsTree());
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("after Simplify (" + to_string(tree.stage_stats.simplify_collapses) +
+		                         " collapse(s); OT rendered as OJT)",
+		                     tree.ConstructOJT()->PrintAsTree(true));
+	}
 
 	{
 		auto post_simp_ojt = tree.ConstructOJT();
 		BottomUpPass(tree, post_simp_ojt->Root());
 		TopDownPass(tree, post_simp_ojt->Root());
 	}
-#ifndef NDEBUG
-	Printer::Print("[OuterYanPre] semi-join pairs:\n" + PrintSemiPairs(tree));
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("semi-join pairs (bottom-up + top-down)", PrintSemiPairs(tree));
+	}
 
 	Desimplify(tree);
-#ifndef NDEBUG
-	Printer::Print("[OuterYanPre] after Desimplify:\n" + tree.ConstructOJT()->PrintAsTree());
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("after Desimplify (" + to_string(tree.stage_stats.desimplify_changes) +
+		                         " kind rewrite(s); OT rendered as OJT)",
+		                     tree.ConstructOJT()->PrintAsTree(true));
+	}
 
 	if (!desimplification.AllPairsSatisfy(tree)) {
 		throw InternalException(

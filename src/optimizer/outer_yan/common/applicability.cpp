@@ -38,8 +38,41 @@ ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
 		v.result.reason = "pure inner-join query — defer to JoinOrderOptimizer";
 		return std::move(v.result);
 	}
+	// Residuals must be unary (≤1 base relation each). table_index_to_relation is
+	// fully populated by the walk above, so the arity is now resolvable.
+	if (!v.ResidualsAreUnary(plan)) {
+		v.result.applicable = false;
+		v.result.reason = "residual predicate spans >1 relation (only unary "
+		                  "\"column OP constant\" residuals supported)";
+		return std::move(v.result);
+	}
 	v.result.applicable = true;
 	return std::move(v.result);
+}
+
+bool OuterYanApplicability::ResidualsAreUnary(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
+		for (auto &expr : op.expressions) {
+			unordered_set<idx_t> tables;
+			CollectColumnTables(*expr, tables);
+			unordered_set<RelationId> rels;
+			for (auto ti : tables) {
+				auto it = result.table_index_to_relation.find(ti);
+				if (it != result.table_index_to_relation.end()) {
+					rels.insert(it->second);
+				}
+			}
+			if (rels.size() > 1) {
+				return false;
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (!ResidualsAreUnary(*child)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 LogicalOperator &OuterYanApplicability::SkeletonRoot(LogicalOperator &plan) {

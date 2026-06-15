@@ -56,6 +56,12 @@ private:
 	vector<OJTEdge *> all_edges;
 	unordered_map<idx_t, OJTNode *> node_by_rel;
 	unordered_map<idx_t, OJTEdge *> parent_edge_by_rel;
+
+public:
+	//! Number of edges reverted (kind→original_kind) in the last `Apply`.
+	//! Read by `OuterYanPost` into `OuterYanTree::StageStats::resimplify_reverts`
+	//! so a test can assert a revert actually fired (item 4d "record such flag").
+	idx_t reverts = 0;
 };
 
 } // namespace duckdb

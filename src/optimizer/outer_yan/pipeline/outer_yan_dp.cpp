@@ -1,11 +1,11 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/printer.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
 #include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -36,6 +36,12 @@ void OuterYanDP::Optimize(OuterYanTree &tree) {
 	PopulateOutputRelations(tree);
 
 	if (num_relations <= 1) {
+		// Nothing to enumerate. Still surface an OJT for the lone relation so
+		// OuterYanPost has a valid tree to lower (an accepted query always has
+		// >= 2 relations, so the 0-relation case is unreachable here).
+		if (num_relations == 1) {
+			tree.BuildOJT();
+		}
 		return;
 	}
 
@@ -83,31 +89,59 @@ void OuterYanDP::Optimize(OuterYanTree &tree) {
 		}
 	}
 
-	if (best_attempt < 0) {
-		// No regime produced a connected plan over all relations -- Path A
-		// bail-out: OT untouched, downstream passes see the original order.
+	// Fallback ladder. The root-fix regimes (FIX_ALL_OUTPUTS / FIX_ONE_OUTPUT)
+	// can fail to connect every relation when an anchored output relation is a
+	// cut vertex of the join graph -- e.g. the sole GROUP BY key is the centre
+	// of a star, so every 2-set holding it is rejected while the only
+	// anchor-free pair is disconnected. Root anchoring is a SOFT cost
+	// preference (the group-by relation as tree root is desirable, not
+	// required); correctness is established by the OJT lowering regardless of
+	// order. So instead of abandoning the query we retry once UNCONSTRAINED
+	// (`NONE`), which always connects an acyclic predicate graph. `use_none`
+	// flags that the chosen plan is this retry.
+	bool use_none = false;
+	if (best_attempt < 0 && primary_mode != RootFixMode::NONE) {
+		ResetForRetry(tree);
+		fix_mode = RootFixMode::NONE;
+		if (RunEnumeration(tree) && plans.find(full_set) != plans.end()) {
+			use_none = true;
+		}
+	}
+
+	if (best_attempt < 0 && !use_none) {
+		// Even unconstrained enumeration could not connect all relations -- only
+		// possible for a disconnected predicate graph, which the applicability
+		// gate already rejects. Fall back to the post-Desimplify OT order so
+		// OuterYanPost always receives a valid OJT instead of crashing with
+		// "tree has no OJT".
+		tree.BuildOJT();
 		return;
 	}
 
 	// Re-run the winning attempt so `plans` is populated for RebuildOT.
 	ResetForRetry(tree);
-	if (best_attempt == 0) {
+	if (use_none) {
+		fix_mode = RootFixMode::NONE;
+	} else if (best_attempt == 0) {
 		fix_mode = primary_mode;
 	} else {
 		fix_mode = RootFixMode::FIX_ONE_OUTPUT;
 		fixed_output_relation = fix_one_candidates[static_cast<idx_t>(best_attempt) - 1];
 	}
 	if (!RunEnumeration(tree) || plans.find(full_set) == plans.end()) {
-		// Deterministic re-run cannot diverge from the first attempt; this
-		// branch is unreachable under normal operation. Bail safely.
+		// Deterministic re-run cannot diverge from the winning attempt; fall
+		// back to the OT order rather than leave the tree without an OJT.
+		tree.BuildOJT();
 		return;
 	}
 
 	RebuildOT(tree, full_set);
 	tree.BuildOJT();
-#ifdef DEBUG
-	Printer::Print("[OuterYanDP] result OJT:\n" + tree.OJT().PrintAsTree());
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage(string("after DP — cost-chosen join order (reordered=") +
+		                         (tree.stage_stats.dp_reordered ? "yes" : "no") + "; result OJT)",
+		                     tree.OJT().PrintAsTree(true));
+	}
 }
 
 // ============================================================================
@@ -659,10 +693,37 @@ unique_ptr<OTNode> OuterYanDP::MaterializeNode(JoinRelationSet &set, OuterYanTre
 	join->children[0] = std::move(left_child);
 	join->children[1] = std::move(right_child);
 	join->order = ++next_order;
+
+	// `join_kind` is children-relative (BuildOJT reads it as "children[0]
+	// preserved" via `parent_is_left`). The moved payload is oriented to the
+	// join's canonical layout — cond-LHS relation in children[0] — but the DP
+	// may have placed the operands swapped. If the chosen `left_set` does NOT
+	// hold the cond-LHS relation, flip LEFT<->RIGHT on the persisted kinds so
+	// the SAME relation stays preserved (no-op for INNER/FULL). This mirrors the
+	// `left_holds_lhs` flip in EdgeCardinality, which previously applied it only
+	// to the cost formula and never to the materialised tree.
+	bool left_holds_lhs = false;
+	for (idx_t i = 0; i < node.left_set.count; i++) {
+		if (node.left_set.relations[i].index == join->info->cond_left_relation_id) {
+			left_holds_lhs = true;
+			break;
+		}
+	}
+	if (!left_holds_lhs) {
+		join->info->join_kind = FlipOuterYanJoinKind(join->info->join_kind);
+		join->info->original_join_kind = FlipOuterYanJoinKind(join->info->original_join_kind);
+	}
 	return join;
 }
 
 void OuterYanDP::RebuildOT(OuterYanTree &tree, JoinRelationSet &full_set) {
+	// Signature of the join groupings BEFORE re-materialisation: the set of
+	// every JOIN node's `subtree_relations`. A cost-chosen order that differs
+	// structurally from the post-Desimplify input produces a different set of
+	// intermediate groupings; equal sets mean DP re-emitted the input shape.
+	// Used only to populate `StageStats::dp_reordered` (observational, 4c).
+	const auto old_signature = JoinGroupingSignature(tree.ot_joins_by_order);
+
 	idx_t next_order = 0;
 	auto new_root = MaterializeNode(full_set, tree, next_order);
 
@@ -678,6 +739,22 @@ void OuterYanDP::RebuildOT(OuterYanTree &tree, JoinRelationSet &full_set) {
 	for (idx_t i = 0; i < tree.ot_joins_by_order.size(); i++) {
 		tree.ot_joins_by_order[i]->order = i + 1;
 	}
+
+	tree.stage_stats.dp_reordered =
+	    JoinGroupingSignature(tree.ot_joins_by_order) != old_signature;
+}
+
+std::set<vector<idx_t>> OuterYanDP::JoinGroupingSignature(const vector<OTNode *> &joins) {
+	std::set<vector<idx_t>> signature;
+	for (auto *jn : joins) {
+		if (!jn || jn->kind != OTNode::Kind::JOIN) {
+			continue;
+		}
+		vector<idx_t> rels(jn->subtree_relations.begin(), jn->subtree_relations.end());
+		std::sort(rels.begin(), rels.end());
+		signature.insert(std::move(rels));
+	}
+	return signature;
 }
 
 // ============================================================================

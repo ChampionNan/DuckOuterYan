@@ -13,6 +13,7 @@
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
@@ -184,8 +185,12 @@ public:
 	string Print() const;
 
 	//! Indented-tree printer. Same information as `Print` but rendered
-	//! parent-child tree style, EXPLAIN-style.
-	string PrintAsTree() const;
+	//! parent-child tree style, EXPLAIN-style. With `verbose`, each edge also
+	//! reports `original_kind` (as `was=…` when it differs from the current
+	//! kind), the PK/FK side, and the bottom-up / top-down elimination markers,
+	//! and each node reports its `relation_id` — the signal the pipeline tracer
+	//! needs to see which rule rewrote which edge across stages.
+	string PrintAsTree(bool verbose = false) const;
 
 private:
 	// Printer helpers.
@@ -194,7 +199,11 @@ private:
 	static void CollectEdges(const OJTNode &node, vector<const OJTEdge *> &out);
 	static void PrintNodeRecursive(const OJTNode &node, std::ostringstream &os,
 	                               const string &indent, bool is_last_child, bool is_root,
-	                               OuterYanJoinKind incoming_kind, idx_t incoming_order);
+	                               const OJTEdge *incoming_edge, bool verbose,
+	                               const unordered_map<idx_t, string> &alias);
+	//! Short relation_id → name map (table name, or `R<id>`), built once per
+	//! print so verbose edges can render "parent ⋈/⟕/⟖/⟗ child".
+	static unordered_map<idx_t, string> BuildAlias(const OJTNode &root);
 
 	unique_ptr<OJTNode> root;
 };

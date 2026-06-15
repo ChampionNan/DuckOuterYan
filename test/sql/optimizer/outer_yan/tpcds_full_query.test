@@ -1,0 +1,75 @@
+# name: test/sql/optimizer/outer_yan/tpcds_full_query.test
+# description: OuterYan optimizer — full-query (SELECT *) outer-join equivalence
+#              over REAL TPC-DS data at the minimum scale (sf=0.01). Wide-
+#              projection SELECT * over the small customer dimension tables
+#              (customer, customer_address, household_demographics) joined on
+#              their surrogate keys with mixed outer-join kinds. Exercises the
+#              OuterYan OJT→plan roundtrip on TPC-DS's wide schema and real NULL
+#              padding. Each query runs OuterYan-disabled vs enabled; the row
+#              multisets must match (symmetric difference = 0).
+# group: [outer_yan]
+
+require tpcds
+
+statement ok
+CALL dsdgen(sf=0.01);
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# customer ⟕ customer_address ⟕ household_demographics (surrogate-key chain).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE ds_off AS
+SELECT * FROM customer
+  LEFT OUTER JOIN customer_address       ON c_current_addr_sk  = ca_address_sk
+  LEFT OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE ds_on AS
+SELECT * FROM customer
+  LEFT OUTER JOIN customer_address       ON c_current_addr_sk  = ca_address_sk
+  LEFT OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk;
+
+query I
+SELECT * FROM sym_diff('ds_off', 'ds_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Mixed kinds: customer ⟕ customer_address ⟗ household_demographics.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE ds_off AS
+SELECT * FROM customer
+  LEFT OUTER JOIN customer_address       ON c_current_addr_sk  = ca_address_sk
+  FULL OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE ds_on AS
+SELECT * FROM customer
+  LEFT OUTER JOIN customer_address       ON c_current_addr_sk  = ca_address_sk
+  FULL OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk;
+
+query I
+SELECT * FROM sym_diff('ds_off', 'ds_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''

@@ -65,4 +65,27 @@ void LogicalSJProbe::AddDownStreamOperator(LogicalSJBuild *op) {
 	related_sj_build.emplace_back(op);
 }
 
+InsertionOrderPreservingMap<string> LogicalSJProbe::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	const auto child_bindings = children.empty() ? vector<ColumnBinding>() : children[0]->GetColumnBindings();
+	for (idx_t f = 0; f < sj_to_use.size(); f++) {
+		const idx_t tag = f < filter_ids.size() ? filter_ids[f] : f;
+		string keys = "probe ";
+		if (f < probe_col_ids_per_filter.size()) {
+			const auto &cols = probe_col_ids_per_filter[f];
+			for (idx_t k = 0; k < cols.size(); k++) {
+				if (k > 0) {
+					keys += ", ";
+				}
+				// Reuse the build operator's column resolver — same logic.
+				keys += (children.empty() || cols[k] >= child_bindings.size())
+				            ? ("#" + to_string(cols[k]))
+				            : LogicalSJBuild::DescribeKeyColumn(*children[0], child_bindings[cols[k]]);
+			}
+		}
+		result["filter#" + to_string(tag)] = keys;
+	}
+	return result;
+}
+
 } // namespace duckdb

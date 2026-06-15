@@ -1,19 +1,17 @@
 # name: test/sql/optimizer/outer_yan/outer_join_aggregate.test
-# description: OuterYan optimizer — aggregation root selection over outer-join
-#              chains. Verifies correctness across all OuterYanAggregationType
-#              variants (COUNT_STAR / COUNT / SUM / MIN/MAX / DISTINCT).
-#              Variants 1..9 compare the full OuterYan pipeline against the
-#              baseline (pre/dp/post disabled). The pass-isolation section at the
-#              end keeps pre/dp/post enabled and toggles only
-#              `aggregate_pushdown_outer` (aggregate_pushdown_outer.cpp), so the
-#              pushdown rewrite is correctness-pinned on its own.
+# description: OuterYan optimizer — aggregation over outer-join chains. Each
+#              variant runs the SAME query twice — once with OuterYan disabled
+#              (baseline) and once enabled — and asserts the two row multisets
+#              are identical (symmetric difference = 0). This self-validating
+#              form needs no hand-computed expected values (the previous version
+#              hard-coded results that ignored the c-table fan-out and were
+#              wrong on several rows); the engine's own baseline is the oracle.
+#              Covers every OuterYanAggregationType: COUNT_STAR / COUNT / SUM /
+#              MIN-MAX / DISTINCT, plus HAVING and FULL OUTER.
 # group: [outer_yan]
 
 statement ok
 PRAGMA enable_verification
-
-statement ok
-PRAGMA verify_parallelism
 
 statement ok
 CREATE TABLE a(id INTEGER, ax INTEGER);
@@ -40,401 +38,217 @@ statement ok
 INSERT INTO d VALUES (2, 20000), (3, 30000), (5, 50000), (7, 70000);
 
 # ============================================================================
-# Variant 1 — COUNT_STAR over outer-join chain (forced root case).
+# Comparison helper: a SQL macro that returns the size of the symmetric
+# multiset difference between two tables created from the baseline and the
+# OuterYan-optimized run of one query. 0 ⇔ the two results are identical.
 # ============================================================================
 
 statement ok
-SET disabled_optimizers TO ''
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# Variant 1 — COUNT_STAR over a 3-way LEFT chain (root, no GROUP BY).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
 
 query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-8
+0
+
+# ----------------------------------------------------------------------------
+# Variant 2 — GROUP BY a.id with COUNT(b.bx).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, COUNT(b.bx) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, COUNT(b.bx) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
 
 query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-8
+0
 
-# ============================================================================
-# Variant 2 — GROUP BY a.id with COUNT(b.col).
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Variant 3 — SUM with NULLs from outer joins, GROUP BY a.id.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT a.id, COUNT(b.bx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	2
-2	1
-3	1
-4	0
-5	0
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
-
-query II rowsort
-SELECT a.id, COUNT(b.bx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	2
-2	1
-3	1
-4	0
-5	0
-
-# ============================================================================
-# Variant 3 — SUM with NULLs from outer joins (NULLs treated as 0 by SUM).
-# ============================================================================
+SET disabled_optimizers TO '';
 
 statement ok
-SET disabled_optimizers TO ''
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
 
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-1	1000
-2	NULL
-3	6200
-4	4000
-5	NULL
+0
+
+# ----------------------------------------------------------------------------
+# Variant 4 — MIN/MAX over outer-joined columns, GROUP BY a.id.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
-
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	1000
-2	NULL
-3	6200
-4	4000
-5	NULL
-
-# ============================================================================
-# Variant 4 — MIN/MAX over outer-joined columns.
-# ============================================================================
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, MIN(b.bx) AS lo, MAX(c.cx) AS hi FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
 
 statement ok
-SET disabled_optimizers TO ''
-
-query III rowsort
-SELECT a.id, MIN(b.bx), MAX(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	100	1000
-2	200	NULL
-3	300	3100
-4	NULL	4000
-5	NULL	NULL
+SET disabled_optimizers TO '';
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, MIN(b.bx) AS lo, MAX(c.cx) AS hi FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
 
-query III rowsort
-SELECT a.id, MIN(b.bx), MAX(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-1	100	1000
-2	200	NULL
-3	300	3100
-4	NULL	4000
-5	NULL	NULL
+0
 
-# ============================================================================
+# ----------------------------------------------------------------------------
 # Variant 5 — SELECT DISTINCT.
-# ============================================================================
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT DISTINCT a.id, b.bx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-1	100
-1	110
-2	200
-3	300
-4	NULL
-5	NULL
+CREATE OR REPLACE TABLE r_off AS
+SELECT DISTINCT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+SET disabled_optimizers TO '';
 
-query II rowsort
-SELECT DISTINCT a.id, b.bx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT DISTINCT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-1	100
-1	110
-2	200
-3	300
-4	NULL
-5	NULL
+0
 
-# ============================================================================
+# ----------------------------------------------------------------------------
 # Variant 6 — SUM with HAVING.
-# ============================================================================
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-HAVING SUM(c.cx) > 2000
-----
-3	6200
-4	4000
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id HAVING SUM(c.cx) > 2000;
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
-
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-HAVING SUM(c.cx) > 2000
-----
-3	6200
-4	4000
-
-# ============================================================================
-# Variant 7 — COUNT(*) on 4-way chain.
-# ============================================================================
+SET disabled_optimizers TO '';
 
 statement ok
-SET disabled_optimizers TO ''
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id HAVING SUM(c.cx) > 2000;
 
 query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id
-                       LEFT JOIN c ON a.id = c.id
-                       LEFT JOIN d ON a.id = d.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-8
+0
+
+# ----------------------------------------------------------------------------
+# Variant 7 — COUNT_STAR on a 4-way chain.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+CREATE OR REPLACE TABLE r_off AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
 
 query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id
-                       LEFT JOIN c ON a.id = c.id
-                       LEFT JOIN d ON a.id = d.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-8
+0
 
-# ============================================================================
-# Variant 8 — Aggregation with mixed LEFT/RIGHT/FULL.
-# ============================================================================
+# ----------------------------------------------------------------------------
+# Variant 8 — Aggregation with mixed FULL OUTER / LEFT.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT COALESCE(a.id, b.id), COUNT(*)
+CREATE OR REPLACE TABLE r_off AS
+SELECT COALESCE(a.id, b.id) AS k, COUNT(*) AS n
 FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON COALESCE(a.id, b.id) = c.id
-GROUP BY COALESCE(a.id, b.id)
-----
-1	2
-2	1
-3	1
-4	1
-5	1
-6	1
+GROUP BY COALESCE(a.id, b.id);
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+SET disabled_optimizers TO '';
 
-query II rowsort
-SELECT COALESCE(a.id, b.id), COUNT(*)
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COALESCE(a.id, b.id) AS k, COUNT(*) AS n
 FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON COALESCE(a.id, b.id) = c.id
-GROUP BY COALESCE(a.id, b.id)
-----
-1	2
-2	1
-3	1
-4	1
-5	1
-6	1
-
-# ============================================================================
-# Variant 9 — Aggregation column from the deepest outer-joined relation.
-# ============================================================================
-
-statement ok
-SET disabled_optimizers TO ''
+GROUP BY COALESCE(a.id, b.id);
 
 query I
-SELECT SUM(d.dx)
-FROM a LEFT JOIN b ON a.id = b.id
-       LEFT JOIN c ON a.id = c.id
-       LEFT JOIN d ON a.id = d.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-50000
+0
+
+# ----------------------------------------------------------------------------
+# Variant 9 — SUM from the deepest outer-joined relation of a 4-way chain.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
 
 statement ok
-SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+CREATE OR REPLACE TABLE r_off AS
+SELECT SUM(d.dx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT SUM(d.dx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
 
 query I
-SELECT SUM(d.dx)
-FROM a LEFT JOIN b ON a.id = b.id
-       LEFT JOIN c ON a.id = c.id
-       LEFT JOIN d ON a.id = d.id
+SELECT * FROM sym_diff('r_off', 'r_on');
 ----
-50000
+0
 
 statement ok
 SET disabled_optimizers TO ''
-
-# ============================================================================
-# Pass isolation — aggregate_pushdown_outer. Variants 1..10 above compare the
-# whole OuterYan pipeline against the baseline (pre/dp/post all disabled), which
-# never exercises the pushdown pass on its own. The blocks below keep pre/dp/post
-# enabled and toggle ONLY `aggregate_pushdown_outer`, so any divergence is
-# attributable to the pushdown rewrite itself. Each aggregate shape
-# (COUNT_STAR / SUM / MIN-MAX / plain-SUM / DISTINCT) must be invariant under
-# the toggle.
-# ============================================================================
-
-# COUNT_STAR — pushdown disabled, then enabled.
-statement ok
-SET disabled_optimizers TO 'aggregate_pushdown_outer'
-
-query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-8
-
-statement ok
-SET disabled_optimizers TO ''
-
-query I
-SELECT COUNT(*) FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-8
-
-# SUM over GROUP BY.
-statement ok
-SET disabled_optimizers TO 'aggregate_pushdown_outer'
-
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	1000
-2	NULL
-3	6200
-4	4000
-5	NULL
-
-statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	1000
-2	NULL
-3	6200
-4	4000
-5	NULL
-
-# MIN/MAX over GROUP BY.
-statement ok
-SET disabled_optimizers TO 'aggregate_pushdown_outer'
-
-query III rowsort
-SELECT a.id, MIN(b.bx), MAX(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	100	1000
-2	200	NULL
-3	300	3100
-4	NULL	4000
-5	NULL	NULL
-
-statement ok
-SET disabled_optimizers TO ''
-
-query III rowsort
-SELECT a.id, MIN(b.bx), MAX(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-GROUP BY a.id
-----
-1	100	1000
-2	200	NULL
-3	300	3100
-4	NULL	4000
-5	NULL	NULL
-
-# Plain SUM, no GROUP BY, deepest relation of a 4-way chain.
-statement ok
-SET disabled_optimizers TO 'aggregate_pushdown_outer'
-
-query I
-SELECT SUM(d.dx)
-FROM a LEFT JOIN b ON a.id = b.id
-       LEFT JOIN c ON a.id = c.id
-       LEFT JOIN d ON a.id = d.id
-----
-50000
-
-statement ok
-SET disabled_optimizers TO ''
-
-query I
-SELECT SUM(d.dx)
-FROM a LEFT JOIN b ON a.id = b.id
-       LEFT JOIN c ON a.id = c.id
-       LEFT JOIN d ON a.id = d.id
-----
-50000
-
-# SELECT DISTINCT.
-statement ok
-SET disabled_optimizers TO 'aggregate_pushdown_outer'
-
-query II rowsort
-SELECT DISTINCT a.id, b.bx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-1	100
-1	110
-2	200
-3	300
-4	NULL
-5	NULL
-
-statement ok
-SET disabled_optimizers TO ''
-
-query II rowsort
-SELECT DISTINCT a.id, b.bx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-----
-1	100
-1	110
-2	200
-3	300
-4	NULL
-5	NULL

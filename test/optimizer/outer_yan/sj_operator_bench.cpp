@@ -17,8 +17,13 @@
 //   BASELINE  disabled_optimizers='outer_yan_pre,outer_yan_dp,outer_yan_post'
 //
 // Test tiers
-//   [outer_yan][sj_bench]       sf=0 schema-only: plan shape + EXCEPT ALL parity.
-//   [outer_yan][sj_bench_slow]  sf=0.01 / sf=0.1: wall-clock timing + speedup table.
+//   [outer_yan][sj_bench]            sf=0 schema-only: plan shape + EXCEPT ALL
+//                                    parity. Runs in the default [outer_yan] suite.
+//   [sj_bench_slow][.]               sf=0.01: wall-clock timing + speedup table.
+//                                    Hidden ([.]) so it is opt-in only — run with
+//                                    `unittest "[sj_bench_slow]"`. NOT tagged
+//                                    [outer_yan], so the default suite never drags
+//                                    in dbgen/dsdgen (which previously hung it).
 
 #include "catch.hpp"
 #include "test_helpers.hpp"
@@ -320,7 +325,7 @@ TEST_CASE("sj_bench: TPC-DS plan shape and result parity (sf=0)",
 // ─────────────────────────────────────────────────────────────────────────────
 
 TEST_CASE("sj_bench: TPC-H execution timing (sf=0.01)",
-          "[outer_yan][sj_bench_slow][tpch]") {
+          "[sj_bench_slow][tpch][.]") {
     DuckDB db(nullptr);
     if (!db.ExtensionIsLoaded("tpch")) {
         return;
@@ -340,14 +345,14 @@ TEST_CASE("sj_bench: TPC-H execution timing (sf=0.01)",
     PrintTable(rows);
 }
 
-TEST_CASE("sj_bench: TPC-DS execution timing (sf=0.1)",
-          "[outer_yan][sj_bench_slow][tpcds]") {
+TEST_CASE("sj_bench: TPC-DS execution timing (sf=0.01)",
+          "[sj_bench_slow][tpcds][.]") {
     DuckDB db(nullptr);
     if (!db.ExtensionIsLoaded("tpcds")) {
         return;
     }
     Connection con(db);
-    REQUIRE_NO_FAIL(con.Query("CALL dsdgen(sf=0.1)"));
+    REQUIRE_NO_FAIL(con.Query("CALL dsdgen(sf=0.01)"));
     constexpr int N = 5;
 
     std::vector<BenchRow> rows;
@@ -359,4 +364,70 @@ TEST_CASE("sj_bench: TPC-DS execution timing (sf=0.1)",
         rows.push_back({c.name, t_bmp, t_hash, t_base});
     }
     PrintTable(rows);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Selectivity sweep: BITMAP vs HASH vs BASELINE as the semi-join's filtering
+// power varies from p=0 (drops everything) to p=1 (drops nothing). Synthetic,
+// self-contained (no TPC extension needed), so it isolates the separated
+// semi-join's runtime effect from query-specific noise — directly answering
+// "vary the predicates from 0 to 1, with detailed statistics and the query
+// setting". Tune N / DOM to vary data scale; the join key is fact.k.
+//
+//   fact(k,v)  : N rows, key k = i mod DOM (uniform over the domain).
+//   dimA(k)    : keys [0, keep) with keep = round(p*DOM) — the INNER join
+//                fact⋈dimA keeps exactly the p fraction of fact whose key < keep.
+//   dimB(k)    : full domain [0, DOM); the LEFT join fact⟕dimB adds no rows but
+//                makes the query OuterYan-applicable (acyclic, one outer join).
+//
+// The separated SJ build-on-dimA / probe-on-fact pre-reduces fact before the
+// hash join; the speedup over BASELINE is expected to peak at small p.
+TEST_CASE("sj_bench: selectivity sweep (synthetic, predicate fraction p=0..1)",
+          "[sj_bench_slow][selectivity][.]") {
+    DuckDB db(nullptr);
+    Connection con(db);
+    constexpr int64_t N    = 300000; // fact rows   (raise to scale data up)
+    constexpr int64_t DOM  = 100000; // key domain  (raise to scale keys up)
+    constexpr int     RUNS = 5;
+
+    REQUIRE_NO_FAIL(con.Query("CREATE TABLE fact(k BIGINT, v BIGINT)"));
+    REQUIRE_NO_FAIL(con.Query("INSERT INTO fact SELECT (i % " + std::to_string(DOM) +
+                              "), i FROM range(" + std::to_string(N) + ") t(i)"));
+    REQUIRE_NO_FAIL(con.Query("CREATE TABLE dimB(k BIGINT)"));
+    REQUIRE_NO_FAIL(con.Query("INSERT INTO dimB SELECT i FROM range(" + std::to_string(DOM) +
+                              ") t(i)"));
+
+    const string sql =
+        "SELECT fact.k, fact.v, dimA.k AS ak, dimB.k AS bk "
+        "FROM fact INNER JOIN dimA ON fact.k = dimA.k "
+        "LEFT JOIN dimB ON fact.k = dimB.k";
+
+    // Sanity: at full selectivity the plan must carry the separated SJ probe,
+    // otherwise the sweep is measuring plain hash joins and is meaningless.
+    REQUIRE_NO_FAIL(con.Query("CREATE TABLE dimA(k BIGINT)"));
+    REQUIRE_NO_FAIL(con.Query("INSERT INTO dimA SELECT i FROM range(" + std::to_string(DOM) +
+                              ") t(i)"));
+    RequireSJProbe(con, sql, SJMode::BITMAP);
+
+    std::printf("\nSelectivity sweep  (fact=%lld rows, key domain=%lld, join key=fact.k)\n",
+                (long long)N, (long long)DOM);
+    std::printf("%6s  %8s  %8s  %9s  %8s  %8s\n", "p", "Bmp(s)", "Hash(s)", "Base(s)", "SpBmp", "SpHash");
+    std::printf("%6s  %8s  %8s  %9s  %8s  %8s\n", "------", "--------", "--------", "---------",
+                "--------", "--------");
+    for (int pct = 0; pct <= 100; pct += 10) {
+        const int64_t keep = (DOM * pct) / 100;
+        REQUIRE_NO_FAIL(con.Query("DROP TABLE dimA"));
+        REQUIRE_NO_FAIL(con.Query("CREATE TABLE dimA(k BIGINT)"));
+        if (keep > 0) {
+            REQUIRE_NO_FAIL(con.Query("INSERT INTO dimA SELECT i FROM range(" +
+                                      std::to_string(keep) + ") t(i)"));
+        }
+        Apply(con, SJMode::BITMAP);   double t_bmp  = TimeMin(con, sql, RUNS);
+        Apply(con, SJMode::HASH);     double t_hash = TimeMin(con, sql, RUNS);
+        Apply(con, SJMode::BASELINE); double t_base = TimeMin(con, sql, RUNS);
+        std::printf("%5d%%  %8.4f  %8.4f  %9.4f  %7.2fx  %7.2fx\n", pct, t_bmp, t_hash, t_base,
+                    t_base / t_bmp, t_base / t_hash);
+    }
+    std::printf("\nSpeedup = baseline / mode  (>1x = SJ faster). "
+                "p = fraction of fact keys kept by the semi-join.\n\n");
 }

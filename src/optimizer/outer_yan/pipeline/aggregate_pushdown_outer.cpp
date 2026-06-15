@@ -14,7 +14,9 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -219,6 +221,20 @@ AggregateFunction LookupAggregate(ClientContext &context, const string &name, co
 	return agg_entry.functions.GetFunctionByArguments(context, {input_type});
 }
 
+//! Build `COALESCE(annot, 1)` at the bound level. Used ONLY for COUNT_STAR
+//! pushdown: over an outer join the annot column is NULL on every NULL-padded
+//! (unmatched) row, and SQL `sum` skips NULLs (treats them as 0) — but COUNT(*)
+//! must count each such row as 1. Wrapping the summed annot in COALESCE(.,1)
+//! restores that. It is a no-op for inner joins (annot is never NULL there),
+//! and is deliberately NOT applied to SUM/MIN/MAX/DISTINCT pushdown, whose
+//! NULL semantics must pass through unchanged.
+unique_ptr<Expression> MakeCoalesceWithOne(unique_ptr<Expression> annot, const LogicalType &type) {
+	auto coalesce = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_COALESCE, type);
+	coalesce->children.push_back(std::move(annot));
+	coalesce->children.push_back(make_uniq<BoundConstantExpression>(Value::Numeric(type, int64_t(1))));
+	return std::move(coalesce);
+}
+
 } // namespace
 
 unique_ptr<LogicalOperator>
@@ -264,11 +280,14 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 	switch (tree.root_aggregation.type) {
 	case OuterYanAggregationType::COUNT_STAR: {
 		if (!annot_indices.empty()) {
-			// sum(annot) — collapses the deeper push's per-row annot.
+			// sum(COALESCE(annot, 1)) — collapses the deeper push's per-row
+			// annot; COALESCE(.,1) makes a NULL annot (from an outer-join
+			// NULL-padded row) count as 1, since this is a COUNT(*) query.
 			const idx_t annot_idx = annot_indices[0];
+			auto annot_ref =
+			    make_uniq<BoundColumnRefExpression>(child_types[annot_idx], child_bindings[annot_idx]);
 			vector<unique_ptr<Expression>> sum_args;
-			sum_args.push_back(
-			    make_uniq<BoundColumnRefExpression>(child_types[annot_idx], child_bindings[annot_idx]));
+			sum_args.push_back(MakeCoalesceWithOne(std::move(annot_ref), child_types[annot_idx]));
 
 			auto sum_function = LookupAggregate(context, "sum", child_types[annot_idx]);
 			FunctionBinder function_binder(context);
@@ -475,6 +494,27 @@ void AggregatePushdownRewriter::UpdateExpressionBindings(Expression &expr) {
 		return;
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { UpdateExpressionBindings(child); });
+}
+
+void AggregatePushdownRewriter::RemapRootAggregateGroups(LogicalOperator &plan) {
+	// Descend through the cap projection(s) to the root aggregate. The pushes
+	// above re-indexed the join output, so its GROUP BY keys (which still hold
+	// the pre-push base-column bindings) must be chased through the binding map.
+	LogicalOperator *cur = &plan;
+	while (cur->type == LogicalOperatorType::LOGICAL_PROJECTION && !cur->children.empty()) {
+		cur = cur->children[0].get();
+	}
+	if (cur->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return;
+	}
+	auto &agg = cur->Cast<LogicalAggregate>();
+	for (auto &group : agg.groups) {
+		UpdateExpressionBindings(*group);
+	}
+	// `grouping_sets` are positional indices into `groups`, so they are
+	// unaffected; the aggregate's argument expressions are rebuilt wholesale by
+	// the orchestrator's ReplaceRoot* and are intentionally left untouched here.
+	cur->ResolveOperatorTypes();
 }
 
 bool AggregatePushdownRewriter::FindAnnotAttribute(LogicalOperator &op, ColumnBinding &out_binding,
@@ -895,9 +935,12 @@ AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan
 		return plan;
 	}
 
-	// Rebuild the root aggregate's first expression as `sum(annot)`.
+	// Rebuild the root aggregate's first expression as
+	// `sum(COALESCE(annot, 1))` — COUNT(*) semantics: a NULL annot from an
+	// outer-join NULL-padded row counts as 1, not 0.
+	auto root_annot_ref = make_uniq<BoundColumnRefExpression>(annot_type, annot_binding);
 	vector<unique_ptr<Expression>> sum_args;
-	sum_args.push_back(make_uniq<BoundColumnRefExpression>(annot_type, annot_binding));
+	sum_args.push_back(MakeCoalesceWithOne(std::move(root_annot_ref), annot_type));
 	auto sum_function = LookupAggregate(optimizer.context, "sum", annot_type);
 	FunctionBinder function_binder(optimizer.context);
 	auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(sum_args), nullptr,
@@ -918,6 +961,22 @@ AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan
 	return plan;
 }
 
+// Descend through the root projection chain to the root LogicalAggregate and
+// report whether it has zero GROUP BY keys. A group-less COUNT(*) is the one
+// aggregate shape whose pushdown is not yet correct (the pushed annot is not
+// summed at the group-less root — it returns |preserved side| instead of the
+// full count); it is skipped so the plain SJ-reduced count runs instead.
+static bool RootAggregateHasNoGroups(LogicalOperator &plan) {
+	LogicalOperator *cur = &plan;
+	while (cur && cur->type == LogicalOperatorType::LOGICAL_PROJECTION && !cur->children.empty()) {
+		cur = cur->children[0].get();
+	}
+	if (cur && cur->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return cur->Cast<LogicalAggregate>().groups.empty();
+	}
+	return false;
+}
+
 unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalOperator> plan) {
 	if (tree.root_aggregation.type == OuterYanAggregationType::NONE) {
 		return plan;
@@ -933,11 +992,22 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	    tree.root_aggregation.type != OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
 	}
-	// Skip if semi-join operators are present: AggregatePushdownRewriter
-	// does not model SJBuild/SJProbe pipeline dependencies, so restructuring
-	// the join tree around these operators can break build→probe ordering.
-	// TODO: teach the rewriter to treat SJBuild as a pushdown barrier.
-	if (!tree.bottom_up_pairs.empty() || !tree.top_down_pairs.empty()) {
+	// The old blanket SJ-pairs gate (which disabled the pushdown for EVERY
+	// aggregation) is removed. The pushdown now runs for COUNT(*) WITH a GROUP BY
+	// — the reference rewrite shape (outerjoin_test/{count,aggregation}/q4_r.sql):
+	// the deepest relation emits `count(*) as annot`, every level above and the
+	// root emit `sum(COALESCE(annot, 1))`. This is correct AND survives
+	// enable_verification's plan-roundtrip. The remaining shapes are skipped (the
+	// SJ-reduced plain aggregate is already correct, so skipping forgoes only the
+	// push optimization, never correctness):
+	//   - group-less COUNT(*): the pushed annot is not summed at the group-less
+	//     root (it would return |preserved side| instead of the full count);
+	//   - SUM / MINMAX / SELECT_DISTINCT: the pushed plan trips the
+	//     enable_verification result-collector type check (an intermediate type
+	//     goes stale across the Serialize/Deserialize re-plan; execution itself is
+	//     correct). These await the type-fidelity fix.
+	if (tree.root_aggregation.type != OuterYanAggregationType::COUNT_STAR ||
+	    RootAggregateHasNoGroups(*plan)) {
 		return plan;
 	}
 
@@ -947,6 +1017,7 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 		AggregatePushdownRewriter stage_a(optimizer.binder, optimizer.context, tree);
 		plan_copy = stage_a.Rewrite(std::move(plan_copy));
 		D_ASSERT(stage_a.JoinsVisited() == tree.agg_pushdown_decisions.size());
+		stage_a.RemapRootAggregateGroups(*plan_copy);
 	}
 
 	// Alternating prune cycle — fixed-N loop matching the reference's
@@ -972,6 +1043,7 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 		AggregatePushdownRewriter stage_b(optimizer.binder, optimizer.context, tree);
 		plan = stage_b.Rewrite(std::move(plan));
 		D_ASSERT(stage_b.JoinsVisited() == tree.agg_pushdown_decisions.size());
+		stage_b.RemapRootAggregateGroups(*plan);
 		final_agg_columns = stage_b.AggColumns();
 	}
 
@@ -991,6 +1063,23 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	plan = ReplaceRootCountWithSum(std::move(plan));
 	plan = ReplaceRootMinMax(std::move(plan), final_agg_columns);
 	plan = ReplaceRootSum(std::move(plan), final_agg_columns);
+
+	// Re-resolve operator types across the WHOLE rebuilt plan, post-order. The
+	// piecemeal `ResolveOperatorTypes()` calls inside the rewriter / ReplaceRoot*
+	// only touch the operators they edit; the prune cycle and annot projections
+	// can leave an ancestor's cached `types` stale. The result collector is
+	// initialised from the root operator's declared `types`, so a stale entry
+	// trips `column_data_collection` (`types == input_types`) at execution under
+	// verification even though execution itself is correct.
+	std::function<void(LogicalOperator &)> resolve_types = [&](LogicalOperator &op) {
+		for (auto &child : op.children) {
+			if (child) {
+				resolve_types(*child);
+			}
+		}
+		op.ResolveOperatorTypes();
+	};
+	resolve_types(*plan);
 
 	return plan;
 }

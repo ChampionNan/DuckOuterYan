@@ -154,11 +154,37 @@ public:
 	//! dense, position-indexed mirror of the join post-order seen by
 	//! `LogicalOperatorVisitor::VisitOperator`.
 	vector<OuterYanAggPushdownDecision> agg_pushdown_decisions;
-	//! Non-owning pointer into `source_plan` to the lowest root LogicalProjection
-	//! — the column-pruning cap above the join skeleton. `OJTToLogicalPlan`
-	//! splices the rebuilt skeleton into its child slot so the output schema
-	//! survives the roundtrip. Null when no projection tops the plan.
-	LogicalOperator *root_projection = nullptr;
+	//! Non-owning pointer into `source_plan` to the DEEPEST peeled cap operator
+	//! — the operator (projection / aggregate / distinct / emptied filter) whose
+	//! `children[0]` held the join-skeleton root. `OJTToLogicalPlan` splices the
+	//! rebuilt skeleton back into that slot, so every cap above it (e.g. a root
+	//! aggregate, or a DISTINCT over a projection) survives the roundtrip. Using
+	//! the deepest cap rather than the outermost projection is what keeps a root
+	//! LogicalAggregate from being dropped for `COUNT(*)` / `SUM ... GROUP BY`
+	//! queries. Null when the plan is a bare join skeleton.
+	LogicalOperator *root_skeleton_parent = nullptr;
+
+	//! Per-stage transformation counters. Each OuterYan pass records here what
+	//! it actually changed, so tests (and `--debug` printing) can assert that a
+	//! stage fired rather than silently no-op'd. Purely observational — no pass
+	//! reads these to drive a decision, so they never affect plan correctness.
+	struct StageStats {
+		//! Simplification: number of JOIN OTNodes whose `join_kind` was lowered
+		//! (OUTER→{INNER,LEFT,RIGHT} or LEFT/RIGHT→INNER) by null-rejection.
+		idx_t simplify_collapses = 0;
+		//! Desimplification: number of committed `join_kind` rewrites across the
+		//! whole fixpoint (a single edge may be counted more than once if it is
+		//! rewritten in successive passes).
+		idx_t desimplify_changes = 0;
+		//! Resimplification: number of OJT edges reverted from their
+		//! de-simplified `kind` back to `original_kind` (4d "such flag").
+		idx_t resimplify_reverts = 0;
+		//! DP: true iff the cost-chosen join order materialised by `RebuildOT`
+		//! differs from the post-Desimplify OT order it received (i.e. the DP
+		//! actually restructured the tree, not just re-emitted the input order).
+		bool dp_reordered = false;
+	};
+	StageStats stage_stats;
 
 private:
 	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can

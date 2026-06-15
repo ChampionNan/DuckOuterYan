@@ -1,9 +1,13 @@
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+
+#include <functional>
 
 namespace duckdb {
 
@@ -64,6 +68,69 @@ vector<ColumnBinding> LogicalSJBuild::GetColumnBindings() {
 
 void LogicalSJBuild::ResolveTypes() {
 	types = children[0]->types;
+}
+
+string LogicalSJBuild::DescribeKeyColumn(const LogicalOperator &root, const ColumnBinding &binding) {
+	// Locate the base LogicalGet for this binding's table_index within `root`.
+	const LogicalGet *found = nullptr;
+	std::function<void(const LogicalOperator &)> walk = [&](const LogicalOperator &op) {
+		if (found) {
+			return;
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_GET) {
+			auto &get = op.Cast<LogicalGet>();
+			if (get.table_index.index == binding.table_index.index) {
+				found = &get;
+				return;
+			}
+		}
+		for (auto &child : op.children) {
+			walk(*child);
+		}
+	};
+	walk(root);
+
+	const idx_t ti = binding.table_index.index;
+	const idx_t ci = binding.column_index.GetIndexUnsafe();
+	string table_label = "t" + to_string(ti);
+	string col_label = "col" + to_string(ci);
+	if (found) {
+		if (auto tbl = found->GetTable()) {
+			table_label = tbl->name + "(t" + to_string(ti) + ")";
+		}
+		// `ci` is the projection index within the Get's projected column list;
+		// map it through GetColumnIds() to the base column name.
+		auto &col_ids = found->GetColumnIds();
+		if (ci < col_ids.size()) {
+			auto base = col_ids[ci].GetPrimaryIndex();
+			if (base < found->names.size()) {
+				col_label = found->names[base];
+			}
+		}
+	}
+	return table_label + "." + col_label;
+}
+
+InsertionOrderPreservingMap<string> LogicalSJBuild::ParamsToString() const {
+	InsertionOrderPreservingMap<string> result;
+	const auto child_bindings = children.empty() ? vector<ColumnBinding>() : children[0]->GetColumnBindings();
+	for (idx_t f = 0; f < sj_to_create.size(); f++) {
+		const idx_t tag = f < filter_ids.size() ? filter_ids[f] : f;
+		string keys = "build ";
+		if (f < build_col_ids_per_filter.size()) {
+			const auto &cols = build_col_ids_per_filter[f];
+			for (idx_t k = 0; k < cols.size(); k++) {
+				if (k > 0) {
+					keys += ", ";
+				}
+				keys += (children.empty() || cols[k] >= child_bindings.size())
+				            ? ("#" + to_string(cols[k]))
+				            : DescribeKeyColumn(*children[0], child_bindings[cols[k]]);
+			}
+		}
+		result["filter#" + to_string(tag)] = keys;
+	}
+	return result;
 }
 
 } // namespace duckdb

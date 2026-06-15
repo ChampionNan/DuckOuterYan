@@ -67,6 +67,18 @@ public:
 	idx_t EstimateCardinality(ClientContext &context) override;
 	vector<ColumnBinding> GetColumnBindings() override;
 
+	//! EXPLAIN params: one `filter#<id>` line per filter showing the resolved
+	//! build key column(s). The `<id>` is the shared filter tag — the paired
+	//! LogicalSJProbe prints the same `filter#<id>` line, so a build and its
+	//! probe are matched by eye.
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
+
+	//! Render a build/probe key `ColumnBinding` as "table(tN).column" by
+	//! resolving the LogicalGet for `binding.table_index` inside `root`'s
+	//! subtree; falls back to "tN.colM" when unresolved. Shared by
+	//! LogicalSJBuild / LogicalSJProbe ParamsToString.
+	static string DescribeKeyColumn(const LogicalOperator &root, const ColumnBinding &binding);
+
 protected:
 	void ResolveTypes() override;
 };

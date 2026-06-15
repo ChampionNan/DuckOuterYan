@@ -370,3 +370,18 @@ lsqb*
 
 # project-local agent instructions (kept untracked)
 CLAUDE.md
+test/optimizer/outer_yan/*.md
+
+# OuterYan test/bench artifacts (auto_test/)
+equiv_db
+equiv_db.wal
+tpch_db
+tpch_db.wal
+tpcds_db
+tpcds_db.wal
+oy_traces/
+oy_traces_fail/
+oy_traces_full/
+oy_trace.txt
+experiment_onoff_results.txt
+experiment_semijoin_results.txt

@@ -1,10 +1,11 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/printer.hpp"
+#include "duckdb/common/to_string.hpp"
 #include "duckdb/execution/operator/join/physical_sj_build.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
 namespace duckdb {
@@ -21,9 +22,11 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 	// SemijoinInsertOnPlan. Aggregation-driven root anchoring is already
 	// enforced by OuterYanDP, so the OJT seen here is order-correct.
 	Resimplify(tree);
-#ifdef DEBUG
-	Printer::Print("[OuterYanPost] after Resimplify:\n" + tree.OJT().PrintAsTree());
-#endif
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("after Resimplify (" + to_string(tree.stage_stats.resimplify_reverts) +
+		                         " revert(s); OJT)",
+		                     tree.OJT().PrintAsTree(true));
+	}
 
 	// Record the per-edge aggregate-pushdown gate while the OJT is still
 	// live. Must run before OJTToLogicalPlan because the marker reads
@@ -41,6 +44,9 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 	// pre-decided pairs. Plan 3 contract — runs on the rebuilt LogicalPlan,
 	// not on the OJT.
 	plan = SemijoinInsertOnPlan(std::move(plan), tree);
+	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("after semi-join insertion (logical plan)", plan->ToString());
+	}
 
 	return plan;
 }
@@ -50,6 +56,7 @@ void OuterYanPost::Resimplify(OuterYanTree &tree) {
 		throw InternalException("OuterYanPost::Resimplify: tree has no OJT");
 	}
 	resimplification.Apply(tree.OJT());
+	tree.stage_stats.resimplify_reverts += resimplification.reverts;
 }
 
 void OuterYanPost::MarkAggPushdown(OuterYanTree &tree) {

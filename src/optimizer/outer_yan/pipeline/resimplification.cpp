@@ -60,6 +60,7 @@ bool Resimplification::TryRevert(OJTEdge &i_edge) {
 			return false;
 		}
 		i_edge.kind = i_edge.original_kind;
+		reverts++;
 		return true;
 	};
 
@@ -90,6 +91,7 @@ bool Resimplification::TryRevert(OJTEdge &i_edge) {
 }
 
 void Resimplification::Apply(OrderedJoinTree &ojt) {
+	reverts = 0;
 	all_edges.clear();
 	node_by_rel.clear();
 	parent_edge_by_rel.clear();

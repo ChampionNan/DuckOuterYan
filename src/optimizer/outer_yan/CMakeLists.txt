@@ -10,6 +10,7 @@ add_library_unity(
   common/applicability.cpp
   common/operator_tree.cpp
   common/ordered_join_tree.cpp
+  common/outer_yan_trace.cpp
   common/outer_yan_tree.cpp
   # main OuterYan algorithm pipeline phases
   pipeline/agg_pushdown.cpp

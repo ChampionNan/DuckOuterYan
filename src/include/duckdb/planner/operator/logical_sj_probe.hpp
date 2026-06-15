@@ -62,6 +62,11 @@ public:
 	idx_t EstimateCardinality(ClientContext &context) override;
 	vector<ColumnBinding> GetColumnBindings() override;
 
+	//! EXPLAIN params: one `filter#<id>` line per filter showing the resolved
+	//! probe key column(s). The `<id>` matches the paired LogicalSJBuild's
+	//! `filter#<id>` line, so build and probe are matched by the shared tag.
+	InsertionOrderPreservingMap<string> ParamsToString() const override;
+
 	//! Append an upstream LogicalSJBuild that populates one of `sj_to_use`'s
 	//! filters. Caller must keep the index alignment with `sj_to_use`.
 	void AddDownStreamOperator(LogicalSJBuild *op);

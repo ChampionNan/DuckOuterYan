@@ -22,6 +22,8 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
+#include <set>
+
 namespace duckdb {
 class ClientContext;
 
@@ -163,6 +165,9 @@ private:
 	static vector<unordered_set<RelationIndex>> GetAllNeighborSets(vector<RelationIndex> neighbors);
 	//! Post-order walk of an OT subtree, appending each JOIN node into `out`.
 	static void RefreshOTJoinsByOrder(OTNode &node, vector<OTNode *> &out);
+	//! Set of every JOIN node's sorted `subtree_relations`. Compared before/
+	//! after `RebuildOT` to detect whether DP restructured the tree (4c).
+	static std::set<vector<idx_t>> JoinGroupingSignature(const vector<OTNode *> &joins);
 
 private:
 	ClientContext &context;

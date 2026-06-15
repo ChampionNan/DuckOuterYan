@@ -79,6 +79,14 @@ private:
 	// the top of the join skeleton.
 	LogicalOperator &SkeletonRoot(LogicalOperator &plan);
 
+	// True iff every LOGICAL_FILTER expression in `op`'s subtree references at
+	// most ONE base relation. OuterYan pushes each residual predicate onto a
+	// single relation's leaf in OJTToLogicalPlan, so a residual spanning >1
+	// relation has no leaf to land on and would be mis-placed — such queries are
+	// rejected (deferred to DuckDB). Only unary "column OP constant"-style
+	// residuals are supported.
+	bool ResidualsAreUnary(LogicalOperator &op);
+
 	// Union-find helpers for graph-cycle detection.
 	RelationId Find(RelationId x);
 	bool UnionRelations(RelationId a, RelationId b);

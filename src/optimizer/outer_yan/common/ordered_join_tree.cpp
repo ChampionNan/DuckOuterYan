@@ -57,15 +57,77 @@ void OrderedJoinTree::CollectEdges(const OJTNode &node, vector<const OJTEdge *> 
 	}
 }
 
+// Directional connector for a "parent KIND child" edge. The arrow points FROM
+// the preserved operand TOWARD the null-extended one:
+//   LEFT  (parent preserved)  -> ;  RIGHT (child preserved)  <- ;
+//   FULL  (both preserved)    <->;  INNER (neither)          ⋈ .
+static const char *JoinSymbol(OuterYanJoinKind kind) {
+	switch (kind) {
+	case JoinType::INNER:
+		return " ⋈ ";
+	case JoinType::LEFT:
+		return " -> ";
+	case JoinType::RIGHT:
+		return " <- ";
+	case JoinType::OUTER:
+		return " <-> ";
+	default:
+		return " ?? ";
+	}
+}
+
+unordered_map<idx_t, string> OrderedJoinTree::BuildAlias(const OJTNode &root) {
+	vector<const OJTNode *> nodes;
+	CollectNodes(root, nodes);
+	unordered_map<idx_t, string> alias;
+	for (auto *n : nodes) {
+		const auto *base = FindBaseOp(n->base_op);
+		if (base && base->type == LogicalOperatorType::LOGICAL_GET) {
+			auto te = base->Cast<LogicalGet>().GetTable();
+			alias[n->relation_id] = te ? te->name : StringUtil::Format("R%llu", n->relation_id);
+		} else {
+			alias[n->relation_id] = StringUtil::Format("R%llu", n->relation_id);
+		}
+	}
+	return alias;
+}
+
 void OrderedJoinTree::PrintNodeRecursive(const OJTNode &node, std::ostringstream &os,
                                          const string &indent, bool is_last_child, bool is_root,
-                                         OuterYanJoinKind incoming_kind, idx_t incoming_order) {
+                                         const OJTEdge *incoming_edge, bool verbose,
+                                         const unordered_map<idx_t, string> &alias) {
+	auto name_of = [&alias](idx_t rel) -> string {
+		auto it = alias.find(rel);
+		return it != alias.end() ? it->second : StringUtil::Format("R%llu", rel);
+	};
 	os << indent;
-	if (!is_root) {
+	if (!is_root && incoming_edge) {
 		os << (is_last_child ? "└──" : "├──");
-		os << "[order=" << incoming_order << ", " << EnumUtil::ToString(incoming_kind) << "]── ";
+		os << "[order=" << incoming_edge->order << ", " << EnumUtil::ToString(incoming_edge->kind);
+		if (verbose) {
+			// Which relation joins which: parent <dir> child, the arrow marking
+			// the preserved side; then de-simplification / PK / elim flags.
+			os << ": " << name_of(incoming_edge->parent_relation_id)
+			   << JoinSymbol(incoming_edge->kind) << name_of(node.relation_id);
+			if (incoming_edge->original_kind != incoming_edge->kind) {
+				os << " was=" << EnumUtil::ToString(incoming_edge->original_kind);
+			}
+			if (incoming_edge->has_pk_fk_constraint) {
+				os << (incoming_edge->child_is_pk ? " pk=child" : " pk=parent");
+			}
+			if (incoming_edge->bottom_up_eliminated) {
+				os << " bu-elim";
+			}
+			if (incoming_edge->top_down_eliminated) {
+				os << " td-elim";
+			}
+		}
+		os << "]── ";
 	}
 	os << RelationLabel(node);
+	if (verbose) {
+		os << " rel=" << node.relation_id;
+	}
 	if (!node.filters.empty()) {
 		os << " filters=" << node.filters.size();
 	}
@@ -81,7 +143,7 @@ void OrderedJoinTree::PrintNodeRecursive(const OJTNode &node, std::ostringstream
 			continue;
 		}
 		bool last = (i + 1 == node.children.size());
-		PrintNodeRecursive(*edge.child, os, child_indent, last, false, edge.kind, edge.order);
+		PrintNodeRecursive(*edge.child, os, child_indent, last, false, &edge, verbose, alias);
 	}
 }
 
@@ -134,7 +196,7 @@ string OrderedJoinTree::Print() const {
 	return os.str();
 }
 
-string OrderedJoinTree::PrintAsTree() const {
+string OrderedJoinTree::PrintAsTree(bool verbose) const {
 	std::ostringstream os;
 	const auto &r = Root();
 
@@ -142,9 +204,10 @@ string OrderedJoinTree::PrintAsTree() const {
 	CollectNodes(r, nodes);
 	vector<const OJTEdge *> edges;
 	CollectEdges(r, edges);
+	auto alias = BuildAlias(r);
 	os << "OJT (" << nodes.size() << " relations, " << edges.size() << " joins)\n";
 	PrintNodeRecursive(r, os, /*indent*/ "", /*is_last_child*/ true, /*is_root*/ true,
-	                   JoinType::INNER, 0);
+	                   /*incoming_edge*/ nullptr, verbose, alias);
 	return os.str();
 }
 

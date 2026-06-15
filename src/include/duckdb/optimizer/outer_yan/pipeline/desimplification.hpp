@@ -96,6 +96,10 @@ private:
 	//! fired (rewrite committed when `!dry_run`, signalled when `dry_run`).
 	//! Throws on INVALID in either mode.
 	bool TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry_run);
+
+	//! Count of committed (non-dry-run) `D.join_kind` rewrites in the current
+	//! `Apply`. Surfaced into `OuterYanTree::StageStats::desimplify_changes`.
+	idx_t committed_changes = 0;
 };
 
 } // namespace duckdb

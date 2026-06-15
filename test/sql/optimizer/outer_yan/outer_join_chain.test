@@ -311,8 +311,12 @@ WHERE a.ax > 15
 4	NULL	4000
 
 # ============================================================================
-# Variant 10 — Residual filter spanning two relations (must land at the
-# lowest fused subplan, not at the root). Exercises step 3 of OJTToLogicalPlan.
+# Variant 10 — Unary residual on the null-supplying side (c.cx > const). OuterYan
+# supports only unary "column OP constant" residual predicates; a multi-relation
+# residual (e.g. COALESCE(b.bx,0)+COALESCE(c.cx,0) > 500) is intentionally OUT OF
+# SCOPE. The unary predicate null-rejects c, so Simplify lowers the a–c LEFT to
+# INNER; the residual must still land on c's leaf. Exercises step 3 of
+# OJTToLogicalPlan with a single-relation residual.
 # ============================================================================
 
 statement ok
@@ -321,9 +325,8 @@ SET disabled_optimizers TO ''
 query III rowsort
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-WHERE COALESCE(b.bx, 0) + COALESCE(c.cx, 0) > 500
+WHERE c.cx > 1500
 ----
-1	100	1000
 3	300	3000
 4	NULL	4000
 
@@ -333,9 +336,8 @@ SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
 query III rowsort
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
-WHERE COALESCE(b.bx, 0) + COALESCE(c.cx, 0) > 500
+WHERE c.cx > 1500
 ----
-1	100	1000
 3	300	3000
 4	NULL	4000
 

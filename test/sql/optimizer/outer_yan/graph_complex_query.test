@@ -1,0 +1,227 @@
+# name: test/sql/optimizer/outer_yan/graph_complex_query.test
+# description: OuterYan optimizer — the paper's worked example Q_1, a 7-relation
+#              bushy tree mixing every join kind, plus variants. Q_1 (LaTeX):
+#                Q1 = R7(H,A) ⟗_{7,1} ( R1(A,B) ⟕_{1,2}
+#                       ( (R3(C,D) ⟖_{3,4} R4(D,E)) ⟗_{3,2}
+#                         ((R2(B,C) ⟖_{2,5} R5(B,F)) ⋈_{2,6} R6(B,G)) ) )
+#              with ⟗=FULL ⟕=LEFT ⟖=RIGHT ⋈=INNER and edges keyed on the shared
+#              attribute (7-1:A, 1-2:B, 3-2:C, 3-4:D, 2-5:B, 2-6:B). The predicate
+#              graph (R7–R1–R2 hub, R2–R3–R4, R2–R5, R2–R6) is acyclic, so the
+#              query is in OuterYan's class. Every query names all columns (the
+#              relations share column names, so SELECT * would collide) and runs
+#              OuterYan-disabled vs enabled; the two row multisets must match
+#              (symmetric difference = 0). The full bushy nesting with two FULL
+#              OUTER joins, a RIGHT/INNER subtree, and cross-subtree ON conditions
+#              is exactly the shape that stresses Simplify/Desimplify/DP/Resimplify
+#              and the OJT→plan roundtrip together.
+# group: [outer_yan]
+
+# ----------------------------------------------------------------------------
+# Schema mirrors the paper's relation signatures. Keys overlap partially so each
+# outer join NULL-pads some rows; a few duplicate keys (R2.B=20, R6.B=20) fan out.
+# ----------------------------------------------------------------------------
+statement ok
+CREATE TABLE R7(H BIGINT, A BIGINT);
+
+statement ok
+CREATE TABLE R1(A BIGINT, B BIGINT);
+
+statement ok
+CREATE TABLE R2(B BIGINT, C BIGINT);
+
+statement ok
+CREATE TABLE R3(C BIGINT, D BIGINT);
+
+statement ok
+CREATE TABLE R4(D BIGINT, E BIGINT);
+
+statement ok
+CREATE TABLE R5(B BIGINT, F BIGINT);
+
+statement ok
+CREATE TABLE R6(B BIGINT, G BIGINT);
+
+statement ok
+INSERT INTO R7 VALUES (700,1),(701,2),(702,9);
+
+statement ok
+INSERT INTO R1 VALUES (1,10),(2,20),(3,30);
+
+statement ok
+INSERT INTO R2 VALUES (10,100),(20,200),(20,201),(40,400);
+
+statement ok
+INSERT INTO R3 VALUES (100,1000),(200,2000),(900,9000);
+
+statement ok
+INSERT INTO R4 VALUES (1000,5),(2000,6),(8000,8);
+
+statement ok
+INSERT INTO R5 VALUES (10,11),(20,22),(50,55);
+
+statement ok
+INSERT INTO R6 VALUES (10,111),(20,222),(20,223),(60,666);
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# A column list naming every output column (relations share names, so SELECT *
+# would produce duplicate identifiers and the CREATE TABLE AS would fail).
+# Reused verbatim by every Q_1 variant below.
+
+# ----------------------------------------------------------------------------
+# Q_1 — the exact bushy nesting from the paper.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE q1_off AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7 FULL OUTER JOIN (
+       R1 LEFT OUTER JOIN (
+            (R3 RIGHT OUTER JOIN R4 ON R3.D = R4.D)
+            FULL OUTER JOIN
+            ((R2 RIGHT OUTER JOIN R5 ON R2.B = R5.B) INNER JOIN R6 ON R2.B = R6.B)
+            ON R3.C = R2.C
+          ) ON R1.B = R2.B
+     ) ON R7.A = R1.A;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE q1_on AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7 FULL OUTER JOIN (
+       R1 LEFT OUTER JOIN (
+            (R3 RIGHT OUTER JOIN R4 ON R3.D = R4.D)
+            FULL OUTER JOIN
+            ((R2 RIGHT OUTER JOIN R5 ON R2.B = R5.B) INNER JOIN R6 ON R2.B = R6.B)
+            ON R3.C = R2.C
+          ) ON R1.B = R2.B
+     ) ON R7.A = R1.A;
+
+query I
+SELECT * FROM sym_diff('q1_off', 'q1_on');
+----
+0
+
+# NOTE (finding): on this 7-relation bushy tree OuterYan is applicable (7
+# relations, 6 edges) and produces a CORRECT result on/off, but the rebuilt plan
+# currently carries NO SJ_PROBE — the semi-join reduction is not applied to Q_1
+# (DP takes its fallback path). Equivalence still holds; the missing reduction is
+# an optimization gap, tracked separately, not a correctness defect here. A
+# narrow projection or a COUNT(*) wrapper over this same tree additionally trips
+# an "OJT connectivity invariant violated" crash in BuildOJTImpl (the bushy join
+# order the pruned plan yields cannot be re-assembled) — see the SELECT * focus
+# below, which is the safe path.
+
+# ----------------------------------------------------------------------------
+# Variant 1 — null-rejecting WHERE on the R2.C / R1.B keys forces Simplify to
+# collapse the FULL/LEFT joins adjacent to those relations; the on/off result
+# must still match.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE q1v1_off AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7 FULL OUTER JOIN (
+       R1 LEFT OUTER JOIN (
+            (R3 RIGHT OUTER JOIN R4 ON R3.D = R4.D)
+            FULL OUTER JOIN
+            ((R2 RIGHT OUTER JOIN R5 ON R2.B = R5.B) INNER JOIN R6 ON R2.B = R6.B)
+            ON R3.C = R2.C
+          ) ON R1.B = R2.B
+     ) ON R7.A = R1.A
+WHERE R2.C > 0 AND R1.B > 0;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE q1v1_on AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7 FULL OUTER JOIN (
+       R1 LEFT OUTER JOIN (
+            (R3 RIGHT OUTER JOIN R4 ON R3.D = R4.D)
+            FULL OUTER JOIN
+            ((R2 RIGHT OUTER JOIN R5 ON R2.B = R5.B) INNER JOIN R6 ON R2.B = R6.B)
+            ON R3.C = R2.C
+          ) ON R1.B = R2.B
+     ) ON R7.A = R1.A
+WHERE R2.C > 0 AND R1.B > 0;
+
+query I
+SELECT * FROM sym_diff('q1v1_off', 'q1v1_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 2 — left-deep re-association of the same 7 relations / same edges /
+# same join kinds (R7 anchors the chain). Exercises a different OT skeleton and
+# DP ordering while joining the identical relations on the identical keys.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE q1v2_off AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7
+  FULL OUTER JOIN R1 ON R7.A = R1.A
+  LEFT OUTER JOIN R2 ON R1.B = R2.B
+  RIGHT OUTER JOIN R5 ON R2.B = R5.B
+  INNER JOIN R6 ON R2.B = R6.B
+  FULL OUTER JOIN R3 ON R3.C = R2.C
+  RIGHT OUTER JOIN R4 ON R3.D = R4.D;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE q1v2_on AS
+SELECT R7.H AS r7h, R7.A AS r7a, R1.A AS r1a, R1.B AS r1b, R2.B AS r2b, R2.C AS r2c,
+       R3.C AS r3c, R3.D AS r3d, R4.D AS r4d, R4.E AS r4e, R5.B AS r5b, R5.F AS r5f,
+       R6.B AS r6b, R6.G AS r6g
+FROM R7
+  FULL OUTER JOIN R1 ON R7.A = R1.A
+  LEFT OUTER JOIN R2 ON R1.B = R2.B
+  RIGHT OUTER JOIN R5 ON R2.B = R5.B
+  INNER JOIN R6 ON R2.B = R6.B
+  FULL OUTER JOIN R3 ON R3.C = R2.C
+  RIGHT OUTER JOIN R4 ON R3.D = R4.D;
+
+query I
+SELECT * FROM sym_diff('q1v2_off', 'q1v2_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ----------------------------------------------------------------------------
+# KNOWN OPEN BUG C (NOT tested here — see KNOWN_BUGS.md + compare_onoff.sh).
+# Run as a BARE `SELECT` (not CREATE TABLE AS), Q_1's bushy 7-relation tree
+# crashes BuildOJTImpl ("connectivity invariant violated"), and naively
+# un-crashing it drops rows (bare = 4 vs the correct 7). The CREATE TABLE AS
+# sym_diff comparison above optimises to a non-bushy plan and so does NOT
+# exercise that path — it is a real coverage gap, documented rather than hidden.
+# These bare forms are deliberately omitted because the crash is an InternalError
+# the sqllogictest harness cannot mark as expected.
+statement ok
+SET disabled_optimizers TO ''

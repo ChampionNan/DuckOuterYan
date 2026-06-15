@@ -42,6 +42,7 @@
 #include "duckdb/optimizer/row_number_rewriter.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/aggregate_pushdown_outer.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
@@ -279,6 +280,14 @@ void Optimizer::RunBuiltInOptimizers() {
 		}
 #endif
 		if (outer_yan_active) {
+			// Open the trace block for this query: the original SQL plus the
+			// logical plan handed to OuterYan, before any OT/OJT rewrite. Guard
+			// the whole block so `plan->ToString()` is not rendered when tracing
+			// is off.
+			if (OuterYanTrace::Enabled()) {
+				OuterYanTrace::BeginQuery(context.GetCurrentQuery());
+				OuterYanTrace::Stage("input logical plan (pre-OuterYan)", plan->ToString());
+			}
 			OuterYanPre outer_yan_pre;
 			outer_yan_pre.Optimize(std::move(plan), outer_yan_tree);
 		}
@@ -298,6 +307,7 @@ void Optimizer::RunBuiltInOptimizers() {
 		RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
 			AggregatePushdownOuter aggregate_pushdown_outer(*this, outer_yan_tree);
 			plan = aggregate_pushdown_outer.Optimize(std::move(plan));
+			OuterYanTrace::Stage("after Aggregate Pushdown (logical plan)", plan->ToString());
 		});
 	} else {
 		// Simplifies FULL OUTER -> LEFT/RIGHT OUTER -> INNER if NULLs are filtered anyway

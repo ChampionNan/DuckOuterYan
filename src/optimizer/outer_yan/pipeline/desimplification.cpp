@@ -130,6 +130,7 @@ bool Desimplification::TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry
 		return false;
 	}
 	D_info.join_kind = committed;
+	committed_changes++;
 	return true;
 }
 
@@ -181,9 +182,11 @@ void Desimplification::Apply(OuterYanTree &tree) {
 	if (!tree.HasOT()) {
 		return;
 	}
+	committed_changes = 0;
 	while (VisitAsParent(tree.OT().Root(), /*dry_run=*/false)) {
 		// fixpoint
 	}
+	tree.stage_stats.desimplify_changes += committed_changes;
 }
 
 bool Desimplification::AllPairsSatisfy(OuterYanTree &tree) {
