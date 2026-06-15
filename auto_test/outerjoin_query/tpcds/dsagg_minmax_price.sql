@@ -1,0 +1,1 @@
+SELECT i_category, MIN(ss_sales_price) AS lo, MAX(ss_sales_price) AS hi FROM ((store_sales LEFT OUTER JOIN item ON ss_item_sk=i_item_sk) LEFT OUTER JOIN store ON ss_store_sk=s_store_sk) GROUP BY i_category;

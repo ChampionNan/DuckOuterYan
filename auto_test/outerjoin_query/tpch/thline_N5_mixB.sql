@@ -1,0 +1,1 @@
+SELECT * FROM ((((region FULL OUTER JOIN nation ON r_regionkey=n_regionkey) RIGHT OUTER JOIN customer ON n_nationkey=c_nationkey) INNER JOIN orders ON c_custkey=o_custkey) LEFT OUTER JOIN lineitem ON o_orderkey=l_orderkey);
