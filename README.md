@@ -2,32 +2,49 @@
 
 ## Build
 
-You can build this repository in the same way as the original DuckDB. A `Makefile` wraps the build process. For available build targets and configuration flags, see the [DuckDB Build Configuration Guide](https://duckdb.org/docs/stable/dev/building/build_configuration.html).
+A `Makefile` wraps the build (same as upstream DuckDB). For all targets and flags
+see the [DuckDB Build Configuration Guide](https://duckdb.org/docs/stable/dev/building/build_configuration.html).
 
 ```bash
-make                   # Build optimized release version
-make release           # Same as 'make'
-make debug             # Build with debug symbols
-GEN=ninja make         # Use Ninja as backend
-BUILD_BENCHMARK=1 make # Build with benchmark support
+GEN=ninja make release   # optimized -> build/release/duckdb   (use this for all testing)
+GEN=ninja make debug     # debug     -> build/debug/duckdb     (failure-debugging only)
 ```
 
-## Experiement
-### Test Queries
-Under `./outerjoin_test`, storage file is `rstk_db`. Auto test script is `auto_run.sh`, need to change `DUCK_NUM` PATH. 
-```sh
-# bash auto_run storage_file query_directory
-$ bash auto_run.sh rstk outerjoin_test/aggregation
+The TPC-H / TPC-DS correctness suites need the `dbgen` / `dsdgen` extensions
+**statically linked**, so build the release binary with them (a plain
+`make release` omits them and those suites self-skip):
+
+```bash
+BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 ```
 
-### Correctness
-`compare_equal_batch.sh` call `compare_equal.sh`. For new testing directory, add new case in `compare_equal.sh`. 
-```sh
-$ bash compare_equal_batch.sh 5       # call test case 5
-$ bash compare_equal_batch.sh [all]   # call all test cases
+## Testing the OuterYan optimizer
+
+All test/benchmark scripts live in [`auto_test/`](auto_test/) — see
+[auto_test/README.md](auto_test/README.md) for the full reference (data/DB build,
+the disk-safe in-engine bench compare, single-query compare, tracing). Main steps:
+
+```bash
+export DUCKDB_BIN="$PWD/build/release/duckdb"
+
+# 1. CORRECTNESS — OuterYan ON vs OFF, per query (set-based equivalence diff).
+#    Suites: select | agg | tpch | tpcds | equiv (select+agg) | bench (tpch+tpcds) | all
+bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
+grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt        # any failures
+
+# TPC-H/DS scale factor defaults to 10; override (and rebuild the DB) per run:
+rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
+
+# 2. PERFORMANCE — gate on correctness, then time OFF vs ON (release binary only).
+bash auto_test/experiment_onoff.sh --rscale 100000          # -> experiment_onoff_results.txt
+bash auto_test/experiment_semijoin.sh                       # -> experiment_semijoin_results.txt
+
+# 3. DEBUG a wrong answer — dump every optimizer pass for a query.
+bash auto_test/trace_outer_yan.sh -q "SELECT ...;"          # -> oy_trace.txt
 ```
 
-### Running time
+The databases (`equiv_db`, `tpch_db`, `tpcds_db`) and `*_results.txt` are built in
+the repo root and are git-ignored.
 
 ---
 

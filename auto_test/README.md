@@ -1,170 +1,134 @@
-# `auto_test/` — OuterYan optimizer test & benchmark scripts
+# `auto_test/` — OuterYan optimizer test & benchmark
 
-Helper scripts for the **OuterYan** optimizer (semi-join / bloom-filter
-predicate transfer for acyclic queries with outer joins): **correctness**
-(OFF-vs-ON equivalence), **debugging** (per-stage pipeline traces), and
-**performance** (timing experiments).
+Scripts for the **OuterYan** optimizer: **correctness** (ON-vs-OFF equivalence),
+**performance** (timing), **debugging** (per-pass traces). Each script finds the
+repo itself; the binary defaults to `build/release/duckdb` (`DUCKDB_BIN=` or
+`--bin` to override). **Test on a RELEASE build** — debug is failure-debugging only.
 
-Each script resolves the repo automatically — `SCRIPT_DIR = auto_test/`,
-`REPO_ROOT = SCRIPT_DIR/..` — so it runs from anywhere. The duckdb binary
-defaults to `build/release/duckdb`, falling back to `build/debug/duckdb`
-(override with `DUCKDB_BIN=` or a `--bin` flag).
+---
 
-> **Always test against a RELEASE build** — `GEN=ninja make release`. The debug
-> binary is the fallback and is for failure-debugging only (10–50× slower, and
-> its timings are directional at best).
+## Data & databases
+
+Each DB is built once, reused, git-ignored, and rebuilt only if missing.
+
+| DB | built from | needs |
+|---|---|---|
+| `equiv_db`  | `test/.../outer_yan/data/R1..R10.csv` → tables `R1..R10` + views `R/S/T/K` | `data_generation.py` |
+| `tpch_db`   | `CALL dbgen(sf=$TPCH_SF)`   (default 10) | binary built `BUILD_TPCH=1` |
+| `tpcds_db`  | `CALL dsdgen(sf=$TPCDS_SF)` (default 10) | binary built `BUILD_TPCDS=1` |
+
+`equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the query corpus from
+`gen_queries.py`.
+
+```
+data_generation.py    write R1..Rk chain CSVs (behind equiv_db + experiment_onoff)
+    --k N            number of tables R1..Rk
+    --total-ids N    ids/rows to generate (joins are per-id → size scales linearly)
+    --seed N         RNG seed
+    --output-dir D   directory to write R*.csv into
+gen_queries.py [equiv|tpch|tpcds|bench|all]   (re)generate the SQL corpus
+```
+```bash
+python3 auto_test/data_generation.py --k 10 --total-ids 1000000 --seed 42 \
+        --output-dir test/sql/optimizer/outer_yan/data
+```
 
 ---
 
 ## Correctness — `compare_equal_batch.sh`
 
-File-based, in the repo's own `compare_pair` style. Every test runs **two `.sql`
-files** through `compare_equal.sh` against a database and diffs them with EXCEPT
-both ways (set-based, order-independent). For OuterYan we pair, per query:
+Runs each query twice (OuterYan ON vs OFF) and checks the result sets match.
 
-```
-<q>.sql       the bare query           -> OuterYan ON  (default)
-<q>_off.sql   SET disabled_optimizers  -> OuterYan OFF (oracle)
-              TO 'outer_yan'; <query>
-```
-
-```
-auto_test/compare_equal_batch.sh [select|agg|tpch|tpcds|equiv|bench|all]   (default: all)
-    select / 1   equivalence: SELECT *        (equiv DB)
-    agg    / 2   equivalence: aggregation     (equiv DB)
-    tpch   / 3   TPC-H outer-join families     (tpch DB; needs dbgen)
-    tpcds  / 4   TPC-DS outer-join families    (tpcds DB; needs dsdgen)
-    equiv        select + agg
-    bench        tpch + tpcds
-auto_test/compare_equal.sh <f1.sql> <f2.sql> [db]   # one pair, shows the diff
-```
-
-The corpora live under `outerjoin_query/`, each suite self-building its DB once:
-
-| suite | dir | data |
-|---|---|---|
-| `select` | `equivalence/select_star/` | structural matrix N=3..6 × {line,star,bushy} × kind vectors (126) + 7-/10-rel deep chains | equiv DB |
-| `agg`    | `equivalence/aggregation/` | `COUNT`/`SUM … GROUP BY` over R/S/T/K (5) | equiv DB |
-| `tpch`   | `tpch/`  | customer/orders/lineitem, nation/supplier, … outer-join families | `dbgen(sf=0.01)` |
-| `tpcds`  | `tpcds/` | store_sales/customer/item/store, web_sales, … outer-join families | `dsdgen(sf=0.01)` |
-
-`equiv DB` (`$REPO_ROOT/equiv_db`) is built from the chain CSVs
-(`test/sql/optimizer/outer_yan/data/R1..R10.csv` → tables R1..R10 + views
-R/S/T/K). `tpch_db` / `tpcds_db` are generated via the dbgen/dsdgen extensions
-(a suite self-skips if its extension is absent). All four corpora are generated
-by `gen_queries.py` (re-run to regenerate / extend; see below).
-
-**Methodology: always diff the BARE `SELECT`.** Never `COPY (…) TO` or
-`CREATE TABLE AS` — the wrapper root makes OuterYan inapplicable, so ON silently
-equals OFF (a vacuous, bug-masking comparison).
-
-### Test ONE query ON vs OFF (file-pair compare)
-
-`compare_equal.sh <f1.sql> <f2.sql> [db]` runs each side, loads both result sets,
-EXCEPTs them both ways, and prints **✅ SUCCESS** or **❌ FAILURE** with the
-differing rows.
-
-**Run an existing corpus pair** — every query already ships as a `<q>.sql` (ON) /
-`<q>_off.sql` (OFF) pair, e.g. the 4-relation all-LEFT chain
-`outerjoin_query/equivalence/select_star/line_N4_allLEFT.sql`:
-
-```
-SELECT * FROM (((R1 LEFT OUTER JOIN R2 ON R1.dst=R2.src)
-                     LEFT OUTER JOIN R3 ON R2.dst=R3.src)
-                     LEFT OUTER JOIN R4 ON R3.dst=R4.src);
-```
+**All suites**
 ```bash
-cd auto_test
-P=outerjoin_query/equivalence/select_star/line_N4_allLEFT
-compare_equal.sh "$P.sql" "${P}_off.sql" "$REPO_ROOT/equiv_db"
-# tpch/tpcds pairs: use tpch_db / tpcds_db, e.g.
-compare_equal.sh outerjoin_query/tpch/th1_cust_ord_line.sql \
-                 outerjoin_query/tpch/th1_cust_ord_line_off.sql "$REPO_ROOT/tpch_db"
+bash auto_test/compare_equal_batch.sh all
 ```
 
-**Or test an ad-hoc query** — write the two files yourself (bare = ON, `SET`
-prefix = OFF):
-
+**One suite** — `compare_equal_batch.sh [select|agg|tpch|tpcds|equiv|bench]`
+(`equiv`=select+agg, `bench`=tpch+tpcds). Env: `TPCH_SF`/`TPCDS_SF` (scale,
+default 10), `BENCH_MEM=6GB`, `BENCH_TMPCAP=20GB`, `BENCH_TIMEOUT=900`.
 ```bash
-Q="SELECT * FROM R LEFT JOIN S ON R.dst=S.src;"
-printf '%s\n' "$Q" > /tmp/q.sql                                              # ON
-printf "SET disabled_optimizers TO 'outer_yan';\n%s\n" "$Q" > /tmp/q_off.sql # OFF
-auto_test/compare_equal.sh /tmp/q.sql /tmp/q_off.sql equiv_db
+rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
 ```
 
-Use `equiv_db` for `R/S/T/K` & `R1..R10` queries, `tpch_db` / `tpcds_db` for those
-schemas. To check OuterYan actually engaged:
-`echo "EXPLAIN $Q" | $DUCKDB_BIN equiv_db | grep -E 'SJ_BUILD|SJ_PROBE'`.
-
----
-
-## Debugging — trace mode
-
-The OuterYan optimizer records a labelled snapshot of **every pipeline pass** to a
-file, so you can see exactly which rule rewrote which edge — i.e. where a wrong
-answer enters. The stages, in order:
-
-```
-original SQL → input logical plan → after BuildOT → after Simplify →
-semi-join pairs (2 passes) → after Desimplify → after DP → after Resimplify →
-after SJ insertion → (aggregate queries) after Aggregate Pushdown
-```
-
-OT/OJT stages render verbose: each edge is `parent <dir> child` — LEFT `->`,
-RIGHT `<-`, FULL `<->`, INNER `⋈` — with `was=original_kind` plus PK/elim
-markers; plan stages render as the logical plan.
-
-**Raw mechanism — the `DUCKDB_OYTRACE` env var.** Any duckdb invocation honours
-it: point it at a file, run the *bare* query with OuterYan ON, and each pass
-appends its snapshot. Unset, tracing is a zero-cost no-op (guarded by
-`OuterYanTrace::Enabled()`).
-
+**Single query** — `compare_equal.sh <on.sql> <off.sql> [db]`
 ```bash
-echo "SELECT * FROM R LEFT JOIN S ON R.dst=S.src;" \
-  | DUCKDB_OYTRACE=/tmp/oy.txt build/release/duckdb equiv_db
-```
-
-**Convenience runner — `trace_outer_yan.sh`** (builds the R1..R10 + R/S/T/K DB
-and drives the tracer):
-
-```
-auto_test/trace_outer_yan.sh -q "SELECT … ;"            # one query -> oy_trace.txt (also printed)
-auto_test/trace_outer_yan.sh -q "SELECT … ;" -o out.txt # choose the output file
-auto_test/trace_outer_yan.sh fails                       # the bundle of known-failing queries -> oy_traces/
-    -b,--bin PATH    duckdb binary (default build/debug/duckdb)
-    -o,--out FILE    output file for -q          (default oy_trace.txt)
-    -d,--outdir DIR  output dir for `fails` mode (default oy_traces/)
+P=auto_test/outerjoin_query/equivalence/select_star/line_N4_allLEFT
+bash auto_test/compare_equal.sh "$P.sql" "${P}_off.sql" equiv_db
 ```
 
 ---
 
-## Performance experiments
+## Performance
 
-Gate on correctness first (a wrong ON result is never timed); results are
-written to the repo root. Use a **release** `--bin`.
+Gate on correctness first (a wrong ON result is never timed), then time OFF vs ON;
+release binary only.
 
-- `experiment_onoff.sh` — Exp 2: whole-optimizer OFF vs ON. Times the **same
-  queries** that `compare_equal_batch.sh` checks — the `equivalence/` corpus —
-  over the R1..R10 + R/S/T/K schema scaled up via `--rscale` (the generator keys
-  joins per-id, so result size scales linearly). Per query: correctness gate →
-  join_reorder regime (No/Yes) → min-of-window timing at `threads=1`.
-- `experiment_semijoin.sh` — Exp 1: OuterYan SJ filters vs DuckDB SEMI (same
-  `dim ⟕ fact` skeleton; BASELINE / BITMAP / HASH / DUCKDB_SEMI; selectivity sweep).
+### `experiment_onoff.sh` 
+- whole optimizer OFF vs ON over the equivalence corpus
+```
+    -r,--rscale N    rows/table (default 1e6; use ~1e5 so heavy branch/bushy
+                     queries don't blow the gate timeout)
+    --only select|agg|all    --pattern GLOB    --limit N
+    -n,--runs N    --min-secs S (timing window)    -t,--timeout S    -o,--out FILE
+```
+```bash
+bash auto_test/experiment_onoff.sh --rscale 100000 -t 120
+```
+Output: `experiment_onoff_results.txt`
 
-Specs: `test/optimizer/outer_yan/EXPERIMENT_*_DESIGN.md`.
+### `experiment_semijoin.sh` 
+- OuterYan SJ filters vs DuckDB SEMI (`dim ⋈ fact`)
+```
+    -N fact rows    -D key domain    -n runs    -t timeout    -b,--bin PATH    -o,--out FILE
+```
+```bash
+bash auto_test/experiment_semijoin.sh -N 1000000 -D 200000
+```
+Output: `experiment_semijoin_results.txt`
 
 ---
 
-## Shared / generators
+## Debugging — `trace_outer_yan.sh`
 
-| file | role |
-|---|---|
-| `outer_yan_bench_lib.sh` | bash lib **sourced** by the experiments: the primitives `oy_equiv_check` (OFF-vs-ON correctness atom), `oy_time_min` (min-of-window wall time), `oy_regime` (join_reorder Yes/No from the EXPLAIN join-order signature). Not a query file. |
-| `data_generation.py` | generates the `R1..Rk` chain-stress CSVs for the equiv DB + `experiment_onoff.sh`. |
-| `gen_queries.py` | unified corpus generator: `gen_queries.py [equiv\|tpch\|tpcds\|bench\|all]` (default `all`). Same topology × join-type-vector "variance shape" across all corpora — synthetic R1..R10 (`equiv`, wiped+regenerated) vs real FK trees (`tpch`/`tpcds`, hand-written `th1..th5`/`ds1..ds5` anchors preserved). |
-| `outerjoin_query/` | the SQL corpus: `equivalence/` (ON/OFF pairs over the equiv DB) + `tpch/` + `tpcds/`. |
+Dumps every optimizer pass for a query, so you can see which rule rewrote which
+edge. Flow:
+```
+input plan → BuildOT → Simplify → SJ pairs → Desimplify → DP → Resimplify
+           → SJ insertion → (aggregate) agg pushdown
+```
+```
+    -q "SELECT … ;"   trace one query        fails   trace the known-failing bundle
+    -b,--bin PATH     -o,--out FILE (default oy_trace.txt)   -d,--outdir DIR (default oy_traces/)
+```
+```bash
+bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R LEFT JOIN S ON R.dst=S.src;"
+```
 
-## Outputs (repo root, git-ignored)
+---
 
-`equiv_db` / `tpch_db` / `tpcds_db` (built once); `oy_traces*/`, `oy_trace.txt`;
-`experiment_*_results.txt`. Wipe stale output before a fresh run.
+## Whole testing flow
+
+```bash
+# 1. generate R1..R10 data (for equiv_db + onoff)
+python3 auto_test/data_generation.py --k 10 --total-ids 1000000 --seed 42 \
+        --output-dir test/sql/optimizer/outer_yan/data
+
+# 2. build a release binary WITH the tpch/tpcds extensions
+BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
+export DUCKDB_BIN="$PWD/build/release/duckdb"
+
+# 3. correctness (all suites) -> file, then list failures
+bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
+grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt
+
+# 4. performance
+bash auto_test/experiment_onoff.sh --rscale 100000
+bash auto_test/experiment_semijoin.sh
+
+# 5. debug a failing query
+bash auto_test/trace_outer_yan.sh -q "SELECT ...;"
+```
+
+Outputs (repo root, git-ignored): `equiv_db` / `tpch_db` / `tpcds_db`,
+`compare_equal_batch_results.txt`, `experiment_*_results.txt`, `oy_trace*`.

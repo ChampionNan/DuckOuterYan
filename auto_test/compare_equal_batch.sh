@@ -13,8 +13,8 @@
 # Suites (each self-builds its database once, then runs every pair in a dir):
 #   select   equivalence/select_star/  structural matrix N=3..6 + deep chains
 #   agg      equivalence/aggregation/  COUNT/SUM … GROUP BY            } equiv DB
-#   tpch     tpch/                     real TPC-H schema (dbgen sf=0.01)
-#   tpcds    tpcds/                    real TPC-DS schema (dsdgen sf=0.01)
+#   tpch     tpch/                     real TPC-H schema (dbgen sf=10; TPCH_SF= to override)
+#   tpcds    tpcds/                    real TPC-DS schema (dsdgen sf=10; TPCDS_SF= to override)
 #
 # USAGE: compare_equal_batch.sh [select|agg|tpch|tpcds|equiv|bench|all]
 #   select / 1   equivalence: SELECT *          (equiv DB)
@@ -36,8 +36,8 @@ DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/release/duckdb}"
 export DUCKDB_BIN
 
 EQUIV_DB="${EQUIV_DB:-$REPO_ROOT/equiv_db}"
-TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}";   TPCH_SF="${TPCH_SF:-0.01}"
-TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"; TPCDS_SF="${TPCDS_SF:-0.01}"
+TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}";   TPCH_SF="${TPCH_SF:-10}"
+TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"; TPCDS_SF="${TPCDS_SF:-10}"
 
 # Helper: run one ON/OFF pair through compare_equal.sh against ${DB} and verdict.
 compare_pair() {
@@ -61,6 +61,55 @@ run_equiv_dir() {  # $1=dir $2=db
         case "$on" in *_off.sql) continue;; esac
         off="${on%.sql}_off.sql"
         compare_pair "$on" "$off"
+    done
+}
+
+# --- disk-safe in-engine comparison (for large bench results) ----------------
+# The compare_equal.sh path materialises each side's FULL result to a CSV, which
+# explodes on real TPC-H/DS data (a single sf=1 SELECT * over lineitem can be
+# 20+ GB). compare_pair_inengine instead runs BOTH sides as TEMP tables inside ONE
+# duckdb process and counts the symmetric set-difference + row-count delta — no
+# result ever hits the disk as CSV. memory_limit + max_temp_directory_size CAP the
+# spill, so a runaway (fan-out) query ERRORs cleanly instead of filling the disk.
+BENCH_MEM="${BENCH_MEM:-6GB}"
+BENCH_TMPCAP="${BENCH_TMPCAP:-20GB}"
+BENCH_TIMEOUT="${BENCH_TIMEOUT:-900}"
+compare_pair_inengine() {  # $1=on.sql $2=db
+    local on="$1" db="$2" q label out diff tmo
+    label="$(basename "$on" .sql)"
+    [ -f "$on" ] || { echo "⚠️  MISSING: $on"; return; }
+    q="$(sed 's/;[[:space:]]*$//' "$on")"             # bare query, trailing ; stripped
+    tmo="$(command -v timeout || command -v gtimeout || true)"
+    out="$( { [ -n "$tmo" ] && set -- "$tmo" "$BENCH_TIMEOUT" "$DUCKDB_BIN" "$db" -noheader -list \
+                            || set -- "$DUCKDB_BIN" "$db" -noheader -list
+        "$@" <<SQL 2>&1
+PRAGMA memory_limit='$BENCH_MEM';
+SET max_temp_directory_size='$BENCH_TMPCAP';
+SET disabled_optimizers TO 'outer_yan';
+CREATE TEMP TABLE _off AS $q;
+SET disabled_optimizers TO '';
+CREATE TEMP TABLE _on AS $q;
+SELECT (SELECT count(*) FROM (SELECT * FROM _off EXCEPT SELECT * FROM _on))
+     + (SELECT count(*) FROM (SELECT * FROM _on EXCEPT SELECT * FROM _off))
+     + abs((SELECT count(*) FROM _off) - (SELECT count(*) FROM _on)) AS diff;
+SQL
+    } )"
+    if [ -z "$out" ]; then
+        echo "⏱️  TIMEOUT(${BENCH_TIMEOUT}s) or empty: $label"
+    elif printf '%s' "$out" | grep -qiE 'error|exceed|out of memory|temp'; then
+        echo "⚠️  ERROR: $label"; printf '%s' "$out" | grep -iE 'error|exceed|out of memory|temp' | head -1 | sed 's/^/        /'
+    else
+        diff="$(printf '%s' "$out" | grep -oE '^-?[0-9]+$' | tail -1)"
+        if [ "$diff" = "0" ]; then echo "✅ PASS: $label"
+        else echo "❌ FAIL: $label (symdiff+rowdelta=${diff:-?})"; fi
+    fi
+}
+
+run_bench_dir() {  # $1=dir $2=db ; disk-safe in-engine comparison
+    local on
+    for on in "$1"/*.sql; do
+        case "$on" in *_off.sql) continue;; esac
+        compare_pair_inengine "$on" "$2"
     done
 }
 
@@ -106,14 +155,14 @@ test_equality_agg() {
     run_equiv_dir "$SCRIPT_DIR/outerjoin_query/equivalence/aggregation" "$EQUIV_DB"
 }
 test_equality_tpch() {
-    echo "---- OuterYan equivalence: TPC-H (ON vs OFF) ----"
+    echo "---- OuterYan equivalence: TPC-H (ON vs OFF, in-engine sf=$TPCH_SF) ----"
     build_tpch_db || return
-    run_equiv_dir "$SCRIPT_DIR/outerjoin_query/tpch" "$TPCH_DB"
+    run_bench_dir "$SCRIPT_DIR/outerjoin_query/tpch" "$TPCH_DB"
 }
 test_equality_tpcds() {
-    echo "---- OuterYan equivalence: TPC-DS (ON vs OFF) ----"
+    echo "---- OuterYan equivalence: TPC-DS (ON vs OFF, in-engine sf=$TPCDS_SF) ----"
     build_tpcds_db || return
-    run_equiv_dir "$SCRIPT_DIR/outerjoin_query/tpcds" "$TPCDS_DB"
+    run_bench_dir "$SCRIPT_DIR/outerjoin_query/tpcds" "$TPCDS_DB"
 }
 
 # --- dispatch ----------------------------------------------------------------
