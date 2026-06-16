@@ -52,6 +52,11 @@ while [ $# -gt 0 ]; do case "$1" in
     -h|--help) sed -n '2,/^set /p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
 OUT="${OUT:-$REPO_ROOT/experiment_semijoin_results.txt}"
+# Machine-readable siblings of the pretty report (one per table shape).
+CSV_BASE="${OUT%.txt}"
+CSV_CORPUS="${CSV_BASE}_corpus.csv"
+CSV_SWEEP="${CSV_BASE}_sweep.csv"
+CSV_TPCH="${CSV_BASE}_tpch.csv"
 
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb not executable: $DUCKDB_BIN" >&2; exit 1; }
 source "$SCRIPT_DIR/outer_yan_bench_lib.sh"
@@ -115,13 +120,15 @@ echo
 echo "===================== A. semi-join corpus (${#LABELS[@]} queries) ====================="
 printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' query sj Base Bmp Hash SpBmp SpHash correct
 echo "--------------------------------------------------------------------------------------"
+echo 'query,sj,base_s,bmp_s,hash_s,spbmp,sphash,correct' > "$CSV_CORPUS"
 NSJ=0; NTIMED=0; SUMB=0; NB=0; SUMH=0; NH=0
 for ((i=0; i<${#LABELS[@]}; i++)); do
     id="${LABELS[i]}"; q="${SQLS[i]}"
     g="$(oy_equiv_check "$DB" "$id" "$q")"
     case "$g" in *"equiv OK"*) ok="OK";; *"NOT EQUIV"*) ok="NOTEQ";; *"TIMEOUT"*) ok="TMO";; *) ok="ERR";; esac
     if [ "$ok" != "OK" ]; then
-        printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' "$id" "-" - - - - - "$ok"; continue
+        printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' "$id" "-" - - - - - "$ok"
+        printf '"%s",,,,,,,%s\n' "$id" "$ok" >> "$CSV_CORPUS"; continue
     fi
     if { echo "$SET_BMP"; echo "EXPLAIN (FORMAT json) ${q%;};"; } \
          | "$DUCKDB_BIN" "$DB" -list -noheader 2>/dev/null | grep -q 'SJ_PROBE'; then sj="yes"; NSJ=$((NSJ+1)); else sj="no"; fi
@@ -131,6 +138,7 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
     spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
     sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
     printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' "$id" "$sj" "$base" "$bmp" "$hash" "$spb" "$sph" "OK"
+    printf '"%s",%s,%s,%s,%s,%s,%s,OK\n' "$id" "$sj" "$base" "$bmp" "$hash" "$spb" "$sph" >> "$CSV_CORPUS"
     NTIMED=$((NTIMED+1))
     [ "$spb" != "NA" ] && { SUMB="$(awk -v s="$SUMB" -v r="$spb" 'BEGIN{print s+r}')"; NB=$((NB+1)); }
     [ "$sph" != "NA" ] && { SUMH="$(awk -v s="$SUMH" -v r="$sph" 'BEGIN{print s+r}')"; NH=$((NH+1)); }
@@ -149,6 +157,7 @@ echo
 echo "===================== B. selectivity sweep (d1 ⟕ fact) ====================="
 printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' p dimKeys sj Base Bmp Hash Semi SpBmp SpHash
 echo "----------------------------------------------------------------------------------"
+echo 'p,dim_keys,sj,base_s,bmp_s,hash_s,semi_s,spbmp,sphash' > "$CSV_SWEEP"
 for p in 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0; do
     DK="$(awk -v p="$p" -v d="$DOM" 'BEGIN{printf "%d", p*d}')"
     "$DUCKDB_BIN" "$DB" >/dev/null 2>&1 <<SQL
@@ -157,7 +166,8 @@ SQL
     g1="$(oy_equiv_check "$DB" "p=$p ON==OFF" "$JOIN")"; r1=$?
     g2="$(oy_equiv_two   "$DB" "p=$p SEMI==plain" "$SET_OFF" "$SEMI" "$JOIN")"; r2=$?
     if [ $r1 -ne 0 ] || [ $r2 -ne 0 ]; then
-        printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DK" "GATEFAIL" - - - - - -; continue
+        printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DK" "GATEFAIL" - - - - - -
+        printf '%s,%s,GATEFAIL,,,,,,\n' "$p" "$DK" >> "$CSV_SWEEP"; continue
     fi
     if { echo "$SET_BMP"; echo "EXPLAIN (FORMAT json) ${JOIN%;};"; } \
          | "$DUCKDB_BIN" "$DB" -list -noheader 2>/dev/null | grep -q 'SJ_PROBE'; then sj="yes"; else sj="no"; fi
@@ -168,6 +178,7 @@ SQL
     spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
     sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
     printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DK" "$sj" "$base" "$bmp" "$hash" "$semi" "$spb" "$sph"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$p" "$DK" "$sj" "$base" "$bmp" "$hash" "$semi" "$spb" "$sph" >> "$CSV_SWEEP"
 done
 echo "----------------------------------------------------------------------------------"
 
@@ -181,18 +192,21 @@ if [ -n "$TPCH" ]; then
         "$DUCKDB_BIN" "$DB" -c "CALL dbgen(sf=$TPCH);" >/dev/null 2>&1
         printf '%-32s %9s %9s %9s %8s %8s\n' query Base Bmp Hash SpBmp SpHash
         echo "--------------------------------------------------------------------------"
+        echo 'query,base_s,bmp_s,hash_s,spbmp,sphash' > "$CSV_TPCH"
         for tf in "$SCRIPT_DIR"/outerjoin_query/tpch/*.sql; do
             case "$tf" in *_off.sql) continue;; esac
             id="$(basename "$tf" .sql)"; q="$(cat "$tf")"
-            g="$(oy_equiv_check "$DB" "$id" "$q")"; case "$g" in *"equiv OK"*) :;; *) printf '%-32s %9s\n' "$id" "GATE-FAIL"; continue;; esac
+            g="$(oy_equiv_check "$DB" "$id" "$q")"; case "$g" in *"equiv OK"*) :;; *) printf '%-32s %9s\n' "$id" "GATE-FAIL"; printf '"%s",GATE-FAIL,,,,\n' "$id" >> "$CSV_TPCH"; continue;; esac
             base="$(oy_time_min "$DB" "$SET_OFF"  "$q" "$RUNS" 1)"; base="${base%% *}"
             bmp="$(oy_time_min  "$DB" "$SET_BMP"  "$q" "$RUNS" 1)"; bmp="${bmp%% *}"
             hash="$(oy_time_min "$DB" "$SET_HASH" "$q" "$RUNS" 1)"; hash="${hash%% *}"
             spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
             sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
             printf '%-32s %9s %9s %9s %8s %8s\n' "$id" "$base" "$bmp" "$hash" "$spb" "$sph"
+            printf '"%s",%s,%s,%s,%s,%s\n' "$id" "$base" "$bmp" "$hash" "$spb" "$sph" >> "$CSV_TPCH"
         done
     fi
 fi
 } | tee "$OUT"
 echo "Results written to $OUT"
+echo "CSV: $CSV_CORPUS, $CSV_SWEEP${TPCH:+, $CSV_TPCH}"

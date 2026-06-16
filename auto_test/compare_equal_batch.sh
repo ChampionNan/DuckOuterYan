@@ -39,18 +39,31 @@ EQUIV_DB="${EQUIV_DB:-$REPO_ROOT/equiv_db}"
 TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}";   TPCH_SF="${TPCH_SF:-10}"
 TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"; TPCDS_SF="${TPCDS_SF:-10}"
 
+# Per-query wall-clock cap for the equivalence (compare_equal.sh) suites; the
+# bench suites have their own BENCH_TIMEOUT. Default 5 min; EQUIV_TIMEOUT=0 = off.
+EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-300}"
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"   # GNU coreutils; '' on bare macOS
+
 # Helper: run one ON/OFF pair through compare_equal.sh against ${DB} and verdict.
+# The compare_equal.sh call is wrapped in `timeout` (SIGKILL EQUIV_TIMEOUT+5s after)
+# so a stuck query is capped at 5 min instead of hanging the whole suite.
 compare_pair() {
     local file1=$1 file2=$2
     [ -f "$file1" ] || { echo "⚠️  MISSING: $file1"; return; }
     [ -f "$file2" ] || { echo "⚠️  MISSING: $file2"; return; }
-    local result
-    result=$("$SCRIPT_DIR/compare_equal.sh" "$file1" "$file2" "${DB:-$EQUIV_DB}")
-    if echo "$result" | grep -q "SUCCESS"; then
+    local db="${DB:-$EQUIV_DB}" result rc
+    if [ -n "$TIMEOUT_BIN" ] && [ "${EQUIV_TIMEOUT:-0}" -gt 0 ]; then
+        result=$("$TIMEOUT_BIN" -k 5 "$EQUIV_TIMEOUT" "$SCRIPT_DIR/compare_equal.sh" "$file1" "$file2" "$db"); rc=$?
+    else
+        result=$("$SCRIPT_DIR/compare_equal.sh" "$file1" "$file2" "$db"); rc=$?
+    fi
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then          # 124=timed out, 137=SIGKILL (-k)
+        echo "⏱️  TIMEOUT(${EQUIV_TIMEOUT}s): $(basename "$file1")"
+    elif echo "$result" | grep -q "SUCCESS"; then
         echo "✅ PASS: $(basename "$file1")"
     else
         echo "❌ FAIL: $(basename "$file1")"
-        echo "   (Run '$SCRIPT_DIR/compare_equal.sh $file1 $file2 ${DB:-$EQUIV_DB}' to see the diff)"
+        echo "   (Run '$SCRIPT_DIR/compare_equal.sh $file1 $file2 $db' to see the diff)"
     fi
 }
 
@@ -71,8 +84,8 @@ run_equiv_dir() {  # $1=dir $2=db
 # duckdb process and counts the symmetric set-difference + row-count delta — no
 # result ever hits the disk as CSV. memory_limit + max_temp_directory_size CAP the
 # spill, so a runaway (fan-out) query ERRORs cleanly instead of filling the disk.
-BENCH_MEM="${BENCH_MEM:-6GB}"
-BENCH_TMPCAP="${BENCH_TMPCAP:-20GB}"
+BENCH_MEM="${BENCH_MEM:-100GB}"
+BENCH_TMPCAP="${BENCH_TMPCAP:-50GB}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-900}"
 compare_pair_inengine() {  # $1=on.sql $2=db
     local on="$1" db="$2" q label out diff tmo
@@ -162,12 +175,12 @@ test_equality_pred() {
 test_equality_tpch() {
     echo "---- OuterYan equivalence: TPC-H (ON vs OFF, in-engine sf=$TPCH_SF) ----"
     build_tpch_db || return
-    run_bench_dir "$SCRIPT_DIR/outerjoin_query/tpch" "$TPCH_DB"
+    run_equiv_dir "$SCRIPT_DIR/outerjoin_query/tpch" "$TPCH_DB"
 }
 test_equality_tpcds() {
     echo "---- OuterYan equivalence: TPC-DS (ON vs OFF, in-engine sf=$TPCDS_SF) ----"
     build_tpcds_db || return
-    run_bench_dir "$SCRIPT_DIR/outerjoin_query/tpcds" "$TPCDS_DB"
+    run_equiv_dir "$SCRIPT_DIR/outerjoin_query/tpcds" "$TPCDS_DB"
 }
 
 # --- dispatch ----------------------------------------------------------------

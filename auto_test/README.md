@@ -30,7 +30,7 @@ outerjoin_query/
   equivalence/predicates/    shapes + WHERE value predicates        -> equiv_db
   tpch/                      TPC-H outer joins + _p* predicate vars  -> tpch_db
   tpcds/                     TPC-DS outer joins + _p* predicate vars -> tpcds_db
-  semijoin/                  star schema, ~54 shapes (gen_semijoin) -> experiment_semijoin.sh
+  semijoin/                  star schema, ~54 shapes                 -> experiment_semijoin.sh
 ```
 All WHERE predicates are VALUE predicates (no NULL tests). **One generator**,
 `gen_queries.py`, produces every family; pick what to (re)generate with a target
@@ -70,6 +70,8 @@ bash auto_test/compare_equal_batch.sh all
 **One suite** — `compare_equal_batch.sh [select|agg|pred|tpch|tpcds|equiv|bench]`
 (`equiv`=select+agg+pred, `bench`=tpch+tpcds). Env: `TPCH_SF`/`TPCDS_SF` (scale,
 default 10), `BENCH_MEM=6GB`, `BENCH_TMPCAP=20GB`, `BENCH_TIMEOUT=900`.
+Per-query wall-clock cap: `EQUIV_TIMEOUT=300` (select/agg/pred; 5 min, `0`=off)
+and `BENCH_TIMEOUT=900` (tpch/tpcds) — a stuck query is killed, not left hanging.
 ```bash
 rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
 ```

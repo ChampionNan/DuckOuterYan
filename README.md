@@ -1,9 +1,27 @@
 # Yannakakis<sup>+</sup>
 
+## Prerequisites
+
+Building needs CMake + Python 3 + a C++17 compiler; the build/test steps below use
+`ninja`, and the test scripts use GNU `timeout` for the soft per-query timeout.
+**Only the toolchain install differs by platform — every `make` and script command
+below is byte-for-byte identical on Linux and macOS.**
+
+| platform | install toolchain | `timeout` |
+|---|---|---|
+| **Linux** (Debian/Ubuntu) | `sudo apt install -y build-essential cmake ninja-build python3` | native (coreutils) |
+| **Linux** (Fedora/RHEL)   | `sudo dnf install -y gcc-c++ make cmake ninja-build python3` | native (coreutils) |
+| **macOS**                 | `xcode-select --install && brew install cmake ninja coreutils` | `gtimeout` (scripts auto-fall back) |
+
+> **Case sensitivity:** Linux filesystems are case-sensitive; a wrong-case
+> `#include "duckdb/Planner/…"` can compile on macOS (APFS) yet fail the Linux
+> build. Match the on-disk casing exactly — this is the one real Mac→Linux gotcha.
+
 ## Build
 
-A `Makefile` wraps the build (same as upstream DuckDB). For all targets and flags
-see the [DuckDB Build Configuration Guide](https://duckdb.org/docs/stable/dev/building/build_configuration.html).
+A `Makefile` wraps the build (same as upstream DuckDB), identical on both platforms.
+For all targets and flags see the
+[DuckDB Build Configuration Guide](https://duckdb.org/docs/stable/dev/building/build_configuration.html).
 
 ```bash
 GEN=ninja make release   # optimized -> build/release/duckdb   (use this for all testing)
@@ -28,12 +46,16 @@ the disk-safe in-engine bench compare, single-query compare, tracing). Main step
 export DUCKDB_BIN="$PWD/build/release/duckdb"
 
 # 1. CORRECTNESS — OuterYan ON vs OFF, per query (set-based equivalence diff).
-#    Suites: select | agg | tpch | tpcds | equiv (select+agg) | bench (tpch+tpcds) | all
+#    Suites: select | agg | pred | tpch | tpcds | equiv (select+agg+pred) | bench (tpch+tpcds) | all
 bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
 grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt        # any failures
 
 # TPC-H/DS scale factor defaults to 10; override (and rebuild the DB) per run:
 rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
+
+# Per-query wall-clock cap (stuck query is killed, not left hanging):
+#   EQUIV_TIMEOUT=300  select/agg/pred  (5 min; 0 = off)   BENCH_TIMEOUT=900  tpch/tpcds
+EQUIV_TIMEOUT=600 bash auto_test/compare_equal_batch.sh equiv
 
 # 2. PERFORMANCE — gate on correctness, then time OFF vs ON (release binary only).
 bash auto_test/experiment_onoff.sh --rscale 100000          # -> experiment_onoff_results.txt
