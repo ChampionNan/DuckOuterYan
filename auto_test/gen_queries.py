@@ -1,43 +1,51 @@
 #!/usr/bin/env python3
 # ============================================================================
-# gen_queries.py
+# gen_queries.py — the single OuterYan query-corpus generator
 #
-# Unified OuterYan OFF-vs-ON query-corpus generator. Merges the former
-# gen_equivalence_queries.py (synthetic R1..R10 corpus) and
-# gen_benchmark_queries.py (real TPC-H / TPC-DS corpus) behind one shared core.
-# All corpora share the same "variance shape" — topology families × join-type
-# vectors {allINNER,allLEFT,allRIGHT,allFULL,mixA,mixB,mixC} — so KIND,
-# vectors(), OFF_PREFIX and write_pair() are defined once; only the join graph
-# differs (synthetic R{a}.dst=R{b}.src chains vs real FK edges).
+# One script, dispatched by a target argument, regenerates every family under
+# outerjoin_query/. It supersedes the former per-corpus scripts
+# (gen_equivalence_queries / gen_benchmark_queries / gen_predicate_queries /
+# gen_tpc_predicate_queries / gen_semijoin_queries): all of them shared the same
+# "variance shape" — topology families × join-type vectors
+# {allINNER,allLEFT,allRIGHT,allFULL,mixA,mixB,mixC} — so KIND, vectors(),
+# OFF_PREFIX and write_pair() live here once and only the join graph differs.
 #
-# Each query ships as a FILE PAIR in the compare_equal.sh / _batch.sh convention:
+# Each ON/OFF query ships as a FILE PAIR in the compare_equal.sh convention:
 #   <label>.sql       the bare query              -> OuterYan ON  (default)
 #   <label>_off.sql   SET disabled_optimizers     -> OuterYan OFF (oracle)
 #                     TO 'outer_yan'; <same query>
+# TPC predicate variants and the semijoin corpus are bare-only: the bench /
+# semijoin runners compare ON-vs-OFF in-engine, so no _off file is needed.
 #
-# Corpora (USAGE: gen_queries.py [equiv|tpch|tpcds|bench|all], default all):
-#   equiv  equivalence/select_star/  SELECT * structural matrix N=3..6 +
-#                                     deep chains  (R1..R10 + R/S/T/K)
-#          equivalence/aggregation/  COUNT/SUM … GROUP BY over R/S/T/K
-#          -> wipes + regenerates both dirs
-#   tpch   tpch/                     real TPC-H FK trees, SELECT * + aggregation
-#   tpcds  tpcds/                    real TPC-DS FK trees, SELECT * + aggregation
-#          -> add/overwrite generated pairs; hand-written th1..th5 / ds1..ds5
-#             anchors are preserved (only labels this script owns are touched)
-#   bench  = tpch + tpcds ;  all = equiv + bench
+# USAGE: gen_queries.py [equiv|pred|tpch|tpcds|bench|semijoin|all]  (default all)
+#   equiv     equivalence/select_star/  SELECT * structural matrix N=3..6 + chains
+#             equivalence/aggregation/  COUNT/SUM … GROUP BY over R/S/T/K
+#             equivalence/predicates/   shapes + WHERE value predicate (no NULL)
+#   pred      equivalence/predicates/   (only)
+#   tpch      tpch/   real TPC-H FK trees (SELECT*+agg) + <anchor>_p* value preds
+#   tpcds     tpcds/  real TPC-DS FK trees (SELECT*+agg) + <anchor>_p* value preds
+#   bench     = tpch + tpcds
+#   semijoin  semijoin/  star-schema fact⋈dim corpus for experiment_semijoin.sh
+#   all       = equiv + tpch + tpcds + semijoin
 #
-# SELECT * over the real schemas is column-collision-free: every TPC-H/TPC-DS
-# table uses a unique column prefix. Re-run to regenerate / extend.
+# Hand-written TPC anchors (th1..thN / ds1..dsN) are preserved; only the labels
+# this script owns are (re)written. SELECT * over the real schemas is
+# collision-free (every table uses a unique column prefix). All WHERE predicates
+# are VALUE predicates — no NULL tests. Re-run to regenerate / extend.
 # ============================================================================
 import os
+import re
 import sys
+import glob
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outerjoin_query")
 EQUIV_BASE = os.path.join(BASE, "equivalence")
 SELECT_DIR = os.path.join(EQUIV_BASE, "select_star")
 AGG_DIR = os.path.join(EQUIV_BASE, "aggregation")
+PRED_DIR = os.path.join(EQUIV_BASE, "predicates")
 TPCH_DIR = os.path.join(BASE, "tpch")
 TPCDS_DIR = os.path.join(BASE, "tpcds")
+SEMI_DIR = os.path.join(BASE, "semijoin")
 
 OFF_PREFIX = "SET disabled_optimizers TO 'outer_yan';\n"
 KIND = {"INNER": "INNER JOIN", "LEFT": "LEFT OUTER JOIN",
@@ -68,6 +76,14 @@ def emit(outdir, queries):
     for label, sql in queries.items():
         write_pair(outdir, label, sql)
     return len(queries)
+
+
+def wipe(outdir, keep=lambda f: False):
+    """Remove every *.sql in outdir except those for which keep(filename) is True."""
+    os.makedirs(outdir, exist_ok=True)
+    for f in os.listdir(outdir):
+        if f.endswith(".sql") and not keep(f):
+            os.remove(os.path.join(outdir, f))
 
 
 # ============================================================================
@@ -153,10 +169,7 @@ def extra_queries():
 
 def gen_equiv():
     for d in (SELECT_DIR, AGG_DIR):
-        os.makedirs(d, exist_ok=True)
-        for f in os.listdir(d):                       # wipe any previous generation
-            if f.endswith(".sql"):
-                os.remove(os.path.join(d, f))
+        wipe(d)
     sel_q = dict(matrix_queries())
     agg_q = {}
     for label, sql in extra_queries().items():
@@ -170,7 +183,48 @@ def gen_equiv():
 
 
 # ============================================================================
-# Corpus 2 — benchmark: real TPC-H / TPC-DS FK trees
+# Corpus 2 — equivalence predicates: the structural shapes WITH a WHERE filter,
+# so semi-join reduction is exercised under predicates. VALUE predicates only
+# (equality / range / modulo / BETWEEN / IN / compound AND-OR — no NULL tests),
+# on R1/R2 which every base references. 54 pairs = 6 shapes × 9 predicates.
+# ============================================================================
+EQUIV_PREDS = {
+    "gt":      "R1.src > 100",
+    "ge":      "R2.src >= 100",
+    "eq":      "R1.src = 210",
+    "mod":     "R1.src % 2 = 0",
+    "range":   "R1.dst < 5000000",
+    "between": "R1.dst BETWEEN 0 AND 1000000",
+    "inlist":  "R1.src IN (10, 210, 410, 610, 810)",
+    "and":     "R1.src > 100 AND R2.dst < 5000000",
+    "or":      "R1.src < 100 OR R2.dst > 5000000",
+}
+
+
+def pred_bases():
+    """6 curated base join expressions (no SELECT/WHERE), all referencing R1 & R2."""
+    return {
+        "line_N3_allLEFT":     jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "LEFT", 2, 3)["sql"],
+        "line_N4_mixA":        jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 2, 3), lf(4), "RIGHT", 3, 4)["sql"],
+        "star_N3_allLEFT":     jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "LEFT", 1, 3)["sql"],
+        "star_N4_mixA":        jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 1, 3), lf(4), "RIGHT", 1, 4)["sql"],
+        "bushyR_N3_mixA":      jn(lf(1), jn(lf(2), lf(3), "INNER", 2, 3), "LEFT", 1, 2)["sql"],
+        "bushyBal_N4_allLEFT": jn(jn(lf(1), lf(2), "LEFT", 1, 2), jn(lf(3), lf(4), "LEFT", 3, 4), "LEFT", 2, 3)["sql"],
+    }
+
+
+def gen_equiv_pred():
+    wipe(PRED_DIR)
+    n = 0
+    for bname, expr in pred_bases().items():
+        for pname, pred in EQUIV_PREDS.items():
+            write_pair(PRED_DIR, f"{bname}_{pname}", f"SELECT * FROM {expr} WHERE {pred};")
+            n += 1
+    print(f"predicates/: {n} pairs")
+
+
+# ============================================================================
+# Corpus 3 — benchmark: real TPC-H / TPC-DS FK trees
 #
 # A topology is (label, njoins, body): body has slots {0}..{njoins-1} for the
 # JOIN keyword in textual order and bakes in the real FK predicates. Each
@@ -341,6 +395,64 @@ TPCDS_AGG = [
 ]
 
 
+# --- TPC predicate variants --------------------------------------------------
+# Append a VALUE WHERE predicate to each hand-written named anchor (th1.. / ds1..)
+# on a numeric column of the query's leading table. Bare-only (the bench suite
+# compares ON-vs-OFF in-engine). Small constants + modulo so the predicate
+# selects a fraction for any key range (incl. tiny dims like region 0..4).
+TPC_COLS = {
+    "tpch": {"customer": "c_custkey", "orders": "o_orderkey", "lineitem": "l_orderkey",
+             "nation": "n_nationkey", "supplier": "s_suppkey", "region": "r_regionkey",
+             "part": "p_partkey", "partsupp": "ps_partkey"},
+    "tpcds": {"customer": "c_customer_sk", "store_sales": "ss_item_sk", "web_sales": "ws_item_sk",
+              "item": "i_item_sk", "store": "s_store_sk", "customer_address": "ca_address_sk",
+              "date_dim": "d_date_sk", "catalog_sales": "cs_item_sk"},
+}
+TPC_DIR = {"tpch": TPCH_DIR, "tpcds": TPCDS_DIR}
+TPC_ANCHOR = {"tpch": "th", "tpcds": "ds"}  # named-anchor filename prefix (th1_, ds1_, …)
+
+
+def tpc_preds(c):  # value predicates (no NULL) on column c
+    return {
+        "gt2":   f"{c} > 2",
+        "mod2":  f"{c} % 2 = 0",
+        "mod3":  f"{c} % 3 = 1",
+        "ge1":   f"{c} >= 1",
+        "lt":    f"{c} < 1000000",
+        "bet":   f"{c} BETWEEN 1 AND 1000",
+        "inlist":f"{c} IN (1, 2, 3, 5, 8, 13)",
+        "and":   f"{c} > 1 AND {c} % 2 = 0",
+        "or":    f"{c} < 5 OR {c} % 2 = 0",
+    }
+
+
+# A predicate variant ends in _p<key> for exactly these keys — pin the match to
+# them so it never collides with base names that merely contain "_p…" (e.g.
+# dsagg_avg_price, dsagg_sum_profit).
+PRED_VARIANT_RE = re.compile(r"_p(" + "|".join(tpc_preds("x")) + r")\.sql$")
+
+
+def gen_tpc_pred(fam):
+    d = TPC_DIR[fam]
+    wipe(d, keep=lambda f: not PRED_VARIANT_RE.search(f))  # only re-wipe _p<key> variants
+    n = 0
+    for base in sorted(glob.glob(os.path.join(d, f"{TPC_ANCHOR[fam]}[0-9]_*.sql"))):
+        b = os.path.basename(base)
+        if b.endswith("_off.sql") or PRED_VARIANT_RE.search(b):
+            continue
+        sql = open(base).read().strip().rstrip(";").strip()
+        m = re.search(r"\bFROM\s+([a-z_]+)", sql, re.I)
+        col = TPC_COLS[fam].get(m.group(1).lower()) if m else None
+        if not col:
+            continue
+        label = b[:-4]  # strip .sql
+        for pn, pred in tpc_preds(col).items():
+            with open(os.path.join(d, f"{label}_p{pn}.sql"), "w") as fh:
+                fh.write(f"{sql} WHERE {pred};\n")
+            n += 1
+    print(f"{fam}/: {n} predicate variants (_p*; {TPC_ANCHOR[fam]}1.. anchors preserved)")
+
+
 def gen_tpch():
     q = {}
     q.update(expand(TPCH_SHAPES))
@@ -348,6 +460,7 @@ def gen_tpch():
     q.update(build_agg(TPCH_AGG))
     n = emit(TPCH_DIR, q)
     print(f"tpch/: {n} generated pairs (th1..th5 anchors preserved)")
+    gen_tpc_pred("tpch")
 
 
 def gen_tpcds():
@@ -357,12 +470,54 @@ def gen_tpcds():
     q.update(build_agg(TPCDS_AGG))
     n = emit(TPCDS_DIR, q)
     print(f"tpcds/: {n} generated pairs (ds1..ds5 anchors preserved)")
+    gen_tpc_pred("tpcds")
+
+
+# ============================================================================
+# Corpus 4 — semijoin: SELECT * over a star schema (fact + d1/d2/d3) where a
+# small dimension reduces the large fact through the join, so OuterYan can insert
+# a semi-join / bloom filter. Bare-only; experiment_semijoin.sh runs each ON/OFF.
+# ~54 acyclic, reduction-amenable shapes × join-type vectors:
+#   single  d_j ⋈ fact (3 FKs × 4 join types)   star2  fact ⋈ d_a ⋈ d_b
+#   star3   fact ⋈ d1 ⋈ d2 ⋈ d3                  chain  d_a ⋈ fact ⋈ d_b
+# skeleton_*.sql (the selectivity-sweep template) is hand-kept and preserved.
+# ============================================================================
+def gen_semijoin():
+    wipe(SEMI_DIR, keep=lambda f: f.startswith("skeleton_"))
+    Q = {}
+    for j in (1, 2, 3):                                   # single: d_j ⋈ fact
+        for kt in ("INNER", "LEFT", "RIGHT", "FULL"):
+            Q[f"single_fk{j}_{kt}"] = f"SELECT * FROM d{j} {KIND[kt]} fact ON d{j}.k=fact.fk{j}"
+    for a, b in ((1, 2), (1, 3), (2, 3)):                 # star2: fact ⋈ d_a ⋈ d_b
+        for vn, k in vectors(2).items():
+            Q[f"star2_fk{a}{b}_{vn}"] = (
+                f"SELECT * FROM (fact {KIND[k[0]]} d{a} ON fact.fk{a}=d{a}.k) "
+                f"{KIND[k[1]]} d{b} ON fact.fk{b}=d{b}.k")
+    for vn, k in vectors(3).items():                      # star3: fact ⋈ d1 ⋈ d2 ⋈ d3
+        Q[f"star3_{vn}"] = (
+            f"SELECT * FROM ((fact {KIND[k[0]]} d1 ON fact.fk1=d1.k) "
+            f"{KIND[k[1]]} d2 ON fact.fk2=d2.k) {KIND[k[2]]} d3 ON fact.fk3=d3.k")
+    for a, b, tag in ((1, 2, "fk12"), (1, 3, "fk13")):    # chain: d_a ⋈ fact ⋈ d_b
+        for vn, k in vectors(2).items():
+            Q[f"chain_{tag}_{vn}"] = (
+                f"SELECT * FROM (d{a} {KIND[k[0]]} fact ON d{a}.k=fact.fk{a}) "
+                f"{KIND[k[1]]} d{b} ON fact.fk{b}=d{b}.k")
+    for label, sql in Q.items():
+        with open(os.path.join(SEMI_DIR, f"{label}.sql"), "w") as fh:
+            fh.write(sql + ";\n")
+    print(f"semijoin/: {len(Q)} queries")
 
 
 # --- dispatch ----------------------------------------------------------------
-TARGETS = {"equiv": [gen_equiv], "tpch": [gen_tpch], "tpcds": [gen_tpcds],
-           "bench": [gen_tpch, gen_tpcds],
-           "all": [gen_equiv, gen_tpch, gen_tpcds]}
+TARGETS = {
+    "equiv":    [gen_equiv, gen_equiv_pred],
+    "pred":     [gen_equiv_pred],
+    "tpch":     [gen_tpch],
+    "tpcds":    [gen_tpcds],
+    "bench":    [gen_tpch, gen_tpcds],
+    "semijoin": [gen_semijoin],
+    "all":      [gen_equiv, gen_equiv_pred, gen_tpch, gen_tpcds, gen_semijoin],
+}
 
 
 def main():

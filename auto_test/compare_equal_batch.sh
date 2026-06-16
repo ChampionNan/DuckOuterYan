@@ -154,6 +154,11 @@ test_equality_agg() {
     build_equiv_db || return
     run_equiv_dir "$SCRIPT_DIR/outerjoin_query/equivalence/aggregation" "$EQUIV_DB"
 }
+test_equality_pred() {
+    echo "---- OuterYan equivalence: predicates (ON vs OFF) ----"
+    build_equiv_db || return
+    run_equiv_dir "$SCRIPT_DIR/outerjoin_query/equivalence/predicates" "$EQUIV_DB"
+}
 test_equality_tpch() {
     echo "---- OuterYan equivalence: TPC-H (ON vs OFF, in-engine sf=$TPCH_SF) ----"
     build_tpch_db || return
@@ -176,21 +181,23 @@ echo "========================================"
 case $TEST_NUM in
     select|1)  test_equality_select ;;
     agg|2)     test_equality_agg ;;
-    tpch|3)    test_equality_tpch ;;
-    tpcds|4)   test_equality_tpcds ;;
-    equiv)     test_equality_select; test_equality_agg ;;
+    pred|3)    test_equality_pred ;;
+    tpch|4)    test_equality_tpch ;;
+    tpcds|5)   test_equality_tpcds ;;
+    equiv)     test_equality_select; test_equality_agg; test_equality_pred ;;
     bench)     test_equality_tpch; test_equality_tpcds ;;
-    all)       test_equality_select; test_equality_agg
+    all)       test_equality_select; test_equality_agg; test_equality_pred
                test_equality_tpch;   test_equality_tpcds ;;
     *)
-        echo "Usage: $0 [select|agg|tpch|tpcds|equiv|bench|all]"
+        echo "Usage: $0 [select|agg|pred|tpch|tpcds|equiv|bench|all]"
         echo "  select / 1   equivalence: SELECT *        (equiv DB)"
         echo "  agg    / 2   equivalence: aggregation     (equiv DB)"
-        echo "  tpch   / 3   TPC-H outer-join families    (needs dbgen)"
-        echo "  tpcds  / 4   TPC-DS outer-join families   (needs dsdgen)"
-        echo "  equiv        select + agg"
+        echo "  pred   / 3   equivalence: WHERE predicates(equiv DB)"
+        echo "  tpch   / 4   TPC-H outer-join families    (needs dbgen)"
+        echo "  tpcds  / 5   TPC-DS outer-join families   (needs dsdgen)"
+        echo "  equiv        select + agg + pred"
         echo "  bench        tpch + tpcds"
-        echo "  all (default) all four"
+        echo "  all (default) everything"
         exit 1 ;;
 esac
 

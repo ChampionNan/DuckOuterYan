@@ -3,142 +3,195 @@
 # experiment_semijoin.sh  —  Experiment 1: OuterYan SJ filters vs DuckDB SEMI.
 # Spec: test/optimizer/outer_yan/EXPERIMENT_SEMIJOIN_DESIGN.md
 #
-# Fairness principle (§2): every mode runs the SAME `dim ⟕ fact` skeleton; only
-# the reduction of `fact` differs:
-#   BASELINE    outer_yan off            no reduction (plain LEFT join)  [floor]
+# A small dimension reduces a large fact through the join, so OuterYan can insert
+# a semi-join / bloom filter (SJ_BUILD + SJ_PROBE). Each query is timed under:
+#   BASELINE    outer_yan off            no reduction (plain join)        [floor]
 #   BITMAP      outer_yan on, bitmap     SJ_BUILD+SJ_PROBE, KeyBitmap
 #   HASH        outer_yan on, no bitmap  SJ_BUILD+SJ_PROBE, HashFilter
-#   DUCKDB_SEMI outer_yan off            dim ⟕ (fact WHERE EXISTS dim)  → HASH_JOIN[SEMI]
+#   DUCKDB_SEMI outer_yan off            EXISTS-rewrite → HASH_JOIN[SEMI]  (sweep only)
 #
-# CORRECTNESS FIRST: before any timing, every selectivity point gates on
-#   (a) oy_equiv_check(dim ⟕ fact)  — OuterYan ON==OFF (BITMAP/HASH vs BASELINE)
-#   (b) oy_equiv_two(SEMI-rewrite vs plain) — the EXISTS form == the plain join
-# A point that fails the gate is reported and NOT timed.
+# Star schema (built here): fact(fid,fk1,fk2,fk3,fv) over key domain DOM +
+# dims d1,d2,d3(k,v) holding a fraction p of the domain (the reduction selectivity).
 #
-# Selectivity sweep (§3.1): `fact` has N rows over key domain DOM; `dim` holds a
-# fraction p∈{0,.1,…,1} of the domain, so the reduction keeps ≈p·N of fact.
-#
-# NOTE: DEBUG-build timings are directional only; use --bin <release duckdb> for
-# headline numbers (the design targets a release build).
+# Section A — CORPUS: every query in outerjoin_query/semijoin/ (54 shapes ×
+#   join-type vectors), gated on ON==OFF, then timed BASELINE/BITMAP/HASH.
+# Section B — SWEEP: the dim⟕fact skeleton across selectivity p∈{0..1}, all 4 modes.
 #
 # USAGE: experiment_semijoin.sh [options]
-#   -b,--bin PATH    duckdb (default build/debug/duckdb)
-#   -N,--n N         fact row count     (default 100000)
-#   -D,--dom N       key domain size    (default 20000)
-#   -n,--runs N      timed runs         (default 5)
-#   -t,--timeout S   per-query timeout  (default 120)
+#   -b,--bin PATH    duckdb (default build/release/duckdb, else build/debug)
+#   -N,--n N         fact row count           (default 100000)
+#   -D,--dom N       key domain size          (default 20000)
+#   -p,--sel P       dim selectivity for Sec A (default 0.5 → dims hold p·DOM keys)
+#   -n,--runs N      timed runs (floor)       (default 5)
+#      --min-secs S  timing window/query      (default 5)
+#   -t,--timeout S   soft per-query timeout   (default 120)
+#      --kill-after S hard SIGKILL any duckdb query > S sec (default 300; 0=off)
 #      --tpch SF     also run the TPC-H end-to-end family at scale factor SF
+#   -o,--out FILE    results (default experiment_semijoin_results.txt)
 # ============================================================================
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-export DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/debug/duckdb}"
+export DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/release/duckdb}"
+[ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
+SJ_DIR="$SCRIPT_DIR/outerjoin_query/semijoin"
 
-N=100000; DOM=20000; RUNS=5; TPCH=""; OUT=""
-export OY_MIN_SECS=5; export OY_TIMEOUT_SECS=300
+N=100000; DOM=20000; SEL=0.5; RUNS=5; TPCH=""; OUT=""; KILL_AFTER=300
+export OY_MIN_SECS=5; export OY_TIMEOUT_SECS=120
 while [ $# -gt 0 ]; do case "$1" in
-    -b|--bin) DUCKDB_BIN="$2"; shift 2;;
+    -b|--bin) export DUCKDB_BIN="$2"; shift 2;;
     -N|--n) N="$2"; shift 2;;
     -D|--dom) DOM="$2"; shift 2;;
+    -p|--sel) SEL="$2"; shift 2;;
     -n|--runs) RUNS="$2"; shift 2;;
     --min-secs) export OY_MIN_SECS="$2"; shift 2;;
     -t|--timeout) export OY_TIMEOUT_SECS="$2"; shift 2;;
+    --kill-after) KILL_AFTER="$2"; shift 2;;
     --tpch) TPCH="$2"; shift 2;;
     -o|--out) OUT="$2"; shift 2;;
-    -h|--help) sed -n '2,/^set /{/^set /q;p}' "${BASH_SOURCE[0]}"; exit 0;;
+    -h|--help) sed -n '2,/^set /p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
 OUT="${OUT:-$REPO_ROOT/experiment_semijoin_results.txt}"
 
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb not executable: $DUCKDB_BIN" >&2; exit 1; }
 source "$SCRIPT_DIR/outer_yan_bench_lib.sh"
 
-# Config preludes (each mode = one SET string). The bitmap budget is a session
-# VARIABLE (SET VARIABLE …), read by PhysicalSJBuild::GetBitmapBudget: a large
-# budget allows KeyBitmap; 0 forces HashFilter.
+# --- hard watchdog: SIGKILL any of our duckdb queries running > KILL_AFTER secs -
+_oy_watchdog() {  # $1=binary  $2=max-secs
+    local pid e d rest p1 p2 p3 h m s sec
+    while true; do
+        for pid in $(pgrep -f "$1" 2>/dev/null); do
+            e="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"; [ -z "$e" ] && continue
+            d=0; rest="$e"; case "$e" in *-*) d="${e%%-*}"; rest="${e#*-}";; esac
+            IFS=: read -r p1 p2 p3 <<< "$rest"
+            if [ -n "$p3" ]; then h=$p1; m=$p2; s=$p3; else h=0; m=$p1; s=$p2; fi
+            sec=$((10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0}))
+            [ "$sec" -gt "$2" ] && kill -9 "$pid" 2>/dev/null \
+                && echo "  [watchdog] SIGKILL $(basename "$1") pid=$pid etime=$e (>$2s)" >&2
+        done
+        sleep 15
+    done
+}
+WATCHDOG_PID=""
+DB="$(mktemp -u).duckdb"
+trap 'rm -f "$DB" "$DB".wal; [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null' EXIT
+if [ "${KILL_AFTER:-0}" -gt 0 ] 2>/dev/null; then
+    _oy_watchdog "$DUCKDB_BIN" "$KILL_AFTER" & WATCHDOG_PID=$!
+fi
+
+# Config preludes. Bitmap budget is a session VARIABLE read by PhysicalSJBuild:
+# large budget allows KeyBitmap; 0 forces HashFilter.
 SET_OFF="SET disabled_optimizers TO 'outer_yan';"
 SET_BMP="SET disabled_optimizers TO ''; SET VARIABLE outer_yan_bitmap_max_bytes=16777216;"
 SET_HASH="SET disabled_optimizers TO ''; SET VARIABLE outer_yan_bitmap_max_bytes=0;"
 
-DB="$(mktemp -u).duckdb"
-trap 'rm -f "$DB" "$DB".wal' EXIT
-echo "Building fact: N=$N rows, key domain DOM=$DOM ..."
-"$DUCKDB_BIN" "$DB" >/dev/null <<SQL
-CREATE TABLE fact AS SELECT i AS fid, (i % $DOM) AS fk, i AS fv FROM range($N) t(i);
+# --- build the star schema (fact + d1,d2,d3 at selectivity SEL) --------------
+DIMK="$(awk -v p="$SEL" -v d="$DOM" 'BEGIN{printf "%d", (p*d<1?1:p*d)}')"
+echo "Building star schema: fact N=$N (domain DOM=$DOM, 3 FKs), d1/d2/d3 = $DIMK keys (p=$SEL) ..." >&2
+"$DUCKDB_BIN" "$DB" >/dev/null <<SQL || { echo "schema build failed" >&2; exit 1; }
+CREATE TABLE fact AS SELECT i AS fid, (i % $DOM) AS fk1, ((i*7+1) % $DOM) AS fk2,
+                            ((i*13+3) % $DOM) AS fk3, i AS fv FROM range($N) t(i);
+CREATE TABLE d1 AS SELECT i AS k, i AS v FROM range($DIMK) t(i);
+CREATE TABLE d2 AS SELECT i AS k, i*2 AS v FROM range($DIMK) t(i);
+CREATE TABLE d3 AS SELECT i AS k, i*3 AS v FROM range($DIMK) t(i);
 SQL
-
-# Probe: does this binary accept the bitmap-budget variable? (If not, BITMAP and
-# HASH collapse to the same default OuterYan run — reported, not faked.)
 if ! "$DUCKDB_BIN" "$DB" -c "SET VARIABLE outer_yan_bitmap_max_bytes=0;" >/dev/null 2>&1; then
-    echo "WARNING: 'SET VARIABLE outer_yan_bitmap_max_bytes' not accepted —"
-    echo "         BITMAP and HASH modes will both use default OuterYan settings."
+    echo "WARNING: 'SET VARIABLE outer_yan_bitmap_max_bytes' not accepted — BITMAP and HASH collapse." >&2
 fi
 
-JOIN="SELECT * FROM dim LEFT OUTER JOIN fact ON dim.k=fact.fk;"
-SEMI="SELECT * FROM dim LEFT OUTER JOIN (SELECT * FROM fact f WHERE EXISTS (SELECT 1 FROM dim d2 WHERE f.fk=d2.k)) fr ON dim.k=fr.fk;"
+# collect corpus queries (skeleton_* excluded; they drive the sweep)
+LABELS=(); SQLS=()
+for f in "$SJ_DIR"/*.sql; do
+    b="$(basename "$f" .sql)"; case "$b" in skeleton_*) continue;; esac
+    LABELS+=("$b"); SQLS+=("$(cat "$f")")
+done
 
 {   # whole report teed to $OUT
 echo "# OuterYan semi-join experiment   $(date '+%F %T')"
-echo "# bin=$DUCKDB_BIN  N=$N  DOM=$DOM  runs=$RUNS"
+echo "# bin=$DUCKDB_BIN  fact N=$N  DOM=$DOM  dims=$DIMK (p=$SEL)  runs=$RUNS  corpus=${#LABELS[@]}"
 echo
-echo "================= Selectivity sweep (dim ⟕ fact) ================="
-printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' \
-       p dimKeys sj Base Bmp Hash Semi SpBmp SpHash
-echo "----------------------------------------------------------------------------------"
 
+# ---- Section A: corpus (BASELINE vs BITMAP vs HASH, gated on ON==OFF) -------
+echo "===================== A. semi-join corpus (${#LABELS[@]} queries) ====================="
+printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' query sj Base Bmp Hash SpBmp SpHash correct
+echo "--------------------------------------------------------------------------------------"
+NSJ=0; NTIMED=0; SUMB=0; NB=0; SUMH=0; NH=0
+for ((i=0; i<${#LABELS[@]}; i++)); do
+    id="${LABELS[i]}"; q="${SQLS[i]}"
+    g="$(oy_equiv_check "$DB" "$id" "$q")"
+    case "$g" in *"equiv OK"*) ok="OK";; *"NOT EQUIV"*) ok="NOTEQ";; *"TIMEOUT"*) ok="TMO";; *) ok="ERR";; esac
+    if [ "$ok" != "OK" ]; then
+        printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' "$id" "-" - - - - - "$ok"; continue
+    fi
+    if { echo "$SET_BMP"; echo "EXPLAIN (FORMAT json) ${q%;};"; } \
+         | "$DUCKDB_BIN" "$DB" -list -noheader 2>/dev/null | grep -q 'SJ_PROBE'; then sj="yes"; NSJ=$((NSJ+1)); else sj="no"; fi
+    base="$(oy_time_min "$DB" "$SET_OFF"  "$q" "$RUNS" 1)"; base="${base%% *}"
+    bmp="$(oy_time_min  "$DB" "$SET_BMP"  "$q" "$RUNS" 1)"; bmp="${bmp%% *}"
+    hash="$(oy_time_min "$DB" "$SET_HASH" "$q" "$RUNS" 1)"; hash="${hash%% *}"
+    spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
+    sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
+    printf '%-26s %-3s %9s %9s %9s %8s %8s %-8s\n' "$id" "$sj" "$base" "$bmp" "$hash" "$spb" "$sph" "OK"
+    NTIMED=$((NTIMED+1))
+    [ "$spb" != "NA" ] && { SUMB="$(awk -v s="$SUMB" -v r="$spb" 'BEGIN{print s+r}')"; NB=$((NB+1)); }
+    [ "$sph" != "NA" ] && { SUMH="$(awk -v s="$SUMH" -v r="$sph" 'BEGIN{print s+r}')"; NH=$((NH+1)); }
+    printf '  [%3d/%d] %-26s %s sj=%s\n' "$((i+1))" "${#LABELS[@]}" "$id" "$ok" "$sj" >&2
+done
+echo "--------------------------------------------------------------------------------------"
+MB="$(awk -v s="$SUMB" -v n="$NB" 'BEGIN{print (n? sprintf("%.2f",s/n):"-")}')"
+MH="$(awk -v s="$SUMH" -v n="$NH" 'BEGIN{print (n? sprintf("%.2f",s/n):"-")}')"
+echo "corpus=${#LABELS[@]}  timed=$NTIMED  SJ-inserted=$NSJ   mean SpBmp=$MB  mean SpHash=$MH"
+echo "Sp>1 = OuterYan reduction beats the plain join. sj=no => no SJ inserted (Bmp/Hash≈Base)."
+
+# ---- Section B: selectivity sweep on the dim⟕fact skeleton -----------------
+JOIN="$(cat "$SJ_DIR/skeleton_join.sql")"
+SEMI="$(cat "$SJ_DIR/skeleton_semi.sql")"
+echo
+echo "===================== B. selectivity sweep (d1 ⟕ fact) ====================="
+printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' p dimKeys sj Base Bmp Hash Semi SpBmp SpHash
+echo "----------------------------------------------------------------------------------"
 for p in 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0; do
-    DIMK="$(awk -v p="$p" -v d="$DOM" 'BEGIN{printf "%d", p*d}')"
+    DK="$(awk -v p="$p" -v d="$DOM" 'BEGIN{printf "%d", p*d}')"
     "$DUCKDB_BIN" "$DB" >/dev/null 2>&1 <<SQL
-CREATE OR REPLACE TABLE dim AS SELECT i AS k, i AS v FROM range($DIMK) t(i);
+CREATE OR REPLACE TABLE d1 AS SELECT i AS k, i AS v FROM range($DK) t(i);
 SQL
-    # ---- correctness gate (silent unless it fails) ----
-    g1="$(oy_equiv_check "$DB" "p=$p dim⟕fact ON==OFF" "$JOIN")"; r1=$?
+    g1="$(oy_equiv_check "$DB" "p=$p ON==OFF" "$JOIN")"; r1=$?
     g2="$(oy_equiv_two   "$DB" "p=$p SEMI==plain" "$SET_OFF" "$SEMI" "$JOIN")"; r2=$?
     if [ $r1 -ne 0 ] || [ $r2 -ne 0 ]; then
-        echo "$g1"; echo "$g2"
-        printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DIMK" "GATE-FAIL" - - - - - -
-        continue
+        printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DK" "GATEFAIL" - - - - - -; continue
     fi
-    # ---- SJ inserted? ----
     if { echo "$SET_BMP"; echo "EXPLAIN (FORMAT json) ${JOIN%;};"; } \
          | "$DUCKDB_BIN" "$DB" -list -noheader 2>/dev/null | grep -q 'SJ_PROBE'; then sj="yes"; else sj="no"; fi
-    # ---- timing (oy_time_min prints "min iters window"; take the min) ----
     base="$(oy_time_min "$DB" "$SET_OFF"  "$JOIN" "$RUNS" 1)"; base="${base%% *}"
     bmp="$(oy_time_min  "$DB" "$SET_BMP"  "$JOIN" "$RUNS" 1)"; bmp="${bmp%% *}"
     hash="$(oy_time_min "$DB" "$SET_HASH" "$JOIN" "$RUNS" 1)"; hash="${hash%% *}"
     semi="$(oy_time_min "$DB" "$SET_OFF"  "$SEMI" "$RUNS" 1)"; semi="${semi%% *}"
     spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
     sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
-    printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DIMK" "$sj" "$base" "$bmp" "$hash" "$semi" "$spb" "$sph"
+    printf '%-5s %-8s %-4s %9s %9s %9s %9s %8s %8s\n' "$p" "$DK" "$sj" "$base" "$bmp" "$hash" "$semi" "$spb" "$sph"
 done
 echo "----------------------------------------------------------------------------------"
-echo "SpBmp/SpHash = Base/mode (>1 = reduction beats the plain join). sj=no => OuterYan"
-echo "did not insert a semi-join for this skeleton (BITMAP/HASH then equal BASELINE)."
 
 # --- End-to-end TPC-H family (optional) -------------------------------------
 if [ -n "$TPCH" ]; then
     echo
-    echo "================= End-to-end TPC-H (sf=$TPCH) ================="
-    if ! "$DUCKDB_BIN" -c "CALL dbgen(sf=0);" >/dev/null 2>&1; then
+    echo "===================== C. End-to-end TPC-H (sf=$TPCH) ====================="
+    if ! "$DUCKDB_BIN" -c "CALL dbgen(sf=0.01);" >/dev/null 2>&1; then
         echo "tpch extension not available in $DUCKDB_BIN — skipping."
     else
         "$DUCKDB_BIN" "$DB" -c "CALL dbgen(sf=$TPCH);" >/dev/null 2>&1
-        printf '%-7s %9s %9s %9s %8s %8s\n' query Base Bmp Hash SpBmp SpHash
-        echo "------------------------------------------------------------"
-        th() {  # $1=label $2=query
-            local g; g="$(oy_equiv_check "$DB" "$1" "$2")"
-            case "$g" in *"equiv OK"*) :;; *) echo "$g"; printf '%-7s %9s\n' "$1" "GATE-FAIL"; return;; esac
-            local base bmp hash spb sph
-            base="$(oy_time_min "$DB" "$SET_OFF"  "$2" "$RUNS" 1)"; base="${base%% *}"
-            bmp="$(oy_time_min  "$DB" "$SET_BMP"  "$2" "$RUNS" 1)"; bmp="${bmp%% *}"
-            hash="$(oy_time_min "$DB" "$SET_HASH" "$2" "$RUNS" 1)"; hash="${hash%% *}"
-            spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
-            sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (b+0>0? sprintf("%.2f",a/b):"NA")}')"
-            printf '%-7s %9s %9s %9s %8s %8s\n' "$1" "$base" "$bmp" "$hash" "$spb" "$sph"
-        }
-        th TH-S1 "SELECT * FROM customer LEFT OUTER JOIN orders ON c_custkey=o_custkey LEFT OUTER JOIN lineitem ON o_orderkey=l_orderkey;"
-        th TH-S2 "SELECT * FROM nation LEFT OUTER JOIN supplier ON n_nationkey=s_nationkey LEFT OUTER JOIN lineitem ON s_suppkey=l_suppkey;"
-        th TH-S3 "SELECT * FROM region LEFT OUTER JOIN nation ON r_regionkey=n_regionkey RIGHT OUTER JOIN supplier ON n_nationkey=s_nationkey INNER JOIN customer ON s_nationkey=c_nationkey;"
-        th TH-S4 "SELECT * FROM part LEFT OUTER JOIN partsupp ON p_partkey=ps_partkey LEFT OUTER JOIN supplier ON ps_suppkey=s_suppkey LEFT OUTER JOIN nation ON s_nationkey=n_nationkey;"
+        printf '%-32s %9s %9s %9s %8s %8s\n' query Base Bmp Hash SpBmp SpHash
+        echo "--------------------------------------------------------------------------"
+        for tf in "$SCRIPT_DIR"/outerjoin_query/tpch/*.sql; do
+            case "$tf" in *_off.sql) continue;; esac
+            id="$(basename "$tf" .sql)"; q="$(cat "$tf")"
+            g="$(oy_equiv_check "$DB" "$id" "$q")"; case "$g" in *"equiv OK"*) :;; *) printf '%-32s %9s\n' "$id" "GATE-FAIL"; continue;; esac
+            base="$(oy_time_min "$DB" "$SET_OFF"  "$q" "$RUNS" 1)"; base="${base%% *}"
+            bmp="$(oy_time_min  "$DB" "$SET_BMP"  "$q" "$RUNS" 1)"; bmp="${bmp%% *}"
+            hash="$(oy_time_min "$DB" "$SET_HASH" "$q" "$RUNS" 1)"; hash="${hash%% *}"
+            spb="$(awk -v a="$base" -v b="$bmp"  'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
+            sph="$(awk -v a="$base" -v b="$hash" 'BEGIN{print (a!="NA"&&b+0>0? sprintf("%.2f",a/b):"NA")}')"
+            printf '%-32s %9s %9s %9s %8s %8s\n' "$id" "$base" "$bmp" "$hash" "$spb" "$sph"
+        done
     fi
 fi
 } | tee "$OUT"

@@ -20,13 +20,36 @@ Each DB is built once, reused, git-ignored, and rebuilt only if missing.
 `equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the query corpus from
 `gen_queries.py`.
 
+The corpus under `outerjoin_query/` is the **single source of truth** — both
+correctness (`compare_equal_batch.sh`) and performance (`experiment_onoff.sh`) run
+the **same** files, each family against its own DB:
+```
+outerjoin_query/
+  equivalence/select_star/   structural matrix (SELECT *)          -> equiv_db
+  equivalence/aggregation/   COUNT/SUM … GROUP BY                   -> equiv_db
+  equivalence/predicates/    shapes + WHERE value predicates        -> equiv_db
+  tpch/                      TPC-H outer joins + _p* predicate vars  -> tpch_db
+  tpcds/                     TPC-DS outer joins + _p* predicate vars -> tpcds_db
+  semijoin/                  star schema, ~54 shapes (gen_semijoin) -> experiment_semijoin.sh
+```
+All WHERE predicates are VALUE predicates (no NULL tests). **One generator**,
+`gen_queries.py`, produces every family; pick what to (re)generate with a target
+argument (below). Hand-written TPC anchors (`th1..`/`ds1..`) are preserved.
+
 ```
 data_generation.py    write R1..Rk chain CSVs (behind equiv_db + experiment_onoff)
     --k N            number of tables R1..Rk
     --total-ids N    ids/rows to generate (joins are per-id → size scales linearly)
     --seed N         RNG seed
     --output-dir D   directory to write R*.csv into
-gen_queries.py [equiv|tpch|tpcds|bench|all]   (re)generate the SQL corpus
+gen_queries.py [TARGET]    (re)generate the SQL corpus (default TARGET=all)
+    equiv      equivalence/{select_star,aggregation,predicates}/  -> equiv_db
+    pred       equivalence/predicates/ only
+    tpch       tpch/   base FK trees + <anchor>_p* value-predicate variants
+    tpcds      tpcds/  base FK trees + <anchor>_p* value-predicate variants
+    bench      tpch + tpcds
+    semijoin   semijoin/  star-schema corpus (experiment_semijoin.sh)
+    all        equiv + tpch + tpcds + semijoin
 ```
 ```bash
 python3 auto_test/data_generation.py --k 10 --total-ids 1000000 --seed 42 \
@@ -44,8 +67,8 @@ Runs each query twice (OuterYan ON vs OFF) and checks the result sets match.
 bash auto_test/compare_equal_batch.sh all
 ```
 
-**One suite** — `compare_equal_batch.sh [select|agg|tpch|tpcds|equiv|bench]`
-(`equiv`=select+agg, `bench`=tpch+tpcds). Env: `TPCH_SF`/`TPCDS_SF` (scale,
+**One suite** — `compare_equal_batch.sh [select|agg|pred|tpch|tpcds|equiv|bench]`
+(`equiv`=select+agg+pred, `bench`=tpch+tpcds). Env: `TPCH_SF`/`TPCDS_SF` (scale,
 default 10), `BENCH_MEM=6GB`, `BENCH_TMPCAP=20GB`, `BENCH_TIMEOUT=900`.
 ```bash
 rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
@@ -65,25 +88,37 @@ Gate on correctness first (a wrong ON result is never timed), then time OFF vs O
 release binary only.
 
 ### `experiment_onoff.sh` 
-- whole optimizer OFF vs ON over the equivalence corpus
+- whole optimizer OFF vs ON over the **same corpus** correctness checks
+  (select/agg → equiv_db, tpch → tpch_db, tpcds → tpcds_db)
 ```
-    -r,--rscale N    rows/table (default 1e6; use ~1e5 so heavy branch/bushy
-                     queries don't blow the gate timeout)
-    --only select|agg|all    --pattern GLOB    --limit N
-    -n,--runs N    --min-secs S (timing window)    -t,--timeout S    -o,--out FILE
+    --only select|agg|pred|tpch|tpcds|equiv|bench|all   query families (default all)
+    -r,--rscale N    equiv rows/table (default 1e6 — scale up freely on a big machine)
+    TPCH_SF= TPCDS_SF= (env)  scale for the tpch/tpcds families (default 1)
+    -t,--timeout S   soft per-query timeout (default 300; via `timeout`)
+    --kill-after S   HARD SIGKILL any duckdb query running > S sec (default 300 =
+                     5 min; 0 = off) — the backstop when a deadlock ignores --timeout
+    --exclude GLOB   skip labels matching any '|'-separated glob (prune slow shapes)
+    --pattern GLOB    --limit N    -n,--runs N    --min-secs S (window)    -o,--out FILE
 ```
 ```bash
-bash auto_test/experiment_onoff.sh --rscale 100000 -t 120
+# big machine — full corpus at large scale (heavy queries hard-killed after 10 min):
+bash auto_test/experiment_onoff.sh --rscale 2000000 --kill-after 600
+# small machine — prune the heavy fan-out shapes, default 5-min hard kill:
+bash auto_test/experiment_onoff.sh --rscale 100000 --exclude 'bushy*_N[56]_*|branch_N[56]_*|chain_N*'
 ```
 Output: `experiment_onoff_results.txt`
 
 ### `experiment_semijoin.sh` 
-- OuterYan SJ filters vs DuckDB SEMI (`dim ⋈ fact`)
+- OuterYan SJ filters vs DuckDB SEMI over a star schema (fact + d1/d2/d3).
+  **Section A:** the ~54-query corpus `outerjoin_query/semijoin/`, each gated
+  ON==OFF then timed BASELINE/BITMAP/HASH. **Section B:** the `dim ⟕ fact`
+  skeleton across a selectivity sweep (adds the DUCKDB_SEMI rewrite).
 ```
-    -N fact rows    -D key domain    -n runs    -t timeout    -b,--bin PATH    -o,--out FILE
+    -N fact rows   -D key domain   -p dim selectivity (Sec A)   -n runs
+    -t timeout   --kill-after S (hard SIGKILL > S sec, default 300)   --tpch SF   -o,--out FILE
 ```
 ```bash
-bash auto_test/experiment_semijoin.sh -N 1000000 -D 200000
+bash auto_test/experiment_semijoin.sh -N 1000000 -D 200000 -p 0.5
 ```
 Output: `experiment_semijoin_results.txt`
 

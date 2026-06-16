@@ -386,3 +386,6 @@ oy_trace.txt
 experiment_onoff_results.txt
 experiment_semijoin_results.txt
 compare_equal_batch_results.txt
+run_perf_chain.log
+run_all_chain.log
+watchdog.log

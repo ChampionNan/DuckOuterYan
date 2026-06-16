@@ -1,0 +1,1 @@
+SELECT * FROM d1 LEFT OUTER JOIN (SELECT * FROM fact f WHERE EXISTS (SELECT 1 FROM d1 x WHERE f.fk1=x.k)) fr ON d1.k=fr.fk1;
