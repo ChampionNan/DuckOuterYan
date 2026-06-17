@@ -1,1 +1,0 @@
-SELECT n_name, COUNT(*) AS cnt, SUM(s_acctbal) AS tot_bal FROM (((region FULL OUTER JOIN nation ON r_regionkey=n_regionkey) RIGHT OUTER JOIN supplier ON n_nationkey=s_nationkey) INNER JOIN customer ON s_nationkey=c_nationkey) GROUP BY n_name;

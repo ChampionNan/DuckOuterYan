@@ -1,1 +1,0 @@
-SELECT r_name, MIN(s_acctbal) AS min_bal, MAX(c_acctbal) AS max_bal FROM (((region LEFT OUTER JOIN nation ON r_regionkey=n_regionkey) LEFT OUTER JOIN supplier ON n_nationkey=s_nationkey) LEFT OUTER JOIN customer ON s_nationkey=c_nationkey) GROUP BY r_name;

@@ -382,10 +382,7 @@ tpcds_db.wal
 oy_traces/
 oy_traces_fail/
 oy_traces_full/
-oy_trace.txt
-experiment_onoff_results.txt
-experiment_semijoin_results.txt
-compare_equal_batch_results.txt
 run_perf_chain.log
 run_all_chain.log
 watchdog.log
+test/sql/optimizer/outer_yan/data/*.csv

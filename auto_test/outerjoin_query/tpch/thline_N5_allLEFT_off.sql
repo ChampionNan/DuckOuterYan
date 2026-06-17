@@ -1,2 +1,0 @@
-SET disabled_optimizers TO 'outer_yan';
-SELECT * FROM ((((region LEFT OUTER JOIN nation ON r_regionkey=n_regionkey) LEFT OUTER JOIN customer ON n_nationkey=c_nationkey) LEFT OUTER JOIN orders ON c_custkey=o_custkey) LEFT OUTER JOIN lineitem ON o_orderkey=l_orderkey);
