@@ -186,7 +186,7 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
         local_rn="$(oy_time_min "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
         off="$(echo "$local_ro" | awk '{print $1}')"; on="$(echo "$local_rn" | awk '{print $1}')"
         iters="$(echo "$local_ro" | awk '{print $2}')/$(echo "$local_rn" | awk '{print $2}')"
-        ratio="$(awk -v a="$off" -v b="$on" 'BEGIN{ if(a!="NA"&&b!="NA"&&a+0>0) printf "%.3f", b/a; else print "NA" }')"
+        ratio="$(awk -v off="$off" -v on="$on" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
         NTIMED=$((NTIMED+1))
         if [ "$ratio" != "NA" ]; then
             if [ "$reg" = "No" ]; then NNO=$((NNO+1));  SUMNO="$(awk -v s="$SUMNO" -v r="$ratio" 'BEGIN{print s+r}')"
@@ -212,11 +212,11 @@ done
 # ---- Section 2: timing (correct queries only) ------------------------------
 echo
 echo "===================== TIMING (correct queries) ========================"
-printf '%-34s %-9s %10s %10s %8s %11s\n' query reorder? off\(s\) on\(s\) on/off it:off/on
+printf '%-34s %-9s %10s %12s %8s %11s\n' query reorder? native\(s\) outerYan\(s\) speed-up it:nat/oy
 echo "----------------------------------------------------------------------"
 for ((j=0; j<QN; j++)); do
     [ "${QCORRECT[j]}" = "TRUE" ] || continue
-    printf '%-34s %-9s %10s %10s %8s %11s\n' \
+    printf '%-34s %-9s %10s %12s %8s %11s\n' \
         "${QLBL[j]}" "${QREG[j]}" "${QOFF[j]}" "${QON[j]}" "${QRATIO[j]}" "${QITERS[j]}"
 done
 
@@ -226,7 +226,7 @@ MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 echo "============================== SUMMARY ================================"
 echo "queries=$QN  correct=$((QN-NSKIP))  incorrect/skipped=$NSKIP  timed=$NTIMED"
-echo "  No  (no reorder): n=$NNO  mean on/off=$MNO   [expect >=1.0 — SJ overhead, no reorder]"
-echo "  Yes (reorder):   n=$NYES  mean on/off=$MYES   [may be <1.0 — reorder/reduction win]"
+echo "  No  (no reorder): n=$NNO  mean speed-up=$MNO   [expect <=1.0 — SJ overhead, no reorder]"
+echo "  Yes (reorder):   n=$NYES  mean speed-up=$MYES   [may be >1.0 — reorder/reduction win]"
 } | tee "$OUT"
 echo "Results written to $OUT"

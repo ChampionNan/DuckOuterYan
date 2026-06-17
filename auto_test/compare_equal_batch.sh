@@ -61,7 +61,8 @@ run_compare_two_files() {
     # Read raw SQL, strip trailing semicolon
     q_on=$(sed 's/;[[:space:]]*$//' "$file_on")
     q_off_raw=$(cat "$file_off")
-    # Strip redundant SET outer_yan line from off sql file
+    # Strip the off-file's own SET line; the OFF optimizer state is set
+    # explicitly in the heredoc below (the strip alone left OFF running ON).
     q_off=$(echo "$q_off_raw" | sed '/SET disabled_optimizers/d' | sed 's/;[[:space:]]*$//')
 
     # Clean lock before open DB (kill residual duckdb first)
@@ -79,15 +80,18 @@ run_compare_two_files() {
         "$@" <<SQL 2>&1
 PRAGMA memory_limit='$EQUIV_MEM';
 PRAGMA threads=$EQUIV_THREADS;
--- Execute OFF version (OuterYan disabled)
+-- Execute OFF version — OuterYan EXPLICITLY disabled (previously absent, so the
+-- "OFF" table ran with OuterYan ON and the suite silently compared ON vs ON).
+SET disabled_optimizers TO 'outer_yan';
 CREATE TEMP TABLE _tmp_off AS $q_off;
 -- Execute ON version (OuterYan enabled)
 SET disabled_optimizers TO '';
 CREATE TEMP TABLE _tmp_on AS $q_on;
--- Same diff logic as original compare_equal.sh
-SELECT 'In $file_on but not $file_off' as source, * FROM (SELECT * FROM _tmp_off EXCEPT SELECT * FROM _tmp_on)
+-- Multiset diff: EXCEPT ALL preserves row multiplicity (plain EXCEPT collapsed
+-- duplicates and masked count-only divergences). Empty ⇒ identical multisets.
+SELECT 'In $file_on but not $file_off' as source, * FROM (SELECT * FROM _tmp_off EXCEPT ALL SELECT * FROM _tmp_on)
 UNION ALL
-SELECT 'In $file_off but not $file_on' as source, * FROM (SELECT * FROM _tmp_on EXCEPT SELECT * FROM _tmp_off);
+SELECT 'In $file_off but not $file_on' as source, * FROM (SELECT * FROM _tmp_on EXCEPT ALL SELECT * FROM _tmp_off);
 SQL
     } )"
     rc=$?
