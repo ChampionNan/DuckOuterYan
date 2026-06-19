@@ -64,8 +64,16 @@ mkdir -p "$JOB_PARQUET_DIR"
 
 if [ "${SKIP_DOWNLOAD:-0}" != "1" ]; then
     echo "[build_job_db] Downloading 21 parquet files into $JOB_PARQUET_DIR (PARALLEL=$PARALLEL)"
+    # Bash 3.2 (system /bin/bash on macOS) does not support `wait -n`. Use a
+    # FIFO-backed semaphore instead so we never block on the slowest worker.
+    fifo="$(mktemp -u "${TMPDIR:-/tmp}/build_job_db.fifo.XXXXXX")"
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    rm -f "$fifo"
+    for _ in $(seq 1 "$PARALLEL"); do echo >&9; done
+
+    fail_flag="$(mktemp)"; : > "$fail_flag"
     pids=()
-    inflight=0
     for t in "${TABLES[@]}"; do
         out="$JOB_PARQUET_DIR/job_${t}.parquet"
         url="$BASE_URL/job_${t}.parquet"
@@ -73,20 +81,30 @@ if [ "${SKIP_DOWNLOAD:-0}" != "1" ]; then
             echo "  [skip] $out"
             continue
         fi
+        # Acquire a token (blocks until a worker frees one).
+        IFS= read -u 9 -r _tok || true
         (
             echo "  [get ] $url"
-            # --retry 5 to ride out flaky CDNs; --continue-at - resumes partial files.
-            curl -fSL --retry 5 --retry-delay 5 --continue-at - -o "$out.part" "$url"
-            mv "$out.part" "$out"
+            # --retry rides out flaky CDNs; --continue-at - resumes partial files.
+            if curl -fSL --retry 5 --retry-delay 5 --continue-at - -o "$out.part" "$url"; then
+                mv "$out.part" "$out"
+            else
+                echo "FAIL $url" >> "$fail_flag"
+            fi
+            # Release the token.
+            echo >&9
         ) &
         pids+=($!)
-        inflight=$((inflight + 1))
-        if [ "$inflight" -ge "$PARALLEL" ]; then
-            wait -n || { echo "[build_job_db] download failed" >&2; kill "${pids[@]}" 2>/dev/null; exit 1; }
-            inflight=$((inflight - 1))
-        fi
     done
-    wait "${pids[@]}" 2>/dev/null || true
+    for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
+    exec 9>&-
+    if [ -s "$fail_flag" ]; then
+        echo "[build_job_db] some downloads failed:" >&2
+        cat "$fail_flag" >&2
+        rm -f "$fail_flag"
+        exit 1
+    fi
+    rm -f "$fail_flag"
 fi
 
 # Verify all 21 are present and non-empty.
