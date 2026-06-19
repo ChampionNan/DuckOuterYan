@@ -365,6 +365,7 @@ tools/pythonpkg/duckdb_build/
 
 # own
 *_db*
+!auto_test/build_job_db.*
 lsqb*
 *_data
 

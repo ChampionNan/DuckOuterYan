@@ -16,13 +16,16 @@ Each DB is built once, reused, git-ignored, and rebuilt only if missing.
 | `equiv_db`  | `test/.../outer_yan/data/R1..R10.csv` → tables `R1..R10` + views `R/S/T/K` | `data_generation.py` |
 | `tpch_db`   | `CALL dbgen(sf=$TPCH_SF)`   (default 0.01) | binary built `BUILD_TPCH=1` |
 | `tpcds_db`  | `CALL dsdgen(sf=$TPCDS_SF)` (default 0.01) | binary built `BUILD_TPCDS=1` |
-| `job_db`    | external IMDb csv (no built-in generator)  | pre-built; set `JOB_DB=` or place at `$REPO/job_db` |
+| `job_db`    | 21 IMDb parquet files from the `duckdb/duckdb-data` v1.0 release (~1.75 GB total) | `bash auto_test/build_job_db.sh` (downloads + loads); set `JOB_DB=` to override path |
 
 `equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the equivalence /
 semijoin query corpus from `gen_queries.py`. The `tpch/`, `tpcds/`, and `job/`
-families come from the **filtered SQLStorm v1.0** corpus (≥2 outer joins, ≤1
-top-level aggregate, outermost ORDER BY stripped) staged under
-`auto_test/query/` — see `query/README.md` if added later for filter rules.
+families come from the **filtered SQLStorm v1.0** corpus. Filter rules:
+≥2 outer joins, ≤1 top-level aggregate, outermost ORDER BY stripped, and the
+remaining query must not contain any nondeterministic construct (window
+ranking `ROW_NUMBER`/`RANK`/…, unordered aggregates `ARRAY_AGG`/`STRING_AGG`/…,
+top-level `LIMIT` after stripping, or pg-only scalars like `INITCAP`). The
+filtered set is staged under `auto_test/query/`.
 
 ### Corpus layout (single source of truth)
 
@@ -33,14 +36,38 @@ families share the same files; each family runs against its own DB:
 ```
 auto_test/query/
   equivalence/select_star/   18 structural matrix queries (SELECT *)   -> equiv_db
-  tpch/                       49 SQLStorm tpch outer-join queries       -> tpch_db
-  tpcds/                      49 SQLStorm tpcds outer-join queries      -> tpcds_db
-  job/                       819 SQLStorm job  outer-join queries       -> job_db
+  tpch/                        3 SQLStorm tpch outer-join queries       -> tpch_db
+  tpcds/                      16 SQLStorm tpcds outer-join queries      -> tpcds_db
+  job/                       257 SQLStorm job  outer-join queries       -> job_db
 ```
 
 The legacy `outerjoin_query/` corpus (handwritten + `gen_queries.py` output)
 is still in the repo for `compare_equal_batch.sh` / `experiment_semijoin.sh`;
 `experiment_onoff.sh` now points at `auto_test/query/` by default.
+
+### Building `job_db` — `build_job_db.sh`
+
+`bash auto_test/build_job_db.sh` populates `$JOB_DB` (default
+`$REPO/job_db`) by:
+
+1. Downloading 21 official DuckDB IMDb parquet files (~1.75 GB total) from
+   the `duckdb/duckdb-data` v1.0 GitHub release into `$JOB_PARQUET_DIR`
+   (default `$REPO/job_parquet`). Already-present non-empty files are
+   skipped; `curl --continue-at -` resumes partial downloads.
+2. Streaming each parquet into a native DuckDB table via
+   `auto_test/build_job_db.sql`
+   (`CREATE OR REPLACE TABLE ... AS SELECT * FROM read_parquet(...)`).
+
+Useful env knobs: `FORCE=1` (rebuild even when `$JOB_DB` exists),
+`SKIP_DOWNLOAD=1` (assume parquets already on disk), `PARALLEL=N`
+(concurrent workers, default 4), `JOB_PARQUET_DIR=...` (cache location).
+
+```bash
+# first time: ~1.75 GB download + create 21 tables (runtime depends on link)
+bash auto_test/build_job_db.sh
+# rebuild from cached parquets without touching the network:
+SKIP_DOWNLOAD=1 FORCE=1 bash auto_test/build_job_db.sh
+```
 
 ```
 data_generation.py    write R1..Rk chain CSVs (behind equiv_db + experiment_onoff)
@@ -107,7 +134,8 @@ release binary only.
                                           bench = tpch+tpcds+job
     -r,--rscale N    equiv rows/table (default 1000 — scale up freely on a big machine)
     TPCH_SF= TPCDS_SF= (env)  scale for the tpch/tpcds families (default 0.01)
-    JOB_DB= (env)             path to a pre-built IMDb DuckDB file (default $REPO/job_db)
+    JOB_DB= (env)             path to a pre-built IMDb DuckDB file (default $REPO/job_db;
+                              built once via `bash auto_test/build_job_db.sh`)
     -t,--timeout S   soft per-query timeout (default 300; via `timeout`)
     --kill-after S   HARD SIGKILL any duckdb query running > S sec (default 600;
                      0 = off) — the backstop when a deadlock ignores --timeout
@@ -122,7 +150,7 @@ The corpus root is fixed in `test_config.sh` as
 bash auto_test/experiment_onoff.sh                          # all families
 bash auto_test/experiment_onoff.sh --only tpch              # one family
 bash auto_test/experiment_onoff.sh --only bench             # tpch + tpcds + job
-bash auto_test/experiment_onoff.sh --only job               # IMDb (needs JOB_DB)
+bash auto_test/experiment_onoff.sh --only job               # IMDb (run build_job_db.sh first)
 
 # big machine — full corpus at large scale (heavy queries hard-killed after 10 min):
 bash auto_test/experiment_onoff.sh --rscale 2000000 --kill-after 600
@@ -181,11 +209,12 @@ bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
 grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt
 
 # 4. performance — corpus + DB paths come from test_config.sh; no env needed
+bash auto_test/build_job_db.sh                      # one-time: download IMDb parquets + load $JOB_DB
 bash auto_test/experiment_onoff.sh                  # all (job skipped if no JOB_DB)
 # or one family at a time:
 bash auto_test/experiment_onoff.sh --only tpch
 bash auto_test/experiment_onoff.sh --only tpcds
-bash auto_test/experiment_onoff.sh --only job      # needs $JOB_DB pre-built
+bash auto_test/experiment_onoff.sh --only job      # needs $JOB_DB pre-built (see step above)
 bash auto_test/experiment_semijoin.sh
 
 # 5. debug a failing query
