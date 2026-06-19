@@ -14,27 +14,33 @@ Each DB is built once, reused, git-ignored, and rebuilt only if missing.
 | DB | built from | needs |
 |---|---|---|
 | `equiv_db`  | `test/.../outer_yan/data/R1..R10.csv` → tables `R1..R10` + views `R/S/T/K` | `data_generation.py` |
-| `tpch_db`   | `CALL dbgen(sf=$TPCH_SF)`   (default 10) | binary built `BUILD_TPCH=1` |
-| `tpcds_db`  | `CALL dsdgen(sf=$TPCDS_SF)` (default 10) | binary built `BUILD_TPCDS=1` |
+| `tpch_db`   | `CALL dbgen(sf=$TPCH_SF)`   (default 0.01) | binary built `BUILD_TPCH=1` |
+| `tpcds_db`  | `CALL dsdgen(sf=$TPCDS_SF)` (default 0.01) | binary built `BUILD_TPCDS=1` |
+| `job_db`    | external IMDb csv (no built-in generator)  | pre-built; set `JOB_DB=` or place at `$REPO/job_db` |
 
-`equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the query corpus from
-`gen_queries.py`.
+`equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the equivalence /
+semijoin query corpus from `gen_queries.py`. The `tpch/`, `tpcds/`, and `job/`
+families come from the **filtered SQLStorm v1.0** corpus (≥2 outer joins, ≤1
+top-level aggregate, outermost ORDER BY stripped) staged under
+`auto_test/query/` — see `query/README.md` if added later for filter rules.
 
-The corpus under `outerjoin_query/` is the **single source of truth** — both
-correctness (`compare_equal_batch.sh`) and performance (`experiment_onoff.sh`) run
-the **same** files, each family against its own DB:
+### Corpus layout (single source of truth)
+
+`experiment_onoff.sh` reads its corpus from `$OY_CORPUS` (defaulted in
+`test_config.sh` to `auto_test/query/`). Both correctness and performance
+families share the same files; each family runs against its own DB:
+
 ```
-outerjoin_query/
-  equivalence/select_star/   structural matrix (SELECT *)          -> equiv_db
-  equivalence/aggregation/   COUNT/SUM … GROUP BY                   -> equiv_db
-  equivalence/predicates/    shapes + WHERE value predicates        -> equiv_db
-  tpch/                      TPC-H outer joins + _p* predicate vars  -> tpch_db
-  tpcds/                     TPC-DS outer joins + _p* predicate vars -> tpcds_db
-  semijoin/                  star schema, ~54 shapes                 -> experiment_semijoin.sh
+auto_test/query/
+  equivalence/select_star/   18 structural matrix queries (SELECT *)   -> equiv_db
+  tpch/                       49 SQLStorm tpch outer-join queries       -> tpch_db
+  tpcds/                      49 SQLStorm tpcds outer-join queries      -> tpcds_db
+  job/                       819 SQLStorm job  outer-join queries       -> job_db
 ```
-All WHERE predicates are VALUE predicates (no NULL tests). **One generator**,
-`gen_queries.py`, produces every family; pick what to (re)generate with a target
-argument (below). Hand-written TPC anchors (`th1..`/`ds1..`) are preserved.
+
+The legacy `outerjoin_query/` corpus (handwritten + `gen_queries.py` output)
+is still in the repo for `compare_equal_batch.sh` / `experiment_semijoin.sh`;
+`experiment_onoff.sh` now points at `auto_test/query/` by default.
 
 ```
 data_generation.py    write R1..Rk chain CSVs (behind equiv_db + experiment_onoff)
@@ -90,19 +96,34 @@ Gate on correctness first (a wrong ON result is never timed), then time OFF vs O
 release binary only.
 
 ### `experiment_onoff.sh` 
-- whole optimizer OFF vs ON over the **same corpus** correctness checks
-  (select/agg → equiv_db, tpch → tpch_db, tpcds → tpcds_db)
+- whole optimizer OFF vs ON over the **same corpus** correctness checks.
+  Each family ships against its own DB:
+  `select/agg/pred → equiv_db`, `tpch → tpch_db`, `tpcds → tpcds_db`,
+  `job → job_db` (IMDb DB must be supplied externally — when missing, the
+  job family is skipped with a warning and the rest still runs).
 ```
-    --only select|agg|pred|tpch|tpcds|equiv|bench|all   query families (default all)
-    -r,--rscale N    equiv rows/table (default 1e6 — scale up freely on a big machine)
-    TPCH_SF= TPCDS_SF= (env)  scale for the tpch/tpcds families (default 1)
+    --only select|agg|pred|tpch|tpcds|job|equiv|bench|all   query families (default all)
+                                          equiv = select+agg+pred,
+                                          bench = tpch+tpcds+job
+    -r,--rscale N    equiv rows/table (default 1000 — scale up freely on a big machine)
+    TPCH_SF= TPCDS_SF= (env)  scale for the tpch/tpcds families (default 0.01)
+    JOB_DB= (env)             path to a pre-built IMDb DuckDB file (default $REPO/job_db)
     -t,--timeout S   soft per-query timeout (default 300; via `timeout`)
-    --kill-after S   HARD SIGKILL any duckdb query running > S sec (default 300 =
-                     5 min; 0 = off) — the backstop when a deadlock ignores --timeout
+    --kill-after S   HARD SIGKILL any duckdb query running > S sec (default 600;
+                     0 = off) — the backstop when a deadlock ignores --timeout
     --exclude GLOB   skip labels matching any '|'-separated glob (prune slow shapes)
     --pattern GLOB    --limit N    -n,--runs N    --min-secs S (window)    -o,--out FILE
 ```
+The corpus root is fixed in `test_config.sh` as
+`OY_CORPUS=$REPO/auto_test/query` — no env override needed for normal runs.
+
 ```bash
+# default scale (RSCALE=1000, TPCH_SF=TPCDS_SF=0.01) — runs straight from auto_test/query/
+bash auto_test/experiment_onoff.sh                          # all families
+bash auto_test/experiment_onoff.sh --only tpch              # one family
+bash auto_test/experiment_onoff.sh --only bench             # tpch + tpcds + job
+bash auto_test/experiment_onoff.sh --only job               # IMDb (needs JOB_DB)
+
 # big machine — full corpus at large scale (heavy queries hard-killed after 10 min):
 bash auto_test/experiment_onoff.sh --rscale 2000000 --kill-after 600
 # small machine — prune the heavy fan-out shapes, default 5-min hard kill:
@@ -159,13 +180,17 @@ export DUCKDB_BIN="$PWD/build/release/duckdb"
 bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
 grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt
 
-# 4. performance
-bash auto_test/experiment_onoff.sh --rscale 100000
+# 4. performance — corpus + DB paths come from test_config.sh; no env needed
+bash auto_test/experiment_onoff.sh                  # all (job skipped if no JOB_DB)
+# or one family at a time:
+bash auto_test/experiment_onoff.sh --only tpch
+bash auto_test/experiment_onoff.sh --only tpcds
+bash auto_test/experiment_onoff.sh --only job      # needs $JOB_DB pre-built
 bash auto_test/experiment_semijoin.sh
 
 # 5. debug a failing query
 bash auto_test/trace_outer_yan.sh -q "SELECT ...;"
 ```
 
-Outputs (repo root, git-ignored): `equiv_db` / `tpch_db` / `tpcds_db`,
+Outputs (repo root, git-ignored): `equiv_db` / `tpch_db` / `tpcds_db` / `job_db`,
 `compare_equal_batch_results.txt`, `experiment_*_results.txt`, `oy_trace*`.

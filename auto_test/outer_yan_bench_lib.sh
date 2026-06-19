@@ -16,6 +16,11 @@
 
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
+# If sourced standalone (without an outer test_config.sh load), pull defaults.
+if [ -z "${OY_CONFIG_LOADED:-}" ]; then
+    _OY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    [ -f "$_OY_LIB_DIR/test_config.sh" ] && . "$_OY_LIB_DIR/test_config.sh"
+fi
 : "${OY_TIMEOUT_SECS:=120}"
 OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 [ "${OY_TIMEOUT_SECS}" = "0" ] && OY_TIMEOUT_BIN=""
@@ -32,8 +37,9 @@ oy_duck() {  # args after the db path are passed through; reads stdin
 }
 
 # --- the correctness atom ---------------------------------------------------
-# Runs the SAME query with OuterYan OFF and ON against <db>, sorts both result
-# sets (multiset + order-independent) and diffs. Prints a verdict line.
+# Runs the SAME query with OuterYan OFF and ON against <db>, compares both
+# result sets (multiset + order-independent) via ORDER BY ALL inside DuckDB
+# (parallel, much faster than external sort). Prints a verdict line.
 # RETURNS: 0 PASS (ON==OFF) | 1 FAIL (rows differ) | 2 ERROR (crash) | 3 TIMEOUT.
 # This is "compare the query equivalence by input parameters" — the atomic unit
 # every experiment calls before it trusts a timing number.
@@ -42,10 +48,13 @@ oy_equiv_check() {
     local off on eoff eon roff ron rc=0
     off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp)
 
-    { echo "$OY_OFF"; echo "$query"; } \
-        | oy_duck "$db" -csv -noheader 2>"$eoff" | LC_ALL=C sort > "$off"; roff=${PIPESTATUS[1]}
-    { echo "$OY_ON";  echo "$query"; } \
-        | oy_duck "$db" -csv -noheader 2>"$eon"  | LC_ALL=C sort > "$on";  ron=${PIPESTATUS[1]}
+    # Wrap query with ORDER BY ALL so DuckDB outputs deterministic sorted rows.
+    local sorted_q="SELECT * FROM (${query%;}) _oy_sub ORDER BY ALL;"
+
+    { echo "$OY_OFF"; echo "$sorted_q"; } \
+        | oy_duck "$db" -csv -noheader 2>"$eoff" > "$off"; roff=${PIPESTATUS[1]}
+    { echo "$OY_ON";  echo "$sorted_q"; } \
+        | oy_duck "$db" -csv -noheader 2>"$eon"  > "$on";  ron=${PIPESTATUS[1]}
 
     if [ "${roff:-0}" -eq 124 ] || [ "${ron:-0}" -eq 124 ]; then
         echo "  ⏱️  TIMEOUT (${OY_TIMEOUT_SECS}s): $label"; rc=3
@@ -70,8 +79,10 @@ oy_equiv_two() {
     local db="$1" label="$2" set_sql="$3" qa="$4" qb="$5"
     local a b ea eb rc=0
     a=$(mktemp); b=$(mktemp); ea=$(mktemp); eb=$(mktemp)
-    { echo "$set_sql"; echo "$qa"; } | oy_duck "$db" -csv -noheader 2>"$ea" | LC_ALL=C sort > "$a"
-    { echo "$set_sql"; echo "$qb"; } | oy_duck "$db" -csv -noheader 2>"$eb" | LC_ALL=C sort > "$b"
+    local sq_a="SELECT * FROM (${qa%;}) _oy_sub ORDER BY ALL;"
+    local sq_b="SELECT * FROM (${qb%;}) _oy_sub ORDER BY ALL;"
+    { echo "$set_sql"; echo "$sq_a"; } | oy_duck "$db" -csv -noheader 2>"$ea" > "$a"
+    { echo "$set_sql"; echo "$sq_b"; } | oy_duck "$db" -csv -noheader 2>"$eb" > "$b"
     if grep -qE 'Error:' "$ea" "$eb"; then
         echo "  ⚠️  ERROR: $label"; grep -hE 'Error:' "$ea" "$eb" | head -1 | sed 's/^/        /'; rc=2
     elif diff -q "$a" "$b" >/dev/null; then

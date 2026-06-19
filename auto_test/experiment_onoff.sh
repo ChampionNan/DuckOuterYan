@@ -23,14 +23,16 @@
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
-#   -r,--rscale N     total_ids for R1..R10     (default 1000000)
-#   -n,--runs N       min timed runs (floor)    (default 3)
+#   -r,--rscale N     total_ids for R1..R10     (default from test_config.sh: 500000)
+#   -n,--runs N       min timed runs (floor)    (default from test_config.sh: 3)
 #      --min-secs S   measurement window/query  (default 5; 0 = just --runs)
 #   -t,--timeout S    soft per-query timeout sec  (default 300; via `timeout`)
-#      --kill-after S hard SIGKILL any duckdb query running > S sec (default 300,
-#                     5 min; 0 = off) — the backstop when a deadlock ignores --timeout
-#      --only select|agg|pred|tpch|tpcds|equiv|bench|all  query families (default all);
-#                     tpch/tpcds time against tpch_db/tpcds_db (TPCH_SF/TPCDS_SF env)
+#      --kill-after S hard SIGKILL any duckdb query running > S sec (default 600,
+#                     10 min; 0 = off) — the backstop when a deadlock ignores --timeout
+#      --only select|agg|pred|tpch|tpcds|job|equiv|bench|all  query families (default all);
+#                     tpch/tpcds time against tpch_db/tpcds_db (TPCH_SF/TPCDS_SF env);
+#                     job times against $JOB_DB (must be pre-built from IMDb csv —
+#                     there is no built-in generator for it).
 #      --pattern GLOB  only queries whose label matches (default *)
 #      --exclude GLOB  skip labels matching any '|'-separated glob (prune slow shapes)
 #      --limit N       cap number of queries (0 = no cap, default 0)
@@ -39,14 +41,18 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-export DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/release/duckdb}"
+# Unified config: defines DUCKDB_BIN, RSCALE, TPCH_SF/TPCDS_SF, OY_THREADS,
+# OY_TIMEOUT_SECS, KILL_AFTER, OY_MIN_SECS, OY_RUNS. Override via env or CLI.
+. "$SCRIPT_DIR/test_config.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 DATAGEN="$SCRIPT_DIR/data_generation.py"
-CORPUS="$SCRIPT_DIR/outerjoin_query"
-TPCH_SF="${TPCH_SF:-1}"; TPCDS_SF="${TPCDS_SF:-1}"      # scale for the tpch/tpcds families
+# Corpus root comes from test_config.sh ($OY_CORPUS, default auto_test/query/).
+# Still respects an env override if you want to point at a different folder.
+CORPUS="${OY_CORPUS:-$SCRIPT_DIR/query}"
+# (TPCH_SF, TPCDS_SF, RSCALE, OY_TIMEOUT_SECS, OY_MIN_SECS, KILL_AFTER are
+#  pre-set by test_config.sh; the CLI flags below still override them.)
 
-RSCALE=1000000; RUNS=3; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""; KILL_AFTER=300
-export OY_MIN_SECS=5; export OY_TIMEOUT_SECS=300
+RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 while [ $# -gt 0 ]; do case "$1" in
     -b|--bin) export DUCKDB_BIN="$2"; shift 2;;
     -r|--rscale) RSCALE="$2"; shift 2;;
@@ -67,11 +73,12 @@ OUT="${OUT:-$REPO_ROOT/experiment_onoff_results.txt}"
 case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — directional only; pass --bin <release>." >&2;; esac
 source "$SCRIPT_DIR/outer_yan_bench_lib.sh"
 
-# --- hard watchdog: SIGKILL any of our duckdb queries running > KILL_AFTER secs.
-# The soft --timeout uses `timeout`, which a DEADLOCKED duckdb can ignore (it then
-# stalls the whole run); this is the reliable backstop. --kill-after 0 disables it.
+# --- hard watchdog: SIGTERM any long-running duckdb process.
+# Since external sort has been removed (ORDER BY ALL used instead), there are
+# no pipeline siblings holding pipe FDs. Single-process SIGTERM is sufficient;
+# no process-group kill needed (which would accidentally kill the main script).
 _oy_watchdog() {  # $1=binary  $2=max-secs
-    local pid e d rest p1 p2 p3 h m s sec
+    local pid e d rest p1 p2 p3 h m s sec grace=3
     while true; do
         for pid in $(pgrep -f "$1" 2>/dev/null); do
             e="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"; [ -z "$e" ] && continue
@@ -79,8 +86,20 @@ _oy_watchdog() {  # $1=binary  $2=max-secs
             IFS=: read -r p1 p2 p3 <<< "$rest"
             if [ -n "$p3" ]; then h=$p1; m=$p2; s=$p3; else h=0; m=$p1; s=$p2; fi
             sec=$((10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0}))
-            [ "$sec" -gt "$2" ] && kill -9 "$pid" 2>/dev/null \
-                && echo "  [watchdog] SIGKILL $(basename "$1") pid=$pid etime=$e (>$2s)" >&2
+            if [ "$sec" -gt "$2" ]; then
+                # Stage 1: SIGTERM just the duckdb process (no pipeline siblings now).
+                kill -TERM "$pid" 2>/dev/null
+                echo "  [watchdog] SIGTERM duckdb pid=$pid etime=$e (>$2s)" >&2
+                local i=0
+                while [ "$i" -lt "$grace" ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1; i=$((i+1))
+                done
+                # Stage 2: SIGKILL if TERM was ignored.
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -9 "$pid" 2>/dev/null
+                    echo "  [watchdog] SIGKILL duckdb pid=$pid (TERM ignored)" >&2
+                fi
+            fi
         done
         sleep 15
     done
@@ -94,15 +113,16 @@ fi
 # --- families -> dirs + per-family DB (the SAME corpus compare_equal_batch runs) -
 case "$ONLY" in
     select) FAMS="select";;       agg) FAMS="agg";;       pred) FAMS="pred";;
-    tpch)   FAMS="tpch";;          tpcds) FAMS="tpcds";;
-    equiv)  FAMS="select agg pred";;   bench) FAMS="tpch tpcds";;
-    all)    FAMS="select agg pred tpch tpcds";;
-    *) echo "Unknown --only: $ONLY (select|agg|pred|tpch|tpcds|equiv|bench|all)" >&2; exit 2;;
+    tpch)   FAMS="tpch";;          tpcds) FAMS="tpcds";;   job) FAMS="job";;
+    equiv)  FAMS="select agg pred";;   bench) FAMS="tpch tpcds job";;
+    all)    FAMS="select agg pred tpch tpcds job";;
+    *) echo "Unknown --only: $ONLY (select|agg|pred|tpch|tpcds|job|equiv|bench|all)" >&2; exit 2;;
 esac
-need_equiv=0; need_tpch=0; need_tpcds=0
-for fam in $FAMS; do case "$fam" in select|agg|pred) need_equiv=1;; tpch) need_tpch=1;; tpcds) need_tpcds=1;; esac; done
+need_equiv=0; need_tpch=0; need_tpcds=0; need_job=0
+for fam in $FAMS; do case "$fam" in select|agg|pred) need_equiv=1;; tpch) need_tpch=1;; tpcds) need_tpcds=1;; job) need_job=1;; esac; done
 
 EQUIV_DB=""; TMPR=""; TPCH_DB="$REPO_ROOT/tpch_db"; TPCDS_DB="$REPO_ROOT/tpcds_db"
+JOB_DB="${JOB_DB:-$REPO_ROOT/job_db}"
 trap 'rm -rf "$EQUIV_DB" "$EQUIV_DB".wal "$TMPR"; [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null' EXIT
 
 # equiv DB: scaled R1..R10 + R/S/T/K views (timing scale via --rscale)
@@ -128,6 +148,14 @@ if [ "$need_tpcds" = 1 ] && [ ! -f "$TPCDS_DB" ]; then
     "$DUCKDB_BIN" "$TPCDS_DB" -c "CALL dsdgen(sf=$TPCDS_SF);" >/dev/null 2>&1 \
         || { echo "WARNING: dsdgen unavailable — tpcds family skipped" >&2; need_tpcds=0; rm -f "$TPCDS_DB" "$TPCDS_DB".wal; }
 fi
+# job_db: NO built-in generator — must be pre-built from IMDb csv (see SQLStorm
+# scripts/generatejob.py / OLAPBench). We just verify it exists.
+if [ "$need_job" = 1 ] && [ ! -f "$JOB_DB" ]; then
+    echo "WARNING: JOB_DB not found at $JOB_DB — job family skipped" >&2
+    echo "         Build the IMDb DuckDB file externally (e.g. SQLStorm/scripts/generatejob.py)" >&2
+    echo "         and either copy it to that path or set JOB_DB env." >&2
+    need_job=0
+fi
 
 # --- collect queries, each tagged with its family DB -------------------------
 LABELS=(); SQLS=(); DBS=()
@@ -138,6 +166,7 @@ for fam in $FAMS; do
         pred)   dir="$CORPUS/equivalence/predicates";   fdb="$EQUIV_DB";;
         tpch)   [ "$need_tpch"  = 1 ] || continue; dir="$CORPUS/tpch";  fdb="$TPCH_DB";;
         tpcds)  [ "$need_tpcds" = 1 ] || continue; dir="$CORPUS/tpcds"; fdb="$TPCDS_DB";;
+        job)    [ "$need_job"   = 1 ] || continue; dir="$CORPUS/job";   fdb="$JOB_DB";;
     esac
     for f in "$dir"/*.sql; do
         case "$f" in *_off.sql) continue;; esac
@@ -154,13 +183,13 @@ for fam in $FAMS; do
     [ "$LIMIT" -gt 0 ] && [ "${#LABELS[@]}" -ge "$LIMIT" ] && break
 done
 [ "${#LABELS[@]}" -gt 0 ] || { echo "No corpus queries matched (only=$ONLY pattern=$PATTERN)" >&2; exit 1; }
-SIZES="families=[$FAMS]  equiv rscale=$RSCALE  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF"
+SIZES="families=[$FAMS]  equiv rscale=$RSCALE  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF  job db=$JOB_DB"
 
 # --- run: gate -> regime -> time, teed to $OUT -------------------------------
 {
 echo "# OuterYan on/off experiment   $(date '+%F %T')"
 echo "# binary : $DUCKDB_BIN"
-echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from outerjoin_query/"
+echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
 echo "# tables : $SIZES"
 echo "# timing : threads=1, materialised CREATE TABLE AS, MIN per-run over a >=${OY_MIN_SECS}s window (floor ${RUNS} runs)"
 echo "# correct: ON result multiset == OFF result; only correct queries are timed"
@@ -182,8 +211,8 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
     reg="-"; off="-"; on="-"; ratio="-"; iters="-"
     if [ "$correct" = "TRUE" ]; then
         reg="$(oy_regime "$db" "$sql")"; reg="${reg%% *}"
-        local_ro="$(oy_time_min "$db" "$OY_OFF" "$sql" "$RUNS" 1)"
-        local_rn="$(oy_time_min "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
+        local_ro="$(oy_time_min "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS:-1}")"
+        local_rn="$(oy_time_min "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS:-1}")"
         off="$(echo "$local_ro" | awk '{print $1}')"; on="$(echo "$local_rn" | awk '{print $1}')"
         iters="$(echo "$local_ro" | awk '{print $2}')/$(echo "$local_rn" | awk '{print $2}')"
         ratio="$(awk -v off="$off" -v on="$on" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"

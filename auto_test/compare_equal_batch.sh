@@ -9,26 +9,13 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/release/duckdb}"
+# Unified config: defines DUCKDB_BIN, EQUIV_DB, TPCH_DB, TPCDS_DB, TPCH_SF,
+# TPCDS_SF, EQUIV_TIMEOUT/MEM/THREADS, BENCH_TIMEOUT/MEM/TMPCAP/THREADS.
+. "$SCRIPT_DIR/test_config.sh"
 [ -x "$DUCKDB_BIN" ] || DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 export DUCKDB_BIN
 
-# Database paths & scale factors
-EQUIV_DB="${EQUIV_DB:-$REPO_ROOT/equiv_db}"
-TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}";   TPCH_SF="${TPCH_SF:-10}"
-TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"; TPCDS_SF="${TPCDS_SF:-10}"
-
-# Equivalence suite config
-EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-300}"
-EQUIV_MEM="${EQUIV_MEM:-20GB}"
-EQUIV_THREADS=4
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
-
-# TPC-H / TPC-DS large benchmark config
-BENCH_MEM="${BENCH_MEM:-100GB}"
-BENCH_TMPCAP="${BENCH_TMPCAP:-50GB}"
-BENCH_TIMEOUT="${BENCH_TIMEOUT:-900}"
-BENCH_THREADS=8
 
 # -----------------------------------------------------------------------------
 # Utility: Kill residual duckdb process + Clean residual .wal / .lock file

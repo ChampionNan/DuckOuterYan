@@ -32,12 +32,14 @@
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-export DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/release/duckdb}"
+# Unified config: defines DUCKDB_BIN, OY_TIMEOUT_SECS, KILL_AFTER, OY_MIN_SECS,
+# OY_SEMI_N/DOM/SEL/RUNS, etc. Override via env or CLI flags below.
+. "$SCRIPT_DIR/test_config.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 SJ_DIR="$SCRIPT_DIR/outerjoin_query/semijoin"
 
-N=100000; DOM=20000; SEL=0.5; RUNS=5; TPCH=""; OUT=""; KILL_AFTER=300
-export OY_MIN_SECS=5; export OY_TIMEOUT_SECS=120
+N="${OY_SEMI_N:-100000}"; DOM="${OY_SEMI_DOM:-20000}"; SEL="${OY_SEMI_SEL:-0.5}"
+RUNS="${OY_SEMI_RUNS:-5}"; TPCH=""; OUT=""
 while [ $# -gt 0 ]; do case "$1" in
     -b|--bin) export DUCKDB_BIN="$2"; shift 2;;
     -N|--n) N="$2"; shift 2;;
@@ -61,9 +63,11 @@ CSV_TPCH="${CSV_BASE}_tpch.csv"
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb not executable: $DUCKDB_BIN" >&2; exit 1; }
 source "$SCRIPT_DIR/outer_yan_bench_lib.sh"
 
-# --- hard watchdog: SIGKILL any of our duckdb queries running > KILL_AFTER secs -
+# --- hard watchdog: SIGTERM any long-running duckdb process.
+# Since external sort has been removed (ORDER BY ALL used instead), there are
+# no pipeline siblings holding pipe FDs. Single-process SIGTERM is sufficient.
 _oy_watchdog() {  # $1=binary  $2=max-secs
-    local pid e d rest p1 p2 p3 h m s sec
+    local pid e d rest p1 p2 p3 h m s sec grace=3
     while true; do
         for pid in $(pgrep -f "$1" 2>/dev/null); do
             e="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"; [ -z "$e" ] && continue
@@ -71,8 +75,18 @@ _oy_watchdog() {  # $1=binary  $2=max-secs
             IFS=: read -r p1 p2 p3 <<< "$rest"
             if [ -n "$p3" ]; then h=$p1; m=$p2; s=$p3; else h=0; m=$p1; s=$p2; fi
             sec=$((10#${d:-0}*86400 + 10#${h:-0}*3600 + 10#${m:-0}*60 + 10#${s:-0}))
-            [ "$sec" -gt "$2" ] && kill -9 "$pid" 2>/dev/null \
-                && echo "  [watchdog] SIGKILL $(basename "$1") pid=$pid etime=$e (>$2s)" >&2
+            if [ "$sec" -gt "$2" ]; then
+                kill -TERM "$pid" 2>/dev/null
+                echo "  [watchdog] SIGTERM duckdb pid=$pid etime=$e (>$2s)" >&2
+                local i=0
+                while [ "$i" -lt "$grace" ] && kill -0 "$pid" 2>/dev/null; do
+                    sleep 1; i=$((i+1))
+                done
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -9 "$pid" 2>/dev/null
+                    echo "  [watchdog] SIGKILL duckdb pid=$pid (TERM ignored)" >&2
+                fi
+            fi
         done
         sleep 15
     done
