@@ -86,7 +86,15 @@ if [ "${SKIP_DOWNLOAD:-0}" != "1" ]; then
         (
             echo "  [get ] $url"
             # --retry rides out flaky CDNs; --continue-at - resumes partial files.
-            if curl -fSL --retry 5 --retry-delay 5 --continue-at - -o "$out.part" "$url"; then
+            # --speed-time/--speed-limit: if avg drops below 2KB/s for 30s,
+            # abort the connection so --retry can pick a new one. This is
+            # essential when github.com fastly CDN throttles long-lived streams.
+            if curl -fSL \
+                   --retry 10 --retry-delay 3 --retry-max-time 0 \
+                   --connect-timeout 15 \
+                   --speed-time 30 --speed-limit 2048 \
+                   --continue-at - \
+                   -o "$out.part" "$url"; then
                 mv "$out.part" "$out"
             else
                 echo "FAIL $url" >> "$fail_flag"
