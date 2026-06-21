@@ -36,37 +36,100 @@ The TPC-H / TPC-DS correctness suites need the `dbgen` / `dsdgen` extensions
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 ```
 
-## Testing the OuterYan optimizer
+## Testing the OuterYan Optimizer
 
 All test/benchmark scripts live in [`auto_test/`](auto_test/) — see
-[auto_test/README.md](auto_test/README.md) for the full reference (data/DB build,
-the disk-safe in-engine bench compare, single-query compare, tracing). Main steps:
+[auto_test/README.md](auto_test/README.md) for the full reference. Summary:
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `auto_test/run_all.sh` | **One-shot**: build + data + experiment (Linux) |
+| `auto_test/build_db.sh` | Build databases (graph, tpch, tpcds, job) |
+| `auto_test/gen_queries.py` | Generate the query corpus (graph + bench) |
+| `auto_test/experiment_onoff.sh` | Correctness + performance: ON vs OFF |
+| `auto_test/trace_outer_yan.sh` | Dump optimizer passes for a single query |
+| `auto_test/configs.sh` | Unified configuration (sourced by all scripts) |
+
+### Quick Commands
 
 ```bash
-export DUCKDB_BIN="$PWD/build/release/duckdb"
+# Build all databases (auto-detects & builds missing extensions):
+bash auto_test/build_db.sh
 
-# 1. CORRECTNESS — OuterYan ON vs OFF, per query (set-based equivalence diff).
-#    Suites: select | agg | pred | tpch | tpcds | equiv (select+agg+pred) | bench (tpch+tpcds) | all
-bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
-grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt        # any failures
+# Run the ON-vs-OFF experiment (all families):
+bash auto_test/experiment_onoff.sh
 
-# TPC-H/DS scale factor defaults to 10; override (and rebuild the DB) per run:
-rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
+# Run only TPC-H family:
+bash auto_test/experiment_onoff.sh --only tpch
 
-# Per-query wall-clock cap (stuck query is killed, not left hanging):
-#   EQUIV_TIMEOUT=300  select/agg/pred  (5 min; 0 = off)   BENCH_TIMEOUT=900  tpch/tpcds
-EQUIV_TIMEOUT=600 bash auto_test/compare_equal_batch.sh equiv
+# Run graph family with wiki dataset (28.5M edges):
+GRAPH_DATASET=wiki bash auto_test/experiment_onoff.sh --only graph
 
-# 2. PERFORMANCE — gate on correctness, then time OFF vs ON (release binary only).
-bash auto_test/experiment_onoff.sh --rscale 100000          # -> experiment_onoff_results.txt
-bash auto_test/experiment_semijoin.sh                       # -> experiment_semijoin_results.txt
-
-# 3. DEBUG a wrong answer — dump every optimizer pass for a query.
-bash auto_test/trace_outer_yan.sh -q "SELECT ...;"          # -> oy_trace.txt
+# Debug a specific query (dump optimizer passes):
+bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
 ```
 
-The databases (`equiv_db`, `tpch_db`, `tpcds_db`) and `*_results.txt` are built in
-the repo root and are git-ignored.
+### Parameters (experiment_onoff.sh)
+
+```
+  -b, --bin PATH      duckdb binary
+  -n, --runs N        timed iterations per config (default 10, median taken)
+  -t, --timeout S     per-query timeout (seconds, default 300)
+      --only FAMILY   graph | tpch | tpcds | job | bench | all
+      --pattern GLOB  filter queries by label
+      --exclude GLOB  skip matching queries ('|'-separated)
+      --limit N       cap total queries
+  -o, --out FILE      output file
+```
+
+### Complete Workflow (New Machine)
+
+```bash
+# 1. Clone
+git clone <repo-url> DuckYanOuter && cd DuckYanOuter
+
+# 2. One command does everything: build → data → experiment
+bash auto_test/run_all.sh
+```
+
+Or step-by-step:
+
+```bash
+# Build with extensions
+BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 GEN=ninja make release
+
+# Build databases (auto-rebuilds binary if extensions are missing)
+bash auto_test/build_db.sh all
+#   graph_db  — SNAP bitcoin (default), ~24K edges → R1..R10
+#   tpch_db   — TPC-H SF=50 via CALL dbgen(sf=50)
+#   tpcds_db  — TPC-DS SF=50 via CALL dsdgen(sf=50)
+#   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
+
+# Run experiment (correctness + dual-thread timing, median of 10 runs)
+bash auto_test/experiment_onoff.sh
+
+# (Optional) Larger-scale graph
+GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
+bash auto_test/experiment_onoff.sh --only graph
+```
+
+**`run_all.sh` environment overrides:**
+
+```bash
+# Skip compilation (reuse existing binary):
+SKIP_BUILD=1 bash auto_test/run_all.sh
+
+# Skip data generation (reuse existing databases):
+SKIP_DATA=1 bash auto_test/run_all.sh
+
+# Custom scale + graph:
+GRAPH_DATASET=wiki TPCH_SF=100 bash auto_test/run_all.sh --only graph
+```
+
+Outputs (git-ignored): `graph_db`, `tpch_db`, `tpcds_db`, `job_db`,
+`graph_data/`, `auto_test/results/`.
 
 ---
 

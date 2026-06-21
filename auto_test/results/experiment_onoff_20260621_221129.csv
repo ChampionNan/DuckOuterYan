@@ -1,0 +1,3 @@
+query,reorder,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup
+line_N3_mixB_ge,No,0.0960,0.0760,1.263,0.0960,0.0390,2.462
+line_N3_mixB_gt,No,0.1700,0.1690,1.006,0.1700,0.0720,2.361

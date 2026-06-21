@@ -1,1 +1,0 @@
-SELECT * FROM d3 RIGHT OUTER JOIN fact ON d3.k=fact.fk3;

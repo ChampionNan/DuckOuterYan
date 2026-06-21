@@ -365,7 +365,7 @@ tools/pythonpkg/duckdb_build/
 
 # own
 *_db*
-!auto_test/build_job_db.*
+
 lsqb*
 *_data
 
@@ -374,12 +374,15 @@ CLAUDE.md
 test/optimizer/outer_yan/*.md
 
 # OuterYan test/bench artifacts (auto_test/)
-equiv_db
-equiv_db.wal
+graph_db
+graph_db.wal
 tpch_db
 tpch_db.wal
 tpcds_db
 tpcds_db.wal
+job_db
+job_db.wal
+graph_data/
 oy_traces/
 oy_traces_fail/
 oy_traces_full/

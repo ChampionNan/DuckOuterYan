@@ -1,225 +1,261 @@
-# `auto_test/` — OuterYan optimizer test & benchmark
+# `auto_test/` — OuterYan Optimizer Test & Benchmark Suite
 
-Scripts for the **OuterYan** optimizer: **correctness** (ON-vs-OFF equivalence),
-**performance** (timing), **debugging** (per-pass traces). Each script finds the
-repo itself; the binary defaults to `build/release/duckdb` (`DUCKDB_BIN=` or
-`--bin` to override). **Test on a RELEASE build** — debug is failure-debugging only.
+Automated correctness + performance testing for the **OuterYan** optimizer module.
+All scripts auto-resolve the repo root; the binary defaults to `build/release/duckdb`
+(`DUCKDB_BIN=` or `--bin` to override). **Always test on a RELEASE build.**
 
 ---
 
-## Data & databases
+## File Layout
 
-Each DB is built once, reused, git-ignored, and rebuilt only if missing.
+```
+auto_test/
+  configs.sh            unified configuration (sourced by all scripts)
+  run_all.sh            one-command full deployment (build + data + experiment)
+  build_db.sh           build all databases (graph, tpch, tpcds, job)
+  gen_queries.py        query corpus generator (all families)
+  experiment_onoff.sh   correctness + performance experiment (ON vs OFF)
+  trace_outer_yan.sh    per-query optimizer pass debugger
+  outerjoin_query/      the query corpus (*.sql files)
+    graph/              54 pairs (108 files) — structural + predicate queries -> graph_db
+    tpch/               111 outer-join queries                                -> tpch_db
+    tpcds/              104 outer-join queries                                -> tpcds_db
+    job/                193 outer-join queries                                -> job_db
+  results/              output directory (git-ignored)
+```
 
-| DB | built from | needs |
+---
+
+## Configuration — `configs.sh`
+
+Single source of truth for all parameters. Sourced automatically by every script.
+Override via environment or per-script CLI flags (`CLI > env > configs.sh`).
+
+Key parameters:
+
+| Variable | Default | Purpose |
 |---|---|---|
-| `equiv_db`  | `test/.../outer_yan/data/R1..R10.csv` → tables `R1..R10` + views `R/S/T/K` | `data_generation.py` |
-| `tpch_db`   | `CALL dbgen(sf=$TPCH_SF)`   (default 0.01) | binary built `BUILD_TPCH=1` |
-| `tpcds_db`  | `CALL dsdgen(sf=$TPCDS_SF)` (default 0.01) | binary built `BUILD_TPCDS=1` |
-| `job_db`    | 21 IMDb parquet files from the `duckdb/duckdb-data` v1.0 release (~1.75 GB total) | `bash auto_test/build_job_db.sh` (downloads + loads); set `JOB_DB=` to override path |
+| `DUCKDB_BIN` | `build/release/duckdb` | Path to duckdb binary |
+| `GRAPH_DATASET` | `bitcoin` | SNAP graph for graph R1..R10 (bitcoin/epinions/google/wiki/dblp) |
+| `TPCH_SF` | `50` | TPC-H scale factor |
+| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `OY_THREADS` | `8` | Thread count for performance timing |
+| `OY_TIMEOUT_SECS` | `300` | Soft per-query timeout (seconds) |
+| `KILL_AFTER` | `600` | Hard SIGKILL watchdog (seconds; 0=off) |
+| `OY_MIN_SECS` | `0` | Minimum timing window per query (0=just OY_RUNS) |
+| `OY_RUNS` | `5` | Minimum timed iterations per query |
 
-`equiv_db`'s `R1..R10.csv` come from `data_generation.py`; the equivalence /
-semijoin query corpus from `gen_queries.py`. The `tpch/`, `tpcds/`, and `job/`
-families come from the **filtered SQLStorm v1.0** corpus. Filter rules:
-≥2 outer joins, ≤1 top-level aggregate, outermost ORDER BY stripped, and the
-remaining query must not contain any nondeterministic construct (window
-ranking `ROW_NUMBER`/`RANK`/…, unordered aggregates `ARRAY_AGG`/`STRING_AGG`/…,
-top-level `LIMIT` after stripping, or pg-only scalars like `INITCAP`). The
-filtered set is staged under `auto_test/query/`.
+---
 
-### Corpus layout (single source of truth)
-
-`experiment_onoff.sh` reads its corpus from `$OY_CORPUS` (defaulted in
-`test_config.sh` to `auto_test/query/`). Both correctness and performance
-families share the same files; each family runs against its own DB:
+## Building Databases — `build_db.sh`
 
 ```
-auto_test/query/
-  equivalence/select_star/   18 structural matrix queries (SELECT *)   -> equiv_db
-  tpch/                        3 SQLStorm tpch outer-join queries       -> tpch_db
-  tpcds/                      16 SQLStorm tpcds outer-join queries      -> tpcds_db
-  job/                       257 SQLStorm job  outer-join queries       -> job_db
+USAGE: bash auto_test/build_db.sh [target...]
+Targets: graph | tpch | tpcds | job | all  (default: all)
 ```
 
-The legacy `outerjoin_query/` corpus (handwritten + `gen_queries.py` output)
-is still in the repo for `compare_equal_batch.sh` / `experiment_semijoin.sh`;
-`experiment_onoff.sh` now points at `auto_test/query/` by default.
+| DB | Source | Notes |
+|---|---|---|
+| `graph_db` | SNAP graph data (external) → R1..R10 + views R/S/T/K | `GRAPH_DATASET`: bitcoin (24K, default), epinions (509K), dblp (1M), google (5.1M), wiki (28.5M) |
+| `tpch_db` | `CALL dbgen(sf=N)` | Auto-rebuilds binary with `BUILD_TPCH=1` if needed |
+| `tpcds_db` | `CALL dsdgen(sf=N)` | Auto-rebuilds binary with `BUILD_TPCDS=1` if needed |
+| `job_db` | Remote parquet via httpfs (`duckdb/duckdb-data` v1.0) | Auto-rebuilds binary with `BUILD_HTTPFS=1` if needed |
 
-### Building `job_db` — `build_job_db.sh`
+**Environment variables:**
 
-`bash auto_test/build_job_db.sh` populates `$JOB_DB` (default
-`$REPO/job_db`) by:
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRAPH_DATASET` | `bitcoin` | Which SNAP graph for graph tables |
+| `TPCH_SF` | `50` | TPC-H scale factor |
+| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `GRAPH_DATA_DIR` | `$REPO/graph_data` | SNAP data cache directory |
+| `FORCE` | `0` | Set to 1 to rebuild existing DBs |
 
-1. Downloading 21 official DuckDB IMDb parquet files (~1.75 GB total) from
-   the `duckdb/duckdb-data` v1.0 GitHub release into `$JOB_PARQUET_DIR`
-   (default `$REPO/job_parquet`). Already-present non-empty files are
-   skipped; `curl --continue-at -` resumes partial downloads.
-2. Streaming each parquet into a native DuckDB table via
-   `auto_test/build_job_db.sql`
-   (`CREATE OR REPLACE TABLE ... AS SELECT * FROM read_parquet(...)`).
-
-Useful env knobs: `FORCE=1` (rebuild even when `$JOB_DB` exists),
-`SKIP_DOWNLOAD=1` (assume parquets already on disk), `PARALLEL=N`
-(concurrent workers, default 4), `JOB_PARQUET_DIR=...` (cache location).
+**Examples:**
 
 ```bash
-# first time: ~1.75 GB download + create 21 tables (runtime depends on link)
-bash auto_test/build_job_db.sh
-# rebuild from cached parquets without touching the network:
-SKIP_DOWNLOAD=1 FORCE=1 bash auto_test/build_job_db.sh
-```
+# Build everything:
+bash auto_test/build_db.sh
 
-```
-data_generation.py    write R1..Rk chain CSVs (behind equiv_db + experiment_onoff)
-    --k N            number of tables R1..Rk
-    --total-ids N    ids/rows to generate (joins are per-id → size scales linearly)
-    --seed N         RNG seed
-    --output-dir D   directory to write R*.csv into
-gen_queries.py [TARGET]    (re)generate the SQL corpus (default TARGET=all)
-    equiv      equivalence/{select_star,aggregation,predicates}/  -> equiv_db
-    pred       equivalence/predicates/ only
-    tpch       tpch/   base FK trees + <anchor>_p* value-predicate variants
-    tpcds      tpcds/  base FK trees + <anchor>_p* value-predicate variants
-    bench      tpch + tpcds
-    semijoin   semijoin/  star-schema corpus (experiment_semijoin.sh)
-    all        equiv + tpch + tpcds + semijoin
-```
-```bash
-python3 auto_test/data_generation.py --k 10 --total-ids 1000000 --seed 42 \
-        --output-dir test/sql/optimizer/outer_yan/data
+# Build only graph with wiki dataset (28.5M edges):
+GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
+
+# Build only tpch at SF=10:
+TPCH_SF=10 bash auto_test/build_db.sh tpch
+
+# Rebuild job (re-download from GitHub):
+FORCE=1 bash auto_test/build_db.sh job
 ```
 
 ---
 
-## Correctness — `compare_equal_batch.sh`
+## Query Generation — `gen_queries.py`
 
-Runs each query twice (OuterYan ON vs OFF) and checks the result sets match.
-
-**All suites**
-```bash
-bash auto_test/compare_equal_batch.sh all
+```
+USAGE: python3 auto_test/gen_queries.py [target]
+Targets: graph | pred | tpch | tpcds | job | bench | validate | all  (default: all)
 ```
 
-**One suite** — `compare_equal_batch.sh [select|agg|pred|tpch|tpcds|equiv|bench]`
-(`equiv`=select+agg+pred, `bench`=tpch+tpcds). Env: `TPCH_SF`/`TPCDS_SF` (scale,
-default 10), `BENCH_MEM=6GB`, `BENCH_TMPCAP=20GB`, `BENCH_TIMEOUT=900`.
-Per-query wall-clock cap: `EQUIV_TIMEOUT=300` (select/agg/pred; 5 min, `0`=off)
-and `BENCH_TIMEOUT=900` (tpch/tpcds) — a stuck query is killed, not left hanging.
-```bash
-rm -f tpch_db* tpcds_db*; TPCH_SF=1 TPCDS_SF=1 bash auto_test/compare_equal_batch.sh bench
-```
+| Target | Output | Description |
+|---|---|---|
+| `graph` / `pred` | `outerjoin_query/graph/` | 54 predicate-bearing pairs (6 shapes x 9 predicates) |
+| `tpch` | `outerjoin_query/tpch/` | 111 TPC-H outer-join queries |
+| `tpcds` | `outerjoin_query/tpcds/` | 104 TPC-DS outer-join queries |
+| `job` | `outerjoin_query/job/` | 193 JOB/IMDb outer-join queries |
+| `bench` | tpch + tpcds + job | All benchmark families |
+| `validate` | (removes broken queries) | EXPLAIN-test against DBs |
+| `all` | graph + bench | Everything |
 
-**Single query** — `compare_equal.sh <on.sql> <off.sql> [db]`
+Design invariants: every query has >= 2 outer joins, mixed join-type vectors (LEFT/RIGHT/FULL),
+diverse topologies (line, right-deep, bushy, star, branch), deterministic (`random.seed(42)`),
+no banned functions.
+
 ```bash
-P=auto_test/outerjoin_query/equivalence/select_star/line_N4_allLEFT
-bash auto_test/compare_equal.sh "$P.sql" "${P}_off.sql" equiv_db
+python3 auto_test/gen_queries.py all          # regenerate everything
+python3 auto_test/gen_queries.py validate     # EXPLAIN-test, remove broken queries
 ```
 
 ---
 
-## Performance
+## Performance Experiment — `experiment_onoff.sh`
 
-Gate on correctness first (a wrong ON result is never timed), then time OFF vs ON;
-release binary only.
+Correctness-gates each query first (ON==OFF), then times OFF vs ON.
 
-### `experiment_onoff.sh` 
-- whole optimizer OFF vs ON over the **same corpus** correctness checks.
-  Each family ships against its own DB:
-  `select/agg/pred → equiv_db`, `tpch → tpch_db`, `tpcds → tpcds_db`,
-  `job → job_db` (IMDb DB must be supplied externally — when missing, the
-  job family is skipped with a warning and the rest still runs).
 ```
-    --only select|agg|pred|tpch|tpcds|job|equiv|bench|all   query families (default all)
-                                          equiv = select+agg+pred,
-                                          bench = tpch+tpcds+job
-    -r,--rscale N    equiv rows/table (default 1000 — scale up freely on a big machine)
-    TPCH_SF= TPCDS_SF= (env)  scale for the tpch/tpcds families (default 0.01)
-    JOB_DB= (env)             path to a pre-built IMDb DuckDB file (default $REPO/job_db;
-                              built once via `bash auto_test/build_job_db.sh`)
-    -t,--timeout S   soft per-query timeout (default 300; via `timeout`)
-    --kill-after S   HARD SIGKILL any duckdb query running > S sec (default 600;
-                     0 = off) — the backstop when a deadlock ignores --timeout
-    --exclude GLOB   skip labels matching any '|'-separated glob (prune slow shapes)
-    --pattern GLOB    --limit N    -n,--runs N    --min-secs S (window)    -o,--out FILE
+USAGE: bash auto_test/experiment_onoff.sh [options]
+  -b, --bin PATH      duckdb binary (default: build/release/duckdb)
+  -n, --runs N        minimum timed runs per query (default: from configs.sh)
+      --min-secs S    minimum measurement window in seconds (default: 0)
+  -t, --timeout S     soft per-query timeout (default: 300)
+      --kill-after S  hard SIGKILL watchdog (default: 600; 0=off)
+      --only FAMILY   query families to run:
+                        graph | tpch | tpcds | job | bench | all
+                        (bench = tpch+tpcds+job; default: all)
+      --pattern GLOB  only run queries matching this glob
+      --exclude GLOB  skip queries matching any '|'-separated glob
+      --limit N       cap total number of queries (0 = no cap)
+  -o, --out FILE      output file (default: results/experiment_onoff_<timestamp>.txt)
+  -h, --help          show usage
 ```
-The corpus root is fixed in `test_config.sh` as
-`OY_CORPUS=$REPO/auto_test/query` — no env override needed for normal runs.
+
+**Examples:**
 
 ```bash
-# default scale (RSCALE=1000, TPCH_SF=TPCDS_SF=0.01) — runs straight from auto_test/query/
-bash auto_test/experiment_onoff.sh                          # all families
-bash auto_test/experiment_onoff.sh --only tpch              # one family
-bash auto_test/experiment_onoff.sh --only bench             # tpch + tpcds + job
-bash auto_test/experiment_onoff.sh --only job               # IMDb (run build_job_db.sh first)
+# Run all families with defaults:
+bash auto_test/experiment_onoff.sh
 
-# big machine — full corpus at large scale (heavy queries hard-killed after 10 min):
-bash auto_test/experiment_onoff.sh --rscale 2000000 --kill-after 600
-# small machine — prune the heavy fan-out shapes, default 5-min hard kill:
-bash auto_test/experiment_onoff.sh --rscale 100000 --exclude 'bushy*_N[56]_*|branch_N[56]_*|chain_N*'
-```
-Output: `experiment_onoff_results.txt`
+# Only TPC-H family:
+bash auto_test/experiment_onoff.sh --only tpch
 
-### `experiment_semijoin.sh` 
-- OuterYan SJ filters vs DuckDB SEMI over a star schema (fact + d1/d2/d3).
-  **Section A:** the ~54-query corpus `outerjoin_query/semijoin/`, each gated
-  ON==OFF then timed BASELINE/BITMAP/HASH. **Section B:** the `dim ⟕ fact`
-  skeleton across a selectivity sweep (adds the DUCKDB_SEMI rewrite).
+# Graph family with wiki dataset (large scale):
+GRAPH_DATASET=wiki bash auto_test/experiment_onoff.sh --only graph --min-secs 5
+
+# Bench families (tpch+tpcds+job), skip bushy7 queries:
+bash auto_test/experiment_onoff.sh --only bench --exclude 'jb_bushy7*'
+
+# Quick correctness check (no timing window):
+bash auto_test/experiment_onoff.sh --only all --runs 1 --min-secs 0
 ```
-    -N fact rows   -D key domain   -p dim selectivity (Sec A)   -n runs
-    -t timeout   --kill-after S (hard SIGKILL > S sec, default 300)   --tpch SF   -o,--out FILE
-```
-```bash
-bash auto_test/experiment_semijoin.sh -N 1000000 -D 200000 -p 0.5
-```
-Output: `experiment_semijoin_results.txt`
+
+**Output format:** Three sections — (1) query catalog with correctness status, (2) timing table for correct queries, (3) summary statistics with mean speed-up grouped by reorder/no-reorder.
 
 ---
 
 ## Debugging — `trace_outer_yan.sh`
 
-Dumps every optimizer pass for a query, so you can see which rule rewrote which
-edge. Flow:
+Dumps every optimizer pass for a single query (OT construction, simplification, SJ pairs, DP, etc.).
+
 ```
-input plan → BuildOT → Simplify → SJ pairs → Desimplify → DP → Resimplify
-           → SJ insertion → (aggregate) agg pushdown
+USAGE: bash auto_test/trace_outer_yan.sh [options]
+  -q "SQL"           query to trace
+  -b, --bin PATH     duckdb binary
+  -o, --out FILE     output file
+  -d, --outdir DIR   output directory (default: results/oy_traces/)
 ```
-```
-    -q "SELECT … ;"   trace one query        fails   trace the known-failing bundle
-    -b,--bin PATH     -o,--out FILE (default oy_trace.txt)   -d,--outdir DIR (default oy_traces/)
-```
+
 ```bash
-bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R LEFT JOIN S ON R.dst=S.src;"
+bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
 ```
 
 ---
 
-## Whole testing flow
+## One-Command Deployment — `run_all.sh`
+
+Clone the repo and run a single command to compile, build all databases, and execute the full experiment:
 
 ```bash
-# 1. generate R1..R10 data (for equiv_db + onoff)
-python3 auto_test/data_generation.py --k 10 --total-ids 1000000 --seed 42 \
-        --output-dir test/sql/optimizer/outer_yan/data
-
-# 2. build a release binary WITH the tpch/tpcds extensions
-BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
-export DUCKDB_BIN="$PWD/build/release/duckdb"
-
-# 3. correctness (all suites) -> file, then list failures
-bash auto_test/compare_equal_batch.sh all > compare_equal_batch_results.txt 2>&1
-grep -E '❌ FAIL|⚠️' compare_equal_batch_results.txt
-
-# 4. performance — corpus + DB paths come from test_config.sh; no env needed
-bash auto_test/build_job_db.sh                      # one-time: download IMDb parquets + load $JOB_DB
-bash auto_test/experiment_onoff.sh                  # all (job skipped if no JOB_DB)
-# or one family at a time:
-bash auto_test/experiment_onoff.sh --only tpch
-bash auto_test/experiment_onoff.sh --only tpcds
-bash auto_test/experiment_onoff.sh --only job      # needs $JOB_DB pre-built (see step above)
-bash auto_test/experiment_semijoin.sh
-
-# 5. debug a failing query
-bash auto_test/trace_outer_yan.sh -q "SELECT ...;"
+git clone <DuckYanOuter repo> && cd DuckYanOuter
+bash auto_test/run_all.sh
 ```
 
-Outputs (repo root, git-ignored): `equiv_db` / `tpch_db` / `tpcds_db` / `job_db`,
-`compare_equal_batch_results.txt`, `experiment_*_results.txt`, `oy_trace*`.
+This handles everything: compile DuckDB with extensions → build graph/tpch/tpcds/job databases → run the on/off experiment with dual-thread timing.
+
+**Environment overrides (all optional):**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GRAPH_DATASET` | `bitcoin` | SNAP graph (bitcoin/epinions/google/wiki/dblp) |
+| `TPCH_SF` | `50` | TPC-H scale factor |
+| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `OY_THREADS` | `72` | Multi-thread count |
+| `OY_RUNS` | `10` | Timed iterations per config (median taken) |
+| `JOBS` | `nproc` | Make parallelism |
+| `SKIP_BUILD` | `0` | Set to 1 to skip compilation |
+| `SKIP_DATA` | `0` | Set to 1 to skip database generation |
+
+```bash
+# Large-scale run with wiki graph + SF=100:
+GRAPH_DATASET=wiki TPCH_SF=100 TPCDS_SF=100 bash auto_test/run_all.sh
+
+# Skip build if binary already exists:
+SKIP_BUILD=1 bash auto_test/run_all.sh --only tpch
+
+# Pass any experiment_onoff.sh flags after the script:
+bash auto_test/run_all.sh --only graph --pattern 'line_N3*'
+```
+
+---
+
+## Complete Workflow (Manual Steps)
+
+```bash
+# ===== Step 1: Clone & Build =====
+git clone <DuckYanOuter repo>
+cd DuckYanOuter
+BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 GEN=ninja make release
+
+# ===== Step 2: Build all databases =====
+# build_db.sh auto-detects missing extensions and triggers make release if needed.
+# Queries are already included in the repo (outerjoin_query/), no generation needed.
+bash auto_test/build_db.sh all
+#   graph_db  — SNAP bitcoin (default), ~24K edges → R1..R10
+#   tpch_db   — TPC-H SF=50 via CALL dbgen(sf=50)
+#   tpcds_db  — TPC-DS SF=50 via CALL dsdgen(sf=50)
+#   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
+
+# ===== Step 3: Run the full on/off experiment =====
+bash auto_test/experiment_onoff.sh
+#   Correctness check (outer_yan ON == OFF) + dual-thread timing
+#   threads=1 + threads=72, median of 10 runs per config
+
+# ===== Step 4: Check results =====
+cat auto_test/results/experiment_onoff_*.txt | tail -10
+
+# ===== (Optional) Debug a specific query =====
+bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src;"
+```
+
+**Customization via environment (or edit `configs.sh`):**
+
+```bash
+# Use wiki graph (28.5M edges) for larger scale:
+GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
+
+# Scale TPC-H to SF=100:
+TPCH_SF=100 bash auto_test/build_db.sh tpch
+
+# Quick test with fewer iterations and smaller scope:
+bash auto_test/experiment_onoff.sh --only graph --runs 3 --limit 5
+```
+
+Databases (`graph_db`, `tpch_db`, `tpcds_db`, `job_db`) and `results/` are git-ignored.

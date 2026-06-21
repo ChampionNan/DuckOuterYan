@@ -16,7 +16,7 @@
 # consecutive snapshots shows exactly which rule rewrote which edge — i.e.
 # where a wrong answer is introduced.
 #
-# Data + loading mirror the equiv DB used by compare_equal_batch.sh (R1..R10 +
+# Data + loading mirror the graph DB used by experiment_onoff.sh (R1..R10 +
 # R/S/T/K views), so a query that FAILs there can be traced here byte-for-byte.
 #
 # USAGE:
@@ -32,7 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$REPO_ROOT/test/sql/optimizer/outer_yan/data"
 DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/debug/duckdb}"
-OUTDIR="$REPO_ROOT/oy_traces"
+OUTDIR="$SCRIPT_DIR/results/oy_traces"
 MODE=""
 QUERY=""
 OUTFILE=""
@@ -51,7 +51,7 @@ done
 [ -n "$MODE" ] || { echo "Nothing to do; pass 'fails' or -q \"SQL\". See --help." >&2; exit 2; }
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb binary not found: $DUCKDB_BIN" >&2; exit 1; }
 
-# --- build the database once (same recipe as the compare_equal_batch equiv DB) ----
+# --- build the database once (same recipe as the experiment_onoff graph DB) ----
 shopt -s nullglob
 CSVS=("$DATA_DIR"/R*.csv)
 shopt -u nullglob
@@ -79,7 +79,7 @@ trace_one() {  # $1=query  $2=outfile
 }
 
 if [ "$MODE" = "one" ]; then
-    OUTFILE="${OUTFILE:-$REPO_ROOT/oy_trace.txt}"
+    OUTFILE="${OUTFILE:-$SCRIPT_DIR/results/oy_trace.txt}"
     echo "Tracing ad-hoc query -> $OUTFILE"
     trace_one "$QUERY" "$OUTFILE"
     echo "============================================================"
@@ -87,7 +87,7 @@ if [ "$MODE" = "one" ]; then
     exit 0
 fi
 
-# --- fails mode: the 5 historically failing equivalence queries --------------
+# --- fails mode: the 5 historically failing graph queries --------------
 mkdir -p "$OUTDIR"
 declare -a NAMES QUERIES
 NAMES+=("chain_5rel_LEFT-INNER-FULL-RIGHT")

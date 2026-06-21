@@ -1,0 +1,25 @@
+# OuterYan on/off experiment   2026-06-21 22:10:09
+# binary : /Users/cbn/Desktop/DuckYanOuter/build/release/duckdb
+# corpus : graph  (pattern=line_N3_mixB_g* limit=2) — 2 queries from /Users/cbn/Desktop/DuckYanOuter/auto_test/outerjoin_query
+# tables : families=[graph]  graph=bitcoin  tpch sf=50  tpcds sf=50  job db=/Users/cbn/Desktop/DuckYanOuter/job_db
+# timing : threads=1+72, median of 3 runs per config (2 warm-up + 3 timed)
+# correct: ON result multiset == OFF result; only correct queries are timed
+
+============================ QUERY CATALOG ============================
+query                              nrel  correct   note       rows
+----------------------------------------------------------------------
+line_N3_mixB_ge                    3     TRUE      OK         13753527
+line_N3_mixB_gt                    3     TRUE      OK         30131566
+
+===================== TIMING (correct queries) ========================
+# Columns: T1 = single-thread (threads=1), TM = multi-thread (threads=72)
+query                              reord?    T1:off     T1:on  T1:spd    TM:off     TM:on  TM:spd
+----------------------------------------------------------------------
+line_N3_mixB_ge                    No       0.0950    0.0750   1.267    0.0980    0.0410   2.390
+line_N3_mixB_gt                    No       0.1700    0.1670   1.018    0.1680    0.0710   2.366
+
+============================== SUMMARY ================================
+queries=2  correct=2  incorrect/skipped=0  timed=2
+threads: single=1, multi=72
+  No  (no reorder): n=2  mean speed-up(TM)=2.378   [expect <=1.0 — SJ overhead, no reorder]
+  Yes (reorder):   n=0  mean speed-up(TM)=-   [may be >1.0 — reorder/reduction win]
