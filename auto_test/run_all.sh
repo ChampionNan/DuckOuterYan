@@ -37,7 +37,7 @@ START_TIME=$SECONDS
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "Step 1/3: Building DuckDB release (BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1)"
     JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
-    BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 make release -j"$JOBS"
+    BUILD_TPCH=1 BUILD_TPCDS=1 make release -j"$JOBS"
     log "Build complete ($(elapsed $((SECONDS - START_TIME))))"
 else
     log "Step 1/3: Skipping build (SKIP_BUILD=1)"

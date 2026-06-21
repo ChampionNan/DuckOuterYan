@@ -134,10 +134,7 @@ _need_rebuild() {
     if want tpcds; then
         "$DUCKDB_BIN" -c "CALL dsdgen(sf=0);" >/dev/null 2>&1 || need_flags="$need_flags BUILD_TPCDS=1"
     fi
-    # httpfs extension (needed for job: remote parquet reads)
-    if want job; then
-        "$DUCKDB_BIN" -c "LOAD httpfs;" >/dev/null 2>&1 || need_flags="$need_flags BUILD_HTTPFS=1"
-    fi
+    # httpfs extension
     need_flags="$(echo "$need_flags" | xargs)"  # trim
     if [ -n "$need_flags" ]; then
         echo "[make] duckdb binary missing extension(s), rebuilding with: $need_flags"
@@ -182,45 +179,34 @@ if want tpcds; then
 fi
 
 # ============================================================================
-# ============================================================================
-# 5. job_db — IMDb (direct remote parquet reads via httpfs, same as official load.sql)
+# 5. job_db — IMDb (download parquet locally, then load into DuckDB)
 # ============================================================================
 if want job; then
     JOB_DB="${JOB_DB:-$REPO_ROOT/job_db}"
+    JOB_DATA_DIR="${JOB_DATA_DIR:-$REPO_ROOT/job_data}"
 
     if [ -e "$JOB_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[job_db] already exists ($JOB_DB). Set FORCE=1 to rebuild."
     else
-        echo "[job_db] Loading IMDb tables from remote parquet (httpfs) ..."
+        echo "[job_db] Downloading IMDb parquet files ..."
+        mkdir -p "$JOB_DATA_DIR"
+        JOB_TABLES="aka_name aka_title cast_info char_name comp_cast_type company_name company_type complete_cast info_type keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link name person_info role_type title"
+        for tbl in $JOB_TABLES; do
+            local_file="$JOB_DATA_DIR/job_${tbl}.parquet"
+            if [ ! -f "$local_file" ]; then
+                curl -sL --retry 3 -o "$local_file" \
+                    "https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_${tbl}.parquet" \
+                    || { echo "ERROR: failed to download job_${tbl}.parquet" >&2; exit 1; }
+            fi
+        done
+        echo "[job_db] Loading parquet into DuckDB ..."
         rm -f "$JOB_DB" "$JOB_DB.wal"
-        "$DUCKDB_BIN" "$JOB_DB" <<'SQL'
-LOAD httpfs;
-CREATE TABLE aka_name AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_aka_name.parquet');
-CREATE TABLE aka_title AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_aka_title.parquet');
-CREATE TABLE cast_info AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_cast_info.parquet');
-CREATE TABLE char_name AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_char_name.parquet');
-CREATE TABLE comp_cast_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_comp_cast_type.parquet');
-CREATE TABLE company_name AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_company_name.parquet');
-CREATE TABLE company_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_company_type.parquet');
-CREATE TABLE complete_cast AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_complete_cast.parquet');
-CREATE TABLE info_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_info_type.parquet');
-CREATE TABLE keyword AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_keyword.parquet');
-CREATE TABLE kind_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_kind_type.parquet');
-CREATE TABLE link_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_link_type.parquet');
-CREATE TABLE movie_companies AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_movie_companies.parquet');
-CREATE TABLE movie_info AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_movie_info.parquet');
-CREATE TABLE movie_info_idx AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_movie_info_idx.parquet');
-CREATE TABLE movie_keyword AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_movie_keyword.parquet');
-CREATE TABLE movie_link AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_movie_link.parquet');
-CREATE TABLE name AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_name.parquet');
-CREATE TABLE person_info AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_person_info.parquet');
-CREATE TABLE role_type AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_role_type.parquet');
-CREATE TABLE title AS SELECT * FROM read_parquet('https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_title.parquet');
-CHECKPOINT;
-SQL
+        SQL=""
+        for tbl in $JOB_TABLES; do
+            SQL="${SQL}CREATE TABLE ${tbl} AS SELECT * FROM read_parquet('${JOB_DATA_DIR}/job_${tbl}.parquet');"
+        done
+        SQL="${SQL}CHECKPOINT;"
+        "$DUCKDB_BIN" "$JOB_DB" -c "$SQL"
         echo "[job_db] done. $(du -h "$JOB_DB" | cut -f1)"
     fi
 fi
-
-echo
-echo "=== build_db complete ==="
