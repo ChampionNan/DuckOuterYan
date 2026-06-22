@@ -247,16 +247,27 @@ done
 SIZES="families=[$FAMS]  graph=$GRAPH_DATASET  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF  job db=$JOB_DB"
 
 # ============================================================================
-# RUN: gate -> regime -> time, teed to $OUT
+# RUN: gate -> regime -> time, streaming results to $OUT and $CSV_OUT
 # ============================================================================
+CSV_OUT="${OUT%.txt}.csv"
+
+# Header (truncate + write)
 {
-echo "# OuterYan on/off experiment   $(date '+%F %T')"
-echo "# binary : $DUCKDB_BIN"
-echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
-echo "# tables : $SIZES"
-echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (2 warm-up + ${RUNS} timed)"
-echo "# correct: ON result multiset == OFF result; only correct queries are timed"
-echo
+    echo "# OuterYan on/off experiment   $(date '+%F %T')"
+    echo "# binary : $DUCKDB_BIN"
+    echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
+    echo "# tables : $SIZES"
+    echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (2 warm-up + ${RUNS} timed)"
+    echo "# correct: ON result multiset == OFF result; only correct queries are timed"
+    echo
+    echo "===================== LIVE PER-QUERY RESULTS =========================="
+    echo "# Columns: T1 = single-thread, TM = multi-thread (threads=${OY_THREADS})"
+    printf '%-34s %-5s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
+        query reord? correct note T1:off T1:on T1:spd TM:off TM:on TM:spd
+    echo "----------------------------------------------------------------------"
+} > "$OUT"
+
+echo "query,reorder,correct,note,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup,rows" > "$CSV_OUT"
 
 QN=0; NSKIP=0; NTIMED=0; NNO=0; NYES=0; SUMNO=0; SUMYES=0
 QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
@@ -264,8 +275,8 @@ QDB=(); QSQL=()
 QOFF1=(); QON1=(); QRATIO1=()
 QOFFM=(); QONM=(); QRATIOM=()
 
-# ==== Pass 1: Correctness check + Multi-thread timing ========================
-echo "--- Pass 1: correctness + multi-thread (threads=${OY_THREADS}) timing ---" >&2
+# ==== Single pass: per query, correctness -> TM -> T1 (streamed to $OUT) ====
+echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
 for ((i=0; i<${#LABELS[@]}; i++)); do
     id="${LABELS[i]}"; sql="${SQLS[i]}"; db="${DBS[i]}"
     nrel="-"; case "$id" in *_N[0-9]*) nrel="$(printf '%s' "$id" | sed -nE 's/.*_N([0-9]+)_.*/\1/p')";; esac
@@ -276,14 +287,17 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
         *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
         *)             correct="FALSE"; note="ERROR";     rows="-";;
     esac
-    reg="-"; offm="-"; onm="-"; ratiom="-"
+    reg="-"; offm="-"; onm="-"; ratiom="-"; off1="-"; on1="-"; ratio1="-"
     if [ "$correct" = "TRUE" ]; then
         reg="$(oy_regime "$db" "$sql")"; reg="${reg%% *}"
-        # Multi-thread timing (median of RUNS iterations)
         local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
         offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
         ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
+        local_ro1="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" 1)"
+        local_rn1="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
+        off1="$(echo "$local_ro1" | awk '{print $1}')"; on1="$(echo "$local_rn1" | awk '{print $1}')"
+        ratio1="$(awk -v off="$off1" -v on="$on1" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
         NTIMED=$((NTIMED+1))
         if [ "$ratiom" != "NA" ]; then
             if [ "$reg" = "No" ]; then NNO=$((NNO+1));  SUMNO="$(awk -v s="$SUMNO" -v r="$ratiom" 'BEGIN{print s+r}')"
@@ -295,68 +309,32 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
     QLBL[$QN]="$id"; QNREL[$QN]="$nrel"; QCORRECT[$QN]="$correct"; QNOTE[$QN]="$note"; QROWS[$QN]="$rows"
     QREG[$QN]="$reg"; QDB[$QN]="$db"; QSQL[$QN]="$sql"
     QOFFM[$QN]="$offm"; QONM[$QN]="$onm"; QRATIOM[$QN]="$ratiom"
-    QOFF1[$QN]="-"; QON1[$QN]="-"; QRATIO1[$QN]="-"
+    QOFF1[$QN]="$off1"; QON1[$QN]="$on1"; QRATIO1[$QN]="$ratio1"
     QN=$((QN+1))
-    printf '  [%3d/%d] %-34s correct=%-5s %s\n' "$QN" "${#LABELS[@]}" "$id" "$correct" "$note" >&2
+    # ---- IMMEDIATE write to $OUT and $CSV_OUT ----
+    printf '%-34s %-5s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
+        "$id" "$reg" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" >> "$OUT"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$id" "$reg" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$rows" >> "$CSV_OUT"
+    if [ "$correct" = "TRUE" ]; then
+        printf '  [%3d/%d] %-34s correct=TRUE  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s\n' \
+            "$QN" "${#LABELS[@]}" "$id" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1" >&2
+    else
+        printf '  [%3d/%d] %-34s correct=FALSE %s\n' "$QN" "${#LABELS[@]}" "$id" "$note" >&2
+    fi
 done
 
-# ==== Pass 2: Single-thread timing (only correct queries) ====================
-echo "--- Pass 2: single-thread (threads=1) timing ---" >&2
-for ((j=0; j<QN; j++)); do
-    [ "${QCORRECT[j]}" = "TRUE" ] || continue
-    local_ro1="$(oy_time_median "${QDB[j]}" "$OY_OFF" "${QSQL[j]}" "$RUNS" 1)"
-    local_rn1="$(oy_time_median "${QDB[j]}" "$OY_ON"  "${QSQL[j]}" "$RUNS" 1)"
-    QOFF1[$j]="$(echo "$local_ro1" | awk '{print $1}')"
-    QON1[$j]="$(echo "$local_rn1" | awk '{print $1}')"
-    QRATIO1[$j]="$(awk -v off="${QOFF1[j]}" -v on="${QON1[j]}" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-    printf '  [%3d/%d] %-34s T1: off=%s on=%s spd=%s\n' "$((j+1))" "$NTIMED" "${QLBL[j]}" "${QOFF1[j]}" "${QON1[j]}" "${QRATIO1[j]}" >&2
-done
-
-# ---- Section 1: correctness catalog ----------------------------------------
-echo "============================ QUERY CATALOG ============================"
-printf '%-34s %-5s %-9s %-10s %s\n' query nrel correct note rows
-echo "----------------------------------------------------------------------"
-for ((j=0; j<QN; j++)); do
-    printf '%-34s %-5s %-9s %-10s %s\n' "${QLBL[j]}" "${QNREL[j]}" "${QCORRECT[j]}" "${QNOTE[j]}" "${QROWS[j]}"
-done
-
-# ---- Section 2: timing (correct queries only) ------------------------------
-echo
-echo "===================== TIMING (correct queries) ========================"
-echo "# Columns: T1 = single-thread (threads=1), TM = multi-thread (threads=${OY_THREADS})"
-printf '%-34s %-5s %9s %9s %7s %9s %9s %7s\n' \
-    query reord? T1:off T1:on T1:spd TM:off TM:on TM:spd
-echo "----------------------------------------------------------------------"
-for ((j=0; j<QN; j++)); do
-    [ "${QCORRECT[j]}" = "TRUE" ] || continue
-    printf '%-34s %-5s %9s %9s %7s %9s %9s %7s\n' \
-        "${QLBL[j]}" "${QREG[j]}" \
-        "${QOFF1[j]}" "${QON1[j]}" "${QRATIO1[j]}" \
-        "${QOFFM[j]}" "${QONM[j]}" "${QRATIOM[j]}"
-done
-
-# ---- Section 3: summary ----------------------------------------------------
-echo
+# ---- Final summary appended to $OUT ----------------------------------------
 MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
-echo "============================== SUMMARY ================================"
-echo "queries=$QN  correct=$((QN-NSKIP))  incorrect/skipped=$NSKIP  timed=$NTIMED"
-echo "threads: single=1, multi=${OY_THREADS}"
-echo "  No  (no reorder): n=$NNO  mean speed-up(TM)=$MNO   [expect <=1.0 — SJ overhead, no reorder]"
-echo "  Yes (reorder):   n=$NYES  mean speed-up(TM)=$MYES   [may be >1.0 — reorder/reduction win]"
-} | tee "$OUT"
-
-# ---- CSV output (performance data for plotting) -----------------------------
-CSV_OUT="${OUT%.txt}.csv"
 {
-    echo "query,reorder,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup"
-    awk '
-        /^=+ TIMING/{found=1; next}
-        /^=+ SUMMARY/{found=0}
-        found && /^[a-zA-Z]/ && !/^(query|#|-)/ {
-            printf "%s,%s,%s,%s,%s,%s,%s,%s\n", $1,$2,$3,$4,$5,$6,$7,$8
-        }
-    ' "$OUT"
-} > "$CSV_OUT"
+    echo
+    echo "============================== SUMMARY ================================"
+    echo "queries=$QN  correct=$((QN-NSKIP))  incorrect/skipped=$NSKIP  timed=$NTIMED"
+    echo "threads: single=1, multi=${OY_THREADS}"
+    echo "  No  (no reorder): n=$NNO  mean speed-up(TM)=$MNO   [expect <=1.0 — SJ overhead, no reorder]"
+    echo "  Yes (reorder):   n=$NYES  mean speed-up(TM)=$MYES   [may be >1.0 — reorder/reduction win]"
+} >> "$OUT"
+
 echo "Results written to $OUT"
 echo "CSV written to $CSV_OUT"

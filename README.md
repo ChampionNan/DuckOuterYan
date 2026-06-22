@@ -67,8 +67,9 @@ bash auto_test/experiment_onoff.sh --only tpch
 # Run graph family with wiki dataset (28.5M edges):
 GRAPH_DATASET=wiki bash auto_test/experiment_onoff.sh --only graph
 
-# Debug a specific query (dump optimizer passes):
-bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
+# Debug a specific query (dump optimizer passes; needs debug binary):
+bash auto_test/trace_outer_yan.sh --db graph_db \
+    -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
 ```
 
 ### Parameters (experiment_onoff.sh)

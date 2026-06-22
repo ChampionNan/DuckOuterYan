@@ -163,20 +163,38 @@ bash auto_test/experiment_onoff.sh --only all --runs 1 --min-secs 0
 
 ## Debugging — `trace_outer_yan.sh`
 
-Dumps every optimizer pass for a single query (OT construction, simplification, SJ pairs, DP, etc.).
+Dumps every optimizer pass for a single query (OT construction, simplification, SJ pairs, DP, etc.) against an **existing** database file (`graph_db` / `tpch_db` / `tpcds_db` / `job_db`). The script does **not** build a temp DB — you point it at the same DB the query was originally written for via `--db`.
+
+> Requires the **debug** binary (`build/debug/duckdb`). The `DUCKDB_OYTRACE` hook is compiled out of release builds. Build it once with `make debug` (add `BUILD_TPCH=1 BUILD_TPCDS=1` if those tables are referenced).
 
 ```
-USAGE: bash auto_test/trace_outer_yan.sh [options]
-  -q "SQL"           query to trace
-  -b, --bin PATH     duckdb binary
-  -o, --out FILE     output file
-  -d, --outdir DIR   output directory (default: results/oy_traces/)
+USAGE: bash auto_test/trace_outer_yan.sh --db PATH [options] (fails | -q "SQL")
+  --db PATH          (REQUIRED) existing DuckDB database file
+  -q "SQL"           query to trace (use -q OR `fails`)
+  fails              trace 5 known-failing R/S/T/K queries (needs views, see below)
+  -b, --bin PATH     duckdb binary (default: build/debug/duckdb)
+  -o, --out FILE     output file (default: results/oy_trace.txt)
+  -d, --outdir DIR   output dir for `fails` mode (default: results/oy_traces/)
 ```
 
 ```bash
-bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
-```
+# Trace one query against graph_db
+bash auto_test/trace_outer_yan.sh --db graph_db \
+    -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src WHERE R1.src % 10 = 0;"
 
+# Trace an existing .sql file against tpch_db, custom output
+bash auto_test/trace_outer_yan.sh --db tpch_db \
+    -q "$(cat outerjoin_query/tpch/some_query.sql)" \
+    -o results/oy_traces/some_query.trace.txt
+
+# `fails` mode — 5 preset queries use R/S/T/K view names; create them once on graph_db:
+build/debug/duckdb graph_db -c "
+  CREATE VIEW IF NOT EXISTS R AS SELECT * FROM R1;
+  CREATE VIEW IF NOT EXISTS S AS SELECT * FROM R2;
+  CREATE VIEW IF NOT EXISTS T AS SELECT * FROM R3;
+  CREATE VIEW IF NOT EXISTS K AS SELECT * FROM R4;"
+bash auto_test/trace_outer_yan.sh --db graph_db fails
+```
 ---
 
 ## One-Command Deployment — `run_all.sh`
@@ -242,7 +260,8 @@ bash auto_test/experiment_onoff.sh
 cat auto_test/results/experiment_onoff_*.txt | tail -10
 
 # ===== (Optional) Debug a specific query =====
-bash auto_test/trace_outer_yan.sh -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src;"
+bash auto_test/trace_outer_yan.sh --db graph_db \
+    -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src;"
 ```
 
 **Customization via environment (or edit `configs.sh`):**

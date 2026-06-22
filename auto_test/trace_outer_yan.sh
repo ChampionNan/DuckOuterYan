@@ -16,26 +16,27 @@
 # consecutive snapshots shows exactly which rule rewrote which edge — i.e.
 # where a wrong answer is introduced.
 #
-# Data + loading mirror the graph DB used by experiment_onoff.sh (R1..R10 +
-# R/S/T/K views), so a query that FAILs there can be traced here byte-for-byte.
+# Runs the query against an EXISTING database file (graph_db, tpch_db,
+# tpcds_db, job_db, ...) — no temp loading. You pass --db PATH.
 #
 # USAGE:
-#   trace_outer_yan.sh fails                 # trace all 5 known-failing queries
-#   trace_outer_yan.sh -q "SELECT ... ;"     # trace one ad-hoc query
-#   trace_outer_yan.sh -q "..." -o out.txt   # choose the output file
-#   options: -b/--bin PATH   duckdb binary (default build/debug/duckdb)
-#            -d/--outdir DIR  trace dir for `fails` mode (default ./oy_traces)
+#   trace_outer_yan.sh --db graph_db fails              # trace 5 known-failing queries
+#   trace_outer_yan.sh --db graph_db -q "SELECT ... ;"  # trace one ad-hoc query
+#   trace_outer_yan.sh --db tpch_db -q "..." -o out.txt # choose output file
+#   options: --db PATH       (REQUIRED) DuckDB database file to query against
+#            -b/--bin PATH   duckdb binary (default build/debug/duckdb)
+#            -d/--outdir DIR trace dir for `fails` mode (default ./results/oy_traces)
 # ============================================================================
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="$REPO_ROOT/test/sql/optimizer/outer_yan/data"
 DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/debug/duckdb}"
 OUTDIR="$SCRIPT_DIR/results/oy_traces"
 MODE=""
 QUERY=""
 OUTFILE=""
+DB_FILE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -44,31 +45,17 @@ while [ $# -gt 0 ]; do
         -o|--out)      OUTFILE="$2"; shift 2 ;;
         -b|--bin)      DUCKDB_BIN="$2"; shift 2 ;;
         -d|--outdir)   OUTDIR="$2"; shift 2 ;;
+        --db)          DB_FILE="$2"; shift 2 ;;
         -h|--help)     sed -n '2,/^set /{/^set /q;p}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$MODE" ] || { echo "Nothing to do; pass 'fails' or -q \"SQL\". See --help." >&2; exit 2; }
+[ -n "$MODE" ]    || { echo "Nothing to do; pass 'fails' or -q \"SQL\". See --help." >&2; exit 2; }
+[ -n "$DB_FILE" ] || { echo "Error: --db PATH is required (e.g. --db $REPO_ROOT/graph_db)" >&2; exit 2; }
+# Resolve relative path against current working directory
+case "$DB_FILE" in /*) ;; *) DB_FILE="$(cd "$(dirname "$DB_FILE")" 2>/dev/null && pwd)/$(basename "$DB_FILE")" ;; esac
+[ -f "$DB_FILE" ] || { echo "Error: database file not found: $DB_FILE" >&2; exit 1; }
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb binary not found: $DUCKDB_BIN" >&2; exit 1; }
-
-# --- build the database once (same recipe as the experiment_onoff graph DB) ----
-shopt -s nullglob
-CSVS=("$DATA_DIR"/R*.csv)
-shopt -u nullglob
-[ ${#CSVS[@]} -gt 0 ] || { echo "Error: no R*.csv under $DATA_DIR" >&2; exit 1; }
-
-DB_FILE="$(mktemp -u).duckdb"
-trap 'rm -f "$DB_FILE" "$DB_FILE".wal' EXIT
-{
-    for csv in "${CSVS[@]}"; do
-        t="$(basename "$csv" .csv)"
-        echo "CREATE TABLE $t AS SELECT * FROM read_csv('$csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});"
-    done
-    echo "CREATE VIEW R AS SELECT * FROM R1;"
-    echo "CREATE VIEW S AS SELECT * FROM R2;"
-    echo "CREATE VIEW T AS SELECT * FROM R3;"
-    echo "CREATE VIEW K AS SELECT * FROM R4;"
-} | "$DUCKDB_BIN" "$DB_FILE" >/dev/null || { echo "Error: failed to load data" >&2; exit 1; }
 
 # Run one bare query ON with the tracer writing to $2 (truncated first).
 trace_one() {  # $1=query  $2=outfile
