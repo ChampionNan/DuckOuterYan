@@ -6,4 +6,4 @@ FROM region
     LEFT OUTER JOIN lineitem ON o_orderkey = l_orderkey
     RIGHT OUTER JOIN supplier ON l_suppkey = s_suppkey
     INNER JOIN partsupp ON s_suppkey = ps_suppkey
-WHERE s_suppkey > 0 AND s_suppkey < 10000;
+WHERE o_orderkey > 0 AND o_orderkey < 10000;

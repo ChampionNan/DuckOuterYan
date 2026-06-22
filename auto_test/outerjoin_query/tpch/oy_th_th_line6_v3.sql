@@ -5,4 +5,4 @@ FROM region
     RIGHT OUTER JOIN partsupp ON s_suppkey = ps_suppkey
     FULL OUTER JOIN part ON ps_partkey = p_partkey
     LEFT OUTER JOIN lineitem ON p_partkey = l_partkey
-WHERE l_orderkey < 50000;
+WHERE s_acctbal < 50000;

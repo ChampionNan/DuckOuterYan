@@ -6,4 +6,4 @@ FROM region
     LEFT OUTER JOIN lineitem ON o_orderkey = l_orderkey
     RIGHT OUTER JOIN supplier ON l_suppkey = s_suppkey
     FULL OUTER JOIN partsupp ON s_suppkey = ps_suppkey
-WHERE o_totalprice > 100;
+WHERE r_regionkey > 100;

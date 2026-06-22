@@ -356,6 +356,44 @@ TPCH_PRED_COLS = [
     "l_orderkey", "l_quantity", "l_extendedprice", "l_discount", "l_linenumber",
 ]
 
+# Map each TPC-H table to its column-name prefix. Prefixes are underscore-
+# anchored, so "p_" (part) and "ps_" (partsupp) never collide.
+TPCH_TABLE_PREFIX = {
+    "region": "r_", "nation": "n_", "supplier": "s_", "customer": "c_",
+    "part": "p_", "partsupp": "ps_", "orders": "o_", "lineitem": "l_",
+}
+TPCH_ALL_TABLES = list(TPCH_TABLE_PREFIX)
+
+
+def _tpch_col_table(col):
+    """Return the table a TPC-H column belongs to (longest matching prefix)."""
+    best = None
+    for tbl, pre in TPCH_TABLE_PREFIX.items():
+        if col.startswith(pre) and (best is None or
+                                    len(pre) > len(TPCH_TABLE_PREFIX[best])):
+            best = tbl
+    return best
+
+
+def _tpch_tables_in(text):
+    """Set of TPC-H tables named in a FROM-clause fragment / bushy template."""
+    low = text.lower()
+    return {t for t in TPCH_ALL_TABLES if re.search(r"\b" + t + r"\b", low)}
+
+
+def _tpch_pick_pred_col(tables, idx):
+    """Deterministically pick a predicate column whose table is in `tables`.
+
+    TPCH_PRED_COLS spans the whole schema, but each topology only joins a
+    subset of tables. Restricting candidates to in-scope tables is what keeps
+    the generated WHERE predicate bindable (otherwise e.g. a branch topology
+    on customer/orders/region/nation/supplier could draw `p_size` from `part`,
+    which isn't in the FROM clause -> Binder Error).
+    """
+    tabs = set(tables)
+    allowed = [c for c in TPCH_PRED_COLS if _tpch_col_table(c) in tabs]
+    return allowed[idx % len(allowed)]
+
 
 def _tpch_line_topologies():
     """Line/chain topologies of various lengths."""
@@ -456,7 +494,7 @@ def gen_tpch_queries():
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
         for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCH_PRED_COLS[(idx + vi) % len(TPCH_PRED_COLS)]
+            pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
@@ -466,7 +504,7 @@ def gen_tpch_queries():
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
         for vi, vec in enumerate(vecs[3:6]):
-            pred_col = TPCH_PRED_COLS[(idx + vi) % len(TPCH_PRED_COLS)]
+            pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_rd_v{vi}"
             queries[label] = _build_right_deep_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
@@ -477,7 +515,7 @@ def gen_tpch_queries():
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
         for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCH_PRED_COLS[(idx + vi) % len(TPCH_PRED_COLS)]
+            pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
@@ -486,8 +524,9 @@ def gen_tpch_queries():
     bushy_topos = _tpch_bushy_topologies()
     for topo_label, shape, template, n_joins in bushy_topos:
         vecs = bench_vectors(n_joins)
+        topo_tables = _tpch_tables_in(template)
         for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCH_PRED_COLS[(idx + vi) % len(TPCH_PRED_COLS)]
+            pred_col = _tpch_pick_pred_col(topo_tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
@@ -496,42 +535,51 @@ def gen_tpch_queries():
     branch_topos = _tpch_branch_topologies()
     for topo_label, shape, template, n_joins in branch_topos:
         vecs = bench_vectors(n_joins)
+        topo_tables = _tpch_tables_in(template)
         for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCH_PRED_COLS[(idx + vi) % len(TPCH_PRED_COLS)]
+            pred_col = _tpch_pick_pred_col(topo_tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
 
-    # Aggregation variants
+    # Aggregation variants. Each spec carries the topology that contains every
+    # table its SELECT / GROUP BY columns reference, so the query binds. (All
+    # topologies have >=2 joins so bench_vectors produces a valid join vector.)
     agg_specs = [
-        {"select": "COUNT(*) AS cnt, SUM(l_extendedprice) AS rev", "group_by": ""},
-        {"select": "o_orderpriority, COUNT(*) AS cnt", "group_by": "o_orderpriority"},
+        {"select": "COUNT(*) AS cnt, SUM(l_extendedprice) AS rev", "group_by": "",
+         "tables": ["customer", "orders", "lineitem"],
+         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
+        {"select": "o_orderpriority, COUNT(*) AS cnt", "group_by": "o_orderpriority",
+         "tables": ["customer", "orders", "lineitem"],
+         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
         {"select": "n_name, SUM(l_quantity) AS total_qty, AVG(l_extendedprice) AS avg_price",
-         "group_by": "n_name"},
+         "group_by": "n_name",
+         "tables": ["nation", "supplier", "lineitem"],
+         "conds": ["n_nationkey = s_nationkey", "s_suppkey = l_suppkey"]},
         {"select": "s_nationkey, COUNT(*) AS cnt, MIN(ps_supplycost) AS min_cost",
-         "group_by": "s_nationkey"},
-        {"select": "r_name, COUNT(*) AS cnt, MAX(c_acctbal) AS max_bal", "group_by": "r_name"},
-        {"select": "c_mktsegment, SUM(o_totalprice) AS total_val", "group_by": "c_mktsegment"},
-        {"select": "p_size, COUNT(*) AS cnt, AVG(l_discount) AS avg_disc", "group_by": "p_size"},
+         "group_by": "s_nationkey",
+         "tables": ["nation", "supplier", "partsupp"],
+         "conds": ["n_nationkey = s_nationkey", "s_suppkey = ps_suppkey"]},
+        {"select": "r_name, COUNT(*) AS cnt, MAX(c_acctbal) AS max_bal", "group_by": "r_name",
+         "tables": ["region", "nation", "customer"],
+         "conds": ["r_regionkey = n_regionkey", "n_nationkey = c_nationkey"]},
+        {"select": "c_mktsegment, SUM(o_totalprice) AS total_val", "group_by": "c_mktsegment",
+         "tables": ["customer", "orders", "lineitem"],
+         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
+        {"select": "p_size, COUNT(*) AS cnt, AVG(l_discount) AS avg_disc", "group_by": "p_size",
+         "tables": ["part", "lineitem", "orders"],
+         "conds": ["p_partkey = l_partkey", "l_orderkey = o_orderkey"]},
         {"select": "n_regionkey, SUM(s_acctbal) AS tot_bal, COUNT(*) AS n_supp",
-         "group_by": "n_regionkey"},
-    ]
-    agg_line_topos = [
-        (["customer", "orders", "lineitem"],
-         ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]),
-        (["region", "nation", "supplier", "partsupp"],
-         ["r_regionkey = n_regionkey", "n_nationkey = s_nationkey", "s_suppkey = ps_suppkey"]),
-        (["region", "nation", "customer", "orders"],
-         ["r_regionkey = n_regionkey", "n_nationkey = c_nationkey", "c_custkey = o_custkey"]),
-        (["lineitem", "part", "supplier"],
-         ["l_partkey = p_partkey", "l_suppkey = s_suppkey"]),
+         "group_by": "n_regionkey",
+         "tables": ["region", "nation", "supplier"],
+         "conds": ["r_regionkey = n_regionkey", "n_nationkey = s_nationkey"]},
     ]
     for ai, agg in enumerate(agg_specs):
-        tables, conds = agg_line_topos[ai % len(agg_line_topos)]
+        tables, conds = agg["tables"], agg["conds"]
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
         vec = vecs[(ai + 2) % len(vecs)]
-        pred_col = TPCH_PRED_COLS[(idx + ai) % len(TPCH_PRED_COLS)]
+        pred_col = _tpch_pick_pred_col(tables, idx + ai)
         label = f"th_agg{ai}"
         queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + ai, agg=agg)
         idx += 1

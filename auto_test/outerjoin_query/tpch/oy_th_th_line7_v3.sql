@@ -6,4 +6,4 @@ FROM region
     FULL OUTER JOIN lineitem ON o_orderkey = l_orderkey
     LEFT OUTER JOIN supplier ON l_suppkey = s_suppkey
     INNER JOIN partsupp ON s_suppkey = ps_suppkey
-WHERE r_regionkey % 3 = 0;
+WHERE ps_availqty % 3 = 0;

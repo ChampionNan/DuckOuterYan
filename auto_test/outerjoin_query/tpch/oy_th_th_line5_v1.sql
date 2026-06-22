@@ -4,4 +4,4 @@ FROM region
     FULL OUTER JOIN customer ON n_nationkey = c_nationkey
     LEFT OUTER JOIN orders ON c_custkey = o_custkey
     RIGHT OUTER JOIN lineitem ON o_orderkey = l_orderkey
-WHERE c_custkey % 7 <> 0;
+WHERE r_regionkey % 7 <> 0;

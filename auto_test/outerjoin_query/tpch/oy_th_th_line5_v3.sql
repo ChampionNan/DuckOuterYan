@@ -4,4 +4,4 @@ FROM region
     INNER JOIN customer ON n_nationkey = c_nationkey
     RIGHT OUTER JOIN orders ON c_custkey = o_custkey
     FULL OUTER JOIN lineitem ON o_orderkey = l_orderkey
-WHERE p_retailprice > 500;
+WHERE o_orderkey > 500;

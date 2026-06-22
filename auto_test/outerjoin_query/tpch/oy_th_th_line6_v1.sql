@@ -5,4 +5,4 @@ FROM region
     LEFT OUTER JOIN partsupp ON s_suppkey = ps_suppkey
     RIGHT OUTER JOIN part ON ps_partkey = p_partkey
     FULL OUTER JOIN lineitem ON p_partkey = l_partkey
-WHERE ps_availqty % 2 = 1;
+WHERE l_linenumber % 2 = 1;
