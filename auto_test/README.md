@@ -173,7 +173,7 @@ USAGE: bash auto_test/trace_outer_yan.sh --db PATH [options] (fails | -q "SQL")
   -q "SQL"           query to trace (use -q OR `fails`)
   fails              trace 5 known-failing R/S/T/K queries (needs views, see below)
   -b, --bin PATH     duckdb binary (default: build/debug/duckdb)
-  -o, --out FILE     output file (default: results/oy_trace.txt)
+  -o, --out FILE     output file (default: results/oy_traces/<stem>.trace.txt)
   -d, --outdir DIR   output dir for `fails` mode (default: results/oy_traces/)
 ```
 

@@ -21,10 +21,15 @@
 #
 # USAGE:
 #   trace_outer_yan.sh --db graph_db fails              # trace 5 known-failing queries
-#   trace_outer_yan.sh --db graph_db -q "SELECT ... ;"  # trace one ad-hoc query
-#   trace_outer_yan.sh --db tpch_db -q "..." -o out.txt # choose output file
+#   trace_outer_yan.sh --db graph_db -q "SELECT ... ;"  # trace one inline query
+#   trace_outer_yan.sh --db graph_db -f path/to/q.sql   # trace query from a .sql file
+#   trace_outer_yan.sh --db tpch_db -f q.sql -o out.txt # choose output file
 #   options: --db PATH       (REQUIRED) DuckDB database file to query against
+#            -q "SQL"        inline SQL string (use -q OR -f)
+#            -f/--file PATH  read SQL from a file (default outfile derives from this name)
 #            -b/--bin PATH   duckdb binary (default build/debug/duckdb)
+#            -o/--out FILE   trace output file (default: results/oy_traces/<stem>.trace.txt
+#                            where <stem> = .sql basename for -f, or inline_<ts> for -q)
 #            -d/--outdir DIR trace dir for `fails` mode (default ./results/oy_traces)
 # ============================================================================
 set -uo pipefail
@@ -35,6 +40,7 @@ DUCKDB_BIN="${DUCKDB_BIN:-$REPO_ROOT/build/debug/duckdb}"
 OUTDIR="$SCRIPT_DIR/results/oy_traces"
 MODE=""
 QUERY=""
+QUERY_FILE=""
 OUTFILE=""
 DB_FILE=""
 
@@ -42,6 +48,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         fails)         MODE="fails"; shift ;;
         -q|--query)    MODE="one"; QUERY="$2"; shift 2 ;;
+        -f|--file)     MODE="one"; QUERY_FILE="$2"; shift 2 ;;
         -o|--out)      OUTFILE="$2"; shift 2 ;;
         -b|--bin)      DUCKDB_BIN="$2"; shift 2 ;;
         -d|--outdir)   OUTDIR="$2"; shift 2 ;;
@@ -50,12 +57,19 @@ while [ $# -gt 0 ]; do
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$MODE" ]    || { echo "Nothing to do; pass 'fails' or -q \"SQL\". See --help." >&2; exit 2; }
+[ -n "$MODE" ]    || { echo "Nothing to do; pass 'fails', -q \"SQL\", or -f file.sql. See --help." >&2; exit 2; }
 [ -n "$DB_FILE" ] || { echo "Error: --db PATH is required (e.g. --db $REPO_ROOT/graph_db)" >&2; exit 2; }
 # Resolve relative path against current working directory
 case "$DB_FILE" in /*) ;; *) DB_FILE="$(cd "$(dirname "$DB_FILE")" 2>/dev/null && pwd)/$(basename "$DB_FILE")" ;; esac
 [ -f "$DB_FILE" ] || { echo "Error: database file not found: $DB_FILE" >&2; exit 1; }
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb binary not found: $DUCKDB_BIN" >&2; exit 1; }
+
+# If -f provided, load SQL from file (cannot combine with -q)
+if [ -n "$QUERY_FILE" ]; then
+    [ -z "$QUERY" ] || { echo "Error: use either -q or -f, not both." >&2; exit 2; }
+    [ -f "$QUERY_FILE" ] || { echo "Error: query file not found: $QUERY_FILE" >&2; exit 1; }
+    QUERY="$(cat "$QUERY_FILE")"
+fi
 
 # Run one bare query ON with the tracer writing to $2 (truncated first).
 trace_one() {  # $1=query  $2=outfile
@@ -66,8 +80,16 @@ trace_one() {  # $1=query  $2=outfile
 }
 
 if [ "$MODE" = "one" ]; then
-    OUTFILE="${OUTFILE:-$SCRIPT_DIR/results/oy_trace.txt}"
-    echo "Tracing ad-hoc query -> $OUTFILE"
+    if [ -z "$OUTFILE" ]; then
+        if [ -n "$QUERY_FILE" ]; then
+            stem="$(basename "$QUERY_FILE")"; stem="${stem%.sql}"
+        else
+            stem="inline_$(date +%Y%m%d_%H%M%S)"
+        fi
+        OUTFILE="$SCRIPT_DIR/results/oy_traces/${stem}.trace.txt"
+    fi
+    mkdir -p "$(dirname "$OUTFILE")"
+    echo "Tracing ${QUERY_FILE:-inline query} -> $OUTFILE"
     trace_one "$QUERY" "$OUTFILE"
     echo "============================================================"
     cat "$OUTFILE"
