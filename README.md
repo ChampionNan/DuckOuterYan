@@ -84,7 +84,7 @@ bash auto_test/trace_outer_yan.sh --db graph_db \
 
 ```
   -b, --bin PATH      duckdb binary
-  -n, --runs N        timed iterations per config (default 10, median taken)
+  -n, --runs N        timed iterations per config (default 5, median taken)
   -t, --timeout S     per-query timeout (seconds, default 300)
       --only FAMILY   graph | tpch | tpcds | job | bench | all
       --pattern GLOB  filter queries by label
@@ -99,6 +99,17 @@ Results stream to two files under `auto_test/results/` (override with `-o`):
 
 - `experiment_onoff_<timestamp>.txt` — the human-readable table below.
 - `experiment_onoff_<timestamp>.csv` — the same data, one row per query, for plotting.
+
+Both share one `<timestamp>` — captured the moment `experiment_onoff.sh` starts (before
+the DB-build phase) and also printed as `started ...` in the txt header.
+
+**Retry pass.** After the first pass, any query that timed out — a gate `TIMEOUT`,
+or a timing batch that came back `NA` because the per-process `timeout` killed it —
+is re-evaluated once with the timeout multiplied by `OY_TIMEOUT_RETRY_MULT` (default
+`2`, i.e. doubled; set `1` to disable). Retried rows are appended under a
+`RETRY PASS (...)` section in the txt and carry `pass=retry` in the csv (the
+first-pass row stays as `pass=main`); **take the last row per query** — the summary
+already reflects the post-retry result.
 
 Each query produces one row. `T1` is single-thread (`threads=1`); `TM` is
 multi-thread (`threads=$OY_THREADS`). Times are the median (seconds) of `--runs`
@@ -121,6 +132,7 @@ star_N4_mixA_s33                   No    hash    FALSE     NOT-EQUIV          - 
 | `note`    | `OK` / `NOT-EQUIV` / `TIMEOUT` / `ERROR` — only `OK` queries are timed |
 | `T1:off T1:on T1:spd` | single-thread off time, on time, speed-up (`off/on`) |
 | `TM:off TM:on TM:spd` | multi-thread off time, on time, speed-up (`off/on`) |
+| `pass` (csv only) | `main` (first pass) or `retry` (re-run at the doubled timeout) — prefer `retry` |
 
 The `kernel` column comes from the in-binary `DUCKDB_SJ_KERNEL_TRACE` diagnostic:
 when that env var is set, each finalized semi-join filter prints
@@ -193,7 +205,7 @@ bash auto_test/build_db.sh all
 #   tpcds_db  — TPC-DS SF=100 via CALL dsdgen(sf=100)
 #   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
 
-# Run experiment (correctness + dual-thread timing, median of 10 runs)
+# Run experiment (correctness + dual-thread timing, median of 5 runs)
 bash auto_test/experiment_onoff.sh
 
 # (Optional) Larger-scale graph

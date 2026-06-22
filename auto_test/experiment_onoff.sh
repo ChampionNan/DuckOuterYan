@@ -9,12 +9,19 @@
 #      Yes (OuterYan reorders), from the join-order signature.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (bitmap | hash | mixed | -), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 10 runs).
+#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 5 runs).
+#
+# After pass 1, any query that TIMED OUT (gate timeout, or a timing batch that
+# produced NA) is re-evaluated once in a RETRY PASS with the timeout multiplied
+# by OY_TIMEOUT_RETRY_MULT (default 2 = "doubled"; set 1 to disable). Retry rows
+# are appended under their own section (tagged pass=retry in the CSV) and the
+# SUMMARY reflects the better, post-retry result.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
-#   -n,--runs N       timed iterations per config (default 10; median taken)
-#   -t,--timeout S    per-query timeout sec (default 300; via `timeout`)
+#   -n,--runs N       timed iterations per config (default 5; median taken)
+#   -t,--timeout S    per-query timeout sec (default 300; via `timeout`).
+#                     Timed-out queries are retried once at S×OY_TIMEOUT_RETRY_MULT.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
 #                     (default all); bench = tpch+tpcds+job
 #      --pattern GLOB  only queries whose label matches (default *)
@@ -43,7 +50,14 @@ while [ $# -gt 0 ]; do case "$1" in
     -o|--out) OUT="$2"; shift 2;;
     -h|--help) sed -n '2,/^set /p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
-_default_out="$SCRIPT_DIR/results/experiment_onoff_$(date +%Y%m%d_%H%M%S).txt"
+# One experiment start timestamp, captured the moment this script begins (before
+# the DB-build phase). Used for BOTH the .txt/.csv filenames AND the in-file
+# header, so the txt, its corresponding csv, and the printed time all agree and
+# all read as "when experiment_onoff.sh started". Single `date` call so the
+# filename form and human form can never straddle a second boundary.
+_now="$(date '+%Y%m%d_%H%M%S|%F %T')"
+START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
+_default_out="$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt"
 OUT="${OUT:-$_default_out}"
 mkdir -p "$(dirname "$OUT")"
 
@@ -343,11 +357,12 @@ CSV_OUT="${OUT%.txt}.csv"
 
 # Header (truncate + write)
 {
-    echo "# OuterYan on/off experiment   $(date '+%F %T')"
+    echo "# OuterYan on/off experiment   started $START_HUMAN"
     echo "# binary : $DUCKDB_BIN"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# tables : $SIZES"
     echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (2 warm-up + ${RUNS} timed)"
+    echo "# timeout: ${OY_TIMEOUT_SECS}s/process; timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
     echo
     echo "===================== LIVE PER-QUERY RESULTS =========================="
@@ -358,20 +373,30 @@ CSV_OUT="${OUT%.txt}.csv"
     echo "----------------------------------------------------------------------"
 } > "$OUT"
 
-echo "query,reorder,kernel,kernel_detail,correct,note,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup,rows" > "$CSV_OUT"
+echo "query,reorder,kernel,kernel_detail,correct,note,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup,rows,pass" > "$CSV_OUT"
 
-QN=0; NSKIP=0; NTIMED=0; NNO=0; NYES=0; SUMNO=0; SUMYES=0
-NKBM=0; NKHASH=0; NKMIX=0    # kernel tally across correct queries
+# Per-query state arrays (index = query #). Written by process_one and read by
+# the final summary, so that a RETRY-pass result OVERWRITES the first-pass value
+# at the same index and the summary reflects the post-retry outcome.
 QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
-QDB=(); QSQL=()
+QDB=(); QSQL=(); QKER=(); QKDETAIL=()
 QOFF1=(); QON1=(); QRATIO1=()
 QOFFM=(); QONM=(); QRATIOM=()
 
-# ==== Single pass: per query, correctness -> TM -> T1 (streamed to $OUT) ====
-echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
-for ((i=0; i<${#LABELS[@]}; i++)); do
-    id="${LABELS[i]}"; sql="${SQLS[i]}"; db="${DBS[i]}"
-    nrel="-"; case "$id" in *_N[0-9]*) nrel="$(printf '%s' "$id" | sed -nE 's/.*_N([0-9]+)_.*/\1/p')";; esac
+PASS="main"            # "main" | "retry": value of the CSV `pass` column
+OY_LAST_TIMEDOUT=0     # set by process_one: 1 iff query i hit a timeout/NA
+
+# process_one <i> — run the full pipeline for query i (gate -> regime -> kernel
+# -> timing) under the CURRENT $OY_TIMEOUT_SECS, store the result in the Q*
+# arrays at index i, and append one row to $OUT and $CSV_OUT (tagged $PASS).
+# Sets OY_LAST_TIMEDOUT=1 when query i timed out — gate TIMEOUT, or a timing
+# batch that returned NA (the `timeout` killed the process) — so the caller can
+# queue it for the doubled-timeout retry pass.
+process_one() {
+    local i="$1"
+    local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
+    local nrel="-"; case "$id" in *_N[0-9]*) nrel="$(printf '%s' "$id" | sed -nE 's/.*_N([0-9]+)_.*/\1/p')";; esac
+    local gate correct note rows
     gate="$(oy_equiv_check "$db" "$id" "$sql")"
     case "$gate" in
         *"equiv OK"*)  correct="TRUE";  note="OK";        rows="$(printf '%s' "$gate" | grep -oE '[0-9]+ rows' | grep -oE '[0-9]+')";;
@@ -379,11 +404,12 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
         *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
         *)             correct="FALSE"; note="ERROR";     rows="-";;
     esac
-    reg="-"; ker="-"; kdetail="-"; offm="-"; onm="-"; ratiom="-"; off1="-"; on1="-"; ratio1="-"
+    local reg="-" ker="-" kdetail="-" offm="-" onm="-" ratiom="-" off1="-" on1="-" ratio1="-"
+    OY_LAST_TIMEDOUT=0
     if [ "$correct" = "TRUE" ]; then
         reg="$(oy_regime "$db" "$sql")"; reg="${reg%% *}"
-        kraw="$(oy_kernel "$db" "$sql")"; ker="${kraw%% *}"; kdetail="${kraw##* }"
-        case "$ker" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
+        local kraw; kraw="$(oy_kernel "$db" "$sql")"; ker="${kraw%% *}"; kdetail="${kraw##* }"
+        local local_rom local_rnm local_ro1 local_rn1
         local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
         offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
@@ -392,40 +418,85 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
         local_rn1="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
         off1="$(echo "$local_ro1" | awk '{print $1}')"; on1="$(echo "$local_rn1" | awk '{print $1}')"
         ratio1="$(awk -v off="$off1" -v on="$on1" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-        NTIMED=$((NTIMED+1))
-        if [ "$ratiom" != "NA" ]; then
-            if [ "$reg" = "No" ]; then NNO=$((NNO+1));  SUMNO="$(awk -v s="$SUMNO" -v r="$ratiom" 'BEGIN{print s+r}')"
-            else                       NYES=$((NYES+1)); SUMYES="$(awk -v s="$SUMYES" -v r="$ratiom" 'BEGIN{print s+r}')"; fi
-        fi
-    else
-        NSKIP=$((NSKIP+1))
+        # a timing batch killed by `timeout` yields NA -> retry candidate
+        case "$offm$onm$off1$on1" in *NA*) OY_LAST_TIMEDOUT=1;; esac
+    elif [ "$note" = "TIMEOUT" ]; then
+        OY_LAST_TIMEDOUT=1
     fi
-    QLBL[$QN]="$id"; QNREL[$QN]="$nrel"; QCORRECT[$QN]="$correct"; QNOTE[$QN]="$note"; QROWS[$QN]="$rows"
-    QREG[$QN]="$reg"; QDB[$QN]="$db"; QSQL[$QN]="$sql"
-    QOFFM[$QN]="$offm"; QONM[$QN]="$onm"; QRATIOM[$QN]="$ratiom"
-    QOFF1[$QN]="$off1"; QON1[$QN]="$on1"; QRATIO1[$QN]="$ratio1"
-    QN=$((QN+1))
-    # ---- IMMEDIATE write to $OUT and $CSV_OUT ----
+    # store final state (RETRY overwrites first-pass values at the same index)
+    QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
+    QREG[$i]="$reg"; QDB[$i]="$db"; QSQL[$i]="$sql"; QKER[$i]="$ker"; QKDETAIL[$i]="$kdetail"
+    QOFFM[$i]="$offm"; QONM[$i]="$onm"; QRATIOM[$i]="$ratiom"
+    QOFF1[$i]="$off1"; QON1[$i]="$on1"; QRATIO1[$i]="$ratio1"
+    # ---- append to $OUT and $CSV_OUT ----
     printf '%-34s %-5s %-7s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
         "$id" "$reg" "$ker" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" >> "$OUT"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$id" "$reg" "$ker" "$kdetail" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$rows" >> "$CSV_OUT"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$id" "$reg" "$ker" "$kdetail" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$rows" "$PASS" >> "$CSV_OUT"
+    local rtag=""; [ "$PASS" = "retry" ] && rtag="  (retry @${OY_TIMEOUT_SECS}s)"
     if [ "$correct" = "TRUE" ]; then
-        printf '  [%3d/%d] %-34s correct=TRUE  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s\n' \
-            "$QN" "${#LABELS[@]}" "$id" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1" >&2
+        printf '  [%3d/%d] %-34s correct=TRUE  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s%s\n' \
+            "$((i+1))" "${#LABELS[@]}" "$id" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1" "$rtag" >&2
     else
-        printf '  [%3d/%d] %-34s correct=FALSE %s\n' "$QN" "${#LABELS[@]}" "$id" "$note" >&2
+        printf '  [%3d/%d] %-34s correct=FALSE %s%s\n' "$((i+1))" "${#LABELS[@]}" "$id" "$note" "$rtag" >&2
     fi
+}
+
+# ==== Pass 1: every query under the base timeout ============================
+echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
+RETRY_IDX=()
+for ((i=0; i<${#LABELS[@]}; i++)); do
+    process_one "$i"
+    [ "$OY_LAST_TIMEDOUT" = 1 ] && RETRY_IDX+=("$i")
 done
 
-# ---- Final summary appended to $OUT ----------------------------------------
+# ==== Pass 2 (retry): re-evaluate timed-out queries with a DOUBLED timeout ===
+# Each query that timed out under the base limit is re-run once with the timeout
+# multiplied by OY_TIMEOUT_RETRY_MULT (default 2). Rows are appended under a
+# clearly-labelled section and tagged pass=retry in the CSV; the Q* arrays (and
+# thus the SUMMARY below) are overwritten with the better, post-retry result.
+BASE_TIMEOUT="$OY_TIMEOUT_SECS"
+RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
+NRETRY=0; NRECOVERED=0; RETRY_TO=""
+if [ "${#RETRY_IDX[@]}" -gt 0 ] && [ -n "$OY_TIMEOUT_BIN" ] \
+   && [ "$BASE_TIMEOUT" != "0" ] && [ "$RETRY_MULT" -gt 1 ] 2>/dev/null; then
+    RETRY_TO=$(( BASE_TIMEOUT * RETRY_MULT ))
+    NRETRY="${#RETRY_IDX[@]}"
+    {
+        echo
+        echo "============== RETRY PASS (timeout ${BASE_TIMEOUT}s ×${RETRY_MULT} = ${RETRY_TO}s) =============="
+        echo "# ${NRETRY} query(ies) timed out under ${BASE_TIMEOUT}s; re-evaluated below with ${RETRY_TO}s."
+    } >> "$OUT"
+    echo "--- RETRY: ${NRETRY} timed-out query(ies) with timeout=${RETRY_TO}s ---" >&2
+    PASS="retry"; export OY_TIMEOUT_SECS="$RETRY_TO"
+    for i in "${RETRY_IDX[@]}"; do
+        process_one "$i"
+        [ "$OY_LAST_TIMEDOUT" = 0 ] && NRECOVERED=$((NRECOVERED+1))
+    done
+    export OY_TIMEOUT_SECS="$BASE_TIMEOUT"; PASS="main"
+fi
+
+# ==== Final summary computed from the Q* arrays (reflects retry results) =====
+QN="${#LABELS[@]}"
+NCORRECT=0; NTIMED=0; NKBM=0; NKHASH=0; NKMIX=0
+NNO=0; NYES=0; SUMNO=0; SUMYES=0
+for ((i=0; i<QN; i++)); do
+    [ "${QCORRECT[i]}" = "TRUE" ] || continue
+    NCORRECT=$((NCORRECT+1)); NTIMED=$((NTIMED+1))
+    case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
+    [ "${QRATIOM[i]}" = "NA" ] && continue
+    if [ "${QREG[i]}" = "No" ]; then NNO=$((NNO+1));  SUMNO="$(awk -v s="$SUMNO" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')"
+    else                             NYES=$((NYES+1)); SUMYES="$(awk -v s="$SUMYES" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')"; fi
+done
+NSKIP=$((QN-NCORRECT))
 MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 {
     echo
     echo "============================== SUMMARY ================================"
-    echo "queries=$QN  correct=$((QN-NSKIP))  incorrect/skipped=$NSKIP  timed=$NTIMED"
+    echo "queries=$QN  correct=$NCORRECT  incorrect/skipped=$NSKIP  timed=$NTIMED"
     echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
+    [ "$NRETRY" -gt 0 ] && echo "retry pass: $NRETRY timed-out query(ies) re-run at ${RETRY_TO}s — $NRECOVERED now fully timed, $((NRETRY-NRECOVERED)) still timing out / partial (see retry rows above)"
     echo "threads: single=1, multi=${OY_THREADS}"
     echo "  No  (no reorder): n=$NNO  mean speed-up(TM)=$MNO   [expect <=1.0 — SJ overhead, no reorder]"
     echo "  Yes (reorder):   n=$NYES  mean speed-up(TM)=$MYES   [may be >1.0 — reorder/reduction win]"

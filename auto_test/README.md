@@ -254,7 +254,8 @@ bash auto_test/build_db.sh all
 # ===== Step 3: Run the full on/off experiment =====
 bash auto_test/experiment_onoff.sh
 #   Correctness check (outer_yan ON == OFF) + dual-thread timing
-#   threads=1 + threads=72, median of 10 runs per config
+#   threads=1 + threads=72, median of 5 runs per config; timed-out queries
+#   are retried once at the doubled timeout (OY_TIMEOUT_RETRY_MULT, default 2)
 
 # ===== Step 4: Check results =====
 cat auto_test/results/experiment_onoff_*.txt | tail -10

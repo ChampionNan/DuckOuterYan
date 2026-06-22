@@ -80,7 +80,16 @@ export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-300}"
 # 6) Iteration counts
 # ===========================================================================
 # Fixed number of timed runs per query (after 2 warm-up runs). Median is taken.
-export OY_RUNS="${OY_RUNS:-10}"
+# NOTE: the timing phase runs (OY_RUNS + 2) executions inside ONE duckdb process
+# under ONE timeout window, so the effective per-run budget is
+# OY_TIMEOUT_SECS / (OY_RUNS + 2). Higher OY_RUNS => smaller per-run budget =>
+# more timing-phase timeouts on slow (e.g. large-graph) queries.
+export OY_RUNS="${OY_RUNS:-5}"
+
+# Retry pass: after the first pass, any query that TIMED OUT (gate timeout, or a
+# timing batch that produced NA) is re-evaluated once with the timeout multiplied
+# by this factor. 2 = "doubled timeout" retry. Set 1 to disable the retry pass.
+export OY_TIMEOUT_RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
 
 # ===========================================================================
 # 7) Pretty-print summary (only when sourced interactively / verbose)
