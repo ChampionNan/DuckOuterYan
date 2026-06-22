@@ -72,9 +72,6 @@ struct OTNode {
 	//! Raw pointer into OuterYanTree::source_plan. Never owned.
 	LogicalOperator *origin = nullptr;
 	idx_t relation_id = 0;
-	//! Cached at BuildOT time (via CheckPKFK on `origin`). Lets BuildOJT
-	//! decide PK/FK side without re-walking the original subtree.
-	bool is_pk = false;
 
 	// -- JOIN-only --
 	//! Owned. Moved into OJTEdge::info during BuildOJT; null afterwards.

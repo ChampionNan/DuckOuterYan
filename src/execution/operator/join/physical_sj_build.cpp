@@ -189,7 +189,7 @@ SinkCombineResultType PhysicalSJBuild::Combine(ExecutionContext &context, Operat
 // =============================================================================
 static void BuildOneFilterAsHash(ClientContext &context, const ColumnDataCollection &total_data,
                                  const shared_ptr<SemiJoinFilter> &filter, const vector<idx_t> &build_col_ids,
-                                 HashFilter::HashKind hash_kind) {
+                                 HashFilter::HashKind hash_kind, const char *reason) {
 	(void)context;
 	auto hf = make_shared_ptr<HashFilter>(hash_kind);
 	DataChunk scan_chunk;
@@ -201,7 +201,7 @@ static void BuildOneFilterAsHash(ClientContext &context, const ColumnDataCollect
 		scan_chunk.Reset();
 	}
 	hf->Finalize();
-	filter->FinalizeAsHash(std::move(hf));
+	filter->FinalizeAsHash(std::move(hf), reason);
 }
 
 // =============================================================================
@@ -387,9 +387,10 @@ private:
 class SJBuildHashInsertEvent : public BasePipelineEvent {
 public:
 	SJBuildHashInsertEvent(Pipeline &pipeline_p, ClientContext &context_p, const PhysicalSJBuild &op_p,
-	                       SJBuildGlobalSinkState &gstate_p, idx_t filter_idx_p, HashFilter::HashKind hash_kind_p)
+	                       SJBuildGlobalSinkState &gstate_p, idx_t filter_idx_p, HashFilter::HashKind hash_kind_p,
+	                       const char *reason_p)
 	    : BasePipelineEvent(pipeline_p), context(context_p), op(op_p), gstate(gstate_p), filter_idx(filter_idx_p),
-	      hash_kind(hash_kind_p) {
+	      hash_kind(hash_kind_p), reason(reason_p) {
 	}
 
 	void Schedule() override {
@@ -417,7 +418,7 @@ public:
 
 	void FinishEvent() override {
 		hf->Finalize();
-		op.sj_to_create[filter_idx]->FinalizeAsHash(std::move(hf));
+		op.sj_to_create[filter_idx]->FinalizeAsHash(std::move(hf), reason);
 	}
 
 private:
@@ -426,6 +427,9 @@ private:
 	SJBuildGlobalSinkState &gstate;
 	idx_t filter_idx;
 	HashFilter::HashKind hash_kind;
+	//! Static string for the DUCKDB_SJ_KERNEL_TRACE diagnostic — why this filter
+	//! took the hash kernel ("force_hash" / "budget0" / "ineligible" / "overflow").
+	const char *reason;
 	shared_ptr<HashFilter> hf;
 };
 
@@ -469,7 +473,8 @@ public:
 			vector<LogicalType> build_col_types {key_type};
 			D_ASSERT(HashFilter::IsInline64Eligible(build_col_types));
 			auto hash_event =
-			    make_shared_ptr<SJBuildHashInsertEvent>(*pipeline, context, op, gstate, filter_idx, hash_kind);
+			    make_shared_ptr<SJBuildHashInsertEvent>(*pipeline, context, op, gstate, filter_idx, hash_kind,
+			                                            "overflow");
 			this->InsertEvent(std::move(hash_event));
 			return;
 		}
@@ -536,15 +541,21 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 		const auto elig = KeyBitmap::CheckEligibility(build_col_ids, build_col_types);
 		const bool must_hash = filter->force_hash() || !elig.eligible || budget == 0;
 		const bool hash_is_parallelizable = HashFilter::IsInline64Eligible(build_col_types);
+		// Static reason string for the DUCKDB_SJ_KERNEL_TRACE diagnostic; only
+		// meaningful when must_hash. force_hash wins, then the budget=0 escape
+		// hatch, else the type/arity was not bitmap-eligible.
+		const char *hash_reason =
+		    filter->force_hash() ? "force_hash" : (budget == 0 ? "budget0" : "ineligible");
 
 		if (must_hash && hash_is_parallelizable) {
 			// Parallel INLINE_64 hash — atomic-CAS slot claim via SJBuildHashInsertEvent.
-			auto hash_event = make_shared_ptr<SJBuildHashInsertEvent>(pipeline, context, *this, gstate, f, hash_kind);
+			auto hash_event =
+			    make_shared_ptr<SJBuildHashInsertEvent>(pipeline, context, *this, gstate, f, hash_kind, hash_reason);
 			event.InsertEvent(std::move(hash_event));
 		} else if (must_hash) {
 			// Sequential BOXED hash (varchar / decimal / composite).
 			// Parallel BOXED build is Stage 3, not yet implemented.
-			BuildOneFilterAsHash(context, *gstate.total_data, filter, build_col_ids, hash_kind);
+			BuildOneFilterAsHash(context, *gstate.total_data, filter, build_col_ids, hash_kind, hash_reason);
 		} else {
 			// Parallel bitmap init→fill event chain; scheduler load-balances
 			// across filters and within-filter tasks.

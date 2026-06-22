@@ -655,17 +655,16 @@ unique_ptr<OTNode> OuterYanDP::MaterializeNode(JoinRelationSet &set, OuterYanTre
 	auto &node = *plan_it->second;
 
 	if (set.count == 1) {
-		// Leaf: clone the original RELATION OTNode. The base-op pointer, PK/FK
-		// flag, and stats are kept; subtree_relations is repopulated by Finalize.
+		// Leaf: clone the original RELATION OTNode. The base-op pointer and stats
+		// are kept; subtree_relations is repopulated by Finalize. PK-FK side is no
+		// longer cached per relation — it is derived per join edge from the join
+		// columns in attach_edge (see JoinSideIsUnique).
 		auto rel_id = set.relations[0].index;
 		auto *src = tree.ot_relations_by_id[rel_id];
 		auto leaf = make_uniq<OTNode>();
 		leaf->kind = OTNode::Kind::RELATION;
 		leaf->origin = src->origin;
 		leaf->relation_id = rel_id;
-		// Recalculate from origin rather than copying src->is_pk — the copy
-		// chain through prior MaterializeNode calls may have drifted.
-		leaf->is_pk = OuterYanTree::CheckPKFK(*leaf->origin);
 		leaf->stats = src->stats;
 		return leaf;
 	}

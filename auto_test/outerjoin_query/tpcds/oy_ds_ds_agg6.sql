@@ -1,6 +1,6 @@
-SELECT ca_zip, SUM(ss_sales_price) AS revenue
+SELECT i_category, MIN(ss_sales_price) AS lo_val
 FROM store_sales
-    LEFT OUTER JOIN customer ON ss_customer_sk = c_customer_sk
-    RIGHT OUTER JOIN customer_address ON c_current_addr_sk = ca_address_sk
-WHERE cd_purchase_estimate <= 1000
-GROUP BY ca_zip;
+    RIGHT OUTER JOIN item ON ss_item_sk = i_item_sk
+    LEFT OUTER JOIN store ON ss_store_sk = s_store_sk
+WHERE ss_quantity > 500
+GROUP BY i_category;

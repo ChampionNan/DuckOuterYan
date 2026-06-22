@@ -6,4 +6,4 @@ FROM store_sales
     LEFT OUTER JOIN customer_address ON c_current_addr_sk = ca_address_sk
     RIGHT OUTER JOIN customer_demographics ON c_current_cdemo_sk = cd_demo_sk
     FULL OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk
-WHERE ss_net_profit IN (2, 4, 6, 8, 10, 12, 14);
+WHERE i_wholesale_cost > 0 AND i_wholesale_cost < 10000;

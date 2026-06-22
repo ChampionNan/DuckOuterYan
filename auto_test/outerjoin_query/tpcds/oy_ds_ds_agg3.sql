@@ -1,7 +1,6 @@
-SELECT s_state, MIN(ss_sales_price) AS lo, MAX(ss_sales_price) AS hi
+SELECT ca_state, MAX(ss_net_profit) AS hi_val
 FROM store_sales
-    FULL OUTER JOIN item ON ss_item_sk = i_item_sk
-    INNER JOIN store ON ss_store_sk = s_store_sk
-    LEFT OUTER JOIN customer ON ss_customer_sk = c_customer_sk
-WHERE p_promo_sk % 2 = 1
-GROUP BY s_state;
+    RIGHT OUTER JOIN customer ON ss_customer_sk = c_customer_sk
+    RIGHT OUTER JOIN customer_address ON c_current_addr_sk = ca_address_sk
+WHERE ss_quantity IN (1, 5, 10, 50, 100, 500)
+GROUP BY ca_state;

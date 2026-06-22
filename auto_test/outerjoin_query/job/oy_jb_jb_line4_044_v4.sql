@@ -1,6 +1,0 @@
-SELECT *
-FROM title t
-    RIGHT OUTER JOIN cast_info ci ON t.id = ci.movie_id
-    INNER JOIN name n ON ci.person_id = n.id
-    FULL OUTER JOIN person_info pi ON n.id = pi.person_id
-WHERE k.id <= 1000;

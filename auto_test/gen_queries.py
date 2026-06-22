@@ -37,6 +37,19 @@ JOB_DIR = os.path.join(BASE, "job")
 KIND = {"INNER": "INNER JOIN", "LEFT": "LEFT OUTER JOIN",
         "RIGHT": "RIGHT OUTER JOIN", "FULL": "FULL OUTER JOIN"}
 
+# ----------------------------------------------------------------------------
+# Shape-mix policy — applies to EVERY corpus (graph, tpch, tpcds, job).
+# BUSHY is the dominant shape: that is where OuterYan's join reordering +
+# semi-join reduction produce performance gains. A few LEFT-deep (line/star)
+# and RIGHT-deep variants are kept so the corpus still covers the whole
+# join-tree-shape space. Right-deep is emitted ONLY for chain topologies (see
+# _is_chain) — star/clique right-deep yields correlated-join (LATERAL) errors.
+# Tune the mix here in one place.
+# ----------------------------------------------------------------------------
+SHAPE_LINE_VECS = 1     # left-deep (and star) variants per topology
+SHAPE_RD_VECS = 2       # right-deep variants per chain topology
+SHAPE_BUSHY_VECS = 6    # bushy/branch variants per template (dominant shape)
+
 
 # --- shared core -------------------------------------------------------------
 def vectors(e):
@@ -175,15 +188,36 @@ GRAPH_PREDS = {
 
 
 def pred_bases():
-    """6 curated base join expressions (no SELECT/WHERE), all referencing R1 & R2.
-    All use mixed join types (no all-same-direction)."""
+    """Bushy-dominant base join expressions (no SELECT/WHERE), all referencing R1
+    (predicates filter R1.src). Per the shape-mix policy: mostly bushy, with a
+    few left-deep (line) and right-deep bases for tree-shape coverage. All use
+    mixed join types (no all-same-direction). Graph relations all expose
+    src/dst, so every tree shape binds."""
     return {
-        "line_N3_mixB":        jn(jn(lf(1), lf(2), "FULL", 1, 2), lf(3), "RIGHT", 2, 3)["sql"],
-        "line_N4_mixA":        jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 2, 3), lf(4), "RIGHT", 3, 4)["sql"],
-        "star_N3_mixC":        jn(jn(lf(1), lf(2), "RIGHT", 1, 2), lf(3), "FULL", 1, 3)["sql"],
-        "star_N4_mixA":        jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 1, 3), lf(4), "RIGHT", 1, 4)["sql"],
-        "bushyR_N3_mixA":      jn(lf(1), jn(lf(2), lf(3), "INNER", 2, 3), "LEFT", 1, 2)["sql"],
-        "bushyBal_N4_mixB":    jn(jn(lf(1), lf(2), "FULL", 1, 2), jn(lf(3), lf(4), "RIGHT", 3, 4), "LEFT", 2, 3)["sql"],
+        # --- BUSHY (dominant) ---
+        "bushyBal_N4_mixB":  jn(jn(lf(1), lf(2), "FULL", 1, 2),
+                                jn(lf(3), lf(4), "RIGHT", 3, 4), "LEFT", 2, 3)["sql"],
+        "bushyBal_N4_mixA":  jn(jn(lf(1), lf(2), "LEFT", 1, 2),
+                                jn(lf(3), lf(4), "INNER", 3, 4), "RIGHT", 2, 3)["sql"],
+        "bushy_N5_mixC":     jn(jn(lf(1), lf(2), "RIGHT", 1, 2),
+                                jn(jn(lf(3), lf(4), "FULL", 3, 4), lf(5), "LEFT", 4, 5),
+                                "INNER", 2, 3)["sql"],
+        "bushy_N5_mixA":     jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "FULL", 2, 3),
+                                jn(lf(4), lf(5), "RIGHT", 4, 5), "INNER", 3, 4)["sql"],
+        "bushyBal_N6_mixA":  jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 2, 3),
+                                jn(jn(lf(4), lf(5), "RIGHT", 4, 5), lf(6), "FULL", 5, 6),
+                                "LEFT", 3, 4)["sql"],
+        "bushy_N6_mixB":     jn(jn(jn(lf(1), lf(2), "FULL", 1, 2), lf(3), "RIGHT", 2, 3),
+                                jn(jn(lf(4), lf(5), "LEFT", 4, 5), lf(6), "INNER", 5, 6),
+                                "FULL", 3, 4)["sql"],
+        # --- LEFT-deep (several, for shape coverage) ---
+        "line_N3_mixB":      jn(jn(lf(1), lf(2), "FULL", 1, 2), lf(3), "RIGHT", 2, 3)["sql"],
+        "line_N4_mixA":      jn(jn(jn(lf(1), lf(2), "LEFT", 1, 2), lf(3), "INNER", 2, 3),
+                                lf(4), "RIGHT", 3, 4)["sql"],
+        # --- RIGHT-deep (several, for shape coverage) ---
+        "rdeep_N3_mixC":     jn(lf(1), jn(lf(2), lf(3), "FULL", 2, 3), "RIGHT", 1, 2)["sql"],
+        "rdeep_N4_mixB":     jn(lf(1), jn(lf(2), jn(lf(3), lf(4), "LEFT", 3, 4),
+                                "INNER", 2, 3), "FULL", 1, 2)["sql"],
     }
 
 
@@ -273,6 +307,30 @@ def _pick_pred(col, idx):
     """Deterministically pick a predicate for column using index."""
     preds = _bench_predicates(col)
     return preds[idx % len(preds)]
+
+
+# --- Aggregation: one aggregate per query, over COUNT/SUM/MIN/MAX (no AVG) ---
+# OuterYan's aggregate handling supports a single aggregate function per query,
+# and AVG is intentionally excluded. Each agg query is built from a "base"
+# (a topology + an in-scope GROUP BY column + an in-scope numeric measure +
+# an in-scope predicate column); the base is expanded into one query per
+# aggregate function below.
+AGG_FUNCS = [("cnt", "COUNT(*)"), ("total", "SUM({m})"),
+             ("lo", "MIN({m})"), ("hi", "MAX({m})")]
+
+
+def _expand_agg_bases(bases):
+    """Expand each base into one single-aggregate spec per AGG_FUNCS entry."""
+    specs = []
+    for b in bases:
+        for suf, tmpl in AGG_FUNCS:
+            expr = tmpl.format(m=b["measure"])
+            grp = b.get("group", "")
+            sel = f"{grp}, {expr} AS {suf}_val" if grp else f"{expr} AS {suf}_val"
+            specs.append({"select": sel, "group_by": grp,
+                          "tables": b["tables"], "conds": b["conds"],
+                          "pred_col": b["pred_col"]})
+    return specs
 
 
 # --- Bench query builders ---
@@ -395,6 +453,51 @@ def _tpch_pick_pred_col(tables, idx):
     return allowed[idx % len(allowed)]
 
 
+# --- Generic schema-aware predicate selection (reused by TPC-DS and JOB) -----
+# Same idea as the _tpch_* helpers above, parameterised by a {table: col-prefix}
+# map so it works for any schema. A generated WHERE predicate only binds if its
+# column belongs to a table actually present in the topology.
+def _col_table_pm(col, prefix_map):
+    """Table a column belongs to, by longest matching (underscore-anchored) prefix."""
+    best = None
+    for tbl, pre in prefix_map.items():
+        if col.startswith(pre) and (best is None or len(pre) > len(prefix_map[best])):
+            best = tbl
+    return best
+
+
+def _tables_in_text(text, all_tables):
+    """Set of known tables named in a FROM fragment / bushy template."""
+    low = text.lower()
+    return {t for t in all_tables if re.search(r"\b" + re.escape(t) + r"\b", low)}
+
+
+def _pick_pred_pm(tables, idx, pred_cols, prefix_map):
+    """Pick a predicate column whose table is in `tables` (else fall back)."""
+    tabs = set(tables)
+    allowed = [c for c in pred_cols if _col_table_pm(c, prefix_map) in tabs]
+    if not allowed:
+        allowed = pred_cols
+    return allowed[idx % len(allowed)]
+
+
+def _is_chain(tables, conds, col_to_group):
+    """True iff each cond[i] references exactly {tables[i], tables[i+1]} — a
+    linear chain. Right-deep nesting (t0 J (t1 J (t2 J ...))) only binds for
+    chains; on a star/clique topology a deep join condition references a table
+    outside its parenthesised scope, which DuckDB rejects as a correlated /
+    LATERAL join ("Non-inner join on correlated columns not supported")."""
+    for i, cond in enumerate(conds):
+        groups = set()
+        for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", cond):
+            g = col_to_group(tok)
+            if g:
+                groups.add(g)
+        if groups != {tables[i], tables[i + 1]}:
+            return False
+    return True
+
+
 def _tpch_line_topologies():
     """Line/chain topologies of various lengths."""
     topos = []
@@ -483,107 +586,158 @@ def _tpch_branch_topologies():
     return topos
 
 
+def _tpch_realistic_queries():
+    """Real-semantics TPC-H queries: actual tables, FK joins, meaningful
+    projections/predicates — NOT shape probes. Flat (no subqueries/CTEs) and
+    each has >= 3 outer joins. The only outer join in canonical TPC-H is Q13
+    (customer LEFT JOIN orders); these extend that pattern with more
+    outer-joined tables and add FULL/RIGHT variants for join-type coverage."""
+    return {
+        # Q13 spirit, flattened to one level + extended: customer activity,
+        # keeping customers with no orders / orders with no lineitems.
+        "real_custdist": (
+            "SELECT c_custkey, c_name, count(l_orderkey) AS line_cnt\n"
+            "FROM customer\n"
+            "    LEFT OUTER JOIN orders   ON c_custkey = o_custkey\n"
+            "    LEFT OUTER JOIN lineitem ON o_orderkey = l_orderkey\n"
+            "    LEFT OUTER JOIN nation   ON c_nationkey = n_nationkey\n"
+            "WHERE c_acctbal > 0\n"
+            "GROUP BY c_custkey, c_name;"),
+        # Customer order/line detail with geography (4 LEFT outer joins).
+        "real_cust_order_line": (
+            "SELECT c_custkey, c_name, n_name, o_orderdate, l_quantity, l_extendedprice\n"
+            "FROM customer\n"
+            "    LEFT OUTER JOIN orders   ON c_custkey = o_custkey\n"
+            "    LEFT OUTER JOIN lineitem ON o_orderkey = l_orderkey\n"
+            "    LEFT OUTER JOIN nation   ON c_nationkey = n_nationkey\n"
+            "    LEFT OUTER JOIN region   ON n_regionkey = r_regionkey\n"
+            "WHERE c_acctbal > 1000;"),
+        # Supplier supply catalog with geography (4 LEFT outer joins).
+        "real_supplier_catalog": (
+            "SELECT s_name, n_name, r_name, p_name, ps_availqty\n"
+            "FROM supplier\n"
+            "    LEFT OUTER JOIN partsupp ON s_suppkey = ps_suppkey\n"
+            "    LEFT OUTER JOIN part     ON ps_partkey = p_partkey\n"
+            "    LEFT OUTER JOIN nation   ON s_nationkey = n_nationkey\n"
+            "    LEFT OUTER JOIN region   ON n_regionkey = r_regionkey\n"
+            "WHERE s_acctbal > 1000;"),
+        # Region -> nation -> {customers, suppliers}: branch/Y, 3 outer joins.
+        "real_region_branch": (
+            "SELECT r_name, n_name, c_name, s_name\n"
+            "FROM region\n"
+            "    LEFT OUTER JOIN nation   ON r_regionkey = n_regionkey\n"
+            "    LEFT OUTER JOIN customer ON n_nationkey = c_nationkey\n"
+            "    LEFT OUTER JOIN supplier ON n_nationkey = s_nationkey\n"
+            "WHERE r_regionkey < 4;"),
+        # Order/line/part with a FULL outer join (3 outer joins, mixed types).
+        "real_order_full": (
+            "SELECT o_orderkey, o_orderstatus, l_linestatus, p_brand, ps_availqty\n"
+            "FROM orders\n"
+            "    FULL OUTER JOIN lineitem ON o_orderkey = l_orderkey\n"
+            "    LEFT OUTER JOIN part     ON l_partkey = p_partkey\n"
+            "    LEFT OUTER JOIN partsupp ON l_partkey = ps_partkey AND l_suppkey = ps_suppkey\n"
+            "WHERE o_totalprice > 50000;"),
+        # Supplier supply with a RIGHT outer join anchor (3 outer joins).
+        "real_supplier_right": (
+            "SELECT n_name, s_name, ps_availqty, p_name\n"
+            "FROM nation\n"
+            "    RIGHT OUTER JOIN supplier ON n_nationkey = s_nationkey\n"
+            "    LEFT OUTER JOIN partsupp  ON s_suppkey = ps_suppkey\n"
+            "    LEFT OUTER JOIN part      ON ps_partkey = p_partkey\n"
+            "WHERE s_acctbal > 500;"),
+    }
+
+
 def gen_tpch_queries():
     """Generate ~100 diverse TPC-H queries."""
     queries = {}
     idx = 0
 
-    # Line topologies (left-deep)
+    # Line topologies (left-deep) — a few for shape coverage
     line_topos = _tpch_line_topologies()
     for topo_label, tables, conds, shape in line_topos:
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[:5]):
+        for vi, vec in enumerate(vecs[:SHAPE_LINE_VECS]):
             pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
 
-    # Right-deep versions of some line topologies
+    # Right-deep versions (chain topologies only — see _is_chain)
     for topo_label, tables, conds, shape in line_topos[:6]:
+        if not _is_chain(tables, conds, _tpch_col_table):
+            continue
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[3:6]):
+        for vi, vec in enumerate(vecs[3:3 + SHAPE_RD_VECS]):
             pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_rd_v{vi}"
             queries[label] = _build_right_deep_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
 
-    # Star topologies
+    # Star topologies (left-deep over a star graph) — a few for coverage
     star_topos = _tpch_star_topologies()
     for topo_label, tables, conds, shape in star_topos:
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[:5]):
+        for vi, vec in enumerate(vecs[:SHAPE_LINE_VECS]):
             pred_col = _tpch_pick_pred_col(tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
 
-    # Bushy topologies
+    # Bushy topologies (DOMINANT shape)
     bushy_topos = _tpch_bushy_topologies()
     for topo_label, shape, template, n_joins in bushy_topos:
         vecs = bench_vectors(n_joins)
         topo_tables = _tpch_tables_in(template)
-        for vi, vec in enumerate(vecs[:5]):
+        for vi, vec in enumerate(vecs[:SHAPE_BUSHY_VECS]):
             pred_col = _tpch_pick_pred_col(topo_tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
 
-    # Branch topologies
+    # Branch/Y topologies (bushy family — DOMINANT shape)
     branch_topos = _tpch_branch_topologies()
     for topo_label, shape, template, n_joins in branch_topos:
         vecs = bench_vectors(n_joins)
         topo_tables = _tpch_tables_in(template)
-        for vi, vec in enumerate(vecs[:5]):
+        for vi, vec in enumerate(vecs[:SHAPE_BUSHY_VECS]):
             pred_col = _tpch_pick_pred_col(topo_tables, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
 
-    # Aggregation variants. Each spec carries the topology that contains every
-    # table its SELECT / GROUP BY columns reference, so the query binds. (All
-    # topologies have >=2 joins so bench_vectors produces a valid join vector.)
-    agg_specs = [
-        {"select": "COUNT(*) AS cnt, SUM(l_extendedprice) AS rev", "group_by": "",
-         "tables": ["customer", "orders", "lineitem"],
-         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
-        {"select": "o_orderpriority, COUNT(*) AS cnt", "group_by": "o_orderpriority",
-         "tables": ["customer", "orders", "lineitem"],
-         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
-        {"select": "n_name, SUM(l_quantity) AS total_qty, AVG(l_extendedprice) AS avg_price",
-         "group_by": "n_name",
-         "tables": ["nation", "supplier", "lineitem"],
-         "conds": ["n_nationkey = s_nationkey", "s_suppkey = l_suppkey"]},
-        {"select": "s_nationkey, COUNT(*) AS cnt, MIN(ps_supplycost) AS min_cost",
-         "group_by": "s_nationkey",
-         "tables": ["nation", "supplier", "partsupp"],
-         "conds": ["n_nationkey = s_nationkey", "s_suppkey = ps_suppkey"]},
-        {"select": "r_name, COUNT(*) AS cnt, MAX(c_acctbal) AS max_bal", "group_by": "r_name",
-         "tables": ["region", "nation", "customer"],
-         "conds": ["r_regionkey = n_regionkey", "n_nationkey = c_nationkey"]},
-        {"select": "c_mktsegment, SUM(o_totalprice) AS total_val", "group_by": "c_mktsegment",
-         "tables": ["customer", "orders", "lineitem"],
-         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"]},
-        {"select": "p_size, COUNT(*) AS cnt, AVG(l_discount) AS avg_disc", "group_by": "p_size",
-         "tables": ["part", "lineitem", "orders"],
-         "conds": ["p_partkey = l_partkey", "l_orderkey = o_orderkey"]},
-        {"select": "n_regionkey, SUM(s_acctbal) AS tot_bal, COUNT(*) AS n_supp",
-         "group_by": "n_regionkey",
-         "tables": ["region", "nation", "supplier"],
-         "conds": ["r_regionkey = n_regionkey", "n_nationkey = s_nationkey"]},
+    # Aggregation variants. Each base carries a topology plus an in-scope GROUP
+    # BY column, numeric measure, and predicate column, so the query binds. The
+    # base is expanded into one query per aggregate (COUNT/SUM/MIN/MAX, no AVG).
+    # (All topologies have >=2 joins so bench_vectors yields a valid vector.)
+    agg_bases = [
+        {"tables": ["customer", "orders", "lineitem"],
+         "conds": ["c_custkey = o_custkey", "o_orderkey = l_orderkey"],
+         "group": "o_orderpriority", "measure": "l_extendedprice", "pred_col": "o_orderkey"},
+        {"tables": ["nation", "supplier", "partsupp"],
+         "conds": ["n_nationkey = s_nationkey", "s_suppkey = ps_suppkey"],
+         "group": "s_nationkey", "measure": "ps_supplycost", "pred_col": "ps_availqty"},
+        {"tables": ["region", "nation", "customer"],
+         "conds": ["r_regionkey = n_regionkey", "n_nationkey = c_nationkey"],
+         "group": "r_name", "measure": "c_acctbal", "pred_col": "c_custkey"},
+        {"tables": ["part", "lineitem", "orders"],
+         "conds": ["p_partkey = l_partkey", "l_orderkey = o_orderkey"],
+         "group": "p_size", "measure": "o_totalprice", "pred_col": "l_linenumber"},
     ]
-    for ai, agg in enumerate(agg_specs):
+    for ai, agg in enumerate(_expand_agg_bases(agg_bases)):
         tables, conds = agg["tables"], agg["conds"]
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        vec = vecs[(ai + 2) % len(vecs)]
-        pred_col = _tpch_pick_pred_col(tables, idx + ai)
+        vec = vecs[ai % len(vecs)]
         label = f"th_agg{ai}"
-        queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + ai, agg=agg)
+        queries[label] = _build_line_query(tables, conds, vec, agg["pred_col"], idx + ai, agg=agg)
         idx += 1
 
+    # Real-semantics queries (derived from the only outer-join TPC-H query, Q13)
+    queries.update(_tpch_realistic_queries())
     return queries
 
 
@@ -601,6 +755,21 @@ TPCDS_PRED_COLS = [
     "d_date_sk", "d_year", "d_month_seq",
     "p_promo_sk", "ib_income_band_sk",
 ]
+
+# {table: column-prefix} for the tables used by the TPC-DS topologies. Prefixes
+# are underscore-anchored so e.g. ss_ (store_sales) / s_ (store), ca_/cd_/cs_/c_
+# never collide.
+TPCDS_TABLE_PREFIX = {
+    "store_sales": "ss_", "web_sales": "ws_", "catalog_sales": "cs_",
+    "customer": "c_", "customer_address": "ca_", "customer_demographics": "cd_",
+    "household_demographics": "hd_", "item": "i_", "store": "s_",
+    "date_dim": "d_", "promotion": "p_", "income_band": "ib_",
+}
+TPCDS_ALL_TABLES = list(TPCDS_TABLE_PREFIX)
+
+
+def _tpcds_col_table(col):
+    return _col_table_pm(col, TPCDS_TABLE_PREFIX)
 
 
 def _tpcds_line_topologies():
@@ -677,7 +846,94 @@ def _tpcds_bushy_templates():
                   "(( store_sales {0} web_sales ON ss_customer_sk = ws_bill_customer_sk) "
                   "{1} ( customer {2} item ON 1=1) "
                   "ON ss_customer_sk = c_customer_sk)"))
+    topos.append(("ds_bushy4d", 3,
+                  "(( store_sales {0} item ON ss_item_sk = i_item_sk) "
+                  "{1} ( customer {2} date_dim ON 1=1) "
+                  "ON ss_customer_sk = c_customer_sk)"))
+    topos.append(("ds_bushy4e", 3,
+                  "(( web_sales {0} item ON ws_item_sk = i_item_sk) "
+                  "{1} ( customer {2} customer_address ON c_current_addr_sk = ca_address_sk) "
+                  "ON ws_bill_customer_sk = c_customer_sk)"))
+    topos.append(("ds_bushy4f", 3,
+                  "(( catalog_sales {0} item ON cs_item_sk = i_item_sk) "
+                  "{1} ( customer {2} date_dim ON 1=1) "
+                  "ON cs_bill_customer_sk = c_customer_sk)"))
+    topos.append(("ds_bushy4g", 3,
+                  "(( store_sales {0} store ON ss_store_sk = s_store_sk) "
+                  "{1} ( customer {2} customer_demographics ON c_current_cdemo_sk = cd_demo_sk) "
+                  "ON ss_customer_sk = c_customer_sk)"))
+    topos.append(("ds_bushy5b", 4,
+                  "((( store_sales {0} item ON ss_item_sk = i_item_sk) "
+                  "{1} promotion ON ss_promo_sk = p_promo_sk) "
+                  "{2} ( customer {3} customer_address ON c_current_addr_sk = ca_address_sk) "
+                  "ON ss_customer_sk = c_customer_sk)"))
     return topos
+
+
+def _tpcds_realistic_queries():
+    """Real-semantics TPC-DS queries: actual fact/dimension tables, FK joins,
+    meaningful projections/predicates. Flat (no subqueries/CTEs) — note the
+    canonical outer-join queries Q51/Q97 FULL-OUTER-JOIN pre-aggregated channel
+    subqueries; flattened here as fact-with-dimension reports that keep all
+    fact rows. Each has >= 3 outer joins (mostly LEFT, with FULL/RIGHT for
+    coverage)."""
+    return {
+        # Store-sales decorated with its dimensions, keeping every sale even
+        # when a dimension key is missing (4 LEFT outer joins). Q5/Q40 spirit.
+        "real_store_dims": (
+            "SELECT ss_item_sk, ss_sales_price, i_brand, c_first_name, s_store_name\n"
+            "FROM store_sales\n"
+            "    LEFT OUTER JOIN item      ON ss_item_sk = i_item_sk\n"
+            "    LEFT OUTER JOIN customer  ON ss_customer_sk = c_customer_sk\n"
+            "    LEFT OUTER JOIN store     ON ss_store_sk = s_store_sk\n"
+            "    LEFT OUTER JOIN promotion ON ss_promo_sk = p_promo_sk\n"
+            "WHERE ss_quantity > 0;"),
+        # Web sales with customer geography + date (3 LEFT outer joins).
+        "real_web_geo": (
+            "SELECT ws_item_sk, ws_sales_price, c_last_name, ca_state, d_year\n"
+            "FROM web_sales\n"
+            "    LEFT OUTER JOIN customer         ON ws_bill_customer_sk = c_customer_sk\n"
+            "    LEFT OUTER JOIN customer_address ON c_current_addr_sk = ca_address_sk\n"
+            "    LEFT OUTER JOIN date_dim         ON ws_sold_date_sk = d_date_sk\n"
+            "WHERE ws_quantity > 0;"),
+        # Catalog sales with customer demographics + item (3 LEFT outer joins).
+        "real_catalog_demo": (
+            "SELECT cs_item_sk, cs_sales_price, cd_gender, i_category\n"
+            "FROM catalog_sales\n"
+            "    LEFT OUTER JOIN customer               ON cs_bill_customer_sk = c_customer_sk\n"
+            "    LEFT OUTER JOIN customer_demographics  ON c_current_cdemo_sk = cd_demo_sk\n"
+            "    LEFT OUTER JOIN item                   ON cs_item_sk = i_item_sk\n"
+            "WHERE cs_quantity > 0;"),
+        # Cross-channel item presence (Q97 spirit): items and their store +
+        # catalog sales, FULL outer join so items in only one channel survive.
+        "real_channel_full": (
+            "SELECT i_item_sk, i_brand, ss_sales_price, cs_sales_price, d_year\n"
+            "FROM item\n"
+            "    LEFT OUTER JOIN store_sales   ON i_item_sk = ss_item_sk\n"
+            "    FULL OUTER JOIN catalog_sales ON i_item_sk = cs_item_sk\n"
+            "    LEFT OUTER JOIN date_dim      ON ss_sold_date_sk = d_date_sk\n"
+            "WHERE i_category IS NOT NULL;"),
+        # Store sales joined through the customer-demographics dimensions
+        # (4 LEFT outer joins).
+        "real_store_demo": (
+            "SELECT ss_item_sk, ss_net_profit, cd_gender, hd_demo_sk, ca_state\n"
+            "FROM store_sales\n"
+            "    LEFT OUTER JOIN customer               ON ss_customer_sk = c_customer_sk\n"
+            "    LEFT OUTER JOIN customer_demographics  ON c_current_cdemo_sk = cd_demo_sk\n"
+            "    LEFT OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk\n"
+            "    LEFT OUTER JOIN customer_address       ON c_current_addr_sk = ca_address_sk\n"
+            "WHERE ss_net_profit > 0;"),
+        # Items sold per category, keeping unsold/dimensionless sales
+        # (single COUNT aggregate, no AVG; 3 outer joins).
+        "real_store_agg": (
+            "SELECT i_category, count(ss_item_sk) AS sold_cnt\n"
+            "FROM store_sales\n"
+            "    LEFT OUTER JOIN item     ON ss_item_sk = i_item_sk\n"
+            "    LEFT OUTER JOIN store    ON ss_store_sk = s_store_sk\n"
+            "    LEFT OUTER JOIN customer ON ss_customer_sk = c_customer_sk\n"
+            "WHERE ss_quantity > 0\n"
+            "GROUP BY i_category;"),
+    }
 
 
 def gen_tpcds_queries():
@@ -685,82 +941,70 @@ def gen_tpcds_queries():
     queries = {}
     idx = 0
 
-    # Line topologies
+    # Line topologies (left-deep) — a few for shape coverage
     line_topos = _tpcds_line_topologies()
     for topo_label, tables, conds in line_topos:
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCDS_PRED_COLS[(idx + vi) % len(TPCDS_PRED_COLS)]
+        for vi, vec in enumerate(vecs[:SHAPE_LINE_VECS]):
+            pred_col = _pick_pred_pm(tables, idx + vi, TPCDS_PRED_COLS, TPCDS_TABLE_PREFIX)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
 
-    # Right-deep versions
+    # Right-deep versions (chain topologies only — star right-deep would emit a
+    # correlated/LATERAL join that DuckDB rejects)
     for topo_label, tables, conds in line_topos[:7]:
+        if not _is_chain(tables, conds, _tpcds_col_table):
+            continue
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[4:7]):
-            pred_col = TPCDS_PRED_COLS[(idx + vi) % len(TPCDS_PRED_COLS)]
+        for vi, vec in enumerate(vecs[4:4 + SHAPE_RD_VECS]):
+            pred_col = _pick_pred_pm(tables, idx + vi, TPCDS_PRED_COLS, TPCDS_TABLE_PREFIX)
             label = f"{topo_label}_rd_v{vi}"
             queries[label] = _build_right_deep_query(tables, conds, vec, pred_col, idx + vi)
             idx += 1
 
-    # Bushy topologies
+    # Bushy topologies (DOMINANT shape)
     bushy_topos = _tpcds_bushy_templates()
     for topo_label, n_joins, template in bushy_topos:
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[:5]):
-            pred_col = TPCDS_PRED_COLS[(idx + vi) % len(TPCDS_PRED_COLS)]
+        topo_tables = _tables_in_text(template, TPCDS_ALL_TABLES)
+        for vi, vec in enumerate(vecs[:SHAPE_BUSHY_VECS]):
+            pred_col = _pick_pred_pm(topo_tables, idx + vi, TPCDS_PRED_COLS, TPCDS_TABLE_PREFIX)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
 
-    # Aggregation variants
-    agg_specs = [
-        {"select": "ca_state, COUNT(*) AS cnt, SUM(ss_net_profit) AS profit",
-         "group_by": "ca_state"},
-        {"select": "i_category, AVG(ss_sales_price) AS avg_price",
-         "group_by": "i_category"},
-        {"select": "d_year, COUNT(*) AS cnt, SUM(ws_sales_price) AS tot",
-         "group_by": "d_year"},
-        {"select": "s_state, MIN(ss_sales_price) AS lo, MAX(ss_sales_price) AS hi",
-         "group_by": "s_state"},
-        {"select": "COUNT(*) AS cnt, SUM(cs_quantity) AS total_qty", "group_by": ""},
-        {"select": "cd_gender, COUNT(*) AS cnt, AVG(ss_quantity) AS avg_qty",
-         "group_by": "cd_gender"},
-        {"select": "ca_zip, SUM(ss_sales_price) AS revenue", "group_by": "ca_zip"},
-        {"select": "i_brand, COUNT(*) AS cnt, SUM(ws_quantity) AS tot_qty",
-         "group_by": "i_brand"},
+    # Aggregation variants — one aggregate per query (COUNT/SUM/MIN/MAX, no
+    # AVG). Each base lists in-scope group/measure/predicate columns so the
+    # query binds, then is expanded over the four aggregate functions.
+    agg_bases = [
+        {"tables": ["store_sales", "customer", "customer_address"],
+         "conds": ["ss_customer_sk = c_customer_sk", "c_current_addr_sk = ca_address_sk"],
+         "group": "ca_state", "measure": "ss_net_profit", "pred_col": "ss_quantity"},
+        {"tables": ["store_sales", "item", "store"],
+         "conds": ["ss_item_sk = i_item_sk", "ss_store_sk = s_store_sk"],
+         "group": "i_category", "measure": "ss_sales_price", "pred_col": "ss_quantity"},
+        {"tables": ["web_sales", "customer", "date_dim"],
+         "conds": ["ws_bill_customer_sk = c_customer_sk", "ws_sold_date_sk = d_date_sk"],
+         "group": "d_year", "measure": "ws_sales_price", "pred_col": "ws_quantity"},
+        {"tables": ["catalog_sales", "item", "customer"],
+         "conds": ["cs_item_sk = i_item_sk", "cs_bill_customer_sk = c_customer_sk"],
+         "group": "i_brand", "measure": "cs_sales_price", "pred_col": "cs_quantity"},
     ]
-    agg_topos = [
-        (["store_sales", "customer", "customer_address"],
-         ["ss_customer_sk = c_customer_sk", "c_current_addr_sk = ca_address_sk"]),
-        (["store_sales", "item", "store"],
-         ["ss_item_sk = i_item_sk", "ss_store_sk = s_store_sk"]),
-        (["web_sales", "customer", "date_dim"],
-         ["ws_bill_customer_sk = c_customer_sk", "ws_sold_date_sk = d_date_sk"]),
-        (["store_sales", "item", "store", "customer"],
-         ["ss_item_sk = i_item_sk", "ss_store_sk = s_store_sk", "ss_customer_sk = c_customer_sk"]),
-        (["catalog_sales", "item", "customer"],
-         ["cs_item_sk = i_item_sk", "cs_bill_customer_sk = c_customer_sk"]),
-        (["store_sales", "customer", "customer_demographics"],
-         ["ss_customer_sk = c_customer_sk", "c_current_cdemo_sk = cd_demo_sk"]),
-        (["store_sales", "customer", "customer_address"],
-         ["ss_customer_sk = c_customer_sk", "c_current_addr_sk = ca_address_sk"]),
-        (["web_sales", "item", "customer"],
-         ["ws_item_sk = i_item_sk", "ws_bill_customer_sk = c_customer_sk"]),
-    ]
-    for ai, agg in enumerate(agg_specs):
-        tables, conds = agg_topos[ai]
+    for ai, agg in enumerate(_expand_agg_bases(agg_bases)):
+        tables, conds = agg["tables"], agg["conds"]
         n_joins = len(conds)
         vecs = bench_vectors(n_joins)
-        vec = vecs[(ai + 2) % len(vecs)]
-        pred_col = TPCDS_PRED_COLS[(idx + ai) % len(TPCDS_PRED_COLS)]
+        vec = vecs[ai % len(vecs)]
         label = f"ds_agg{ai}"
-        queries[label] = _build_line_query(tables, conds, vec, pred_col, idx + ai, agg=agg)
+        queries[label] = _build_line_query(tables, conds, vec, agg["pred_col"], idx + ai, agg=agg)
         idx += 1
 
+    # Real-semantics queries (derived from the outer-join TPC-DS queries:
+    # Q5/Q40/Q49/Q72/Q80/Q93 LEFT, Q51/Q97 FULL)
+    queries.update(_tpcds_realistic_queries())
     return queries
 
 
@@ -776,6 +1020,26 @@ JOB_PRED_COLS = [
     "n.id", "cn.id", "k.id",
     "an.person_id", "cc.movie_id",
 ]
+
+# JOB columns are alias-qualified (e.g. "ci.role_id"), so "in scope" means the
+# alias is present in the topology. These helpers mirror _pick_pred_pm/_is_chain
+# but key on the table ALIAS instead of a column prefix.
+def _job_aliases_in(text):
+    """Aliases referenced as `alias.` in a JOB join template / FROM fragment."""
+    return set(re.findall(r"\b([a-z][a-z0-9]{0,4})\s*\.", text.lower()))
+
+
+def _job_pick_pred_col(aliases, idx):
+    """Pick a JOB predicate column whose alias is in `aliases` (else fall back)."""
+    allowed = [c for c in JOB_PRED_COLS if c.split(".")[0] in aliases]
+    if not allowed:
+        allowed = JOB_PRED_COLS
+    return allowed[idx % len(allowed)]
+
+
+def _job_col_alias(tok):
+    """Alias of an `alias.col` token (None if not alias-qualified)."""
+    return tok.split(".")[0] if "." in tok else None
 
 # Pre-defined join paths through the IMDb schema
 JOB_PATHS = [
@@ -970,60 +1234,63 @@ def gen_job_queries():
     queries = {}
     idx = 0
 
-    # Line (left-deep) topologies
+    # Line (left-deep) topologies — a few for shape coverage
     for path_tables, path_conds in JOB_PATHS:
+        aliases = {tt.split()[-1] for tt in path_tables}
         n_joins = len(path_conds)
         vecs = bench_vectors(n_joins)
-        n_vecs = 5 if n_joins <= 4 else 3 if n_joins <= 7 else 2 if n_joins <= 10 else 1
-        for vi, vec in enumerate(vecs[:n_vecs]):
-            pred_col = JOB_PRED_COLS[(idx + vi) % len(JOB_PRED_COLS)]
+        for vi, vec in enumerate(vecs[:SHAPE_LINE_VECS]):
+            pred_col = _job_pick_pred_col(aliases, idx + vi)
             n_tables = len(path_tables)
             label = f"jb_line{n_tables}_{idx:03d}_v{vi}"
             queries[label] = _build_line_query(
                 path_tables, path_conds, vec, pred_col, idx + vi, select_cols="*")
             idx += 1
 
-    # Right-deep versions for shorter paths
+    # Right-deep versions (chain paths only — star right-deep would emit a
+    # correlated/LATERAL join that DuckDB rejects)
     for path_tables, path_conds in JOB_PATHS[:15]:
+        aliases_seq = [tt.split()[-1] for tt in path_tables]
+        if not _is_chain(aliases_seq, path_conds, _job_col_alias):
+            continue
         n_joins = len(path_conds)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[5:8]):
-            pred_col = JOB_PRED_COLS[(idx + vi) % len(JOB_PRED_COLS)]
+        for vi, vec in enumerate(vecs[5:5 + SHAPE_RD_VECS]):
+            pred_col = _job_pick_pred_col(set(aliases_seq), idx + vi)
             n_tables = len(path_tables)
             label = f"jb_rd{n_tables}_{idx:03d}_v{vi}"
             queries[label] = _build_right_deep_query(
                 path_tables, path_conds, vec, pred_col, idx + vi, select_cols="*")
             idx += 1
 
-    # Bushy topologies
+    # Bushy topologies (DOMINANT shape)
     for topo_label, n_joins, template in JOB_BUSHY_TEMPLATES:
+        topo_aliases = _job_aliases_in(template)
         vecs = bench_vectors(n_joins)
-        for vi, vec in enumerate(vecs[:4]):
-            pred_col = JOB_PRED_COLS[(idx + vi) % len(JOB_PRED_COLS)]
+        for vi, vec in enumerate(vecs[:SHAPE_BUSHY_VECS]):
+            pred_col = _job_pick_pred_col(topo_aliases, idx + vi)
             label = f"{topo_label}_v{vi}"
             queries[label] = _build_bushy_query(template, vec, pred_col, idx + vi)
             idx += 1
 
-    # Aggregation variants
-    agg_specs = [
-        {"select": "t.production_year, COUNT(*) AS cnt",
-         "group_by": "t.production_year"},
-        {"select": "COUNT(*) AS total_rows, MIN(t.production_year) AS min_year, MAX(t.production_year) AS max_year",
-         "group_by": ""},
-        {"select": "ci.role_id, COUNT(*) AS cnt, AVG(t.production_year) AS avg_year",
-         "group_by": "ci.role_id"},
-        {"select": "cn.country_code, COUNT(*) AS cnt",
-         "group_by": "cn.country_code"},
+    # Aggregation variants — one aggregate per query (COUNT/SUM/MIN/MAX, no
+    # AVG). Each base's group/measure/predicate columns are alias-qualified and
+    # belong to tables in that base's path, so the query binds.
+    agg_bases = [
+        {"tables": ["title t", "cast_info ci", "name n"],
+         "conds": ["t.id = ci.movie_id", "ci.person_id = n.id"],
+         "group": "ci.role_id", "measure": "t.production_year", "pred_col": "ci.person_id"},
+        {"tables": ["title t", "movie_companies mc", "company_name cn"],
+         "conds": ["t.id = mc.movie_id", "mc.company_id = cn.id"],
+         "group": "cn.country_code", "measure": "t.production_year", "pred_col": "mc.company_id"},
     ]
-    agg_paths = JOB_PATHS[0:4]
-    for ai, agg in enumerate(agg_specs):
-        path_tables, path_conds = agg_paths[ai]
+    for ai, agg in enumerate(_expand_agg_bases(agg_bases)):
+        path_tables, path_conds = agg["tables"], agg["conds"]
         n_joins = len(path_conds)
         vecs = bench_vectors(n_joins)
         vec = vecs[(ai + 3) % len(vecs)]
-        pred_col = random.choice(JOB_PRED_COLS)
         label = f"jb_agg{ai}"
-        queries[label] = _build_line_query(path_tables, path_conds, vec, pred_col, idx,
+        queries[label] = _build_line_query(path_tables, path_conds, vec, agg["pred_col"], idx,
                                            agg=agg)
         idx += 1
 
@@ -1060,7 +1327,7 @@ def verify_bench_queries(queries, name):
     min_outer = min(outer_per_q) if outer_per_q else 0
     banned = ["ROW_NUMBER", "RANK", "DENSE_RANK", "NTILE",
               "ARRAY_AGG", "STRING_AGG", "LIST(", "FIRST(", "LAST(",
-              "ANY_VALUE", "INITCAP"]
+              "ANY_VALUE", "INITCAP", "AVG("]
     violations = []
     for label, q in queries.items():
         for b in banned:

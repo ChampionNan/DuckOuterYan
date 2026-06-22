@@ -1,6 +1,6 @@
-SELECT n_regionkey, SUM(s_acctbal) AS tot_bal, COUNT(*) AS n_supp
-FROM region
-    RIGHT OUTER JOIN nation ON r_regionkey = n_regionkey
+SELECT s_nationkey, MAX(ps_supplycost) AS hi_val
+FROM nation
     FULL OUTER JOIN supplier ON n_nationkey = s_nationkey
-WHERE n_nationkey % 2 = 1
-GROUP BY n_regionkey;
+    RIGHT OUTER JOIN partsupp ON s_suppkey = ps_suppkey
+WHERE ps_availqty >= 100 AND ps_availqty <= 9000
+GROUP BY s_nationkey;

@@ -7,7 +7,9 @@
 #      is not equivalence-preserving (or crashes/times out) is NOT timed.
 #   2. JOIN_REORDER — oy_regime: No (OuterYan keeps DuckDB's join order) vs
 #      Yes (OuterYan reorders), from the join-order signature.
-#   3. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 10 runs).
+#   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
+#      (bitmap | hash | mixed | -), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
+#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 10 runs).
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
@@ -57,13 +59,71 @@ OY_ON="SET disabled_optimizers TO '';"
 OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 [ "${OY_TIMEOUT_SECS}" = "0" ] && OY_TIMEOUT_BIN=""
 
-# Invoke duckdb optionally under timeout.
+# --- duckdb process lifecycle / interrupt-safe cleanup ----------------------
+# Problem: on Ctrl+C a duckdb that is mid-query could be left running, holding
+# the database file open and causing IO errors for the next query. Fix: launch
+# duckdb as a DIRECT, tracked background child of this shell and `wait` on it
+# (so the next query never starts until the current duckdb has fully exited);
+# on any interrupt, a trap TERM/KILLs the tracked duckdb subtree before exiting.
+# We only ever signal processes we ourselves started, so this is safe on a
+# shared machine (never `pkill duckdb`).
+OY_DUCK_PIDS=()
+
+_oy_untrack() {                       # drop a finished pid from the live list
+    local p keep=()
+    for p in "${OY_DUCK_PIDS[@]:-}"; do
+        [ -n "$p" ] && [ "$p" != "$1" ] && keep+=("$p")
+    done
+    OY_DUCK_PIDS=("${keep[@]:-}")
+}
+
+_oy_kill_tree() {                     # _oy_kill_tree <signal> <pid>: kids first
+    local sig="$1" pid="$2" c
+    for c in $(pgrep -P "$pid" 2>/dev/null); do _oy_kill_tree "$sig" "$c"; done
+    kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+_oy_cleanup() {
+    trap '' INT TERM EXIT             # disable traps: no re-entry while cleaning
+    local p alive waited=0
+    local had=0; for p in "${OY_DUCK_PIDS[@]:-}"; do [ -n "$p" ] && had=1; done
+    [ "$had" = 1 ] && echo "  [cleanup] terminating duckdb (pids: ${OY_DUCK_PIDS[*]})" >&2
+    for p in "${OY_DUCK_PIDS[@]:-}"; do [ -n "$p" ] && _oy_kill_tree TERM "$p"; done
+    while [ "$waited" -lt 30 ]; do    # up to ~3s grace for a clean TERM exit
+        alive=0
+        for p in "${OY_DUCK_PIDS[@]:-}"; do
+            [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive=1
+        done
+        [ "$alive" = 0 ] && break
+        sleep 0.1; waited=$((waited+1))
+    done
+    for p in "${OY_DUCK_PIDS[@]:-}"; do [ -n "$p" ] && _oy_kill_tree KILL "$p"; done
+}
+trap '_oy_cleanup; exit 130' INT
+trap '_oy_cleanup; exit 143' TERM
+trap '_oy_cleanup' EXIT
+
+# Invoke duckdb (optionally under `timeout`) as a tracked background child and
+# wait for it. Reads SQL from stdin (redirect a file in); args/redirs from the
+# caller are inherited by the duckdb child. Returns duckdb's exit code (124 on
+# timeout). Must NOT be called inside a pipeline, or the child would belong to
+# a transient subshell and escape both PID tracking and the cleanup trap.
 oy_duck() {
+    local pid rc
+    # `<&0` is REQUIRED: a backgrounded command in a non-job-control shell has
+    # its stdin redirected from /dev/null unless stdin is explicitly redirected,
+    # which would make duckdb read no SQL. `<&0` dups the caller's stdin (the
+    # SQL file) into the child so the query actually runs.
     if [ -n "$OY_TIMEOUT_BIN" ]; then
-        "$OY_TIMEOUT_BIN" "$OY_TIMEOUT_SECS" "$DUCKDB_BIN" "$@"
+        "$OY_TIMEOUT_BIN" "$OY_TIMEOUT_SECS" "$DUCKDB_BIN" "$@" <&0 &
     else
-        "$DUCKDB_BIN" "$@"
+        "$DUCKDB_BIN" "$@" <&0 &
     fi
+    pid=$!
+    OY_DUCK_PIDS+=("$pid")
+    wait "$pid"; rc=$?
+    _oy_untrack "$pid"
+    return $rc
 }
 
 # --- the correctness atom ---------------------------------------------------
@@ -72,15 +132,15 @@ oy_duck() {
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
     local db="$1" label="$2" query="$3"
-    local off on eoff eon roff ron rc=0
-    off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp)
+    local off on eoff eon sql roff ron rc=0
+    off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); sql=$(mktemp)
 
     local sorted_q="SELECT * FROM (${query%;}) _oy_sub ORDER BY ALL;"
 
-    { echo "$OY_OFF"; echo "$sorted_q"; } \
-        | oy_duck "$db" -csv -noheader 2>"$eoff" > "$off"; roff=${PIPESTATUS[1]}
-    { echo "$OY_ON";  echo "$sorted_q"; } \
-        | oy_duck "$db" -csv -noheader 2>"$eon"  > "$on";  ron=${PIPESTATUS[1]}
+    printf '%s\n%s\n' "$OY_OFF" "$sorted_q" > "$sql"
+    oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; roff=$?
+    printf '%s\n%s\n' "$OY_ON"  "$sorted_q" > "$sql"
+    oy_duck "$db" -csv -noheader < "$sql" > "$on"  2>"$eon";  ron=$?
 
     if [ "${roff:-0}" -eq 124 ] || [ "${ron:-0}" -eq 124 ]; then
         echo "  TIMEOUT (${OY_TIMEOUT_SECS}s): $label"; rc=3
@@ -94,7 +154,7 @@ oy_equiv_check() {
         echo "  NOT EQUIV: $label (off=$(wc -l < "$off" | tr -d ' ') on=$(wc -l < "$on" | tr -d ' '))"
         diff "$off" "$on" | head -6 | sed 's/^/        /'; rc=1
     fi
-    rm -f "$off" "$on" "$eoff" "$eon"
+    rm -f "$off" "$on" "$eoff" "$eon" "$sql"
     return $rc
 }
 
@@ -113,9 +173,12 @@ oy_time_median() {
     # timed runs
     script+=".timer on"$'\n'
     for ((i=0; i<runs; i++)); do script+="${query%;};"$'\n'; done
-    local times
-    times="$(printf '%s' "$script" | oy_duck "$db" -noheader 2>&1 \
-        | awk '/Run Time/{for(i=1;i<=NF;i++) if($i=="real") print $(i+1)}')"
+    local times sqlf rawf
+    sqlf=$(mktemp); rawf=$(mktemp)
+    printf '%s' "$script" > "$sqlf"
+    oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1
+    times="$(awk '/Run Time/{for(i=1;i<=NF;i++) if($i=="real") print $(i+1)}' "$rawf")"
+    rm -f "$sqlf" "$rawf"
     [ -z "$times" ] && { echo "NA 0"; return; }
     # compute median using sort + awk
     echo "$times" | sort -n | awk -v K="$runs" '
@@ -169,6 +232,33 @@ oy_regime() {
         | "$DUCKDB_BIN" "$db" -list -noheader 2>/dev/null | grep -q 'SJ_PROBE'; then
         sj="yes"; else sj="no"; fi
     if [ "$s_off" = "$s_on" ]; then echo "No sj=$sj"; else echo "Yes sj=$sj"; fi
+}
+
+# --- semi-join kernel classification (bitmap vs hash) -----------------------
+# Like the join-order regime, the kernel each SJ filter commits to is a
+# structural property of how OuterYan executed the query. The kind is decided at
+# runtime (PhysicalSJBuild::Finalize, including the bitmap->hash overflow
+# fallback), so we cannot read it from EXPLAIN — instead we run the query ONCE
+# with OuterYan ON and the C++ kernel trace (env DUCKDB_SJ_KERNEL_TRACE) on, then
+# count the per-filter "[SJ_KERNEL] BITMAP|HASH" lines it prints to stderr.
+# Echoes: "<label> b<N>h<M>" — label is bitmap | hash | mixed | - (no SJ filters).
+oy_kernel() {
+    local db="$1" query="$2" sqlf errf nbm nhash label
+    sqlf=$(mktemp); errf=$(mktemp)
+    printf '%s\n%s\n' "$OY_ON" "${query%;};" > "$sqlf"
+    # Scope the trace to this single run: export before, unset after, so the
+    # timing/equivalence oy_duck calls never see the extra stderr.
+    export DUCKDB_SJ_KERNEL_TRACE=1
+    oy_duck "$db" -noheader < "$sqlf" >/dev/null 2>"$errf"
+    unset DUCKDB_SJ_KERNEL_TRACE
+    nbm="$(grep -c '\[SJ_KERNEL\] BITMAP' "$errf")"
+    nhash="$(grep -c '\[SJ_KERNEL\] HASH' "$errf")"
+    rm -f "$sqlf" "$errf"
+    if   [ "$nbm" -gt 0 ] && [ "$nhash" -gt 0 ]; then label="mixed"
+    elif [ "$nbm" -gt 0 ]; then label="bitmap"
+    elif [ "$nhash" -gt 0 ]; then label="hash"
+    else label="-"; fi
+    echo "$label b${nbm}h${nhash}"
 }
 
 # ============================================================================
@@ -262,14 +352,16 @@ CSV_OUT="${OUT%.txt}.csv"
     echo
     echo "===================== LIVE PER-QUERY RESULTS =========================="
     echo "# Columns: T1 = single-thread, TM = multi-thread (threads=${OY_THREADS})"
-    printf '%-34s %-5s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
-        query reord? correct note T1:off T1:on T1:spd TM:off TM:on TM:spd
+    echo "#   kernel = semi-join filter kernel OuterYan ran: bitmap | hash | mixed | - (no SJ)"
+    printf '%-34s %-5s %-7s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
+        query reord? kernel correct note T1:off T1:on T1:spd TM:off TM:on TM:spd
     echo "----------------------------------------------------------------------"
 } > "$OUT"
 
-echo "query,reorder,correct,note,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup,rows" > "$CSV_OUT"
+echo "query,reorder,kernel,kernel_detail,correct,note,t1_off,t1_on,t1_speedup,tm_off,tm_on,tm_speedup,rows" > "$CSV_OUT"
 
 QN=0; NSKIP=0; NTIMED=0; NNO=0; NYES=0; SUMNO=0; SUMYES=0
+NKBM=0; NKHASH=0; NKMIX=0    # kernel tally across correct queries
 QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
 QDB=(); QSQL=()
 QOFF1=(); QON1=(); QRATIO1=()
@@ -287,9 +379,11 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
         *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
         *)             correct="FALSE"; note="ERROR";     rows="-";;
     esac
-    reg="-"; offm="-"; onm="-"; ratiom="-"; off1="-"; on1="-"; ratio1="-"
+    reg="-"; ker="-"; kdetail="-"; offm="-"; onm="-"; ratiom="-"; off1="-"; on1="-"; ratio1="-"
     if [ "$correct" = "TRUE" ]; then
         reg="$(oy_regime "$db" "$sql")"; reg="${reg%% *}"
+        kraw="$(oy_kernel "$db" "$sql")"; ker="${kraw%% *}"; kdetail="${kraw##* }"
+        case "$ker" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
         local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
         offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
@@ -312,10 +406,10 @@ for ((i=0; i<${#LABELS[@]}; i++)); do
     QOFF1[$QN]="$off1"; QON1[$QN]="$on1"; QRATIO1[$QN]="$ratio1"
     QN=$((QN+1))
     # ---- IMMEDIATE write to $OUT and $CSV_OUT ----
-    printf '%-34s %-5s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
-        "$id" "$reg" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" >> "$OUT"
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$id" "$reg" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$rows" >> "$CSV_OUT"
+    printf '%-34s %-5s %-7s %-9s %-10s %9s %9s %7s %9s %9s %7s\n' \
+        "$id" "$reg" "$ker" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" >> "$OUT"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$id" "$reg" "$ker" "$kdetail" "$correct" "$note" "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$rows" >> "$CSV_OUT"
     if [ "$correct" = "TRUE" ]; then
         printf '  [%3d/%d] %-34s correct=TRUE  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s\n' \
             "$QN" "${#LABELS[@]}" "$id" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1" >&2
@@ -331,6 +425,7 @@ MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
     echo
     echo "============================== SUMMARY ================================"
     echo "queries=$QN  correct=$((QN-NSKIP))  incorrect/skipped=$NSKIP  timed=$NTIMED"
+    echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
     echo "threads: single=1, multi=${OY_THREADS}"
     echo "  No  (no reorder): n=$NNO  mean speed-up(TM)=$MNO   [expect <=1.0 — SJ overhead, no reorder]"
     echo "  Yes (reorder):   n=$NYES  mean speed-up(TM)=$MYES   [may be >1.0 — reorder/reduction win]"

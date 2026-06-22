@@ -16,8 +16,8 @@
 #   DUCKDB_BIN       Path to duckdb binary (default build/release/duckdb)
 #   GRAPH_DATASET    SNAP graph to use for graph R1..R10 (default epinions)
 #                    Options: bitcoin | epinions | google | wiki | dblp
-#   TPCH_SF          TPC-H scale factor (default 50)
-#   TPCDS_SF         TPC-DS scale factor (default 50)
+#   TPCH_SF          TPC-H scale factor (default 100)
+#   TPCDS_SF         TPC-DS scale factor (default 100)
 #   GRAPH_DATA_DIR   SNAP graph download dir (default $REPO/graph_data)
 #   FORCE=1          Rebuild even if DB already exists
 # ============================================================================
@@ -29,8 +29,8 @@ REPO_ROOT="$OY_REPO_ROOT"
 
 # --- defaults ---------------------------------------------------------------
 GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
-TPCH_SF="${TPCH_SF:-50}"
-TPCDS_SF="${TPCDS_SF:-50}"
+TPCH_SF="${TPCH_SF:-100}"
+TPCDS_SF="${TPCDS_SF:-100}"
 GRAPH_DATA_DIR="${GRAPH_DATA_DIR:-$REPO_ROOT/graph_data}"
 
 # Parse targets
@@ -87,6 +87,28 @@ _graph_read_expr() {
         echo "SELECT column0::BIGINT AS src, column1::BIGINT AS dst FROM read_csv('$path', header=false, delim=',', columns={'column0':'VARCHAR','column1':'VARCHAR','column2':'VARCHAR','column3':'VARCHAR'})"
     else
         echo "SELECT column0 AS src, column1 AS dst FROM read_csv('$path', header=false, delim=E'\t', columns={'column0':'BIGINT','column1':'BIGINT'})"
+    fi
+}
+
+# --- helper: add a PRIMARY KEY if the table lacks one ------------------------
+# OuterYan's PK-FK semi-join elimination keys off UNIQUE / PRIMARY KEY
+# constraints (CheckPKFK in src/optimizer/outer_yan/common/outer_yan_tree.cpp);
+# no foreign keys are needed. dbgen / dsdgen emit only NOT NULL and CTAS-from-
+# parquet emits nothing, so the elimination never fires without this. We add PKs
+# only to PK/build-side (dimension) tables — that is all the elimination looks
+# at, and it avoids costly index builds on the large central fact tables.
+# Idempotent (skips when a PK already exists) and non-fatal under `set -e`
+# (duplicate/NULL keys or a missing table warn instead of aborting the build).
+_add_pk() {
+    local db="$1" tbl="$2" cols="$3" has
+    has=$("$DUCKDB_BIN" "$db" -csv -noheader -c \
+        "SELECT count(*) FROM duckdb_constraints() \
+         WHERE table_name='$tbl' AND constraint_type='PRIMARY KEY';" 2>/dev/null || echo 0)
+    [ "${has:-0}" != "0" ] && return 0
+    if "$DUCKDB_BIN" "$db" -c "ALTER TABLE $tbl ADD PRIMARY KEY ($cols);" >/dev/null 2>&1; then
+        echo "  [pk  ] $tbl ($cols)"
+    else
+        echo "  [warn] could not add PK to $tbl ($cols) — duplicate/NULL keys or table absent"
     fi
 }
 
@@ -160,6 +182,17 @@ if want tpch; then
             || { echo "ERROR: dbgen failed (binary not built with BUILD_TPCH=1?)" >&2; rm -f "$TPCH_DB"; exit 1; }
         echo "[tpch_db] done. SF=$TPCH_SF $(du -h "$TPCH_DB" | cut -f1)"
     fi
+    # TPC-H primary keys (idempotent). lineitem is intentionally omitted: it is
+    # always the central fact / FK-probe side, never a PK build side, so its PK
+    # index would add cost with no semi-join-elimination benefit.
+    echo "[tpch_db] ensuring primary keys ..."
+    _add_pk "$TPCH_DB" region   "r_regionkey"
+    _add_pk "$TPCH_DB" nation   "n_nationkey"
+    _add_pk "$TPCH_DB" part     "p_partkey"
+    _add_pk "$TPCH_DB" supplier "s_suppkey"
+    _add_pk "$TPCH_DB" partsupp "ps_partkey, ps_suppkey"
+    _add_pk "$TPCH_DB" customer "c_custkey"
+    _add_pk "$TPCH_DB" orders   "o_orderkey"
 fi
 
 # ============================================================================
@@ -176,6 +209,27 @@ if want tpcds; then
             || { echo "ERROR: dsdgen failed (binary not built with BUILD_TPCDS=1?)" >&2; rm -f "$TPCDS_DB"; exit 1; }
         echo "[tpcds_db] done. SF=$TPCDS_SF $(du -h "$TPCDS_DB" | cut -f1)"
     fi
+    # TPC-DS dimension primary keys (single-column surrogate keys; idempotent).
+    # Fact tables are intentionally skipped: they are the FK/probe side and their
+    # surrogate-key columns are nullable, so a composite PK would fail anyway.
+    echo "[tpcds_db] ensuring primary keys ..."
+    _add_pk "$TPCDS_DB" call_center            "cc_call_center_sk"
+    _add_pk "$TPCDS_DB" catalog_page           "cp_catalog_page_sk"
+    _add_pk "$TPCDS_DB" customer               "c_customer_sk"
+    _add_pk "$TPCDS_DB" customer_address       "ca_address_sk"
+    _add_pk "$TPCDS_DB" customer_demographics  "cd_demo_sk"
+    _add_pk "$TPCDS_DB" date_dim               "d_date_sk"
+    _add_pk "$TPCDS_DB" household_demographics  "hd_demo_sk"
+    _add_pk "$TPCDS_DB" income_band            "ib_income_band_sk"
+    _add_pk "$TPCDS_DB" item                   "i_item_sk"
+    _add_pk "$TPCDS_DB" promotion              "p_promo_sk"
+    _add_pk "$TPCDS_DB" reason                 "r_reason_sk"
+    _add_pk "$TPCDS_DB" ship_mode              "sm_ship_mode_sk"
+    _add_pk "$TPCDS_DB" store                  "s_store_sk"
+    _add_pk "$TPCDS_DB" time_dim               "t_time_sk"
+    _add_pk "$TPCDS_DB" warehouse              "w_warehouse_sk"
+    _add_pk "$TPCDS_DB" web_page               "wp_web_page_sk"
+    _add_pk "$TPCDS_DB" web_site               "web_site_sk"
 fi
 
 # ============================================================================
@@ -184,13 +238,13 @@ fi
 if want job; then
     JOB_DB="${JOB_DB:-$REPO_ROOT/job_db}"
     JOB_DATA_DIR="${JOB_DATA_DIR:-$REPO_ROOT/job_data}"
+    JOB_TABLES="aka_name aka_title cast_info char_name comp_cast_type company_name company_type complete_cast info_type keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link name person_info role_type title"
 
     if [ -e "$JOB_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[job_db] already exists ($JOB_DB). Set FORCE=1 to rebuild."
     else
         echo "[job_db] Downloading IMDb parquet files ..."
         mkdir -p "$JOB_DATA_DIR"
-        JOB_TABLES="aka_name aka_title cast_info char_name comp_cast_type company_name company_type complete_cast info_type keyword kind_type link_type movie_companies movie_info movie_info_idx movie_keyword movie_link name person_info role_type title"
         for tbl in $JOB_TABLES; do
             local_file="$JOB_DATA_DIR/job_${tbl}.parquet"
             if [ ! -f "$local_file" ]; then
@@ -209,4 +263,10 @@ if want job; then
         "$DUCKDB_BIN" "$JOB_DB" -c "$SQL"
         echo "[job_db] done. $(du -h "$JOB_DB" | cut -f1)"
     fi
+    # JOB/IMDb primary keys: every table's surrogate `id` column is its PK
+    # (idempotent). These are the dimension/build sides for JOB join graphs.
+    echo "[job_db] ensuring primary keys ..."
+    for tbl in $JOB_TABLES; do
+        _add_pk "$JOB_DB" "$tbl" "id"
+    done
 fi

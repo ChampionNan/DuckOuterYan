@@ -37,8 +37,8 @@ Key parameters:
 |---|---|---|
 | `DUCKDB_BIN` | `build/release/duckdb` | Path to duckdb binary |
 | `GRAPH_DATASET` | `bitcoin` | SNAP graph for graph R1..R10 (bitcoin/epinions/google/wiki/dblp) |
-| `TPCH_SF` | `50` | TPC-H scale factor |
-| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `TPCH_SF` | `100` | TPC-H scale factor |
+| `TPCDS_SF` | `100` | TPC-DS scale factor |
 | `OY_THREADS` | `8` | Thread count for performance timing |
 | `OY_TIMEOUT_SECS` | `300` | Soft per-query timeout (seconds) |
 | `KILL_AFTER` | `600` | Hard SIGKILL watchdog (seconds; 0=off) |
@@ -66,8 +66,8 @@ Targets: graph | tpch | tpcds | job | all  (default: all)
 | Variable | Default | Purpose |
 |---|---|---|
 | `GRAPH_DATASET` | `bitcoin` | Which SNAP graph for graph tables |
-| `TPCH_SF` | `50` | TPC-H scale factor |
-| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `TPCH_SF` | `100` | TPC-H scale factor |
+| `TPCDS_SF` | `100` | TPC-DS scale factor |
 | `GRAPH_DATA_DIR` | `$REPO/graph_data` | SNAP data cache directory |
 | `FORCE` | `0` | Set to 1 to rebuild existing DBs |
 
@@ -213,8 +213,8 @@ This handles everything: compile DuckDB with extensions → build graph/tpch/tpc
 | Variable | Default | Purpose |
 |---|---|---|
 | `GRAPH_DATASET` | `bitcoin` | SNAP graph (bitcoin/epinions/google/wiki/dblp) |
-| `TPCH_SF` | `50` | TPC-H scale factor |
-| `TPCDS_SF` | `50` | TPC-DS scale factor |
+| `TPCH_SF` | `100` | TPC-H scale factor |
+| `TPCDS_SF` | `100` | TPC-DS scale factor |
 | `OY_THREADS` | `72` | Multi-thread count |
 | `OY_RUNS` | `10` | Timed iterations per config (median taken) |
 | `JOBS` | `nproc` | Make parallelism |
@@ -247,8 +247,8 @@ BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 GEN=ninja make release
 # Queries are already included in the repo (outerjoin_query/), no generation needed.
 bash auto_test/build_db.sh all
 #   graph_db  — SNAP bitcoin (default), ~24K edges → R1..R10
-#   tpch_db   — TPC-H SF=50 via CALL dbgen(sf=50)
-#   tpcds_db  — TPC-DS SF=50 via CALL dsdgen(sf=50)
+#   tpch_db   — TPC-H SF=100 via CALL dbgen(sf=100)
+#   tpcds_db  — TPC-DS SF=100 via CALL dsdgen(sf=100)
 #   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
 
 # ===== Step 3: Run the full on/off experiment =====

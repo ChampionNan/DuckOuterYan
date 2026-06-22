@@ -76,72 +76,6 @@ optional<idx_t> OuterYanTree::LookupSingleRelation(const Expression &expr,
 	return result;
 }
 
-// TODO: Check
-bool OuterYanTree::CheckPKFK(LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_FILTER ||
-	    op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		if (op.children.size() != 1) {
-			return false;
-		}
-		return CheckPKFK(*op.children[0]);
-	}
-	if (op.type != LogicalOperatorType::LOGICAL_GET) {
-		return false;
-	}
-	auto &get = op.Cast<LogicalGet>();
-	auto table_entry = get.GetTable();
-	if (!table_entry) {
-		return false;
-	}
-	auto &constraints = table_entry->GetConstraints();
-	auto bindings = op.GetColumnBindings();
-	const auto &column_ids = get.GetColumnIds();
-	for (idx_t i = 0; i < bindings.size(); i++) {
-		idx_t col_idx = bindings[i].column_index;
-		if (col_idx >= column_ids.size()) {
-			continue;
-		}
-		idx_t actual_col_idx = column_ids[col_idx].GetPrimaryIndex();
-		for (auto &constraint : constraints) {
-			if (constraint->type != ConstraintType::UNIQUE) {
-				continue;
-			}
-			auto &unique_constraint = constraint->Cast<UniqueConstraint>();
-			if (unique_constraint.index.index != DConstants::INVALID_INDEX) {
-				if (unique_constraint.index.index == actual_col_idx) {
-					return true;
-				}
-			} else if (!unique_constraint.columns.empty()) {
-				bool all_available = true;
-				for (auto &constraint_col_name : unique_constraint.columns) {
-					bool found = false;
-					for (idx_t j = 0; j < bindings.size(); j++) {
-						idx_t other_col_idx = bindings[j].column_index;
-						if (other_col_idx >= column_ids.size()) {
-							continue;
-						}
-						if (other_col_idx >= get.names.size()) {
-							continue;
-						}
-						if (StringUtil::CIEquals(get.names[other_col_idx], constraint_col_name)) {
-							found = true;
-							break;
-						}
-					}
-					if (!found) {
-						all_available = false;
-						break;
-					}
-				}
-				if (all_available) {
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
 // ============================================================================
 // CheckApplicability
 // ============================================================================
@@ -218,8 +152,6 @@ private:
 		node->kind = OTNode::Kind::RELATION;
 		node->origin = &op;
 		node->relation_id = next_relation_id++;
-		// Cache PK/FK once; later passes never re-walk `origin`.
-		node->is_pk = CheckPKFK(op);
 		MapTableToRelId(op, node->relation_id, tree.table_to_relation);
 		if (node->relation_id >= tree.ot_relations_by_id.size()) {
 			tree.ot_relations_by_id.resize(node->relation_id + 1, nullptr);
@@ -518,6 +450,23 @@ static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
 	if (base_op && base_op->type == LogicalOperatorType::LOGICAL_FILTER) {
 		return true;
 	}
+	// FILTER_PUSHDOWN runs before OuterYan and folds a unary "col OP const"
+	// predicate into LogicalGet::table_filters, deleting the LogicalFilter
+	// wrapper — so the predicate is gone from the plan tree but still reduces
+	// the relation's row set. Treat it as a base predicate, otherwise a PK-side
+	// leaf whose only predicate was pushed into the scan looks "unfiltered" and
+	// its (beneficial) reducer is wrongly eliminated. At this point in the
+	// pipeline table_filters holds ONLY real query value-predicates (col OP
+	// const / IN / LIKE / BETWEEN and their transitive implications): DuckDB
+	// does not null-reject join keys into table_filters, and runtime/dynamic
+	// join filters are added later by JOIN_FILTER_PUSHDOWN. A table filter on a
+	// Get is single-relation by construction, so no relation_id match is needed.
+	if (const auto *op = FindBaseOp(base_op)) {
+		if (op->type == LogicalOperatorType::LOGICAL_GET &&
+		    op->Cast<LogicalGet>().table_filters.HasFilters()) {
+			return true;
+		}
+	}
 	for (const auto &rec : filter_records) {
 		if (rec && rec->filter && rec->referenced_relations.size() == 1 &&
 		    *rec->referenced_relations.begin() == relation_id) {
@@ -604,6 +553,102 @@ static void CollectRelationNodes(OTNode &node, vector<OTNode *> &out) {
 	}
 	CollectRelationNodes(*node.children[0], out);
 	CollectRelationNodes(*node.children[1], out);
+}
+
+// True iff `origin`'s join-key column(s) in `conditions` cover a UNIQUE /
+// PRIMARY KEY constraint of its base table — i.e. this relation is the PK side
+// of THIS join. This is the column-accurate form of the documented
+// OJTEdge::child_is_pk contract ("child's join key is unique"). A per-relation
+// "the table has *some* unique column" check is insufficient: it
+// misfires whenever a table carries a surrogate PK on a column that is not the
+// join key — e.g. orders.o_orderkey while the join is on orders.o_custkey — which
+// is the norm once real PK-FK schemas are loaded. We pick out this relation's
+// own join columns by matching each condition column's table_index to the base
+// Get's table_index (orientation-independent: it does not assume LHS/RHS line up
+// with cond_left/right_relation_id, which Finalize may have swapped).
+static bool JoinSideIsUnique(LogicalOperator *origin, const vector<JoinCondition> &conditions) {
+	const LogicalOperator *base = FindBaseOp(origin);
+	if (!base || base->type != LogicalOperatorType::LOGICAL_GET) {
+		return false;
+	}
+	auto &get = base->Cast<LogicalGet>();
+	auto table_entry = get.GetTable();
+	if (!table_entry) {
+		return false;
+	}
+	const auto &column_ids = get.GetColumnIds();
+	const idx_t my_table_index = get.table_index.index;
+
+	// Actual *table-column* indices of THIS relation's join-key columns. A join
+	// condition column's binding.column_index is a projection index into the
+	// Get; column_ids maps it to the underlying table column. (get.names and a
+	// UNIQUE constraint's index/columns are keyed by table column, not by
+	// projection index — at OuterYan time the Get is already pruned, so the two
+	// differ, e.g. proj 0 -> table column o_custkey.)
+	vector<idx_t> key_cols;
+	key_cols.reserve(conditions.size());
+	for (const auto &cond : conditions) {
+		for (const Expression *side : {&cond.GetLHS(), &cond.GetRHS()}) {
+			if (side->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				continue;
+			}
+			const auto &binding = side->Cast<BoundColumnRefExpression>().binding;
+			if (binding.table_index.index != my_table_index) {
+				continue;
+			}
+			idx_t proj_idx = binding.column_index;
+			if (proj_idx < column_ids.size()) {
+				key_cols.push_back(column_ids[proj_idx].GetPrimaryIndex());
+			}
+		}
+	}
+	if (key_cols.empty()) {
+		return false;
+	}
+
+	// Does the set of join-key columns cover any UNIQUE / PRIMARY KEY constraint?
+	// A single-column constraint is encoded either as `index` (inline DDL) or as
+	// a one-element `columns` list (ALTER ... ADD PRIMARY KEY); handle both.
+	auto key_has_column = [&](idx_t table_col) {
+		for (idx_t c : key_cols) {
+			if (c == table_col) {
+				return true;
+			}
+		}
+		return false;
+	};
+	auto key_has_name = [&](const string &name) {
+		for (idx_t c : key_cols) {
+			if (c < get.names.size() && StringUtil::CIEquals(get.names[c], name)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	for (auto &constraint : table_entry->GetConstraints()) {
+		if (constraint->type != ConstraintType::UNIQUE) {
+			continue;
+		}
+		auto &unique_constraint = constraint->Cast<UniqueConstraint>();
+		if (unique_constraint.index.index != DConstants::INVALID_INDEX) {
+			if (key_has_column(unique_constraint.index.index)) {
+				return true;
+			}
+		} else if (!unique_constraint.columns.empty()) {
+			// Every constraint column must be one of the join keys.
+			bool all_present = true;
+			for (auto &constraint_col_name : unique_constraint.columns) {
+				if (!key_has_name(constraint_col_name)) {
+					all_present = false;
+					break;
+				}
+			}
+			if (all_present) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
@@ -703,8 +748,15 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 	auto attach_edge = [&](idx_t parent_id, idx_t child_id, OTNode *ot_join) {
 		auto &ot_info = *ot_join->info;
 		idx_t left_rel = ot_info.cond_left_relation_id;
-		bool left_pk = ot_relations[left_rel]->is_pk;
-		bool right_pk = ot_relations[ot_info.cond_right_relation_id]->is_pk;
+		idx_t right_rel = ot_info.cond_right_relation_id;
+		// PK side is judged on the JOIN COLUMN, not the relation: a side is the
+		// PK side iff its join-key column(s) cover a unique constraint. A
+		// per-relation "table has some unique column" check would misfire whenever
+		// a table carries a surrogate PK on a non-join column (e.g. orders.o_orderkey
+		// while the join is on o_custkey) — the common case once real PK-FK schemas
+		// are loaded. See JoinSideIsUnique.
+		bool left_pk = JoinSideIsUnique(ot_relations[left_rel]->origin, ot_info.conditions);
+		bool right_pk = JoinSideIsUnique(ot_relations[right_rel]->origin, ot_info.conditions);
 		bool child_pk = (child_id == left_rel) ? left_pk : right_pk;
 		bool parent_is_left = (parent_id == left_rel);
 

@@ -7,4 +7,4 @@ FROM region
     RIGHT OUTER JOIN part ON l_partkey = p_partkey
     FULL OUTER JOIN supplier ON l_suppkey = s_suppkey
     LEFT OUTER JOIN partsupp ON s_suppkey = ps_suppkey
-WHERE l_linenumber IN (1, 5, 10, 50, 100, 500);
+WHERE p_size % 7 <> 0;

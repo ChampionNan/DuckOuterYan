@@ -1,6 +1,6 @@
-SELECT r_name, COUNT(*) AS cnt, MAX(c_acctbal) AS max_bal
-FROM region
-    RIGHT OUTER JOIN nation ON r_regionkey = n_regionkey
-    LEFT OUTER JOIN customer ON n_nationkey = c_nationkey
-WHERE c_acctbal % 3 = 0
-GROUP BY r_name;
+SELECT s_nationkey, COUNT(*) AS cnt_val
+FROM nation
+    FULL OUTER JOIN supplier ON n_nationkey = s_nationkey
+    FULL OUTER JOIN partsupp ON s_suppkey = ps_suppkey
+WHERE ps_availqty % 7 <> 0
+GROUP BY s_nationkey;

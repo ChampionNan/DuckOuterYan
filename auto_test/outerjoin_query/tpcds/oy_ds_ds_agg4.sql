@@ -1,5 +1,6 @@
-SELECT COUNT(*) AS cnt, SUM(cs_quantity) AS total_qty
-FROM catalog_sales
-    RIGHT OUTER JOIN item ON cs_item_sk = i_item_sk
-    LEFT OUTER JOIN customer ON cs_bill_customer_sk = c_customer_sk
-WHERE c_customer_sk < 200;
+SELECT i_category, COUNT(*) AS cnt_val
+FROM store_sales
+    FULL OUTER JOIN item ON ss_item_sk = i_item_sk
+    FULL OUTER JOIN store ON ss_store_sk = s_store_sk
+WHERE ss_quantity % 7 <> 0
+GROUP BY i_category;

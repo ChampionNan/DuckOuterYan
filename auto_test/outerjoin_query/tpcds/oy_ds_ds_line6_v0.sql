@@ -5,4 +5,4 @@ FROM store_sales
     FULL OUTER JOIN customer_demographics ON c_current_cdemo_sk = cd_demo_sk
     LEFT OUTER JOIN household_demographics ON c_current_hdemo_sk = hd_demo_sk
     RIGHT OUTER JOIN income_band ON hd_income_band_sk = ib_income_band_sk
-WHERE s_store_sk IN (1, 5, 10, 50, 100, 500);
+WHERE ss_quantity % 7 <> 0;

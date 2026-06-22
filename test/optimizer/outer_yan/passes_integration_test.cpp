@@ -325,20 +325,23 @@ TEST_CASE("outer_yan passes: null-rejecting WHERE simplifies LEFT to INNER",
 	    "SELECT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id = b.id "
 	    "LEFT JOIN c ON a.id = c.id WHERE b.bx > 0");
 	REQUIRE(tree->HasOJT());
-	// At least one OJT edge should have its `kind` lowered to INNER while
-	// `original_kind` is still LEFT_OUTER. The edge fields are mirrored from
-	// `info->join_kind` / `info->original_join_kind`.
-	bool found_simplified = false;
+	// Simplify rebases `original_kind` to the post-Simplify kind (the Desimplify
+	// baseline), so after this pass `original_kind == kind` on every edge — the
+	// source LEFT is not retained. Observe the collapse via the stage counter plus
+	// the resulting INNER edge: every join in this query was LEFT in the source,
+	// so an INNER edge can only be Simplify lowering the (a,b) join.
+	REQUIRE(tree->stage_stats.simplify_collapses >= 1);
+	bool found_inner = false;
 	std::function<void(const OJTNode &)> walk = [&](const OJTNode &node) {
 		for (const auto &edge : node.children) {
-			if (edge.kind == JoinType::INNER && edge.original_kind != JoinType::INNER) {
-				found_simplified = true;
+			if (edge.kind == JoinType::INNER) {
+				found_inner = true;
 			}
 			walk(*edge.child);
 		}
 	};
 	walk(tree->OJT().Root());
-	REQUIRE(found_simplified);
+	REQUIRE(found_inner);
 }
 
 TEST_CASE("outer_yan passes: no simplification when WHERE preserves NULLs",
@@ -617,14 +620,16 @@ TEST_CASE("outer_yan passes: equivalence — 6-relation LEFT star",
 	                                     "LEFT JOIN f ON a.id = f.id");
 }
 
-// `LogicalPlanToOT` throws NotImplementedException when a residual filter's
-// `BoundColumnRef`s all resolve to a `table_index` introduced by a
-// `LogicalProjection` above the join tree (no registered OT base relation).
-// This is the one isolated-conversion check: the gate hides this in production
-// (the query is a pure inner join), so result-equivalence can't surface it.
-// Hidden by `[.]`; run with explicit tag.
-TEST_CASE("outer_yan passes: residual filter via projection (UNSUPPORTED)",
-          "[outer_yan][passes][equivalence][.]") {
+// A unary predicate over a subquery projection — `t.b_total > 150` on
+// `b.bx AS b_total` — is folded by filter-pushdown into b's table scan (as
+// `b.bx > 150`), not left as a residual filter referencing the projection's
+// `table_index`. So `LogicalPlanToOT` sees an ordinary filtered base relation
+// and lowers it without error: the pushed-into-scan predicate is handled, not
+// rejected. (Scan filters are intentionally *not* treated as null-rejection for
+// outer-join simplification — they are applied pre-join — but they are still a
+// perfectly valid base relation to build an OT over.)
+TEST_CASE("outer_yan passes: predicate folded into scan is handled, not rejected",
+          "[outer_yan][passes][equivalence]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedRoundtrip(con);
@@ -635,7 +640,7 @@ TEST_CASE("outer_yan passes: residual filter via projection (UNSUPPORTED)",
 	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
 	REQUIRE(plan);
 	OuterYanTree tree;
-	REQUIRE_THROWS_AS(LogicalPlanToOT(std::move(plan), tree), NotImplementedException);
+	REQUIRE_NOTHROW(LogicalPlanToOT(std::move(plan), tree));
 }
 
 // ============================================================================
@@ -831,8 +836,12 @@ TEST_CASE("outer_yan passes: Simplify — FULL OUTER → one-sided when only one
 	    "SELECT * FROM na FULL OUTER JOIN nb ON na.k = nb.k WHERE na.v > 0");
 	REQUIRE(tree->HasOJT());
 	REQUIRE(tree->stage_stats.simplify_collapses >= 1);
-	REQUIRE(AnyEdge(tree->OJT().Root(), [](OuterYanJoinKind k, OuterYanJoinKind o) {
-		return o == JoinType::OUTER && (k == JoinType::LEFT || k == JoinType::RIGHT);
+	// Simplify rebases `original_kind` to the post-Simplify kind, so assert on the
+	// resulting kind: a FULL OUTER with only the left side null-rejected collapses
+	// to a one-sided outer (LEFT, or RIGHT if the OJT flips parent orientation),
+	// but not all the way to INNER.
+	REQUIRE(AnyEdge(tree->OJT().Root(), [](OuterYanJoinKind k, OuterYanJoinKind) {
+		return k == JoinType::LEFT || k == JoinType::RIGHT;
 	}));
 }
 
@@ -847,8 +856,10 @@ TEST_CASE("outer_yan passes: Simplify — FULL OUTER → INNER when both sides n
 	    "SELECT * FROM na FULL OUTER JOIN nb ON na.k = nb.k WHERE na.v > 0 AND nb.v > 0");
 	REQUIRE(tree->HasOJT());
 	REQUIRE(tree->stage_stats.simplify_collapses >= 1);
-	REQUIRE(AnyEdge(tree->OJT().Root(), [](OuterYanJoinKind k, OuterYanJoinKind o) {
-		return o == JoinType::OUTER && k == JoinType::INNER;
+	// Simplify rebases `original_kind` to the post-Simplify kind, so assert on the
+	// resulting kind: both sides null-rejected ⇒ FULL OUTER collapses to INNER.
+	REQUIRE(AnyEdge(tree->OJT().Root(), [](OuterYanJoinKind k, OuterYanJoinKind) {
+		return k == JoinType::INNER;
 	}));
 }
 

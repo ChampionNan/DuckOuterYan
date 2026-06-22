@@ -57,7 +57,11 @@ public:
 	}
 
 	void FinalizeAsBitmap(unique_ptr<KeyBitmap> b);
-	void FinalizeAsHash(shared_ptr<HashFilter> h);
+	// `reason` is a static string describing why the hash kernel was chosen
+	// (force_hash / budget0 / ineligible / overflow). It is only consumed by
+	// the opt-in DUCKDB_SJ_KERNEL_TRACE diagnostic; pass a literal at the call
+	// site that decides the kernel.
+	void FinalizeAsHash(shared_ptr<HashFilter> h, const char *reason = "unknown");
 
 	const KeyBitmap &bitmap() const;
 	HashFilter &hash() const;

@@ -1,6 +1,6 @@
-SELECT cd_gender, COUNT(*) AS cnt, AVG(ss_quantity) AS avg_qty
+SELECT i_category, SUM(ss_sales_price) AS total_val
 FROM store_sales
-    FULL OUTER JOIN customer ON ss_customer_sk = c_customer_sk
-    RIGHT OUTER JOIN customer_demographics ON c_current_cdemo_sk = cd_demo_sk
-WHERE ca_address_sk < 50000
-GROUP BY cd_gender;
+    LEFT OUTER JOIN item ON ss_item_sk = i_item_sk
+    RIGHT OUTER JOIN store ON ss_store_sk = s_store_sk
+WHERE ss_quantity BETWEEN 1 AND 100
+GROUP BY i_category;

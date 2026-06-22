@@ -58,8 +58,8 @@ export OY_CORPUS="${OY_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_query}"
 export GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
 
 # TPC scale factors. Used by both correctness and performance scripts.
-export TPCH_SF="${TPCH_SF:-50}"
-export TPCDS_SF="${TPCDS_SF:-50}"
+export TPCH_SF="${TPCH_SF:-100}"
+export TPCDS_SF="${TPCDS_SF:-100}"
 
 # ===========================================================================
 # 4) Threading

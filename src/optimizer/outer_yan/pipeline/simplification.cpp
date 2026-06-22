@@ -1,12 +1,71 @@
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+
+#include <cstdlib>
 
 namespace duckdb {
+
+// Experimental, OFF by default. When `DUCKDB_OY_SIMPLIFY_SCAN_FILTERS` is set to
+// a non-empty, non-"0" value, Simplification ALSO seeds its null-rejection set
+// from predicates that filter-pushdown folded into LogicalGet::table_filters.
+//
+// WARNING — this is UNSOUND in general and provided only for measurement. A scan
+// filter is applied pre-join, so it does NOT null-reject the join *output*: e.g.
+// `q LEFT JOIN r ON q.id=r.id AND r.rx>5` keeps the LEFT join while pushing
+// `rx>5` into r's scan, yet q's unmatched rows must survive with NULL r. Treating
+// that scan filter as null-rejection would rewrite to INNER and drop rows. The
+// flag exists so the effect can be benchmarked, not because it is correct.
+static bool ScanFilterSimplifyEnabled() {
+	const char *p = std::getenv("DUCKDB_OY_SIMPLIFY_SCAN_FILTERS");
+	return p && p[0] != '\0' && !(p[0] == '0' && p[1] == '\0');
+}
+
+// Does a pushed-down table filter reject NULL on its column? Recognition mirrors
+// FilterRejectsNulls but over the TableFilter representation. Conservative:
+// anything not provably NULL-rejecting returns false.
+static bool TableFilterRejectsNulls(const TableFilter &filter) {
+	switch (filter.filter_type) {
+	case TableFilterType::CONSTANT_COMPARISON: // x <op> C — NULL x fails
+	case TableFilterType::IS_NOT_NULL:
+	case TableFilterType::IN_FILTER: // x IN (...) — NULL x yields NULL
+		return true;
+	case TableFilterType::CONJUNCTION_AND: {
+		auto &c = filter.Cast<ConjunctionAndFilter>();
+		for (auto &child : c.child_filters) {
+			if (TableFilterRejectsNulls(*child)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	case TableFilterType::CONJUNCTION_OR: {
+		auto &c = filter.Cast<ConjunctionOrFilter>();
+		if (c.child_filters.empty()) {
+			return false;
+		}
+		for (auto &child : c.child_filters) {
+			if (!TableFilterRejectsNulls(*child)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	default:
+		// IS_NULL, OPTIONAL_FILTER, DYNAMIC/BLOOM/PERFECT_HASH/PREFIX_RANGE,
+		// EXPRESSION_FILTER, STRUCT_EXTRACT — not provably NULL-rejecting.
+		return false;
+	}
+}
 
 // NOTE: Implementation strategy
 // -----------------------------
@@ -70,6 +129,28 @@ void Simplification::Apply(OuterYanTree &tree) {
 		}
 	}
 
+	// Experimental (env-gated, OFF by default): also seed from predicates that
+	// filter-pushdown folded into table scans. UNSOUND in general — see
+	// ScanFilterSimplifyEnabled. Provided so the effect can be benchmarked.
+	if (ScanFilterSimplifyEnabled()) {
+		for (auto *rel : tree.ot_relations_by_id) {
+			if (!rel) {
+				continue;
+			}
+			const LogicalOperator *base = FindBaseOp(rel->origin);
+			if (!base || base->type != LogicalOperatorType::LOGICAL_GET) {
+				continue;
+			}
+			auto &get = base->Cast<LogicalGet>();
+			for (const auto &entry : get.table_filters) {
+				if (TableFilterRejectsNulls(entry.Filter())) {
+					null_rej.insert(rel->relation_id);
+					break;
+				}
+			}
+		}
+	}
+
 	VisitNode(tree, tree.OT().Root(), std::move(null_rej));
 
 	// Done after the single top-down VisitNode walk so it captures the final
@@ -91,19 +172,70 @@ const unordered_set<idx_t> &Simplification::ComputeSubtreeRelations(OTNode &node
 }
 
 bool Simplification::FilterRejectsNulls(const Expression &expr) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
-	    expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NOT_NULL) {
-		return true;
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_OPERATOR: {
+		const auto t = expr.GetExpressionType();
+		if (t == ExpressionType::OPERATOR_IS_NOT_NULL) {
+			return true;
+		}
+		// `x IN (...)` / `x NOT IN (...)`: a NULL `x` yields NULL, so the row is
+		// rejected. Require `x` to be a direct column ref (mirrors DuckDB's
+		// HandleExpression discipline — keeps it sound for e.g. coalesce(x,0) IN …).
+		if (t == ExpressionType::COMPARE_IN || t == ExpressionType::COMPARE_NOT_IN) {
+			auto &op = expr.Cast<BoundOperatorExpression>();
+			return !op.children.empty() &&
+			       op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+		}
+		return false;
 	}
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-		const auto cmp_type = expr.GetExpressionType();
-		if (cmp_type == ExpressionType::COMPARE_DISTINCT_FROM ||
-		    cmp_type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+	case ExpressionClass::BOUND_COMPARISON: {
+		const auto t = expr.GetExpressionType();
+		// NULL-tolerant comparisons (`IS [NOT] DISTINCT FROM`) do not reject NULL.
+		return t != ExpressionType::COMPARE_DISTINCT_FROM && t != ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+	}
+	case ExpressionClass::BOUND_FUNCTION: {
+		// A NULL-propagating scalar function used as a boolean filter (LIKE `~~`,
+		// NOT LIKE, GLOB, …) rejects NULL on a column it takes directly: NULL in ⇒
+		// NULL out ⇒ row rejected. coalesce/ifnull use SPECIAL null handling and
+		// are excluded; requiring a direct column-ref argument keeps it sound when
+		// the column is buried under a non-propagating sub-expression.
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (func.function.GetNullHandling() != FunctionNullHandling::DEFAULT_NULL_HANDLING) {
 			return false;
+		}
+		for (auto &child : func.children) {
+			if (child->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				return true;
+			}
+		}
+		return false;
+	}
+	case ExpressionClass::BOUND_CONJUNCTION: {
+		auto &conj = expr.Cast<BoundConjunctionExpression>();
+		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+			// AND rejects NULL if ANY conjunct does.
+			for (auto &child : conj.children) {
+				if (FilterRejectsNulls(*child)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		// CONJUNCTION_OR: rejects NULL only if EVERY disjunct does — otherwise a
+		// non-rejecting branch could be TRUE for the all-NULL tuple.
+		if (conj.children.empty()) {
+			return false;
+		}
+		for (auto &child : conj.children) {
+			if (!FilterRejectsNulls(*child)) {
+				return false;
+			}
 		}
 		return true;
 	}
-	return false;
+	default:
+		return false;
+	}
 }
 
 bool Simplification::SubtreeIntersectsNullRejection(OTNode &node,

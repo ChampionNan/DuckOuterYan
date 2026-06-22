@@ -3,6 +3,16 @@
 #==============================================================================#
 
 #==============================================================================#
+# iCloud Drive conflict copies. When the repo lives under an iCloud-synced
+# folder (e.g. ~/Desktop), iCloud creates duplicate files like "name 2.sql"
+# whenever a file is edited in two places. These must never be committed or
+# they pollute the query corpus (the experiment globs *.sql). Best fix is to
+# move the repo OFF ~/Desktop / disable iCloud Desktop sync; this is a guard.
+#==============================================================================#
+* [0-9].*
+* [0-9][0-9].*
+
+#==============================================================================#
 # File extensions to be ignored anywhere in the tree.
 #==============================================================================#
 

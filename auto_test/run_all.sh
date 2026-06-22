@@ -7,13 +7,13 @@
 #
 # What it does:
 #   1. Compile DuckDB release with required extensions (tpch, tpcds, httpfs)
-#   2. Build all databases (graph, tpch SF=50, tpcds SF=50, job via httpfs)
+#   2. Build all databases (graph, tpch SF=100, tpcds SF=100, job via httpfs)
 #   3. Run the full on/off experiment (correctness + dual-thread timing)
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
-#   TPCH_SF          TPC-H scale factor (default 50)
-#   TPCDS_SF         TPC-DS scale factor (default 50)
+#   TPCH_SF          TPC-H scale factor (default 100)
+#   TPCDS_SF         TPC-DS scale factor (default 100)
 #   OY_THREADS       Multi-thread count (default 72)
 #   OY_RUNS          Timed iterations per config (default 10, median taken)
 #   JOBS             Make parallelism (default: nproc)

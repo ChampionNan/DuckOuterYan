@@ -4,4 +4,4 @@ FROM lineitem
     RIGHT OUTER JOIN part ON l_partkey = p_partkey
     FULL OUTER JOIN supplier ON l_suppkey = s_suppkey
     LEFT OUTER JOIN nation ON s_nationkey = n_nationkey
-WHERE p_partkey > 0 AND p_partkey < 10000;
+WHERE l_quantity % 7 <> 0;

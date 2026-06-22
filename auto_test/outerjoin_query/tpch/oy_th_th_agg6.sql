@@ -1,6 +1,6 @@
-SELECT p_size, COUNT(*) AS cnt, AVG(l_discount) AS avg_disc
-FROM part
-    LEFT OUTER JOIN lineitem ON p_partkey = l_partkey
-    RIGHT OUTER JOIN orders ON l_orderkey = o_orderkey
-WHERE l_orderkey IN (2, 4, 6, 8, 10, 12, 14)
-GROUP BY p_size;
+SELECT s_nationkey, MIN(ps_supplycost) AS lo_val
+FROM nation
+    RIGHT OUTER JOIN supplier ON n_nationkey = s_nationkey
+    LEFT OUTER JOIN partsupp ON s_suppkey = ps_suppkey
+WHERE ps_availqty > 500
+GROUP BY s_nationkey;

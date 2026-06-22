@@ -1,6 +1,6 @@
-SELECT n_name, SUM(l_quantity) AS total_qty, AVG(l_extendedprice) AS avg_price
-FROM nation
-    FULL OUTER JOIN supplier ON n_nationkey = s_nationkey
-    FULL OUTER JOIN lineitem ON s_suppkey = l_suppkey
-WHERE l_orderkey >= 10
-GROUP BY n_name;
+SELECT o_orderpriority, MIN(l_extendedprice) AS lo_val
+FROM customer
+    FULL OUTER JOIN orders ON c_custkey = o_custkey
+    LEFT OUTER JOIN lineitem ON o_orderkey = l_orderkey
+WHERE o_orderkey <= 1000
+GROUP BY o_orderpriority;

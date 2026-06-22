@@ -1,6 +1,6 @@
-SELECT i_category, AVG(ss_sales_price) AS avg_price
+SELECT ca_state, SUM(ss_net_profit) AS total_val
 FROM store_sales
-    RIGHT OUTER JOIN item ON ss_item_sk = i_item_sk
-    RIGHT OUTER JOIN store ON ss_store_sk = s_store_sk
-WHERE cs_sales_price > 0 AND cs_sales_price < 10000
-GROUP BY i_category;
+    RIGHT OUTER JOIN customer ON ss_customer_sk = c_customer_sk
+    FULL OUTER JOIN customer_address ON c_current_addr_sk = ca_address_sk
+WHERE ss_quantity < 50000
+GROUP BY ca_state;

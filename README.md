@@ -64,6 +64,14 @@ bash auto_test/experiment_onoff.sh
 # Run only TPC-H family:
 bash auto_test/experiment_onoff.sh --only tpch
 
+# Run a SINGLE query by label (--pattern is a glob over the query label, which is
+# the .sql file name without extension, under auto_test/outerjoin_query/<family>/):
+bash auto_test/experiment_onoff.sh --only tpch --pattern 'oy_th_th_branch5a_v2'
+
+# --pattern accepts wildcards, so it can also select a subset:
+bash auto_test/experiment_onoff.sh --only graph   --pattern 'star_N4_*'   # all star N=4
+bash auto_test/experiment_onoff.sh --only job     --pattern '*_agg?'      # the agg variants
+
 # Run graph family with wiki dataset (28.5M edges):
 GRAPH_DATASET=wiki bash auto_test/experiment_onoff.sh --only graph
 
@@ -85,6 +93,83 @@ bash auto_test/trace_outer_yan.sh --db graph_db \
   -o, --out FILE      output file
 ```
 
+### Output format (experiment_onoff.sh)
+
+Results stream to two files under `auto_test/results/` (override with `-o`):
+
+- `experiment_onoff_<timestamp>.txt` — the human-readable table below.
+- `experiment_onoff_<timestamp>.csv` — the same data, one row per query, for plotting.
+
+Each query produces one row. `T1` is single-thread (`threads=1`); `TM` is
+multi-thread (`threads=$OY_THREADS`). Times are the median (seconds) of `--runs`
+timed iterations; a speed-up is `off / on`, so **> 1.0 means OuterYan ON is faster**.
+
+```
+query                              reord? kernel  correct   note          T1:off     T1:on  T1:spd    TM:off     TM:on  TM:spd
+----------------------------------------------------------------------
+line_N3_mixB_s80                   No    bitmap  TRUE      OK            0.0123    0.0150   0.820    0.0044    0.0051   0.863
+oy_jb_jb_bushy4a_v0                Yes   mixed   TRUE      OK            0.2100    0.0900   2.333    0.0700    0.0310   2.258
+star_N4_mixA_s33                   No    hash    FALSE     NOT-EQUIV          -         -       -         -         -       -
+```
+
+| column | meaning |
+|---|---|
+| `query`   | query label (the `.sql` file name) |
+| `reord?`  | did OuterYan change the join order vs OFF? `Yes` / `No` |
+| `kernel`  | semi-join filter kernel OuterYan ran: `bitmap`, `hash`, `mixed` (both), or `-` (no SJ filter fired) |
+| `correct` | `TRUE` iff the ON result multiset equals the OFF result (correctness gate) |
+| `note`    | `OK` / `NOT-EQUIV` / `TIMEOUT` / `ERROR` — only `OK` queries are timed |
+| `T1:off T1:on T1:spd` | single-thread off time, on time, speed-up (`off/on`) |
+| `TM:off TM:on TM:spd` | multi-thread off time, on time, speed-up (`off/on`) |
+
+The `kernel` column comes from the in-binary `DUCKDB_SJ_KERNEL_TRACE` diagnostic:
+when that env var is set, each finalized semi-join filter prints
+`[SJ_KERNEL] BITMAP` or `[SJ_KERNEL] HASH reason=<force_hash|budget0|ineligible|overflow>`
+to stderr. The harness sets it for one classification run per query; the CSV's
+`kernel_detail` carries the raw per-query counts as `b<N>h<M>`. The default kernel
+is the dense **bitmap** for single-column INTEGER/BIGINT/UINTEGER/DATE keys; it
+falls back to **hash** when the key is not bitmap-eligible (`ineligible`), the
+bitmap byte budget is exceeded (`overflow`), or the budget is set to 0 (`budget0`,
+via `SET VARIABLE outer_yan_bitmap_max_bytes = 0`).
+
+The run ends with a summary:
+
+```
+queries=42  correct=40  incorrect/skipped=2  timed=40
+kernel (correct queries): bitmap=31  hash=5  mixed=4
+threads: single=1, multi=8
+  No  (no reorder): n=18  mean speed-up(TM)=0.94   [expect <=1.0 — SJ overhead, no reorder]
+  Yes (reorder):   n=22  mean speed-up(TM)=1.71   [may be >1.0 — reorder/reduction win]
+```
+
+### Option gates / tunables
+
+All OuterYan behavior is controlled by these gates. Env vars are read in-process
+(set them before launching `duckdb`, or `export` them in a harness like
+`experiment_onoff.sh`); `SET VARIABLE` gates are per-session SQL.
+
+**Environment variables**
+
+| Gate | Values | Default | Effect |
+|------|--------|---------|--------|
+| `DUCKDB_OYTRACE` | a file path | unset | Dump every OuterYan pipeline stage (OT, simplify, semi-join pairs, DP order, OJT) to the file. |
+| `DUCKDB_SJ_KERNEL_TRACE` | `1` | unset | Print `[SJ_KERNEL] BITMAP` / `[SJ_KERNEL] HASH reason=…` per finalized semi-join filter to stderr. |
+| `DUCKDB_OY_SIMPLIFY_SCAN_FILTERS` | `1` / `0` | off | **Experimental, unsound — measurement only.** Also derive outer→inner null-rejection from predicates folded into `LogicalGet::table_filters`. A scan filter is applied *pre-join*, so it does not null-reject the join output (`q LEFT JOIN r ON q.id=r.id AND r.rx>5` keeps the LEFT join with `rx>5` in r's scan). Safe in practice only because the applicability gate rejects unary ON-clause predicates and all test queries put filters in `WHERE`; do not rely on it. |
+
+**`SET VARIABLE` (per session)**
+
+| Variable | Type | Default | Effect |
+|----------|------|---------|--------|
+| `outer_yan_stats_prefilter` | boolean | `false` | Use base-table min/max stats to skip the bitmap `TryBuild` scan when the implied bitmap would exceed the byte budget. |
+| `outer_yan_bitmap_max_bytes` | integer | `16777216` (16 MiB) | Semi-join bitmap byte budget. `0` forces the hash kernel for every filter. |
+| `outer_yan_hash_fn` | `'murmur'` \| `'duckdb'` | `'duckdb'` | Hash function used by the hash semi-join kernel. |
+
+**PRAGMA**
+
+| Pragma | Effect |
+|--------|--------|
+| `PRAGMA disabled_optimizers='outer_yan';` | Disable the whole OuterYan optimizer (falls back to the native join-order optimizer). Individual passes can be disabled too: `outer_yan_pre`, `outer_yan_dp`, `outer_yan_post`. |
+
 ### Complete Workflow (New Machine)
 
 ```bash
@@ -104,8 +189,8 @@ BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 GEN=ninja make release
 # Build databases (auto-rebuilds binary if extensions are missing)
 bash auto_test/build_db.sh all
 #   graph_db  — SNAP bitcoin (default), ~24K edges → R1..R10
-#   tpch_db   — TPC-H SF=50 via CALL dbgen(sf=50)
-#   tpcds_db  — TPC-DS SF=50 via CALL dsdgen(sf=50)
+#   tpch_db   — TPC-H SF=100 via CALL dbgen(sf=100)
+#   tpcds_db  — TPC-DS SF=100 via CALL dsdgen(sf=100)
 #   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
 
 # Run experiment (correctness + dual-thread timing, median of 10 runs)

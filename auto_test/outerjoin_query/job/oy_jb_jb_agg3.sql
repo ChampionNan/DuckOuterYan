@@ -1,6 +1,6 @@
-SELECT cn.country_code, COUNT(*) AS cnt
+SELECT ci.role_id, MAX(t.production_year) AS hi_val
 FROM title t
-    RIGHT OUTER JOIN movie_info mi ON t.id = mi.movie_id
-    LEFT OUTER JOIN info_type it ON mi.info_type_id = it.id
-WHERE mc.company_id % 2 = 1
-GROUP BY cn.country_code;
+    RIGHT OUTER JOIN cast_info ci ON t.id = ci.movie_id
+    LEFT OUTER JOIN name n ON ci.person_id = n.id
+WHERE ci.person_id BETWEEN 50 AND 5000
+GROUP BY ci.role_id;

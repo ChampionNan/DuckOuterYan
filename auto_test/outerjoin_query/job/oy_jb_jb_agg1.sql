@@ -1,5 +1,6 @@
-SELECT COUNT(*) AS total_rows, MIN(t.production_year) AS min_year, MAX(t.production_year) AS max_year
+SELECT ci.role_id, SUM(t.production_year) AS total_val
 FROM title t
-    FULL OUTER JOIN movie_companies mc ON t.id = mc.movie_id
-    FULL OUTER JOIN company_name cn ON mc.company_id = cn.id
-WHERE t.id IN (2, 4, 6, 8, 10, 12, 14);
+    FULL OUTER JOIN cast_info ci ON t.id = ci.movie_id
+    FULL OUTER JOIN name n ON ci.person_id = n.id
+WHERE ci.person_id >= 10
+GROUP BY ci.role_id;
