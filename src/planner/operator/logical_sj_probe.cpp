@@ -31,7 +31,7 @@ unique_ptr<LogicalOperator> LogicalSJProbe::Copy(ClientContext &context) const {
 		copy->children.push_back(child->Copy(context));
 	}
 	copy->types = types;
-	return copy;
+	return std::move(copy);
 }
 
 unique_ptr<LogicalOperator> LogicalSJProbe::Deserialize(Deserializer &deserializer) {
@@ -46,7 +46,7 @@ unique_ptr<LogicalOperator> LogicalSJProbe::Deserialize(Deserializer &deserializ
 	auto result = make_uniq<LogicalSJProbe>(std::move(filters));
 	result->probe_col_ids_per_filter = std::move(probe_col_ids);
 	result->filter_ids = std::move(filter_ids);
-	return result;
+	return std::move(result);
 }
 
 idx_t LogicalSJProbe::EstimateCardinality(ClientContext &context) {

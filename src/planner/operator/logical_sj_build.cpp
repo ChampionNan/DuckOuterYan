@@ -40,7 +40,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
 		copy->children.push_back(child->Copy(context));
 	}
 	copy->types = types;
-	return copy;
+	return std::move(copy);
 }
 
 unique_ptr<LogicalOperator> LogicalSJBuild::Deserialize(Deserializer &deserializer) {
@@ -55,7 +55,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Deserialize(Deserializer &deserializ
 	auto result = make_uniq<LogicalSJBuild>(std::move(filters));
 	result->build_col_ids_per_filter = std::move(build_col_ids);
 	result->filter_ids = std::move(filter_ids);
-	return result;
+	return std::move(result);
 }
 
 idx_t LogicalSJBuild::EstimateCardinality(ClientContext &context) {

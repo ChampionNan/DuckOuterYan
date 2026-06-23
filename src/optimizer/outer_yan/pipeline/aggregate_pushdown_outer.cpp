@@ -259,7 +259,7 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 		auto distinct = make_uniq<LogicalDistinct>(std::move(distinct_targets), DistinctType::DISTINCT);
 		distinct->AddChild(std::move(child_node));
 		distinct->ResolveOperatorTypes();
-		return distinct;
+		return std::move(distinct);
 	}
 
 	// Position of any pre-existing "annot"-aliased column from a deeper
@@ -415,7 +415,7 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(proj_expressions));
 	projection->AddChild(std::move(aggregate));
 	projection->ResolveOperatorTypes();
-	return projection;
+	return std::move(projection);
 }
 
 unique_ptr<LogicalOperator>
@@ -477,7 +477,7 @@ AggregatePushdownRewriter::AddProjectionWithAnnot(unique_ptr<LogicalOperator> op
 	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(proj_expressions));
 	projection->AddChild(std::move(op));
 	projection->ResolveOperatorTypes();
-	return projection;
+	return std::move(projection);
 }
 
 void AggregatePushdownRewriter::UpdateJoinConditions(LogicalComparisonJoin &join) {

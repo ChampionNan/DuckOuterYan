@@ -925,7 +925,7 @@ unique_ptr<LogicalOperator> OuterYanTree::BuildJoinFromEdge(const OJTEdge &edge,
 	new_join->children.push_back(std::move(parent_plan));
 	new_join->children.push_back(std::move(child_plan));
 	new_join->ResolveOperatorTypes();
-	return new_join;
+	return std::move(new_join);
 }
 
 unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &context) {
