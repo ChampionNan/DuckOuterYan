@@ -20,7 +20,9 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       timed iterations per config (default 5; median taken)
-#   -t,--timeout S    per-query timeout sec (default 300; via `timeout`).
+#   -t,--timeout S    per-query timeout sec (default 300; via `timeout`). The
+#                     timing batch runs N+1 executions (1 warm-up + N timed) in one
+#                     process, so its budget is (N+1)×S; the 1-run gate uses S.
 #                     Timed-out queries are retried once at S×OY_TIMEOUT_RETRY_MULT.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
 #                     (default all); bench = tpch+tpcds+job
@@ -173,36 +175,54 @@ oy_equiv_check() {
 }
 
 # --- timing -----------------------------------------------------------------
-# oy_time_median: run query K times (after 2 warm-up runs), return median time.
-# Output: "median_time iteration_count"
+# oy_time_median: run ONE warm-up followed by $runs timed executions, all with the
+# timer on, and return the median over the TIMED runs (the warm-up is NOT counted,
+# so total executions = $runs + 1). DuckDB flushes each run's "Run Time" line as
+# the statement finishes, so if the per-query timeout kills the batch part-way the
+# timed runs that already completed are still captured and we report the median
+# over THOSE. If the kill lands before any timed run finishes, we fall back to the
+# warm-up time so a result is still produced; NA is emitted ONLY when not a single
+# run completed within the timeout.
+# Output: "median_time runs_used"  (runs_used = how many TIMED runs the median spans)
 : "${OY_RUNS:=10}"
 
 oy_time_median() {
     local db="$1" set_sql="$2" query="$3" runs="$4" threads="$5"
     local script i
     script="PRAGMA threads=${threads};"$'\n'"${set_sql}"$'\n'
-    # 2 warm-up runs (timer off)
-    script+="${query%;};"$'\n'
-    script+="${query%;};"$'\n'
-    # timed runs
+    # 1 warm-up run + $runs timed runs (timer on for all). The warm-up primes the
+    # buffer pool and is excluded from the median; timing it too means a killed
+    # batch still has a fallback measurement instead of NA.
     script+=".timer on"$'\n'
+    script+="${query%;};"$'\n'                                   # warm-up (not counted)
     for ((i=0; i<runs; i++)); do script+="${query%;};"$'\n'; done
     local times sqlf rawf
     sqlf=$(mktemp); rawf=$(mktemp)
     printf '%s' "$script" > "$sqlf"
+    # OY_TIMEOUT_SECS is the PER-QUERY limit. The batch runs $runs+1 executions
+    # (1 warm-up + $runs timed) in one process under a single `timeout`, so scale
+    # the budget to (runs+1) * per-query so every run gets its full limit. When
+    # the global timeout is disabled (OY_TIMEOUT_BIN empty / secs=0) this is moot.
+    local saved_to="$OY_TIMEOUT_SECS"
+    [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ] \
+        && OY_TIMEOUT_SECS=$(( OY_TIMEOUT_SECS * (runs + 1) ))
     oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1
+    OY_TIMEOUT_SECS="$saved_to"
+    # Run Times in EXECUTION order; the first entry is the warm-up.
     times="$(awk '/Run Time/{for(i=1;i<=NF;i++) if($i=="real") print $(i+1)}' "$rawf")"
     rm -f "$sqlf" "$rawf"
     [ -z "$times" ] && { echo "NA 0"; return; }
-    # compute median using sort + awk
-    echo "$times" | sort -n | awk -v K="$runs" '
-        { a[NR]=$1 }
+    # Median over the timed runs (drop the warm-up); fall back to the warm-up only
+    # if it is the lone run that completed, so a number is always reported.
+    echo "$times" | awk '
+        { t[NR]=$1 }
         END {
-            if(NR==0){ printf "NA 0"; exit }
-            mid=int((NR+1)/2)
-            if(NR%2==1) med=a[mid]
-            else med=(a[NR/2]+a[NR/2+1])/2
-            printf "%.4f %d", med, NR
+            n=NR
+            lo=(n>1)?2:1                          # skip the warm-up when a timed run survived
+            m=0; for(k=lo;k<=n;k++) a[++m]=t[k]   # timed set, still in run order
+            for(i=1;i<=m;i++) for(j=i+1;j<=m;j++) if(a[j]<a[i]){x=a[i];a[i]=a[j];a[j]=x}
+            if(m%2==1) med=a[(m+1)/2]; else med=(a[m/2]+a[m/2+1])/2
+            printf "%.4f %d", med, m
         }'
 }
 
@@ -361,8 +381,8 @@ CSV_OUT="${OUT%.txt}.csv"
     echo "# binary : $DUCKDB_BIN"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# tables : $SIZES"
-    echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (2 warm-up + ${RUNS} timed)"
-    echo "# timeout: ${OY_TIMEOUT_SECS}s/process; timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
+    echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
+    echo "# timeout: ${OY_TIMEOUT_SECS}s/query → timing batch gets $(( OY_TIMEOUT_SECS * (RUNS + 1) ))s ((RUNS+1)×); timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
     echo
     echo "===================== LIVE PER-QUERY RESULTS =========================="
