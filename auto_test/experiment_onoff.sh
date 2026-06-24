@@ -145,6 +145,10 @@ oy_duck() {
 # --- the correctness atom ---------------------------------------------------
 # Runs the SAME query with OuterYan OFF and ON against <db>, compares both
 # result sets (multiset + order-independent) via ORDER BY ALL inside DuckDB.
+# This is the hard PRE-CONDITION run before any timing: a query that is not
+# verified here (mismatch / error / timeout) is NOT timed. It runs in PARALLEL
+# (threads=OY_THREADS) so it returns fast, and gets 2x the per-query timeout
+# because it also sorts the entire result (ORDER BY ALL) for the multiset compare.
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
     local db="$1" label="$2" query="$3"
@@ -152,14 +156,21 @@ oy_equiv_check() {
     off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); sql=$(mktemp)
 
     local sorted_q="SELECT * FROM (${query%;}) _oy_sub ORDER BY ALL;"
+    local prag="PRAGMA threads=${OY_THREADS};"
+    # gate timeout = 2 x per-query limit (only while the timeout is enabled)
+    local saved_to="$OY_TIMEOUT_SECS" gate_to="$OY_TIMEOUT_SECS"
+    if [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ]; then
+        gate_to=$(( OY_TIMEOUT_SECS * 2 )); OY_TIMEOUT_SECS="$gate_to"
+    fi
 
-    printf '%s\n%s\n' "$OY_OFF" "$sorted_q" > "$sql"
+    printf '%s\n%s\n%s\n' "$prag" "$OY_OFF" "$sorted_q" > "$sql"
     oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; roff=$?
-    printf '%s\n%s\n' "$OY_ON"  "$sorted_q" > "$sql"
+    printf '%s\n%s\n%s\n' "$prag" "$OY_ON"  "$sorted_q" > "$sql"
     oy_duck "$db" -csv -noheader < "$sql" > "$on"  2>"$eon";  ron=$?
+    OY_TIMEOUT_SECS="$saved_to"
 
     if [ "${roff:-0}" -eq 124 ] || [ "${ron:-0}" -eq 124 ]; then
-        echo "  TIMEOUT (${OY_TIMEOUT_SECS}s): $label"; rc=3
+        echo "  TIMEOUT (${gate_to}s): $label"; rc=3
     elif grep -qE 'Error:' "$eoff"; then
         echo "  ERROR (off): $label"; grep -E 'Error:' "$eoff" | head -1 | sed 's/^/        /'; rc=2
     elif grep -qE 'Error:' "$eon"; then
@@ -382,7 +393,7 @@ CSV_OUT="${OUT%.txt}.csv"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# tables : $SIZES"
     echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
-    echo "# timeout: ${OY_TIMEOUT_SECS}s/query → timing batch gets $(( OY_TIMEOUT_SECS * (RUNS + 1) ))s ((RUNS+1)×); timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
+    echo "# timeout: ${OY_TIMEOUT_SECS}s/query → correctness gate gets $(( OY_TIMEOUT_SECS * 2 ))s (2×, parallel threads=${OY_THREADS}), timing batch gets $(( OY_TIMEOUT_SECS * (RUNS + 1) ))s ((RUNS+1)×); timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
     echo
     echo "===================== LIVE PER-QUERY RESULTS =========================="
