@@ -1213,12 +1213,18 @@ JOB_BUSHY_TEMPLATES = [
      "{2} (( movie_companies mc {3} company_name cn ON mc.company_id = cn.id) "
      "{4} company_type ct ON mc.company_type_id = ct.id) "
      "ON t.id = mc.movie_id)"),
+    # NOTE: kind_type is a dimension of title (title.kind_id -> kind_type.id), so
+    # it can only be joined where `title` is in scope. The join keys therefore
+    # attach kt at the TOP of the tree (over the t.id=mi.movie_id join, whose left
+    # input contains title) rather than inside the movie_info branch — joining
+    # `kt ON t.kind_id=kt.id` inside that branch references `t` across the branch
+    # boundary, which DuckDB rejects ("Non-inner join on correlated columns").
     ("jb_bushy6b", 5,
-     "((( title t {0} movie_keyword mk ON t.id = mk.movie_id) "
+     "(((( title t {0} movie_keyword mk ON t.id = mk.movie_id) "
      "{1} keyword k ON mk.keyword_id = k.id) "
-     "{2} (( movie_info mi {3} info_type it ON mi.info_type_id = it.id) "
-     "{4} kind_type kt ON t.kind_id = kt.id) "
-     "ON t.id = mi.movie_id)"),
+     "{2} ( movie_info mi {3} info_type it ON mi.info_type_id = it.id) "
+     "ON t.id = mi.movie_id) "
+     "{4} kind_type kt ON t.kind_id = kt.id)"),
     ("jb_bushy7", 6,
      "(((( title t {0} cast_info ci ON t.id = ci.movie_id) "
      "{1} name n ON ci.person_id = n.id) "

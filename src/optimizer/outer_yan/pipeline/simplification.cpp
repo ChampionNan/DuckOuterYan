@@ -2,6 +2,7 @@
 
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -192,6 +193,18 @@ bool Simplification::FilterRejectsNulls(const Expression &expr) {
 		const auto t = expr.GetExpressionType();
 		// NULL-tolerant comparisons (`IS [NOT] DISTINCT FROM`) do not reject NULL.
 		return t != ExpressionType::COMPARE_DISTINCT_FROM && t != ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+	}
+	case ExpressionClass::BOUND_BETWEEN: {
+		// `input BETWEEN lo AND hi` ≡ `input >= lo AND input <= hi`: a NULL `input`
+		// yields NULL ⇒ the row is rejected. DuckDB's optimizer normalises a
+		// `col >= a AND col <= b` WHERE clause into a single BoundBetweenExpression,
+		// so without this case the null-rejection (and the outer→inner collapse it
+		// licenses) is silently lost. Require `input` to be a direct column ref
+		// (mirrors the IN discipline) so a non-NULL-propagating wrapper such as
+		// `coalesce(x,0) BETWEEN …` is not mistaken for null-rejecting.
+		auto &bet = expr.Cast<BoundBetweenExpression>();
+		return bet.input &&
+		       bet.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
 	}
 	case ExpressionClass::BOUND_FUNCTION: {
 		// A NULL-propagating scalar function used as a boolean filter (LIKE `~~`,
