@@ -29,7 +29,7 @@ public:
 	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_SJ_PROBE;
 
 public:
-	explicit LogicalSJProbe(vector<shared_ptr<SemiJoinFilter>> sj_to_use);
+	explicit LogicalSJProbe(vector<shared_ptr<SemiJoinFilter>> sj_to_use, bool top_down = false);
 
 	//! Filters this operator probes against. Same shared_ptr instances are
 	//! populated by the paired LogicalSJBuild operators.
@@ -52,6 +52,7 @@ public:
 	//! `related_sj_build` after the plan is built. Authoritative over the
 	//! `related_sj_build` raw pointers, which copy/serialize do not preserve.
 	vector<idx_t> filter_ids;
+	bool top_down;
 
 public:
 	void Serialize(Serializer &serializer) const override;

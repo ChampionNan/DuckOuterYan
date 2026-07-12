@@ -61,7 +61,8 @@ PhysicalSJBuild *PhysicalPlanGenerator::CreatePlanFromRelated(LogicalSJBuild &op
 		filters.push_back(GetOrCreateSJFilter(id));
 	}
 	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(filters),
-	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
+	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality,
+	                                       op.top_down);
 	auto &typed = sj_build.Cast<PhysicalSJBuild>();
 	sj_build.children.push_back(child_plan);
 	for (auto id : op.filter_ids) {
@@ -88,7 +89,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalSJBuild &op) {
 		filters.push_back(GetOrCreateSJFilter(id));
 	}
 	auto &sj_build = Make<PhysicalSJBuild>(child_plan.GetTypes(), std::move(filters),
-	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality);
+	                                       std::move(op.build_col_ids_per_filter), op.estimated_cardinality,
+	                                       op.top_down);
 	auto &typed = sj_build.Cast<PhysicalSJBuild>();
 	op.physical = &typed;
 	sj_build.children.push_back(child_plan);

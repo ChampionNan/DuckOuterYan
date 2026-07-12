@@ -33,7 +33,7 @@ public:
 	PhysicalSJProbe(PhysicalPlan &physical_plan, vector<LogicalType> types,
 	                vector<shared_ptr<SemiJoinFilter>> sj_to_use,
 	                vector<vector<idx_t>> probe_col_ids_per_filter,
-	                idx_t estimated_cardinality);
+	                idx_t estimated_cardinality, bool top_down);
 
 	//! Shared filters this operator probes against. Same shared_ptr instances
 	//! are populated by the paired PhysicalSJBuild operators tracked in
@@ -55,8 +55,11 @@ public:
 	//! LogicalSJProbe. Used only during plan generation to resolve shared filters
 	//! and the related builds; not consulted at execution.
 	vector<idx_t> filter_ids;
+	bool top_down;
 
 public:
+	string GetName() const override;
+
 	// Operator interface
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
 

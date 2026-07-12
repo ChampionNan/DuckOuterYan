@@ -53,7 +53,7 @@
 namespace duckdb {
 
 // Per-session budget knob. Set via:
-//   SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+//   SET VARIABLE outer_yan_bitmap_max_bytes = 17179869184;
 // Read from ClientConfig::user_variables (DuckDB's case-insensitive map
 // populated by SET VARIABLE) rather than registering a global
 // ConfigurationOption — the latter would require touching generated
@@ -77,9 +77,8 @@ idx_t PhysicalSJBuild::GetBitmapBudget(ClientContext &context) {
 }
 
 // Per-session selector for the HashFilter hash function used when a filter
-// falls back from KeyBitmap. Default MURMUR_HASH2 matches the prior fixed
-// behavior; "duckdb" routes to HashKeyDuckDB (CombineHash) for A/B
-// performance comparison without recompiling.
+// falls back from KeyBitmap. The default routes to HashKeyDuckDB
+// (CombineHash); "murmur" remains available for A/B comparison.
 HashFilter::HashKind PhysicalSJBuild::GetHashKind(ClientContext &context) {
 	auto &cfg = ClientConfig::GetConfig(context);
 	auto it = cfg.user_variables.find(kHashFnVar);
@@ -110,13 +109,17 @@ HashFilter::HashKind PhysicalSJBuild::GetHashKind(ClientContext &context) {
 PhysicalSJBuild::PhysicalSJBuild(PhysicalPlan &physical_plan, vector<LogicalType> types,
                                  vector<shared_ptr<SemiJoinFilter>> sj_to_create_p,
                                  vector<vector<idx_t>> build_col_ids_per_filter_p,
-                                 idx_t estimated_cardinality)
+                                 idx_t estimated_cardinality, bool top_down_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::SJ_BUILD, std::move(types), estimated_cardinality),
       sj_to_create(std::move(sj_to_create_p)),
-      build_col_ids_per_filter(std::move(build_col_ids_per_filter_p)) {
+      build_col_ids_per_filter(std::move(build_col_ids_per_filter_p)), top_down(top_down_p) {
 	if (sj_to_create.size() != build_col_ids_per_filter.size()) {
 		throw InternalException("PhysicalSJBuild: filter / build_col_ids count mismatch");
 	}
+}
+
+string PhysicalSJBuild::GetName() const {
+	return top_down ? "SJ_BUILD_ROUND_2" : "SJ_BUILD_ROUND_1";
 }
 
 // ===========================================================================

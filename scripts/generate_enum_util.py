@@ -17,6 +17,12 @@ blacklist = [
     "ComplexJSONType",
     "UnavailableReason",
     "Slot",
+    # Nested OuterYan enums. The generator only supports top-level enums and
+    # would otherwise emit invalid duckdb::Kind/HashKind specializations.
+    "CellTag",
+    "HashKind",
+    "Kind",
+    "StorageMode",
 ]
 
 enum_util_header_file = os.path.join("..", "src", "include", "duckdb", "common", "enum_util.hpp")

@@ -96,8 +96,9 @@ public:
 	}
 
 	unique_ptr<OperatorTree> Build() {
-		auto root = BuildNode(plan_root, /*depth*/ 0);
-		AssignJoinOrders();
+		auto root = BuildNode(plan_root);
+		tree.ot_joins_by_order.clear();
+		AssignJoinOrders(*root);
 		SetJoinTwoSides();
 		// `tree.table_to_relation` is fully populated only after every RELATION
 		// node has been built; resolve aggregate column bindings into relation
@@ -120,27 +121,21 @@ private:
 
 	idx_t next_relation_id = 0;
 
-	struct JoinAtDepth {
-		OTNode *node;
-		idx_t depth;
-	};
-	vector<JoinAtDepth> joins_with_depth;
-
-	unique_ptr<OTNode> BuildNode(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildNode(LogicalOperator &op) {
 		if (IsBaseRelationSubtree(op)) {
 			return BuildRelationNode(op);
 		}
 		switch (op.type) {
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-			return BuildJoinNode(op, depth);
+			return BuildJoinNode(op);
 		case LogicalOperatorType::LOGICAL_FILTER:
-			return BuildThroughFilter(op, depth);
+			return BuildThroughFilter(op);
 		case LogicalOperatorType::LOGICAL_PROJECTION:
-			return BuildThroughProjection(op, depth);
+			return BuildThroughProjection(op);
 		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
-			return BuildThroughAggregate(op, depth);
+			return BuildThroughAggregate(op);
 		case LogicalOperatorType::LOGICAL_DISTINCT:
-			return BuildThroughDistinct(op, depth);
+			return BuildThroughDistinct(op);
 		default:
 			throw NotImplementedException("LogicalPlanToOT: unsupported operator %s",
 			                              EnumUtil::ToString(op.type));
@@ -160,7 +155,7 @@ private:
 		return node;
 	}
 
-	unique_ptr<OTNode> BuildJoinNode(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildJoinNode(LogicalOperator &op) {
 		if (op.children.size() != 2) {
 			throw NotImplementedException(
 			    "LogicalPlanToOT: LogicalComparisonJoin with %llu children (expected 2)",
@@ -179,17 +174,16 @@ private:
 		}
 		node->info = std::move(info);
 
-		joins_with_depth.push_back({node.get(), depth});
-		node->children[0] = BuildNode(*op.children[0], depth + 1);
-		node->children[1] = BuildNode(*op.children[1], depth + 1);
+		node->children[0] = BuildNode(*op.children[0]);
+		node->children[1] = BuildNode(*op.children[1]);
 		return node;
 	}
 
-	unique_ptr<OTNode> BuildThroughFilter(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildThroughFilter(LogicalOperator &op) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalFilter with %llu children", op.children.size());
 		}
-		auto child_node = BuildNode(*op.children[0], depth);
+		auto child_node = BuildNode(*op.children[0]);
 		auto &filter = op.Cast<LogicalFilter>();
 		for (auto &expr : filter.expressions) {
 			unordered_set<idx_t> refs;
@@ -214,20 +208,20 @@ private:
 	//! with any deeper cap, so the FINAL anchor is the operator directly above
 	//! the skeleton root. `OJTToLogicalPlan` re-attaches the rebuilt skeleton
 	//! into that slot, preserving every cap above it.
-	unique_ptr<OTNode> BuildThroughProjection(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildThroughProjection(LogicalOperator &op) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalProjection with %llu children",
 			                        op.children.size());
 		}
 		tree.root_skeleton_parent = &op;
-		return BuildNode(*op.children[0], depth);
+		return BuildNode(*op.children[0]);
 	}
 
 	//! Peel a root LogicalAggregate, classify it into `tree.root_aggregation`,
 	//! and descend into the join skeleton beneath. The applicability gate
 	//! already rejects aggregates that appear inside the join skeleton, so
 	//! this case fires only on the root chain.
-	unique_ptr<OTNode> BuildThroughAggregate(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildThroughAggregate(LogicalOperator &op) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalAggregate with %llu children",
 			                        op.children.size());
@@ -240,14 +234,14 @@ private:
 		// input projection) overwrites it during recursion, so the skeleton is
 		// re-attached directly beneath whatever sits lowest.
 		tree.root_skeleton_parent = &op;
-		return BuildNode(*op.children[0], depth);
+		return BuildNode(*op.children[0]);
 	}
 
 	//! Peel a root LogicalDistinct, classify it as `SELECT_DISTINCT`, and
 	//! record each child binding as a distinct target in
 	//! `tree.root_aggregation.columns`. Mirrors the reference's
 	//! `StoreDistinctAggregates` (`aggregation_pushdown.cpp:272`).
-	unique_ptr<OTNode> BuildThroughDistinct(LogicalOperator &op, idx_t depth) {
+	unique_ptr<OTNode> BuildThroughDistinct(LogicalOperator &op) {
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalDistinct with %llu children",
 			                        op.children.size());
@@ -272,7 +266,7 @@ private:
 		// DISTINCT is a cap that must survive the roundtrip; record it as the
 		// splice anchor (a deeper projection below it overwrites it).
 		tree.root_skeleton_parent = &op;
-		return BuildNode(*op.children[0], depth);
+		return BuildNode(*op.children[0]);
 	}
 
 	//! Record the root aggregate's type tag and per-expression column info on
@@ -386,23 +380,21 @@ private:
 		}
 	}
 
-	void AssignJoinOrders() {
-		auto sorted = joins_with_depth;
-		std::stable_sort(sorted.begin(), sorted.end(),
-		                 [](const JoinAtDepth &a, const JoinAtDepth &b) {
-			                 return a.depth > b.depth;
-		                 });
-		tree.ot_joins_by_order.clear();
-		tree.ot_joins_by_order.reserve(sorted.size());
-		for (idx_t i = 0; i < sorted.size(); i++) {
-			sorted[i].node->order = i + 1;
-			tree.ot_joins_by_order.push_back(sorted[i].node);
+	// Keep edge order identical to a left-to-right post-order walk of the
+	// logical join tree. Positional consumers such as aggregate pushdown rely
+	// on this exact order, including for bushy trees.
+	void AssignJoinOrders(OTNode &node) {
+		if (node.kind == OTNode::Kind::RELATION) {
+			return;
 		}
+		AssignJoinOrders(*node.children[0]);
+		AssignJoinOrders(*node.children[1]);
+		node.order = tree.ot_joins_by_order.size() + 1;
+		tree.ot_joins_by_order.push_back(&node);
 	}
 
 	void SetJoinTwoSides() {
-		for (auto &entry : joins_with_depth) {
-			auto *node = entry.node;
+		for (auto *node : tree.ot_joins_by_order) {
 			D_ASSERT(node->info);
 			auto &info = *node->info;
 			if (info.conditions.empty()) {

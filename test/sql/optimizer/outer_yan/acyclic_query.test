@@ -42,22 +42,23 @@ statement ok
 pragma explain_output='optimized_only'
 
 # ============================================================================
-# ACCEPTED — should produce SJ_BUILD/SJ_PROBE in EXPLAIN
+# ACCEPTED — OuterYan considers these shapes; SJ operators appear only when DP
+# actually changes the join grouping. No-reorder shapes fall back to DuckDB.
 # ============================================================================
 
 # 3-relation LEFT-LEFT chain — primary accepted shape.
 query III rowsort
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 1	100	1000
 2	200	NULL
 3	300	3000
-4	NULL	4000
+4	NULL	NULL
 
 query II
 EXPLAIN SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
@@ -74,7 +75,7 @@ query II
 EXPLAIN SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id RIGHT JOIN c ON a.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # FULL OUTER somewhere in the chain.
 query III rowsort
@@ -91,7 +92,7 @@ query II
 EXPLAIN SELECT a.id, b.bx, c.cx
 FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # 4-relation chain.
 query IIII rowsort

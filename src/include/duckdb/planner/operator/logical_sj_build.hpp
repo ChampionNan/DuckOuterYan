@@ -34,7 +34,7 @@ public:
 	PhysicalSJBuild *physical = nullptr;
 
 public:
-	explicit LogicalSJBuild(vector<shared_ptr<SemiJoinFilter>> sj_to_create);
+	explicit LogicalSJBuild(vector<shared_ptr<SemiJoinFilter>> sj_to_create, bool top_down = false);
 
 	//! Filters this operator populates. Same shared_ptr instances appear in
 	//! the paired LogicalSJProbe::sj_to_use.
@@ -55,6 +55,9 @@ public:
 	//! per-plan registry so build and probe share one runtime SemiJoinFilter and
 	//! the probe re-derives its build dependency.
 	vector<idx_t> filter_ids;
+	//! False for bottom-up round 1; true for top-down round 2. Operators from
+	//! different rounds never coalesce, so one tag describes the whole node.
+	bool top_down;
 
 public:
 	void Serialize(Serializer &serializer) const override;

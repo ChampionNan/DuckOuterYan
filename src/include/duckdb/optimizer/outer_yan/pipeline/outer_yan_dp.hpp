@@ -27,6 +27,47 @@
 namespace duckdb {
 class ClientContext;
 
+//! Row-work coefficients used by both DP enumeration and scoring of an
+//! already-materialised OT.  The defaults deliberately have DuckDB's cost
+//! shape: child costs plus the estimated output cardinality of this join.
+//! Outer joins split that output into the inner result and the unmatched rows
+//! on each preserved side so callers can tune those components independently.
+struct OuterYanDPCostParameters {
+	double inner_output_weight = 1.0;
+	double unmatched_left_weight = 1.0;
+	double unmatched_right_weight = 1.0;
+
+	//! SJBuild materialises its input, constructs the filter, then replays the
+	//! materialised rows as a source.  The three default unit weights reproduce
+	//! the former `3 * build_cardinality` estimate.
+	double semijoin_materialize_weight = 1.0;
+	double semijoin_filter_build_weight = 1.0;
+	double semijoin_replay_weight = 1.0;
+	//! SJProbe looks up every input key and emits each surviving row.
+	double semijoin_probe_lookup_weight = 1.0;
+	double semijoin_probe_emit_weight = 1.0;
+};
+
+//! Cost information produced alongside the chosen DP tree.  Semi-join work is
+//! fixed for the query and intentionally kept separate from the DP memo; its
+//! weighted contribution is added exactly once by an application-cost gate.
+struct OuterYanDPCostSummary {
+	vector<double> reduced_cardinalities;
+	double round1_build_cost = 0.0;
+	double round1_probe_cost = 0.0;
+	double round2_build_cost = 0.0;
+	double round2_probe_cost = 0.0;
+	double chosen_real_join_cost = 0.0;
+	bool has_complete_plan = false;
+
+	double SemijoinRawCost() const {
+		return round1_build_cost + round1_probe_cost + round2_build_cost + round2_probe_cost;
+	}
+	double CandidateCost(double semijoin_cost_ratio) const {
+		return chosen_real_join_cost + semijoin_cost_ratio * SemijoinRawCost();
+	}
+};
+
 //! OuterYanDP -- second OuterYan pass. Bottom-up DPccp on OT, mirroring
 //! `PlanEnumerator::SolveJoinOrderExactly` ([plan_enumerator.cpp]) with two
 //! deviations:
@@ -49,12 +90,28 @@ class ClientContext;
 //! then called to lift the new OT into `tree.ojt` for OuterYanPost.
 class OuterYanDP {
 public:
-	explicit OuterYanDP(ClientContext &context);
+	using JoinGroupingTableSignature = std::set<vector<idx_t>>;
+
+	explicit OuterYanDP(ClientContext &context,
+	                    OuterYanDPCostParameters cost_parameters = OuterYanDPCostParameters());
 
 	//! Consumes `tree.ot` (built by OuterYanPre), runs bottom-up DPccp, and
 	//! installs the chosen ordering back into `tree.ot` + `tree.ojt`. On
-	//! greedy bail-out the OT is left untouched.
-	void Optimize(OuterYanTree &tree);
+	//! greedy bail-out the OT is left untouched.  Callers may ignore the
+	//! returned cost summary.
+	OuterYanDPCostSummary Optimize(OuterYanTree &tree);
+
+	//! Score the OT currently stored in `tree` without semi-join reduction.
+	//! Relation statistics and edge distinct counts are refreshed exactly as
+	//! they are for DP enumeration, then the actual binary OT is evaluated with
+	//! the same type-aware estimator and cost parameters.
+	double ScoreCurrentJoinTree(OuterYanTree &tree);
+
+	//! Stable structural signature of the current OT.  Each JOIN contributes
+	//! the sorted set of base-table indexes below it; using table indexes rather
+	//! than DP-local relation ids makes signatures comparable across separately
+	//! constructed OuterYanTree instances for copies of the same logical plan.
+	static JoinGroupingTableSignature JoinGroupingSignature(const OuterYanTree &tree);
 
 	//! Switch-to-greedy threshold, identical to DuckDB's DPhyp choice.
 	static constexpr idx_t THRESHOLD_TO_SWAP_TO_APPROXIMATE = 12;
@@ -92,7 +149,12 @@ private:
 
 	// ---- setup ----
 	void BuildLeafRelations(OuterYanTree &tree);
+	void BuildEdgeStatistics(OuterYanTree &tree);
 	void BuildEdgesFromOT(OuterYanTree &tree);
+	//! Estimate both reducer rounds before enumeration. The resulting leaf
+	//! cardinalities feed every real-join candidate. Fixed build/probe work is
+	//! returned separately and never charged to a DP leaf.
+	void BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary);
 	void InitLeafPlans(OuterYanTree &tree);
 	//! Translate `tree.root_relations` (RelationId, the GROUP BY / DISTINCT
 	//! anchor set) into the DP-side `output_relations` (RelationIndex) and
@@ -129,14 +191,30 @@ private:
 	                                      DPJoinNode &left, DPJoinNode &right);
 
 	// ---- cost ----
+	struct JoinEstimate {
+		double inner = 0.0;
+		double unmatched_left = 0.0;
+		double unmatched_right = 0.0;
+		double output = 0.0;
+		double weighted_output_cost = 0.0;
+	};
+	struct JoinTreeEstimate {
+		double cardinality = 0.0;
+		double cost = 0.0;
+	};
+
 	//! Output cardinality of `L_set joinKind R_set` via the OT JOIN's owned
 	//! metadata. Applies the user's outer-join correction formula on top of
 	//! `T_inner = T_L * T_R / D_edge`. Orientation is decided by checking
 	//! which side contains `info.cond_left_relation_id`.
-	double EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &right_set,
-	                       const DPJoinNode &left_plan, const DPJoinNode &right_plan,
-	                       const OTJoin &info);
-	double ComputeCost(const DPJoinNode &left, const DPJoinNode &right, double combined_cardinality);
+	JoinEstimate EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &right_set,
+	                             const DPJoinNode &left_plan, const DPJoinNode &right_plan,
+	                             const OTJoin &info) const;
+	JoinEstimate EstimateJoin(double left_cardinality, double right_cardinality, double left_distinct,
+	                          double right_distinct, OuterYanJoinKind kind) const;
+	double ComputeCost(const DPJoinNode &left, const DPJoinNode &right, const JoinEstimate &estimate) const;
+	JoinTreeEstimate ScoreCurrentJoinTreeNode(const OTNode &node) const;
+	static double ClampPlanCardinality(double cardinality);
 
 	// ---- materialisation ----
 	//! Walk the chosen DP plan rooted at `plans[full_set]`; produce a new OT
@@ -165,12 +243,10 @@ private:
 	static vector<unordered_set<RelationIndex>> GetAllNeighborSets(vector<RelationIndex> neighbors);
 	//! Post-order walk of an OT subtree, appending each JOIN node into `out`.
 	static void RefreshOTJoinsByOrder(OTNode &node, vector<OTNode *> &out);
-	//! Set of every JOIN node's sorted `subtree_relations`. Compared before/
-	//! after `RebuildOT` to detect whether DP restructured the tree (4c).
-	static std::set<vector<idx_t>> JoinGroupingSignature(const vector<OTNode *> &joins);
 
 private:
 	ClientContext &context;
+	OuterYanDPCostParameters cost_parameters;
 	//! Relation-set interner. Mirrors `QueryGraphManager::set_manager`.
 	JoinRelationSetManager set_manager;
 	//! Edge graph. Mirrors `QueryGraphManager::query_graph`.
@@ -190,6 +266,10 @@ private:
 	idx_t pairs = 0;
 	//! Number of base relations on the OT; cached for the enumeration loop.
 	idx_t num_relations = 0;
+	//! Estimated relation sizes after bottom-up then top-down semi-join
+	//! reduction. Reducer work is query-global and returned separately from the
+	//! DP memo in OuterYanDPCostSummary.
+	vector<double> semijoin_cardinality;
 	//! Set if greedy could not connect all relations without a cross product.
 	//! On true, `Optimize` leaves the OT untouched (Path A bail-out).
 	bool bailed_out = false;

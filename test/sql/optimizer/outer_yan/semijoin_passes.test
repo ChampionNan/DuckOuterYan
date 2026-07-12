@@ -40,14 +40,14 @@ PRAGMA explain_output='optimized_only'
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_BUILD.*
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
@@ -59,7 +59,7 @@ logical_opt	<REGEX>:.*SJ_PROBE.*
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
@@ -75,7 +75,8 @@ FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# RIGHT OUTER chain — exercises bottom-up pass primarily.
+# RIGHT OUTER chain — DP retains this small input shape, so the normal DuckDB
+# fallback must contain no semi-join operators.
 # ============================================================================
 
 query II
@@ -83,7 +84,7 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
 # FULL OUTER — neither side is preserved; both passes can still run on
@@ -93,7 +94,7 @@ logical_opt	<REGEX>:.*SJ_PROBE.*
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 

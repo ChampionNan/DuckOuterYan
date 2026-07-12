@@ -1,0 +1,57 @@
+# OuterYan on/off experiment   started 2026-07-12 22:11:17
+# binary : build/release/duckdb
+# corpus : bench  (pattern=*_agg[01] limit=6) — 6 queries from /Users/cbn/Desktop/laptop_test/DuckYanOuter/auto_test/outerjoin_query
+# tables : families=[tpch tpcds job]  graph=bitcoin  tpch sf=1  tpcds sf=1  job db=/Users/cbn/Desktop/laptop_test/DuckYanOuter/job_db
+# timing : threads=1+4, median of 1 runs per config (1 warm-up + 1 timed)
+# phases : one profiled ON run at threads=1; R1SJ-T1/R2SJ-T1/JOIN-T1 are summed categorized operator elapsed seconds
+#          they exclude uncategorized/unprofiled work and need not sum to T1:on
+# timeout: 180s/query → correctness gate gets 360s (2×, parallel threads=4), timing batch gets 360s ((RUNS+1)×); timed-out queries retried once at ×1
+# correct: ON result multiset == OFF result; only correct queries are timed
+
+===================== LIVE PER-QUERY RESULTS ==========================
+# Columns: T1 = single-thread, TM = multi-thread (threads=4)
+#   outer/gate/useOY = reordered vs DuckDB / cost comparison applied / OuterYan selected (0|1)
+#   cost estimates are printed on the indented line following each correct query
+#   kernel = semi-join filter kernel OuterYan ran: bitmap | hash | mixed | - (no SJ)
+query                              outer gate useOY decision             kernel  correct   note          T1:off     T1:on  T1:spd    TM:off     TM:on  TM:spd   R1SJ-T1   R2SJ-T1   JOIN-T1
+----------------------------------------------------------------------
+oy_th_th_agg0                      0    0    0     INAPPLICABLE         -       TRUE      OK            0.0040    0.0040   1.000    0.0040    0.0040   1.000  0.000000  0.000000  0.001525
+  cost: baseline=NA threshold=NA (ratio=NA) candidate_join=NA semijoin_raw=NA semijoin_ratio=NA semijoin_weighted=NA candidate_total=NA  R1(build=NA probe=NA) R2(build=NA probe=NA)
+  gate: skipped -> INAPPLICABLE
+oy_th_th_agg1                      0    0    0     DUCKDB_PLAN          -       TRUE      OK            0.1970    0.1990   0.990    0.0600    0.0610   0.984  0.000000  0.000000  0.159933
+  cost: baseline=8741376.1934450846 threshold=9615513.8127895948 (ratio=1.1) candidate_join=8510723.548691649 semijoin_raw=21262591.802769065 semijoin_ratio=0.2 semijoin_weighted=4252518.3605538132 candidate_total=12763241.909245463  R1(build=4500000 probe=12002430) R2(build=4500000 probe=260161.80276906642)
+  gate: skipped -> DUCKDB_PLAN
+oy_ds_ds_agg0                      1    1    0     COST_DUCKDB_BETTER   -       TRUE      OK            0.0460    0.0470   0.979    0.0190    0.0190   1.000  0.000000  0.000000  0.007161
+  cost: baseline=1184988.6497750052 threshold=1303487.5147525058 (ratio=1.1) candidate_join=1270746.9085314574 semijoin_raw=3880477.0220354619 semijoin_ratio=0.2 semijoin_weighted=776095.40440709237 candidate_total=2046842.3129385498  R1(build=1959084.7378154609 probe=266333.94808575686) R2(build=349001.84425727057 probe=1306056.4918769738)
+  gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+  gate values:  1270746.9085314574 + 0.2 * 3880477.0220354619 <= 1.1 * 1184988.6497750052
+  gate result:  2046842.3129385498 <= 1303487.5147525058 => FAIL -> COST_DUCKDB_BETTER
+oy_ds_ds_agg1                      0    0    0     DUCKDB_PLAN          -       TRUE      OK            0.0730    0.0720   1.014    0.0240    0.0230   1.043  0.000000  0.000000  0.031374
+  cost: baseline=9473108.0495340265 threshold=10420418.85448743 (ratio=1.1) candidate_join=6426722.3767454606 semijoin_raw=15130043.423716677 semijoin_ratio=0.2 semijoin_weighted=3026008.6847433355 candidate_total=9452731.061488796  R1(build=8872056.7378154602 probe=266333.94808575686) R2(build=230844.73781546077 probe=5760808)
+  gate: skipped -> DUCKDB_PLAN
+oy_jb_jb_agg0                      1    1    0     COST_DUCKDB_BETTER   -       TRUE      OK            0.0900    0.0830   1.084    0.0300    0.0310   0.968  0.000000  0.000000  0.074985
+  cost: baseline=14070296.880189383 threshold=15477326.568208324 (ratio=1.1) candidate_join=3932137.1875682944 semijoin_raw=65494539.722874284 semijoin_ratio=0.2 semijoin_weighted=13098907.944574857 candidate_total=17031045.132143151  R1(build=21746604 probe=1236866.4307185712) R2(build=22956709.292155713 probe=19554360)
+  gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+  gate values:  3932137.1875682944 + 0.2 * 65494539.722874284 <= 1.1 * 14070296.880189383
+  gate result:  17031045.132143151 <= 15477326.568208324 => FAIL -> COST_DUCKDB_BETTER
+oy_jb_jb_agg1                      1    1    0     COST_DUCKDB_BETTER   -       TRUE      OK            2.1120    2.0510   1.030    0.5850    0.5890   0.993  0.000000  0.000000  1.837946
+  cost: baseline=102629180.63929401 threshold=112892098.70322342 (ratio=1.1) candidate_join=83860797.452666268 semijoin_raw=228707021.63753933 semijoin_ratio=0.2 semijoin_weighted=45741404.327507868 candidate_total=129602201.78017414  R1(build=108733032 probe=6184333.6375393448) R2(build=108733032 probe=5056624)
+  gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+  gate values:  83860797.452666268 + 0.2 * 228707021.63753933 <= 1.1 * 102629180.63929401
+  gate result:  129602201.78017414 <= 112892098.70322342 => FAIL -> COST_DUCKDB_BETTER
+
+============================== SUMMARY ================================
+queries=6  correct=6  incorrect/skipped=0  timed=6
+kernel (correct queries): bitmap=0  hash=0  mixed=0
+threads: single=1, multi=4
+OuterYan decisions: same-grouping=3  changed-rejected=3  selected=0  unknown=0  cost-gate-applied=3
+speed-up by outer_reordered (reorder CSV compatibility column):
+  No:  n=3  mean speed-up(TM)=1.009
+  Yes: n=3  mean speed-up(TM)=0.987
+speed-up by outer_yan_selected:
+  DuckDB baseline: n=6  mean speed-up(TM)=0.998
+  OuterYan:        n=0  mean speed-up(TM)=-
+categorized operator elapsed seconds (n=6 profiled ON runs, threads=1; not complete phase wall time):
+  round 1 semi-join: sum=0  mean=0
+  round 2 semi-join: sum=0  mean=0
+  real joins:         sum=2.11292  mean=0.352153

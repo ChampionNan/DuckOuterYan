@@ -51,13 +51,17 @@ public:
 PhysicalSJProbe::PhysicalSJProbe(PhysicalPlan &physical_plan, vector<LogicalType> types,
                                  vector<shared_ptr<SemiJoinFilter>> sj_to_use_p,
                                  vector<vector<idx_t>> probe_col_ids_per_filter_p,
-                                 idx_t estimated_cardinality)
+                                 idx_t estimated_cardinality, bool top_down_p)
     : CachingPhysicalOperator(physical_plan, PhysicalOperatorType::SJ_PROBE, std::move(types), estimated_cardinality),
       sj_to_use(std::move(sj_to_use_p)),
-      probe_col_ids_per_filter(std::move(probe_col_ids_per_filter_p)) {
+      probe_col_ids_per_filter(std::move(probe_col_ids_per_filter_p)), top_down(top_down_p) {
 	if (sj_to_use.size() != probe_col_ids_per_filter.size()) {
 		throw InternalException("PhysicalSJProbe: filter / probe_col_ids count mismatch");
 	}
+}
+
+string PhysicalSJProbe::GetName() const {
+	return top_down ? "SJ_PROBE_ROUND_2" : "SJ_PROBE_ROUND_1";
 }
 
 unique_ptr<OperatorState> PhysicalSJProbe::GetOperatorState(ExecutionContext &context) const {

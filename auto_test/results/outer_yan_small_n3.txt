@@ -1,0 +1,49 @@
+# OuterYan on/off experiment   started 2026-07-12 22:12:11
+# binary : build/release/duckdb
+# corpus : graph  (pattern=*_N3_*_s0[15] limit=4) — 4 queries from /Users/cbn/Desktop/laptop_test/DuckYanOuter/auto_test/outerjoin_query
+# tables : families=[graph]  graph=bitcoin  tpch sf=100  tpcds sf=100  job db=/Users/cbn/Desktop/laptop_test/DuckYanOuter/job_db
+# timing : threads=1+1, median of 1 runs per config (1 warm-up + 1 timed)
+# phases : one profiled ON run at threads=1; R1SJ-T1/R2SJ-T1/JOIN-T1 are summed categorized operator elapsed seconds
+#          they exclude uncategorized/unprofiled work and need not sum to T1:on
+# timeout: 60s/query → correctness gate gets 120s (2×, parallel threads=1), timing batch gets 120s ((RUNS+1)×); timed-out queries retried once at ×1
+# correct: ON result multiset == OFF result; only correct queries are timed
+
+===================== LIVE PER-QUERY RESULTS ==========================
+# Columns: T1 = single-thread, TM = multi-thread (threads=1)
+#   outer/gate/useOY = reordered vs DuckDB / cost comparison applied / OuterYan selected (0|1)
+#   cost estimates are printed on the indented line following each correct query
+#   kernel = semi-join filter kernel OuterYan ran: bitmap | hash | mixed | - (no SJ)
+query                              outer gate useOY decision             kernel  correct   note          T1:off     T1:on  T1:spd    TM:off     TM:on  TM:spd   R1SJ-T1   R2SJ-T1   JOIN-T1
+----------------------------------------------------------------------
+line_N3_mixB_s01                   0    0    0     DUCKDB_PLAN          -       TRUE      OK            0.0150    0.0140   1.071    0.0150    0.0140   1.071  0.000000  0.000000  0.007701
+  cost: baseline=2528410.6714975843 threshold=2781251.7386473431 (ratio=1.1) candidate_join=2306097.0535426731 semijoin_raw=479360.52698137646 semijoin_ratio=0.2 semijoin_weighted=95872.105396275292 candidate_total=2401969.1589389485  R1(build=145116 probe=96744) R2(build=142925.23913043478 probe=94575.287850941677)
+  gate: skipped -> DUCKDB_PLAN
+line_N3_mixB_s05                   0    0    0     DUCKDB_PLAN          -       TRUE      OK            0.0320    0.0340   0.941    0.0330    0.0360   0.917  0.000000  0.000000  0.014076
+  cost: baseline=2528410.6714975843 threshold=2781251.7386473431 (ratio=1.1) candidate_join=2306097.0535426731 semijoin_raw=479360.52698137646 semijoin_ratio=0.2 semijoin_weighted=95872.105396275292 candidate_total=2401969.1589389485  R1(build=145116 probe=96744) R2(build=142925.23913043478 probe=94575.287850941677)
+  gate: skipped -> DUCKDB_PLAN
+rdeep_N3_mixC_s01                  1    1    1     COST_OUTERYAN_BETTER bitmap  TRUE      OK            0.0070    0.0050   1.400    0.0070    0.0040   1.750  0.000167  0.000197  0.001733
+  cost: baseline=237301.08129839189 threshold=261031.1894282311 (ratio=1.1) candidate_join=1104.3835616438355 semijoin_raw=241913.67149758455 semijoin_ratio=0.2 semijoin_weighted=48382.734299516917 candidate_total=49487.117861160747  R1(build=72558 probe=21.667874396135268) R2(build=72590.003623188401 probe=96744)
+  gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+  gate values:  1104.3835616438355 + 0.2 * 241913.67149758455 <= 1.1 * 237301.08129839189
+  gate result:  49487.117861160747 <= 261031.1894282311 => PASS -> COST_OUTERYAN_BETTER
+rdeep_N3_mixC_s05                  1    1    1     COST_OUTERYAN_BETTER bitmap  TRUE      OK            0.0290    0.0760   0.382    0.0290    0.0240   1.208  0.000181  0.000286  0.008484
+  cost: baseline=237301.08129839189 threshold=261031.1894282311 (ratio=1.1) candidate_join=1104.3835616438355 semijoin_raw=241913.67149758455 semijoin_ratio=0.2 semijoin_weighted=48382.734299516917 candidate_total=49487.117861160747  R1(build=72558 probe=21.667874396135268) R2(build=72590.003623188401 probe=96744)
+  gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+  gate values:  1104.3835616438355 + 0.2 * 241913.67149758455 <= 1.1 * 237301.08129839189
+  gate result:  49487.117861160747 <= 261031.1894282311 => PASS -> COST_OUTERYAN_BETTER
+
+============================== SUMMARY ================================
+queries=4  correct=4  incorrect/skipped=0  timed=4
+kernel (correct queries): bitmap=2  hash=0  mixed=0
+threads: single=1, multi=1
+OuterYan decisions: same-grouping=2  changed-rejected=0  selected=2  unknown=0  cost-gate-applied=2
+speed-up by outer_reordered (reorder CSV compatibility column):
+  No:  n=2  mean speed-up(TM)=0.994
+  Yes: n=2  mean speed-up(TM)=1.479
+speed-up by outer_yan_selected:
+  DuckDB baseline: n=2  mean speed-up(TM)=0.994
+  OuterYan:        n=2  mean speed-up(TM)=1.479
+categorized operator elapsed seconds (n=4 profiled ON runs, threads=1; not complete phase wall time):
+  round 1 semi-join: sum=0.000348  mean=8.7e-05
+  round 2 semi-join: sum=0.000483  mean=0.00012075
+  real joins:         sum=0.031994  mean=0.0079985

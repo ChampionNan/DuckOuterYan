@@ -36,10 +36,10 @@ INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
 statement ok
 PRAGMA explain_output='optimized_only'
 
-# Canonical accepted query — 3-way LEFT chain.
+# Canonical accepted query — 3-way LEFT chain that DP actually reorders.
 
 # ============================================================================
-# Default: all OuterYan passes enabled — SJ_PROBE present.
+# All OuterYan passes enabled — SJ_PROBE present.
 # ============================================================================
 
 statement ok
@@ -47,17 +47,17 @@ SET disabled_optimizers TO ''
 
 query III rowsort
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 1	100	1000
 2	200	NULL
 3	300	3000
-4	NULL	4000
+4	NULL	NULL
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
@@ -73,17 +73,17 @@ SET disabled_optimizers TO 'outer_yan_pre'
 
 query III rowsort
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 1	100	1000
 2	200	NULL
 3	300	3000
-4	NULL	4000
+4	NULL	NULL
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<!REGEX>:.*SJ_PROBE.*
 
@@ -96,17 +96,17 @@ SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
 
 query III rowsort
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 1	100	1000
 2	200	NULL
 3	300	3000
-4	NULL	4000
+4	NULL	NULL
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<!REGEX>:.*SJ_PROBE.*
 
@@ -119,17 +119,17 @@ SET disabled_optimizers TO ''
 
 query III rowsort
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 1	100	1000
 2	200	NULL
 3	300	3000
-4	NULL	4000
+4	NULL	NULL
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
 logical_opt	<REGEX>:.*SJ_PROBE.*
 
@@ -174,13 +174,13 @@ SET disabled_optimizers TO ''
 
 query II rowsort
 SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 GROUP BY a.id
 ----
 1	1000
 2	NULL
 3	3000
-4	4000
+4	NULL
 
 # Skip only the pushdown pass — pre/dp/post still fire.
 statement ok
@@ -188,13 +188,13 @@ SET disabled_optimizers TO 'aggregate_pushdown_outer'
 
 query II rowsort
 SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 GROUP BY a.id
 ----
 1	1000
 2	NULL
 3	3000
-4	4000
+4	NULL
 
 # Reversible — re-enabling restores the full pipeline.
 statement ok
@@ -202,10 +202,10 @@ SET disabled_optimizers TO ''
 
 query II rowsort
 SELECT a.id, SUM(c.cx)
-FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 GROUP BY a.id
 ----
 1	1000
 2	NULL
 3	3000
-4	4000
+4	NULL

@@ -24,8 +24,8 @@ class JoinRelationSet;
 
 //! Wraps the full OuterYan IR pipeline: applicability → OT → OJT → plan.
 //! Holds the shared metadata that all three stages rely on, so each
-//! conversion no longer recomputes them. One instance per query lives in
-//! `optimizer.cpp` and is threaded through OuterYanPre / DP / Post.
+//! conversion no longer recomputes them. `OuterYanOptimizer` owns the
+//! per-candidate instances and threads them through OuterYanPre / DP / Post.
 //!
 //! Lifetimes:
 //!   - `source_plan`           moved in by `BuildOT`, owned through every
@@ -173,10 +173,13 @@ public:
 		//! Resimplification: number of OJT edges reverted from their
 		//! de-simplified `kind` back to `original_kind` (4d "such flag").
 		idx_t resimplify_reverts = 0;
-		//! DP: true iff the cost-chosen join order materialised by `RebuildOT`
-		//! differs from the post-Desimplify OT order it received (i.e. the DP
-		//! actually restructured the tree, not just re-emitted the input order).
-		bool dp_reordered = false;
+		//! Final, stable-table grouping comparison against the actual normal
+		//! DuckDB candidate. Join kind and SJ wrappers are intentionally ignored.
+		bool outer_reordered = false;
+		//! True only when the numeric candidate-vs-baseline comparison ran.
+		bool cost_gate_applied = false;
+		//! True iff the complete OuterYan candidate was selected for execution.
+		bool outer_yan_selected = false;
 	};
 	StageStats stage_stats;
 

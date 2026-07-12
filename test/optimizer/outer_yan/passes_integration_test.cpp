@@ -104,7 +104,7 @@ unique_ptr<OuterYanTree> BuildFullIRFor(Connection &con, const string &sql) {
 	// committed its own. Drive one manually, as sj_operator_bench does.
 	ctx.transaction.BeginTransaction();
 	OuterYanPre().Optimize(std::move(plan), *tree); // BuildOT, Simplify, pairs, Desimplify
-	OuterYanDP(ctx).Optimize(*tree);                // DP enumeration → dp_reordered
+	OuterYanDP(ctx).Optimize(*tree);                // DP enumeration and OT rebuild
 	OuterYanPost(ctx).Optimize(*tree);             // Resimplify (reverts) → lower plan
 	ctx.transaction.Commit();
 	return tree;
@@ -384,9 +384,11 @@ TEST_CASE("outer_yan passes: semi-join pair recording populates both phases",
 	// confirm via EXPLAIN that SJ_BUILD + SJ_PROBE are inserted (downstream
 	// observable signal of recorded pairs).
 	REQUIRE_NO_FAIL(con.Query("PRAGMA explain_output='optimized_only'"));
+	// The b→c chain is deliberately cost-reordered; a star on a.id now takes
+	// the no-reorder fallback and correctly contains no SJ operators.
 	auto result = con.Query("EXPLAIN SELECT a.id, b.bx, c.cx "
 	                        "FROM a LEFT JOIN b ON a.id = b.id "
-	                        "LEFT JOIN c ON a.id = c.id");
+	                        "LEFT JOIN c ON b.id = c.id");
 	REQUIRE_FALSE(result->HasError());
 	auto plan_text = result->ToString();
 	REQUIRE(plan_text.find("SJ_BUILD") != string::npos);
@@ -895,13 +897,13 @@ TEST_CASE("outer_yan passes: StageStats probe across shapes (DIAGNOSTIC)",
 	    "LEFT JOIN d ON a.id=d.id LEFT JOIN e ON a.id=e.id",
 	    "SELECT * FROM a INNER JOIN b ON a.id=b.id FULL OUTER JOIN c ON b.id=c.id",
 	};
-	std::printf("\n%-72s %5s %5s %5s %5s\n", "query", "simp", "desi", "dpRe", "resi");
+	std::printf("\n%-72s %5s %5s %5s\n", "query", "simp", "desi", "resi");
 	for (const auto *q : queries) {
 		auto tree = BuildFullIRFor(con, q);
 		const auto &s = tree->stage_stats;
-		std::printf("%-72s %5llu %5llu %5d %5llu\n", string(q).substr(0, 72).c_str(),
+		std::printf("%-72s %5llu %5llu %5llu\n", string(q).substr(0, 72).c_str(),
 		            (unsigned long long)s.simplify_collapses,
-		            (unsigned long long)s.desimplify_changes, s.dp_reordered ? 1 : 0,
+		            (unsigned long long)s.desimplify_changes,
 		            (unsigned long long)s.resimplify_reverts);
 	}
 }
@@ -933,12 +935,17 @@ TEST_CASE("outer_yan passes: DP — cost model restructures the join order",
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
-	// LEFT (a,b) then INNER (a,c): the cost-chosen materialised order differs
-	// structurally from the written post-Desimplify order — RebuildOT reshapes
-	// the tree, recorded in StageStats::dp_reordered.
-	auto tree = BuildFullIRFor(con,
-	    "SELECT * FROM a LEFT JOIN b ON a.id=b.id INNER JOIN c ON a.id=c.id");
-	REQUIRE(tree->stage_stats.dp_reordered);
+	// LEFT (a,b) then LEFT (b,c): the cost-chosen materialised order differs
+	// structurally from the written order. Compare the stable grouping
+	// signatures directly; this is a test concern, not persistent stage state.
+	auto tree = BuildIRFor(con, "SELECT * FROM a LEFT JOIN b ON a.id=b.id LEFT JOIN c ON b.id=c.id");
+	const auto input_signature = OuterYanDP::JoinGroupingSignature(*tree);
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	auto summary = OuterYanDP(ctx).Optimize(*tree);
+	ctx.transaction.Commit();
+	REQUIRE(summary.has_complete_plan);
+	REQUIRE(OuterYanDP::JoinGroupingSignature(*tree) != input_signature);
 }
 
 // ---- 4d Resimplification: a de-simplified edge reverts; the flag is recorded.

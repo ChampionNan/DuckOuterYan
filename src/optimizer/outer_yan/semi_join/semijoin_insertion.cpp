@@ -273,7 +273,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			stk.back().bindings_per_filter.emplace_back(build_keys);
 			return &build;
 		}
-		auto build = make_uniq<LogicalSJBuild>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		auto build = make_uniq<LogicalSJBuild>(vector<shared_ptr<SemiJoinFilter>> {filter}, top_down);
 		build->filter_ids.emplace_back(filter_id);
 		auto *raw = build.get();
 		vector<vector<ColumnBinding>> binds;
@@ -297,7 +297,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 			stk.back().bindings_per_filter.emplace_back(std::move(probe_keys));
 			return;
 		}
-		auto probe = make_uniq<LogicalSJProbe>(vector<shared_ptr<SemiJoinFilter>> {filter});
+		auto probe = make_uniq<LogicalSJProbe>(vector<shared_ptr<SemiJoinFilter>> {filter}, top_down);
 		probe->filter_ids.emplace_back(filter_id);
 		probe->AddDownStreamOperator(build);
 		vector<vector<ColumnBinding>> binds;
@@ -327,15 +327,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		if (it == keyMapping.end()) {
 			filter = make_shared_ptr<SemiJoinFilter>();
 			filter_id = next_filter_id++;
-			// Plan-3 correctness contract: the probe must always apply a *decided*
-			// filter. Pin every shared filter to the hash representation so
-			// PhysicalSJBuild::Finalize deterministically produces a HashFilter
-			// (a single, type-stable probe path) — never a kind that depends on
-			// bitmap eligibility, and never left UNDECIDED. The build↔probe filter
-			// identity is carried by `filter_id` through plan Copy/Serialize/
-			// Deserialize; see PhysicalPlanGenerator::GetOrCreateSJFilter.
-			filter->ForceHash();
-			// Stats-prefilter (opt-in): only single-column keys are bitmap-
+				// Stats-prefilter (opt-in): only single-column keys are bitmap-
 			// eligible. If base-table min/max predicts the implied bitmap
 			// would exceed the byte budget, tag force_hash so
 			// PhysicalSJBuild::Finalize skips the wasted TryBuild scan.

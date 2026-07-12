@@ -11,8 +11,9 @@
 
 namespace duckdb {
 
-LogicalSJBuild::LogicalSJBuild(vector<shared_ptr<SemiJoinFilter>> sj_to_create_p)
-    : LogicalOperator(LogicalOperatorType::LOGICAL_SJ_BUILD), sj_to_create(std::move(sj_to_create_p)) {
+LogicalSJBuild::LogicalSJBuild(vector<shared_ptr<SemiJoinFilter>> sj_to_create_p, bool top_down_p)
+	    : LogicalOperator(LogicalOperatorType::LOGICAL_SJ_BUILD), sj_to_create(std::move(sj_to_create_p)),
+	      top_down(top_down_p) {
 }
 
 void LogicalSJBuild::Serialize(Serializer &serializer) const {
@@ -25,6 +26,7 @@ void LogicalSJBuild::Serialize(Serializer &serializer) const {
 	// Stable filter ids re-establish build↔probe filter sharing after the
 	// roundtrip (live filter objects cannot survive serialization).
 	serializer.WriteProperty(202, "filter_ids", filter_ids);
+	serializer.WriteProperty(203, "top_down", top_down);
 }
 
 unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
@@ -33,7 +35,7 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Copy(ClientContext &context) const {
 	// SJ operators.  AggregatePushdownOuter needs a throwaway deep copy of the plan
 	// to run its speculative rewrite; sharing the live filters is safe because the
 	// copy is never executed.
-	auto copy = make_uniq<LogicalSJBuild>(sj_to_create);
+	auto copy = make_uniq<LogicalSJBuild>(sj_to_create, top_down);
 	copy->build_col_ids_per_filter = build_col_ids_per_filter;
 	copy->filter_ids = filter_ids;
 	for (const auto &child : children) {
@@ -47,12 +49,13 @@ unique_ptr<LogicalOperator> LogicalSJBuild::Deserialize(Deserializer &deserializ
 	auto num_filters = deserializer.ReadProperty<idx_t>(200, "num_filters");
 	auto build_col_ids = deserializer.ReadProperty<vector<vector<idx_t>>>(201, "build_col_ids_per_filter");
 	auto filter_ids = deserializer.ReadProperty<vector<idx_t>>(202, "filter_ids");
+	auto top_down = deserializer.ReadPropertyWithDefault<bool>(203, "top_down");
 	vector<shared_ptr<SemiJoinFilter>> filters;
 	filters.reserve(num_filters);
 	for (idx_t i = 0; i < num_filters; i++) {
 		filters.push_back(make_shared_ptr<SemiJoinFilter>());
 	}
-	auto result = make_uniq<LogicalSJBuild>(std::move(filters));
+	auto result = make_uniq<LogicalSJBuild>(std::move(filters), top_down);
 	result->build_col_ids_per_filter = std::move(build_col_ids);
 	result->filter_ids = std::move(filter_ids);
 	return std::move(result);

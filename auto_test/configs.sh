@@ -67,14 +67,14 @@ export TPCDS_SF="${TPCDS_SF:-100}"
 # Multi-thread count for performance timing in experiment_onoff.sh.
 # Each query is timed at BOTH threads=1 (single-thread) and threads=OY_THREADS.
 # Valid choices: 1, 4, 8, 16, 32, 64.
-export OY_THREADS="${OY_THREADS:-64}"
+export OY_THREADS="${OY_THREADS:-48}"
 
 # ===========================================================================
 # 5) Timeouts
 # ===========================================================================
 # Per-query timeout (seconds). Each duckdb invocation is wrapped with `timeout`.
 # If a query exceeds this limit, it is killed and marked TIMEOUT. 0 disables.
-export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-300}"
+export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-600}"
 
 # ===========================================================================
 # 6) Iteration counts

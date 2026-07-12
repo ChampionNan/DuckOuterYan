@@ -1,281 +1,321 @@
-# `auto_test/` — OuterYan Optimizer Test & Benchmark Suite
+# `auto_test/` — OuterYan correctness and performance suite
 
-Automated correctness + performance testing for the **OuterYan** optimizer module.
-All scripts auto-resolve the repo root; the binary defaults to `build/release/duckdb`
-(`DUCKDB_BIN=` or `--bin` to override). **Always test on a RELEASE build.**
+This directory contains the operational test harness for the OuterYan optimizer.
+Use a release build for performance runs. A debug build is useful for assertions,
+but its timings are only directional.
 
----
+The script implementations are authoritative. The option and workflow summaries
+below mirror the current versions; `experiment_onoff.sh --help` prints its CLI
+synopsis.
 
-## File Layout
+## Files
 
-```
-auto_test/
-  configs.sh            unified configuration (sourced by all scripts)
-  run_all.sh            one-command full deployment (build + data + experiment)
-  build_db.sh           build all databases (graph, tpch, tpcds, job)
-  gen_queries.py        query corpus generator (all families)
-  experiment_onoff.sh   correctness + performance experiment (ON vs OFF)
-  trace_outer_yan.sh    per-query optimizer pass debugger
-  outerjoin_query/      the query corpus (*.sql files)
-    graph/              54 pairs (108 files) — structural + predicate queries -> graph_db
-    tpch/               111 outer-join queries                                -> tpch_db
-    tpcds/              104 outer-join queries                                -> tpcds_db
-    job/                193 outer-join queries                                -> job_db
-  results/              output directory (git-ignored)
-```
+| Path | Purpose |
+|---|---|
+| `configs.sh` | Defaults shared by `build_db.sh` and `experiment_onoff.sh` |
+| `run_all.sh` | Release build, database preparation, then the full experiment |
+| `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
+| `gen_queries.py` | Generate and validate the SQL corpus |
+| `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
+| `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
+| `outerjoin_query/` | SQL corpus, divided into `graph`, `tpch`, `tpcds`, and `job` |
+| `results/` | Generated text, CSV, profile, and trace output |
 
----
+`trace_outer_yan.sh` has its own command-line/environment defaults and does not
+source `configs.sh`.
 
-## Configuration — `configs.sh`
+## Current configuration
 
-Single source of truth for all parameters. Sourced automatically by every script.
-Override via environment or per-script CLI flags (`CLI > env > configs.sh`).
+Environment variables override `configs.sh`; experiment CLI options override the
+corresponding environment values.
 
-Key parameters:
+| Variable | Current source default | Meaning |
+|---|---:|---|
+| `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
+| `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
+| `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
+| `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
+| `OY_THREADS` | `48` | Multi-thread timing and equivalence-check threads |
+| `OY_TIMEOUT_SECS` | `600` | Per-query timeout; `0` disables it |
+| `OY_RUNS` | `5` | Timed executions after one warm-up |
+| `OY_TIMEOUT_RETRY_MULT` | `2` | Timeout multiplier for one retry; `1` disables retry |
+| `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `DUCKDB_BIN` | `build/release/duckdb` | Path to duckdb binary |
-| `GRAPH_DATASET` | `bitcoin` | SNAP graph for graph R1..R10 (bitcoin/epinions/google/wiki/dblp) |
-| `TPCH_SF` | `100` | TPC-H scale factor |
-| `TPCDS_SF` | `100` | TPC-DS scale factor |
-| `OY_THREADS` | `8` | Thread count for performance timing |
-| `OY_TIMEOUT_SECS` | `300` | Soft per-query timeout (seconds) |
-| `KILL_AFTER` | `600` | Hard SIGKILL watchdog (seconds; 0=off) |
-| `OY_MIN_SECS` | `0` | Minimum timing window per query (0=just OY_RUNS) |
-| `OY_RUNS` | `5` | Minimum timed iterations per query |
+Always inspect `configs.sh` before a server run because these experiment defaults
+are intentionally adjusted for the current machine.
 
----
+## Build
 
-## Building Databases — `build_db.sh`
-
-```
-USAGE: bash auto_test/build_db.sh [target...]
-Targets: graph | tpch | tpcds | job | all  (default: all)
-```
-
-| DB | Source | Notes |
-|---|---|---|
-| `graph_db` | SNAP graph data (external) → R1..R10 + views R/S/T/K | `GRAPH_DATASET`: bitcoin (24K, default), epinions (509K), dblp (1M), google (5.1M), wiki (28.5M) |
-| `tpch_db` | `CALL dbgen(sf=N)` | Auto-rebuilds binary with `BUILD_TPCH=1` if needed |
-| `tpcds_db` | `CALL dsdgen(sf=N)` | Auto-rebuilds binary with `BUILD_TPCDS=1` if needed |
-| `job_db` | Remote parquet via httpfs (`duckdb/duckdb-data` v1.0) | Auto-rebuilds binary with `BUILD_HTTPFS=1` if needed |
-
-**Environment variables:**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `GRAPH_DATASET` | `bitcoin` | Which SNAP graph for graph tables |
-| `TPCH_SF` | `100` | TPC-H scale factor |
-| `TPCDS_SF` | `100` | TPC-DS scale factor |
-| `GRAPH_DATA_DIR` | `$REPO/graph_data` | SNAP data cache directory |
-| `FORCE` | `0` | Set to 1 to rebuild existing DBs |
-
-**Examples:**
+For all four families, build a release CLI with the TPC-H and TPC-DS generators:
 
 ```bash
-# Build everything:
-bash auto_test/build_db.sh
-
-# Build only graph with wiki dataset (28.5M edges):
-GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
-
-# Build only tpch at SF=10:
-TPCH_SF=10 bash auto_test/build_db.sh tpch
-
-# Rebuild job (re-download from GitHub):
-FORCE=1 bash auto_test/build_db.sh job
+BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 ```
 
----
+`build_db.sh` can also detect missing `dbgen`/`dsdgen` support and rebuild the
+release binary when needed.
 
-## Query Generation — `gen_queries.py`
+## Databases
 
+```text
+bash auto_test/build_db.sh [graph|tpch|tpcds|job|all ...]
 ```
-USAGE: python3 auto_test/gen_queries.py [target]
-Targets: graph | pred | tpch | tpcds | job | bench | validate | all  (default: all)
-```
 
-| Target | Output | Description |
-|---|---|---|
-| `graph` / `pred` | `outerjoin_query/graph/` | 54 predicate-bearing pairs (6 shapes x 9 predicates) |
-| `tpch` | `outerjoin_query/tpch/` | 111 TPC-H outer-join queries |
-| `tpcds` | `outerjoin_query/tpcds/` | 104 TPC-DS outer-join queries |
-| `job` | `outerjoin_query/job/` | 193 JOB/IMDb outer-join queries |
-| `bench` | tpch + tpcds + job | All benchmark families |
-| `validate` | (removes broken queries) | EXPLAIN-test against DBs |
-| `all` | graph + bench | Everything |
+| Database | Source |
+|---|---|
+| `graph_db` | One SNAP edge list copied into R1..R10, plus R/S/T/K views |
+| `tpch_db` | `CALL dbgen(sf=TPCH_SF)` |
+| `tpcds_db` | `CALL dsdgen(sf=TPCDS_SF)` |
+| `job_db` | 21 JOB/IMDb Parquet files cached under `job_data/`, then loaded locally |
 
-Design invariants: every query has >= 2 outer joins, mixed join-type vectors (LEFT/RIGHT/FULL),
-diverse topologies (line, right-deep, bushy, star, branch), deterministic (`random.seed(42)`),
-no banned functions.
+Existing database files are reused. Merely changing `GRAPH_DATASET`, `TPCH_SF`,
+or `TPCDS_SF` does not change an existing database. Use `FORCE=1` deliberately:
 
 ```bash
-python3 auto_test/gen_queries.py all          # regenerate everything
-python3 auto_test/gen_queries.py validate     # EXPLAIN-test, remove broken queries
+# Small TPC databases
+FORCE=1 TPCH_SF=1 bash auto_test/build_db.sh tpch
+FORCE=1 TPCDS_SF=1 bash auto_test/build_db.sh tpcds
+
+# Replace graph_db with the wiki graph
+FORCE=1 GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
 ```
 
----
+JOB has no scale factor. Missing Parquet files are downloaded with `curl`; cached
+files are reused. `FORCE=1` rebuilds `job_db` from that cache rather than forcing a
+second download.
 
-## Performance Experiment — `experiment_onoff.sh`
+When `experiment_onoff.sh --only graph` is used, `graph_db` is reused by default.
+Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
-Correctness-gates each query first (ON==OFF), then times OFF vs ON.
+## Query corpus
 
-```
-USAGE: bash auto_test/experiment_onoff.sh [options]
-  -b, --bin PATH      duckdb binary (default: build/release/duckdb)
-  -n, --runs N        minimum timed runs per query (default: from configs.sh)
-      --min-secs S    minimum measurement window in seconds (default: 0)
-  -t, --timeout S     soft per-query timeout (default: 300)
-      --kill-after S  hard SIGKILL watchdog (default: 600; 0=off)
-      --only FAMILY   query families to run:
-                        graph | tpch | tpcds | job | bench | all
-                        (bench = tpch+tpcds+job; default: all)
-      --pattern GLOB  only run queries matching this glob
-      --exclude GLOB  skip queries matching any '|'-separated glob
-      --limit N       cap total number of queries (0 = no cap)
-  -o, --out FILE      output file (default: results/experiment_onoff_<timestamp>.txt)
-  -h, --help          show usage
-```
-
-**Examples:**
+The checked-in corpus currently contains graph, TPC-H, TPC-DS, and JOB outer-join
+queries. Labels are SQL basenames without `.sql`; `--pattern` and `--exclude`
+match the entire label using shell-glob syntax.
 
 ```bash
-# Run all families with defaults:
-bash auto_test/experiment_onoff.sh
+python3 auto_test/gen_queries.py graph
+python3 auto_test/gen_queries.py bench       # tpch + tpcds + job
+python3 auto_test/gen_queries.py validate
+python3 auto_test/gen_queries.py all
+```
 
-# Only TPC-H family:
+Generation is deterministic. Validation executes `EXPLAIN` against the prepared
+databases and may remove generated queries that do not bind.
+
+## Experiment pipeline
+
+For every selected query, `experiment_onoff.sh` performs these operations:
+
+1. Compare OuterYan OFF and ON results after applying the same order-normalizing
+   wrapper (`SELECT * FROM (<query>) ORDER BY ALL`). A mismatch, error, or timeout
+   is not timed.
+2. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record.
+3. If OuterYan was selected, run one kernel-classification execution and record
+   bitmap/hash filter counts.
+4. Run one profiled OuterYan-ON execution at `threads=1` and categorize operator
+   elapsed time as round-1 semi-join, round-2 semi-join, and real joins.
+5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
+   has one warm-up followed by `--runs N` timed executions; the median excludes
+   the warm-up.
+6. Retry timed-out queries once with `OY_TIMEOUT_RETRY_MULT` times the timeout.
+
+The phase values are sums of categorized single-thread operator times. They are
+not complete phase wall times and need not add up to the measured query time.
+
+### Plan decision and cost gate
+
+For an applicable query, OuterYan constructs its DP/OJT candidate and DuckDB's
+normal outer-join-simplified, join-ordered baseline from the same input plan.
+Grouping comparison uses stable base-table identities and ignores join type,
+child orientation, and inserted semi-join wrappers.
+
+A same-grouping candidate always selects DuckDB. For a changed grouping, the
+source-level gate computes:
+
+```text
+semijoin_raw_cost = round1_build + round1_probe + round2_build + round2_probe
+weighted_semijoin_cost = SEMIJOIN_COST_RATIO * semijoin_raw_cost
+candidate_total = candidate_join_cost + weighted_semijoin_cost
+baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
+
+select OuterYan iff candidate_total <= baseline_threshold
+```
+
+The policy knobs are `constexpr` members of `OuterYanOptimizer` in
+`src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
+are not environment variables or SQL settings. The current workspace has the
+gate enabled, a semi-join ratio of `0.05`, and a baseline limit of `1.2`. Rebuild
+the CLI after changing them.
+
+Decision reasons written to the trace and result files include:
+
+| Reason | Meaning |
+|---|---|
+| `INAPPLICABLE` | OuterYan applicability check failed |
+| `DUCKDB_PLAN` | Candidate has the same grouping as DuckDB; use DuckDB |
+| `ALWAYS_OUTERYAN` | Grouping changed and the source-level cost gate is disabled |
+| `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
+| `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
+| `COST_UNAVAILABLE` | A finite comparison could not be produced |
+| `OUTERYAN_FAILED` | OuterYan did not produce a complete candidate |
+
+AggregatePushdownOuter is applied to either winner using metadata corresponding
+to that winner's join shape. Semi-join operators are inserted only when the
+OuterYan candidate is selected.
+
+### Command-line options
+
+```text
+bash auto_test/experiment_onoff.sh [options]
+  -b, --bin PATH      DuckDB CLI
+  -n, --runs N        timed executions per configuration
+  -t, --timeout S     per-query timeout
+      --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
+      --pattern GLOB  include matching labels
+      --exclude GLOB  exclude matching labels; separate globs with |
+      --limit N       global query cap; 0 means unlimited
+  -o, --out FILE      exact text output path
+```
+
+`select`, `agg`, and `pred` currently alias the graph family; they do not filter
+the graph filenames further. `bench` expands to TPC-H, TPC-DS, and JOB. `--limit`
+is global and follows that family order.
+
+### Examples
+
+```bash
+# Four small graph queries, single-thread smoke run
+GRAPH_DATASET=bitcoin OY_THREADS=1 OY_TIMEOUT_RETRY_MULT=1 \
+bash auto_test/experiment_onoff.sh \
+  --only graph --pattern '*_N3_*_s0[15]' --limit 4 --runs 1 --timeout 60
+
+# Two three-relation aggregate queries from each benchmark family
+TPCH_SF=1 TPCDS_SF=1 OY_THREADS=4 \
+bash auto_test/experiment_onoff.sh \
+  --only bench --pattern '*_agg[01]' --limit 6 --runs 1
+
+# Full TPC-H family
 bash auto_test/experiment_onoff.sh --only tpch
 
-# Graph family with wiki dataset (large scale):
-GRAPH_DATASET=wiki bash auto_test/experiment_onoff.sh --only graph --min-secs 5
-
-# Bench families (tpch+tpcds+job), skip bushy7 queries:
-bash auto_test/experiment_onoff.sh --only bench --exclude 'jb_bushy7*'
-
-# Quick correctness check (no timing window):
-bash auto_test/experiment_onoff.sh --only all --runs 1 --min-secs 0
+# Skip JOB bushy-7 labels
+bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
 ```
 
-**Output format:** Three sections — (1) query catalog with correctness status, (2) timing table for correct queries, (3) summary statistics with mean speed-up grouped by reorder/no-reorder.
+The scale variables in the second example describe the prepared databases in
+the report header; rebuild the databases first if they are not already SF1.
 
----
+## Output
 
-## Debugging — `trace_outer_yan.sh`
+Without `--out`, one start timestamp is used for both files:
 
-Dumps every optimizer pass for a single query (OT construction, simplification, SJ pairs, DP, etc.) against an **existing** database file (`graph_db` / `tpch_db` / `tpcds_db` / `job_db`). The script does **not** build a temp DB — you point it at the same DB the query was originally written for via `--db`.
-
-> Requires the **debug** binary (`build/debug/duckdb`). The `DUCKDB_OYTRACE` hook is compiled out of release builds. Build it once with `make debug` (add `BUILD_TPCH=1 BUILD_TPCDS=1` if those tables are referenced).
-
+```text
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.txt
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
 ```
-USAGE: bash auto_test/trace_outer_yan.sh --db PATH [options] (fails | -q "SQL")
-  --db PATH          (REQUIRED) existing DuckDB database file
-  -q "SQL"           query to trace (use -q OR `fails`)
-  fails              trace 5 known-failing R/S/T/K queries (needs views, see below)
-  -b, --bin PATH     duckdb binary (default: build/debug/duckdb)
-  -o, --out FILE     output file (default: results/oy_traces/<stem>.trace.txt)
-  -d, --outdir DIR   output dir for `fails` mode (default: results/oy_traces/)
+
+With `--out path/name.txt`, the text path is exact and the CSV is
+`path/name.csv`.
+
+The text table includes:
+
+| Field | Meaning |
+|---|---|
+| `outer` | `outer_reordered`: candidate grouping differs from DuckDB |
+| `gate` | Numeric gate was applied |
+| `useOY` | OuterYan candidate was actually selected and executed |
+| `decision` | Reason token from the table above |
+| `kernel` | `bitmap`, `hash`, `mixed`, or `-` |
+| `correct` / `note` | Equivalence result and failure category |
+| `T1:*` / `TM:*` | OFF, ON, and `OFF/ON` speed-up at one/many threads |
+| `R1SJ-T1`, `R2SJ-T1`, `JOIN-T1` | Categorized single-thread operator elapsed seconds |
+
+Each correct query is followed by raw cost components and an expanded gate:
+
+```text
+gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline
+gate values:  <join> + <sj-ratio> * <raw-sj> <= <baseline-ratio> * <baseline>
+gate result:  <candidate-total> <= <threshold> => PASS|FAIL -> <decision>
 ```
+
+For same-grouping, inapplicable, unavailable, or forced-policy cases, the report
+states that the numeric gate was skipped and prints the decision reason.
+
+The CSV exports the same decision, cost, kernel, correctness, timing, and phase
+fields in machine-readable form. Retry rows use `pass=retry`; when both main and
+retry rows exist, take the last row for that query. The final text summary already
+uses the post-retry state and groups speed-ups separately by `outer_reordered` and
+`outer_yan_selected`.
+
+## Optimizer trace
+
+`DUCKDB_OYTRACE=/path/to/file` enables the file-based optimizer trace in release
+and debug builds. It records the SQL, logical input, OT/OJT stages, semi-join
+pairs, DuckDB baseline, cost comparison, final `[OY_DECISION]`, and selected plan.
+Tracing adds planning and file-I/O overhead and should not wrap a timed execution.
+The experiment harness avoids that by collecting its decision in a separate
+traced `EXPLAIN` process.
+
+`trace_outer_yan.sh` defaults to the debug CLI, but `-b` can select release:
 
 ```bash
-# Trace one query against graph_db
-bash auto_test/trace_outer_yan.sh --db graph_db \
-    -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src WHERE R1.src % 10 = 0;"
+# Trace a corpus file with release
+bash auto_test/trace_outer_yan.sh \
+  -b build/release/duckdb --db tpch_db \
+  -f auto_test/outerjoin_query/tpch/oy_th_th_agg0.sql
 
-# Trace an existing .sql file against tpch_db, custom output
-bash auto_test/trace_outer_yan.sh --db tpch_db \
-    -q "$(cat outerjoin_query/tpch/some_query.sql)" \
-    -o results/oy_traces/some_query.trace.txt
+# Trace inline SQL
+bash auto_test/trace_outer_yan.sh \
+  -b build/release/duckdb --db graph_db \
+  -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src;"
 
-# `fails` mode — 5 preset queries use R/S/T/K view names; create them once on graph_db:
-build/debug/duckdb graph_db -c "
-  CREATE VIEW IF NOT EXISTS R AS SELECT * FROM R1;
-  CREATE VIEW IF NOT EXISTS S AS SELECT * FROM R2;
-  CREATE VIEW IF NOT EXISTS T AS SELECT * FROM R3;
-  CREATE VIEW IF NOT EXISTS K AS SELECT * FROM R4;"
-bash auto_test/trace_outer_yan.sh --db graph_db fails
+# Trace the five historical R/S/T/K cases
+bash auto_test/trace_outer_yan.sh -b build/release/duckdb --db graph_db fails
 ```
----
 
-## One-Command Deployment — `run_all.sh`
+The graph builder creates R/S/T/K views, so no manual view setup is required.
 
-Clone the repo and run a single command to compile, build all databases, and execute the full experiment:
+## Semi-join kernel controls
+
+| Control | Current default | Effect |
+|---|---:|---|
+| `outer_yan_bitmap_max_bytes` | 16 GiB per filter | Bitmap budget; `0` forces hash |
+| `outer_yan_hash_fn` | `duckdb` | Hash implementation; alternative is `murmur` |
+| `outer_yan_stats_prefilter` | `false` | Use base min/max statistics to skip unsuitable bitmap attempts |
+| `DUCKDB_SJ_KERNEL_TRACE` | unset | Emit finalized bitmap/hash kernel records |
+
+Set session controls with DuckDB variables, for example:
+
+```sql
+SET VARIABLE outer_yan_bitmap_max_bytes = 0;
+SET VARIABLE outer_yan_hash_fn = 'murmur';
+SET VARIABLE outer_yan_stats_prefilter = true;
+```
+
+Disable the cohesive optimizer with:
+
+```sql
+SET disabled_optimizers TO 'outer_yan';
+```
+
+## One-command and manual workflows
 
 ```bash
-git clone <DuckYanOuter repo> && cd DuckYanOuter
+# Build release, prepare/reuse every database, run every family
 bash auto_test/run_all.sh
+
+# Reuse an existing release binary and databases
+SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
 ```
 
-This handles everything: compile DuckDB with extensions → build graph/tpch/tpcds/job databases → run the on/off experiment with dual-thread timing.
-
-**Environment overrides (all optional):**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `GRAPH_DATASET` | `bitcoin` | SNAP graph (bitcoin/epinions/google/wiki/dblp) |
-| `TPCH_SF` | `100` | TPC-H scale factor |
-| `TPCDS_SF` | `100` | TPC-DS scale factor |
-| `OY_THREADS` | `72` | Multi-thread count |
-| `OY_RUNS` | `10` | Timed iterations per config (median taken) |
-| `JOBS` | `nproc` | Make parallelism |
-| `SKIP_BUILD` | `0` | Set to 1 to skip compilation |
-| `SKIP_DATA` | `0` | Set to 1 to skip database generation |
+Manual equivalent:
 
 ```bash
-# Large-scale run with wiki graph + SF=100:
-GRAPH_DATASET=wiki TPCH_SF=100 TPCDS_SF=100 bash auto_test/run_all.sh
-
-# Skip build if binary already exists:
-SKIP_BUILD=1 bash auto_test/run_all.sh --only tpch
-
-# Pass any experiment_onoff.sh flags after the script:
-bash auto_test/run_all.sh --only graph --pattern 'line_N3*'
-```
-
----
-
-## Complete Workflow (Manual Steps)
-
-```bash
-# ===== Step 1: Clone & Build =====
-git clone <DuckYanOuter repo>
-cd DuckYanOuter
-BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 GEN=ninja make release
-
-# ===== Step 2: Build all databases =====
-# build_db.sh auto-detects missing extensions and triggers make release if needed.
-# Queries are already included in the repo (outerjoin_query/), no generation needed.
+BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 bash auto_test/build_db.sh all
-#   graph_db  — SNAP bitcoin (default), ~24K edges → R1..R10
-#   tpch_db   — TPC-H SF=100 via CALL dbgen(sf=100)
-#   tpcds_db  — TPC-DS SF=100 via CALL dsdgen(sf=100)
-#   job_db    — IMDb 21 tables via httpfs read_parquet (remote, ~1.75GB)
-
-# ===== Step 3: Run the full on/off experiment =====
 bash auto_test/experiment_onoff.sh
-#   Correctness check (outer_yan ON == OFF) + dual-thread timing
-#   threads=1 + threads=72, median of 5 runs per config; timed-out queries
-#   are retried once at the doubled timeout (OY_TIMEOUT_RETRY_MULT, default 2)
-
-# ===== Step 4: Check results =====
-cat auto_test/results/experiment_onoff_*.txt | tail -10
-
-# ===== (Optional) Debug a specific query =====
-bash auto_test/trace_outer_yan.sh --db graph_db \
-    -q "SELECT * FROM R1 LEFT JOIN R2 ON R1.dst=R2.src INNER JOIN R3 ON R2.dst=R3.src;"
 ```
 
-**Customization via environment (or edit `configs.sh`):**
-
-```bash
-# Use wiki graph (28.5M edges) for larger scale:
-GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
-
-# Scale TPC-H to SF=100:
-TPCH_SF=100 bash auto_test/build_db.sh tpch
-
-# Quick test with fewer iterations and smaller scope:
-bash auto_test/experiment_onoff.sh --only graph --runs 3 --limit 5
-```
-
-Databases (`graph_db`, `tpch_db`, `tpcds_db`, `job_db`) and `results/` are git-ignored.
+`run_all.sh` and `build_db.sh` reuse existing database files. If a requested
+scale or graph differs from the database already on disk, rebuild that database
+explicitly with `FORCE=1` before running the experiment.

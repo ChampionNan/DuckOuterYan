@@ -60,7 +60,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalSJProbe &op) {
 	}
 
 	auto &sj_probe = Make<PhysicalSJProbe>(child_plan.GetTypes(), std::move(filters),
-	                                       std::move(op.probe_col_ids_per_filter), op.estimated_cardinality);
+	                                       std::move(op.probe_col_ids_per_filter), op.estimated_cardinality,
+	                                       op.top_down);
 	auto &probe_typed = sj_probe.Cast<PhysicalSJProbe>();
 	probe_typed.filter_ids = op.filter_ids;
 	sj_probe.children.push_back(child_plan);

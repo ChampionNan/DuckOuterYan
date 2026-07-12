@@ -42,7 +42,12 @@ struct OTJoin {
 	//! Relations referenced by `conditions[i].left` / `.right` respectively.
 	idx_t cond_left_relation_id = DConstants::INVALID_INDEX;
 	idx_t cond_right_relation_id = DConstants::INVALID_INDEX;
-	//! HLL-product cost statistic; populated by OuterYanDP::BuildEdgesFromOT.
+	//! Per-side HLL products and their maximum, populated by
+	//! OuterYanDP::BuildEdgesFromOT. Keeping both sides lets the cost model
+	//! estimate unmatched outer rows and semi-join selectivity from distinct
+	//! coverage instead of raw row counts.
+	double left_distinct_count = 1.0;
+	double right_distinct_count = 1.0;
 	double distinct_count = 1.0;
 };
 

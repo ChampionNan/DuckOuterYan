@@ -12,6 +12,29 @@
 
 namespace duckdb {
 
+//! Numeric inputs to the final OuterYan selection. Kept as a plain trace
+//! carrier so the experiment harness can export the exact comparison without
+//! depending on DP implementation types.
+struct OuterYanDecisionCosts {
+	bool available = false;
+	double baseline_cost = 0.0;
+	double candidate_join_cost = 0.0;
+	//! Raw sum of the four round build/probe estimates below.
+	double semijoin_raw_cost = 0.0;
+	//! Calibration applied once to semijoin_raw_cost by the final gate.
+	double semijoin_cost_ratio = 0.0;
+	//! semijoin_cost_ratio * semijoin_raw_cost.
+	double weighted_semijoin_cost = 0.0;
+	//! candidate_join_cost + weighted_semijoin_cost.
+	double candidate_total = 0.0;
+	double cost_ratio_limit = 0.0;
+	double baseline_threshold = 0.0;
+	double round1_build = 0.0;
+	double round1_probe = 0.0;
+	double round2_build = 0.0;
+	double round2_probe = 0.0;
+};
+
 //! Opt-in, file-based pipeline tracer for the OuterYan optimizer.
 //!
 //! Every OuterYan pass appends a labelled snapshot of the representation it
@@ -40,6 +63,13 @@ public:
 	//! Append one labelled stage. `body` is emitted verbatim under a header
 	//! banner; a trailing newline is ensured.
 	static void Stage(const string &label, const string &body);
+
+	//! Append one machine-readable final candidate decision. The experiment
+	//! harness consumes this record instead of inferring the decision from the
+	//! presence of SJ operators (which cannot represent a changed-but-rejected
+	//! candidate).
+	static void Decision(bool outer_reordered, bool cost_gate_applied, bool outer_yan_selected,
+	                     const string &reason, const OuterYanDecisionCosts &costs = {});
 
 private:
 	OuterYanTrace() = delete;

@@ -17,6 +17,7 @@ add_library_unity(
   pipeline/aggregate_pushdown_outer.cpp
   pipeline/desimplification.cpp
   pipeline/outer_yan_dp.cpp
+  pipeline/outer_yan_optimizer.cpp
   pipeline/outer_yan_post.cpp
   pipeline/outer_yan_pre.cpp
   pipeline/resimplification.cpp

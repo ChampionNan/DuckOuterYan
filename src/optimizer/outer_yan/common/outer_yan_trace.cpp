@@ -2,7 +2,9 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
+#include <sstream>
 
 namespace duckdb {
 
@@ -77,6 +79,49 @@ void OuterYanTrace::Stage(const string &label, const string &body) {
 		block += "\n";
 	}
 	Append(block);
+}
+
+void OuterYanTrace::Decision(bool outer_reordered, bool cost_gate_applied, bool outer_yan_selected,
+                             const string &reason, const OuterYanDecisionCosts &costs) {
+	if (!Enabled()) {
+		return;
+	}
+	std::ostringstream line;
+	line << std::setprecision(17)
+	     << "[OY_DECISION] outer_reordered=" << (outer_reordered ? 1 : 0)
+	     << " cost_gate_applied=" << (cost_gate_applied ? 1 : 0)
+	     << " outer_yan_selected=" << (outer_yan_selected ? 1 : 0)
+	     << " reason=" << reason;
+	auto metric = [&](const char *name, double value) {
+		line << " " << name << "=";
+		if (costs.available) {
+			line << value;
+		} else {
+			line << "NA";
+		}
+	};
+	auto ratio_metric = [&](const char *name, double value) {
+		line << " " << name << "=";
+		if (costs.available) {
+			line << std::setprecision(6) << value << std::setprecision(17);
+		} else {
+			line << "NA";
+		}
+	};
+	metric("baseline_cost", costs.baseline_cost);
+	metric("candidate_join_cost", costs.candidate_join_cost);
+	metric("semijoin_raw_cost", costs.semijoin_raw_cost);
+	ratio_metric("semijoin_cost_ratio", costs.semijoin_cost_ratio);
+	metric("weighted_semijoin_cost", costs.weighted_semijoin_cost);
+	metric("candidate_total", costs.candidate_total);
+	ratio_metric("cost_ratio_limit", costs.cost_ratio_limit);
+	metric("baseline_threshold", costs.baseline_threshold);
+	metric("round1_build", costs.round1_build);
+	metric("round1_probe", costs.round1_probe);
+	metric("round2_build", costs.round2_build);
+	metric("round2_probe", costs.round2_probe);
+	line << "\n";
+	Append(line.str());
 }
 
 } // namespace duckdb

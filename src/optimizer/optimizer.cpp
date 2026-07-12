@@ -42,18 +42,11 @@
 #include "duckdb/optimizer/row_number_rewriter.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
-#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
-#include "duckdb/optimizer/outer_yan/pipeline/aggregate_pushdown_outer.hpp"
-#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
-#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
-#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp"
 #include "duckdb/optimizer/projection_pullup.hpp"
 #include "duckdb/optimizer/rule/predicate_factoring.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
-
-#include "duckdb/optimizer/operator_binding_printer.hpp"
-#include "duckdb/common/printer.hpp"
 
 namespace duckdb {
 
@@ -241,75 +234,20 @@ void Optimizer::RunBuiltInOptimizers() {
 		projection_pullup.Optimize(plan);
 	});
 
-	// OuterYan — three-pass optimizer for acyclic CQs with inner / outer joins.
-	// `OuterYanPre` runs the applicability gate first and stores the result
-	// (true / false) in `outer_yan_active`. The remaining OuterYan passes
-	// (OuterYanDP, OuterYanPost) and the existing JOIN_ORDER pass branch on
-	// this single flag — they are mutually exclusive: when OuterYan is active
-	// JOIN_ORDER is skipped, otherwise OuterYanDP / OuterYanPost are skipped.
-
-	// Debug format
-	// peratorBindingPrinter printer;
-	// printer.Print(plan, context);  // Prints to stdout
-	bool outer_yan_active = false;
-	OuterYanTree outer_yan_tree;
-	// EXPLAIN wraps the statement in a LOGICAL_EXPLAIN node whose child is the
-	// real plan. OuterYan must run on that inner plan so the printed plan
-	// reflects what executes. It rebuilds the plan it is given and, between its
-	// Pre and Post passes, transiently leaves `plan` empty — RunOptimizer's
-	// inter-pass Verify tolerates a null `plan` but would dereference a
-	// LOGICAL_EXPLAIN holding a null child. So detach the wrapper, run OuterYan
-	// on the inner plan exactly as for a normal query, and re-attach it below.
-	unique_ptr<LogicalOperator> explain_wrapper;
-	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && plan->children.size() == 1) {
-		explain_wrapper = std::move(plan);
-		plan = std::move(explain_wrapper->children[0]);
+	// OuterYan owns both candidate construction and the final policy decision.
+	// When it handles an applicable query it also builds DuckDB's normal plan,
+	// selects one, and applies aggregate pushdown with metadata for that exact
+	// join shape. Inapplicable/disabled queries continue through the unchanged
+	// normal path below.
+	bool outer_yan_applied = false;
+	if (!OptimizerDisabled(OptimizerType::OUTER_YAN)) {
+		OuterYanOptimizer outer_yan_optimizer(*this);
+		auto result = outer_yan_optimizer.Optimize(std::move(plan));
+		plan = std::move(result.plan);
+		outer_yan_applied = result.outer_yan_applied;
 	}
-	if (!OptimizerDisabled(OptimizerType::OUTER_YAN)) RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
-		outer_yan_active = outer_yan_tree.CheckApplicability(*plan);
-#ifndef NDEBUG
-		{
-			const auto &app = outer_yan_tree.Applicability();
-			if (app.applicable) {
-				Printer::Print("[OuterYan] applicable: " + to_string(app.relations.size()) +
-				               " relations, " + to_string(app.edges.size()) + " edges" +
-				               (app.has_root_aggregate ? ", has_root_agg" : ""));
-			} else if (!app.relations.empty()) {
-				Printer::Print("[OuterYan] not applicable: " + app.reason);
-			}
-		}
-#endif
-		if (outer_yan_active) {
-			// Open the trace block for this query: the original SQL plus the
-			// logical plan handed to OuterYan, before any OT/OJT rewrite. Guard
-			// the whole block so `plan->ToString()` is not rendered when tracing
-			// is off.
-			if (OuterYanTrace::Enabled()) {
-				OuterYanTrace::BeginQuery(context.GetCurrentQuery());
-				OuterYanTrace::Stage("input logical plan (pre-OuterYan)", plan->ToString());
-			}
-			OuterYanPre outer_yan_pre;
-			outer_yan_pre.Optimize(std::move(plan), outer_yan_tree);
-		}
-	});
 
-	if (outer_yan_active) {
-		RunOptimizer(OptimizerType::OUTER_YAN_DP, [&]() {
-			OuterYanDP outer_yan_dp(context);
-			outer_yan_dp.Optimize(outer_yan_tree);
-		});
-
-		RunOptimizer(OptimizerType::OUTER_YAN_POST, [&]() {
-			OuterYanPost outer_yan_post(context);
-			plan = outer_yan_post.Optimize(outer_yan_tree);
-		});
-
-		RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
-			AggregatePushdownOuter aggregate_pushdown_outer(*this, outer_yan_tree);
-			plan = aggregate_pushdown_outer.Optimize(std::move(plan));
-			OuterYanTrace::Stage("after Aggregate Pushdown (logical plan)", plan->ToString());
-		});
-	} else {
+	if (!outer_yan_applied) {
 		// Simplifies FULL OUTER -> LEFT/RIGHT OUTER -> INNER if NULLs are filtered anyway
 		RunOptimizer(OptimizerType::OUTER_JOIN_SIMPLIFICATION, [&]() {
 			OuterJoinSimplification outer_join_simplification;
@@ -320,12 +258,6 @@ void Optimizer::RunBuiltInOptimizers() {
 			JoinOrderOptimizer optimizer(context);
 			plan = optimizer.Optimize(std::move(plan));
 		});
-	}
-
-	// Re-attach the EXPLAIN wrapper around the now-optimized inner plan.
-	if (explain_wrapper) {
-		explain_wrapper->children[0] = std::move(plan);
-		plan = std::move(explain_wrapper);
 	}
 
 	RunOptimizer(OptimizerType::JOIN_ELIMINATION, [&]() {

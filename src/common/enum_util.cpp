@@ -148,6 +148,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/setting_info.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/parallel/interrupt.hpp"
@@ -2940,6 +2941,8 @@ const StringUtil::EnumStringLiteral *GetLogicalOperatorTypeValues() {
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_POSITIONAL_JOIN), "LOGICAL_POSITIONAL_JOIN" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_ASOF_JOIN), "LOGICAL_ASOF_JOIN" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_DEPENDENT_JOIN), "LOGICAL_DEPENDENT_JOIN" },
+		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_SJ_BUILD), "LOGICAL_SJ_BUILD" },
+		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_SJ_PROBE), "LOGICAL_SJ_PROBE" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_UNION), "LOGICAL_UNION" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_EXCEPT), "LOGICAL_EXCEPT" },
 		{ static_cast<uint32_t>(LogicalOperatorType::LOGICAL_INTERSECT), "LOGICAL_INTERSECT" },
@@ -2980,12 +2983,12 @@ const StringUtil::EnumStringLiteral *GetLogicalOperatorTypeValues() {
 
 template<>
 const char* EnumUtil::ToChars<LogicalOperatorType>(LogicalOperatorType value) {
-	return StringUtil::EnumToString(GetLogicalOperatorTypeValues(), 63, "LogicalOperatorType", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetLogicalOperatorTypeValues(), 65, "LogicalOperatorType", static_cast<uint32_t>(value));
 }
 
 template<>
 LogicalOperatorType EnumUtil::FromString<LogicalOperatorType>(const char *value) {
-	return static_cast<LogicalOperatorType>(StringUtil::StringToEnum(GetLogicalOperatorTypeValues(), 63, "LogicalOperatorType", value));
+	return static_cast<LogicalOperatorType>(StringUtil::StringToEnum(GetLogicalOperatorTypeValues(), 65, "LogicalOperatorType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetLogicalTypeIdValues() {
@@ -3296,6 +3299,10 @@ const StringUtil::EnumStringLiteral *GetMetricTypeValues() {
 		{ static_cast<uint32_t>(MetricType::OPTIMIZER_PROJECTION_PULLUP), "OPTIMIZER_PROJECTION_PULLUP" },
 		{ static_cast<uint32_t>(MetricType::OPTIMIZER_OUTER_JOIN_SIMPLIFICATION), "OPTIMIZER_OUTER_JOIN_SIMPLIFICATION" },
 		{ static_cast<uint32_t>(MetricType::OPTIMIZER_ROW_NUMBER_REWRITER), "OPTIMIZER_ROW_NUMBER_REWRITER" },
+		{ static_cast<uint32_t>(MetricType::OPTIMIZER_OUTER_YAN_PRE), "OPTIMIZER_OUTER_YAN_PRE" },
+		{ static_cast<uint32_t>(MetricType::OPTIMIZER_OUTER_YAN_DP), "OPTIMIZER_OUTER_YAN_DP" },
+		{ static_cast<uint32_t>(MetricType::OPTIMIZER_OUTER_YAN_POST), "OPTIMIZER_OUTER_YAN_POST" },
+		{ static_cast<uint32_t>(MetricType::OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER), "OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER" },
 		{ static_cast<uint32_t>(MetricType::ALL_OPTIMIZERS), "ALL_OPTIMIZERS" },
 		{ static_cast<uint32_t>(MetricType::CUMULATIVE_OPTIMIZER_TIMING), "CUMULATIVE_OPTIMIZER_TIMING" },
 		{ static_cast<uint32_t>(MetricType::PARSER), "PARSER" },
@@ -3311,12 +3318,12 @@ const StringUtil::EnumStringLiteral *GetMetricTypeValues() {
 
 template<>
 const char* EnumUtil::ToChars<MetricType>(MetricType value) {
-	return StringUtil::EnumToString(GetMetricTypeValues(), 71, "MetricType", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetMetricTypeValues(), 75, "MetricType", static_cast<uint32_t>(value));
 }
 
 template<>
 MetricType EnumUtil::FromString<MetricType>(const char *value) {
-	return static_cast<MetricType>(StringUtil::StringToEnum(GetMetricTypeValues(), 71, "MetricType", value));
+	return static_cast<MetricType>(StringUtil::StringToEnum(GetMetricTypeValues(), 75, "MetricType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetMultiFileColumnMappingModeValues() {
@@ -3576,19 +3583,24 @@ const StringUtil::EnumStringLiteral *GetOptimizerTypeValues() {
 		{ static_cast<uint32_t>(OptimizerType::WINDOW_SELF_JOIN), "WINDOW_SELF_JOIN" },
 		{ static_cast<uint32_t>(OptimizerType::PROJECTION_PULLUP), "PROJECTION_PULLUP" },
 		{ static_cast<uint32_t>(OptimizerType::OUTER_JOIN_SIMPLIFICATION), "OUTER_JOIN_SIMPLIFICATION" },
-		{ static_cast<uint32_t>(OptimizerType::ROW_NUMBER_REWRITER), "ROW_NUMBER_REWRITER" }
+		{ static_cast<uint32_t>(OptimizerType::ROW_NUMBER_REWRITER), "ROW_NUMBER_REWRITER" },
+		{ static_cast<uint32_t>(OptimizerType::OUTER_YAN_PRE), "OUTER_YAN_PRE" },
+		{ static_cast<uint32_t>(OptimizerType::OUTER_YAN_DP), "OUTER_YAN_DP" },
+		{ static_cast<uint32_t>(OptimizerType::OUTER_YAN_POST), "OUTER_YAN_POST" },
+		{ static_cast<uint32_t>(OptimizerType::AGGREGATE_PUSHDOWN_OUTER), "AGGREGATE_PUSHDOWN_OUTER" },
+		{ static_cast<uint32_t>(OptimizerType::OUTER_YAN), "OUTER_YAN" }
 	};
 	return values;
 }
 
 template<>
 const char* EnumUtil::ToChars<OptimizerType>(OptimizerType value) {
-	return StringUtil::EnumToString(GetOptimizerTypeValues(), 37, "OptimizerType", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetOptimizerTypeValues(), 42, "OptimizerType", static_cast<uint32_t>(value));
 }
 
 template<>
 OptimizerType EnumUtil::FromString<OptimizerType>(const char *value) {
-	return static_cast<OptimizerType>(StringUtil::StringToEnum(GetOptimizerTypeValues(), 37, "OptimizerType", value));
+	return static_cast<OptimizerType>(StringUtil::StringToEnum(GetOptimizerTypeValues(), 42, "OptimizerType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetOrderByColumnTypeValues() {
@@ -3708,6 +3720,28 @@ const char* EnumUtil::ToChars<OrdinalityType>(OrdinalityType value) {
 template<>
 OrdinalityType EnumUtil::FromString<OrdinalityType>(const char *value) {
 	return static_cast<OrdinalityType>(StringUtil::StringToEnum(GetOrdinalityTypeValues(), 2, "OrdinalityType", value));
+}
+
+const StringUtil::EnumStringLiteral *GetOuterYanAggregationTypeValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(OuterYanAggregationType::NONE), "NONE" },
+		{ static_cast<uint32_t>(OuterYanAggregationType::COUNT_STAR), "COUNT_STAR" },
+		{ static_cast<uint32_t>(OuterYanAggregationType::MINMAX), "MINMAX" },
+		{ static_cast<uint32_t>(OuterYanAggregationType::SUM), "SUM" },
+		{ static_cast<uint32_t>(OuterYanAggregationType::SELECT_DISTINCT), "SELECT_DISTINCT" },
+		{ static_cast<uint32_t>(OuterYanAggregationType::OTHER), "OTHER" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<OuterYanAggregationType>(OuterYanAggregationType value) {
+	return StringUtil::EnumToString(GetOuterYanAggregationTypeValues(), 6, "OuterYanAggregationType", static_cast<uint32_t>(value));
+}
+
+template<>
+OuterYanAggregationType EnumUtil::FromString<OuterYanAggregationType>(const char *value) {
+	return static_cast<OuterYanAggregationType>(StringUtil::StringToEnum(GetOuterYanAggregationTypeValues(), 6, "OuterYanAggregationType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetOutputStreamValues() {
@@ -3882,6 +3916,8 @@ const StringUtil::EnumStringLiteral *GetPhysicalOperatorTypeValues() {
 		{ static_cast<uint32_t>(PhysicalOperatorType::RIGHT_DELIM_JOIN), "RIGHT_DELIM_JOIN" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::POSITIONAL_JOIN), "POSITIONAL_JOIN" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::ASOF_JOIN), "ASOF_JOIN" },
+		{ static_cast<uint32_t>(PhysicalOperatorType::SJ_BUILD), "SJ_BUILD" },
+		{ static_cast<uint32_t>(PhysicalOperatorType::SJ_PROBE), "SJ_PROBE" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::UNION), "UNION" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::RECURSIVE_CTE), "RECURSIVE_CTE" },
 		{ static_cast<uint32_t>(PhysicalOperatorType::RECURSIVE_KEY_CTE), "RECURSIVE_KEY_CTE" },
@@ -3930,12 +3966,12 @@ const StringUtil::EnumStringLiteral *GetPhysicalOperatorTypeValues() {
 
 template<>
 const char* EnumUtil::ToChars<PhysicalOperatorType>(PhysicalOperatorType value) {
-	return StringUtil::EnumToString(GetPhysicalOperatorTypeValues(), 83, "PhysicalOperatorType", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetPhysicalOperatorTypeValues(), 85, "PhysicalOperatorType", static_cast<uint32_t>(value));
 }
 
 template<>
 PhysicalOperatorType EnumUtil::FromString<PhysicalOperatorType>(const char *value) {
-	return static_cast<PhysicalOperatorType>(StringUtil::StringToEnum(GetPhysicalOperatorTypeValues(), 83, "PhysicalOperatorType", value));
+	return static_cast<PhysicalOperatorType>(StringUtil::StringToEnum(GetPhysicalOperatorTypeValues(), 85, "PhysicalOperatorType", value));
 }
 
 const StringUtil::EnumStringLiteral *GetPhysicalTableScanExecutionStrategyValues() {
