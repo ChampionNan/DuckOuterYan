@@ -43,6 +43,7 @@ This command:
 ```text
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.txt
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.attempts.csv
 ```
 
 Existing databases are reused. If dataset or scale settings changed and every
@@ -73,6 +74,15 @@ candidate_total = candidate_join_cost
 
 candidate_total <= MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 ```
+
+The current P0/P1 policy uses `SEMIJOIN_COST_RATIO=0.35` and
+`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Before the numeric gate, a conservative
+proof copy runs DuckDB statistics propagation and empty-result pull-up; if that
+removes every real join, DuckDB is selected with `DUCKDB_PROVEN_EMPTY`.
+
+The trace and reports distinguish the raw cost winner, the threshold result,
+and the final selected plan. They also print the exact join-output and SJ
+materialize/build/replay/lookup/emit coefficients.
 
 The policy constants, including `APPLY_COST_GATE`, live in
 [`outer_yan_optimizer.hpp`](src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp).
@@ -110,25 +120,35 @@ bash auto_test/experiment_onoff.sh \
 # Run one exact TPC-H query label.
 bash auto_test/experiment_onoff.sh \
     --only tpch --pattern 'oy_th_th_branch5a_v2'
+
+# Release build plus P0/P1 representative bare-query validation.
+SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
+    --only all \
+    --query-list auto_test/representative_queries.txt \
+    --capture-plans
 ```
 
-`experiment_onoff.sh` first compares the OuterYan-ON and OuterYan-OFF result
-multisets. Only equivalent queries are timed. It measures both `threads=1` and
+`experiment_onoff.sh` first executes the bare query with OuterYan ON and OFF,
+then compares the emitted result multisets outside DuckDB. Only equivalent
+queries are timed. It measures both `threads=1` and
 `threads=$OY_THREADS`, and writes a human-readable `.txt` report plus a matching
 `.csv` file under `auto_test/results/` by default.
 
-The reports distinguish:
+The live log and reports distinguish:
 
 - `outer_reordered`: the OuterYan grouping differs from DuckDB's grouping;
 - `outer_yan_selected`: the OuterYan candidate actually passed policy selection;
+- `selected_plan`, `raw_cost_winner`, and `gate_result` as separate decisions;
 - baseline, candidate-join, raw/weighted semi-join, and total estimated costs;
+- the full cost formula and all join/SJ coefficient values;
 - bitmap/hash kernel use; and
 - single-thread categorized operator time for round-1 semi-joins, round-2
   semi-joins, and real joins.
 
 The categorized operator values are diagnostics, not three additive wall-clock
-phases. Timed-out queries can be retried with a larger timeout; retry rows are
-marked in the CSV and the text summary reflects the final attempt.
+phases. The canonical CSV contains one effective post-retry row per query;
+`.attempts.csv` retains every attempt. `--capture-plans` also stores OFF/ON
+EXPLAIN plans, optimizer traces, and per-step cost details.
 
 Database builders reuse existing database files. To intentionally replace one
 at another scale or with another graph dataset, set `FORCE=1` explicitly:

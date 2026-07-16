@@ -17,6 +17,7 @@ synopsis.
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_queries.py` | Generate and validate the SQL corpus |
 | `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
+| `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | SQL corpus, divided into `graph`, `tpch`, `tpcds`, and `job` |
 | `results/` | Generated text, CSV, profile, and trace output |
@@ -39,6 +40,7 @@ corresponding environment values.
 | `OY_TIMEOUT_SECS` | `600` | Per-query timeout; `0` disables it |
 | `OY_RUNS` | `5` | Timed executions after one warm-up |
 | `OY_TIMEOUT_RETRY_MULT` | `2` | Timeout multiplier for one retry; `1` disables retry |
+| `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
 
 Always inspect `configs.sh` before a server run because these experiment defaults
@@ -107,9 +109,9 @@ databases and may remove generated queries that do not bind.
 
 For every selected query, `experiment_onoff.sh` performs these operations:
 
-1. Compare OuterYan OFF and ON results after applying the same order-normalizing
-   wrapper (`SELECT * FROM (<query>) ORDER BY ALL`). A mismatch, error, or timeout
-   is not timed.
+1. Execute the bare query with OuterYan OFF and ON, sort the emitted CSV files
+   outside DuckDB, and compare the result multisets. A mismatch, error, or
+   timeout is not timed. No SQL wrapper changes the optimized plan.
 2. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record.
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
@@ -142,10 +144,16 @@ baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 select OuterYan iff candidate_total <= baseline_threshold
 ```
 
+The trace and CSV report two separate comparisons: `raw_cost_winner` compares
+`candidate_total` directly with `baseline_cost`, while `gate_result` compares
+`candidate_total` with `baseline_threshold`. `selected_plan` is the plan that
+is actually returned and can differ because of same-grouping or proven-empty
+policy decisions.
+
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace has the
-gate enabled, a semi-join ratio of `0.05`, and a baseline limit of `1.2`. Rebuild
+gate enabled, a semi-join ratio of `0.35`, and a baseline limit of `1.0`. Rebuild
 the CLI after changing them.
 
 Decision reasons written to the trace and result files include:
@@ -154,6 +162,7 @@ Decision reasons written to the trace and result files include:
 |---|---|
 | `INAPPLICABLE` | OuterYan applicability check failed |
 | `DUCKDB_PLAN` | Candidate has the same grouping as DuckDB; use DuckDB |
+| `DUCKDB_PROVEN_EMPTY` | DuckDB's proof copy eliminates all real join work; use DuckDB without SJs |
 | `ALWAYS_OUTERYAN` | Grouping changed and the source-level cost gate is disabled |
 | `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
@@ -175,6 +184,8 @@ bash auto_test/experiment_onoff.sh [options]
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
       --limit N       global query cap; 0 means unlimited
+      --query-list FILE  ordered corpus-relative SQL paths; requires --only all
+      --capture-plans save OFF/ON EXPLAIN, trace, and detailed cost files
   -o, --out FILE      exact text output path
 ```
 
@@ -200,6 +211,10 @@ bash auto_test/experiment_onoff.sh --only tpch
 
 # Skip JOB bushy-7 labels
 bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
+
+# P0/P1 representative run using existing databases
+SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
+  --only all --query-list auto_test/representative_queries.txt --capture-plans
 ```
 
 The scale variables in the second example describe the prepared databases in
@@ -207,15 +222,29 @@ the report header; rebuild the databases first if they are not already SF1.
 
 ## Output
 
-Without `--out`, one start timestamp is used for both files:
+Without `--out`, one start timestamp is used for the result group:
 
 ```text
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.txt
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.attempts.csv
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.plans/
 ```
 
 With `--out path/name.txt`, the text path is exact and the CSV is
-`path/name.csv`.
+`path/name.csv`. The canonical CSV contains exactly one effective row per query
+after retries. The attempts CSV retains both main and retry rows.
+
+The live stderr line contains `reorder`, `selected`, `reason`, `raw`, and
+`gate`, followed by an indented calculation:
+
+```text
+cost: OuterYan=<join> + <sj_ratio>*<sj_raw> = <total> vs DuckDB=<baseline> ...
+```
+
+The same record prints all join-output and SJ materialize/build/replay/lookup/
+emit weights. With plan capture enabled, every query has DuckDB-OFF and enabled
+EXPLAIN files, a full trace, and per-join/per-SJ cost records.
 
 The text table includes:
 

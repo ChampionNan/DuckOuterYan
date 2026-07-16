@@ -35,10 +35,10 @@ public:
 	static constexpr bool APPLY_COST_GATE = true;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
 	//! it to the OuterYan candidate's real-join cost.
-	static constexpr double SEMIJOIN_COST_RATIO = 0.05;
-	//! Permit the weighted candidate cost to be up to 10%
-	//! more than DuckDB's baseline estimate before falling back.
-	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.2;
+	static constexpr double SEMIJOIN_COST_RATIO = 0.35;
+	//! Require the weighted candidate cost to be no larger than DuckDB's
+	//! baseline estimate. The value remains a source-level calibration knob.
+	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
 
 	explicit OuterYanOptimizer(Optimizer &optimizer);
 

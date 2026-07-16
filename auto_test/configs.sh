@@ -91,6 +91,10 @@ export OY_RUNS="${OY_RUNS:-5}"
 # by this factor. 2 = "doubled timeout" retry. Set 1 to disable the retry pass.
 export OY_TIMEOUT_RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
 
+# Save OFF/ON EXPLAIN plans plus OuterYan trace/cost artifacts. The
+# experiment_onoff.sh --capture-plans flag sets this to 1 for a run.
+export OY_CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
+
 # ===========================================================================
 # 7) Pretty-print summary (only when sourced interactively / verbose)
 # ===========================================================================
@@ -103,6 +107,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  OY_THREADS       = $OY_THREADS"
         echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per query"
         echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"
+        echo "  CAPTURE_PLANS     = $OY_CAPTURE_PLANS"
         echo "========================="
     } >&2
 fi

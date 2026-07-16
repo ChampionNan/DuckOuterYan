@@ -9,14 +9,20 @@
 #pragma once
 
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/types.hpp"
 
 namespace duckdb {
+
+enum class OuterYanSelectedPlan : uint8_t { DUCKDB_BASELINE, OUTERYAN_CANDIDATE };
+enum class OuterYanCostWinner : uint8_t { DUCKDB_BASELINE, OUTERYAN_CANDIDATE, EQUAL, UNAVAILABLE };
+enum class OuterYanGateResult : uint8_t { PASS, FAIL, SKIPPED, UNAVAILABLE };
 
 //! Numeric inputs to the final OuterYan selection. Kept as a plain trace
 //! carrier so the experiment harness can export the exact comparison without
 //! depending on DP implementation types.
 struct OuterYanDecisionCosts {
 	bool available = false;
+	string formula_id = "OUTER_YAN_COST_V2";
 	double baseline_cost = 0.0;
 	double candidate_join_cost = 0.0;
 	//! Raw sum of the four round build/probe estimates below.
@@ -33,6 +39,38 @@ struct OuterYanDecisionCosts {
 	double round1_probe = 0.0;
 	double round2_build = 0.0;
 	double round2_probe = 0.0;
+	//! Raw candidate-vs-baseline comparison (not the policy threshold).
+	double raw_cost_delta = 0.0;
+	double raw_cost_ratio = 0.0;
+	bool raw_cost_ratio_available = false;
+	//! Exact operands and margin of the policy comparison.
+	double gate_lhs = 0.0;
+	double gate_rhs = 0.0;
+	double gate_margin = 0.0;
+	//! Row-work coefficients used to produce the join/SJ totals.
+	double inner_output_weight = 0.0;
+	double unmatched_left_weight = 0.0;
+	double unmatched_right_weight = 0.0;
+	double semijoin_materialize_weight = 0.0;
+	double semijoin_filter_build_weight = 0.0;
+	double semijoin_replay_weight = 0.0;
+	double semijoin_probe_lookup_weight = 0.0;
+	double semijoin_probe_emit_weight = 0.0;
+};
+
+//! Authoritative final policy decision. The optimizer, trace, and experiment
+//! harness all consume this record so selection cannot be inferred differently
+//! in different layers.
+struct OuterYanDecisionRecord {
+	bool outer_reordered = false;
+	bool cost_gate_applied = false;
+	bool outer_yan_selected = false;
+	bool baseline_proven_empty = false;
+	OuterYanSelectedPlan selected_plan = OuterYanSelectedPlan::DUCKDB_BASELINE;
+	OuterYanCostWinner raw_cost_winner = OuterYanCostWinner::UNAVAILABLE;
+	OuterYanGateResult gate_result = OuterYanGateResult::SKIPPED;
+	string reason = "INAPPLICABLE";
+	OuterYanDecisionCosts costs;
 };
 
 //! Opt-in, file-based pipeline tracer for the OuterYan optimizer.
@@ -68,8 +106,7 @@ public:
 	//! harness consumes this record instead of inferring the decision from the
 	//! presence of SJ operators (which cannot represent a changed-but-rejected
 	//! candidate).
-	static void Decision(bool outer_reordered, bool cost_gate_applied, bool outer_yan_selected,
-	                     const string &reason, const OuterYanDecisionCosts &costs = {});
+	static void Decision(const OuterYanDecisionRecord &record);
 
 private:
 	OuterYanTrace() = delete;

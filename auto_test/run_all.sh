@@ -26,6 +26,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+RUN_TS="$(date '+%Y%m%d_%H%M%S')"
+mkdir -p "$SCRIPT_DIR/results"
+RUN_LOG="$SCRIPT_DIR/results/run_all_${RUN_TS}.log"
+
 # --- Helpers -----------------------------------------------------------------
 log() { printf '\n\033[1;36m===> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -37,7 +41,7 @@ START_TIME=$SECONDS
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "Step 1/3: Building DuckDB release (BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1)"
     JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
-    BUILD_TPCH=1 BUILD_TPCDS=1 make release -j"$JOBS"
+    BUILD_TPCH=1 BUILD_TPCDS=1 BUILD_HTTPFS=1 make release -j"$JOBS" 2>&1 | tee -a "$RUN_LOG"
     log "Build complete ($(elapsed $((SECONDS - START_TIME))))"
 else
     log "Step 1/3: Skipping build (SKIP_BUILD=1)"
@@ -51,7 +55,7 @@ export DUCKDB_BIN
 if [ "${SKIP_DATA:-0}" != "1" ]; then
     log "Step 2/3: Building all databases"
     STEP2_START=$SECONDS
-    bash "$SCRIPT_DIR/build_db.sh" all
+    bash "$SCRIPT_DIR/build_db.sh" all 2>&1 | tee -a "$RUN_LOG"
     log "Databases ready ($(elapsed $((SECONDS - STEP2_START))))"
 else
     log "Step 2/3: Skipping data build (SKIP_DATA=1)"
@@ -60,10 +64,19 @@ fi
 # --- Step 3: Run experiment --------------------------------------------------
 log "Step 3/3: Running on/off experiment"
 STEP3_START=$SECONDS
-bash "$SCRIPT_DIR/experiment_onoff.sh" "$@"
+bash "$SCRIPT_DIR/experiment_onoff.sh" "$@" 2>&1 | tee -a "$RUN_LOG"
 log "Experiment complete ($(elapsed $((SECONDS - STEP3_START))))"
 
 # --- Summary -----------------------------------------------------------------
 TOTAL=$((SECONDS - START_TIME))
 log "All done! Total time: $(elapsed $TOTAL)"
-echo "Results: $(ls -t "$SCRIPT_DIR/results"/experiment_onoff_*.txt 2>/dev/null | head -1)"
+LATEST_TXT="$(ls -t "$SCRIPT_DIR/results"/experiment_onoff_*.txt 2>/dev/null | head -1)"
+echo "Run log: $RUN_LOG"
+if [ -n "$LATEST_TXT" ]; then
+    echo "Results TXT: $LATEST_TXT"
+    echo "Final CSV: ${LATEST_TXT%.txt}.csv"
+    echo "Attempts CSV: ${LATEST_TXT%.txt}.attempts.csv"
+    if [ -d "${LATEST_TXT%.txt}.plans" ]; then
+        echo "Plan artifacts: ${LATEST_TXT%.txt}.plans"
+    fi
+fi

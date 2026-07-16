@@ -34,6 +34,7 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 	}
 
 	OuterYanDPCostSummary summary;
+	summary.parameters = cost_parameters;
 	BuildLeafRelations(tree);
 	BuildEdgesFromOT(tree);
 	BuildSemijoinCostModel(tree, summary);
@@ -143,6 +144,11 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 	summary.chosen_real_join_cost = plans.find(full_set)->second->cost;
 	summary.has_complete_plan = true;
 	RebuildOT(tree, full_set);
+	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	if (!ApproxEqual(summary.candidate_join_breakdown.total_cost, summary.chosen_real_join_cost)) {
+		throw InternalException("OuterYanDP: detailed candidate cost %.17g differs from DP cost %.17g",
+		                        summary.candidate_join_breakdown.total_cost, summary.chosen_real_join_cost);
+	}
 	tree.BuildOJT();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after DP — cost-chosen join order (result OJT)", tree.OJT().PrintAsTree(true));
@@ -240,7 +246,7 @@ void OuterYanDP::BuildLeafRelations(OuterYanTree &tree) {
 			auto &get = base->Cast<LogicalGet>();
 			rel->stats = RelationStatisticsHelper::ExtractGetStats(get, context);
 		}
-		if (rel->stats.cardinality == 0) {
+		if (!rel->stats.stats_initialized) {
 			rel->stats.cardinality = 1;
 		}
 	}
@@ -280,9 +286,20 @@ void OuterYanDP::BuildEdgeStatistics(OuterYanTree &tree) {
 			d_left *= static_cast<double>(MaxValue<idx_t>(l_d, 1));
 			d_right *= static_cast<double>(MaxValue<idx_t>(r_d, 1));
 		}
-		join_info.left_distinct_count = MaxValue<double>(d_left, 1.0);
-		join_info.right_distinct_count = MaxValue<double>(d_right, 1.0);
-		join_info.distinct_count = MaxValue<double>(MaxValue<double>(d_left, d_right), 1.0);
+		const auto &left_stats = ot_relations[join_info.cond_left_relation_id]->stats;
+		const auto &right_stats = ot_relations[join_info.cond_right_relation_id]->stats;
+		const bool left_empty = left_stats.stats_initialized && left_stats.cardinality == 0;
+		const bool right_empty = right_stats.stats_initialized && right_stats.cardinality == 0;
+		join_info.left_distinct_count = left_empty ? 0.0 : MaxValue<double>(d_left, 1.0);
+		join_info.right_distinct_count = right_empty ? 0.0 : MaxValue<double>(d_right, 1.0);
+		if (left_empty && right_empty) {
+			join_info.distinct_count = 0.0;
+		} else {
+			join_info.distinct_count =
+			    MaxValue<double>(MaxValue<double>(join_info.left_distinct_count,
+			                                      join_info.right_distinct_count),
+			                     1.0);
+		}
 	}
 }
 
@@ -333,11 +350,15 @@ void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummar
 	semijoin_cardinality.resize(num_relations);
 	vector<double> base_cardinality(num_relations);
 	for (idx_t r = 0; r < num_relations; r++) {
-		base_cardinality[r] = static_cast<double>(MaxValue<idx_t>(tree.ot_relations_by_id[r]->stats.cardinality, 1));
+		auto &stats = tree.ot_relations_by_id[r]->stats;
+		base_cardinality[r] = static_cast<double>(stats.stats_initialized ? stats.cardinality
+		                                                               : MaxValue<idx_t>(stats.cardinality, 1));
 		semijoin_cardinality[r] = base_cardinality[r];
 	}
 
 	std::set<vector<std::pair<idx_t, idx_t>>> built_filters;
+	idx_t round1_step = 0;
+	idx_t round2_step = 0;
 	auto process_pair = [&](const OuterYanSemiPair &pair, bool top_down) {
 		if (pair.build >= num_relations || pair.probe >= num_relations) {
 			throw InternalException("OuterYanDP::BuildSemijoinCostModel: relation id out of range");
@@ -361,13 +382,31 @@ void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummar
 		const bool build_is_left = edge->cond_left_relation_id == pair.build;
 		const double base_build_distinct = build_is_left ? edge->left_distinct_count : edge->right_distinct_count;
 		const double base_probe_distinct = build_is_left ? edge->right_distinct_count : edge->left_distinct_count;
-		const double build_scale = MinValue<double>(1.0, semijoin_cardinality[pair.build] / base_cardinality[pair.build]);
-		const double probe_scale = MinValue<double>(1.0, semijoin_cardinality[pair.probe] / base_cardinality[pair.probe]);
-		const double build_distinct = MaxValue<double>(1.0, base_build_distinct * build_scale);
-		const double probe_distinct = MaxValue<double>(1.0, base_probe_distinct * probe_scale);
-		const double survival = MinValue<double>(1.0, build_distinct / probe_distinct);
+		const double build_cardinality = semijoin_cardinality[pair.build];
 		const double before_probe = semijoin_cardinality[pair.probe];
-		const double after_probe = MaxValue<double>(1.0, before_probe * survival);
+		double build_scale = 0.0;
+		if (base_cardinality[pair.build] > 0.0) {
+			build_scale = MinValue<double>(1.0, build_cardinality / base_cardinality[pair.build]);
+		}
+		double probe_scale = 0.0;
+		if (base_cardinality[pair.probe] > 0.0) {
+			probe_scale = MinValue<double>(1.0, before_probe / base_cardinality[pair.probe]);
+		}
+		const double build_distinct =
+		    build_cardinality == 0.0 ? 0.0 : MaxValue<double>(1.0, base_build_distinct * build_scale);
+		const double probe_distinct =
+		    before_probe == 0.0 ? 0.0 : MaxValue<double>(1.0, base_probe_distinct * probe_scale);
+		double survival;
+		if (before_probe == 0.0 || build_distinct == 0.0) {
+			survival = 0.0;
+		} else if (probe_distinct == 0.0) {
+			// Defensive fallback for inconsistent statistics: do not invent a
+			// reduction when the non-empty probe has no distinct estimate.
+			survival = 1.0;
+		} else {
+			survival = MinValue<double>(1.0, build_distinct / probe_distinct);
+		}
+		const double after_probe = ClampPlanCardinality(before_probe * survival);
 
 		vector<std::pair<idx_t, idx_t>> filter_key;
 		filter_key.reserve(pair.keys.size());
@@ -376,20 +415,39 @@ void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummar
 			                        key.build_binding.column_index.GetIndexUnsafe());
 		}
 		std::sort(filter_key.begin(), filter_key.end());
-		if (built_filters.insert(filter_key).second) {
+		const bool filter_reused = !built_filters.insert(filter_key).second;
+		OuterYanSemijoinCostStep detail;
+		detail.round = top_down ? 2 : 1;
+		detail.step = top_down ? ++round2_step : ++round1_step;
+		detail.build_relation = pair.build;
+		detail.probe_relation = pair.probe;
+		detail.build_table_index = StableTableIndex(tree, pair.build);
+		detail.probe_table_index = StableTableIndex(tree, pair.probe);
+		detail.filter_reused = filter_reused;
+		detail.build_cardinality = build_cardinality;
+		detail.probe_cardinality_before = before_probe;
+		detail.build_distinct = build_distinct;
+		detail.probe_distinct = probe_distinct;
+		detail.survival = survival;
+		detail.probe_cardinality_after = after_probe;
+		if (!filter_reused) {
 			// SJBuild materializes its input and later replays it as a source;
 			// filter construction adds one more linear pass over the build keys.
-			const double build_weight = cost_parameters.semijoin_materialize_weight +
-			                            cost_parameters.semijoin_filter_build_weight +
-			                            cost_parameters.semijoin_replay_weight;
+			detail.materialize_cost =
+			    cost_parameters.semijoin_materialize_weight * build_cardinality;
+			detail.filter_build_cost =
+			    cost_parameters.semijoin_filter_build_weight * build_cardinality;
+			detail.replay_cost = cost_parameters.semijoin_replay_weight * build_cardinality;
 			auto &build_cost = top_down ? summary.round2_build_cost : summary.round1_build_cost;
-			build_cost += build_weight * semijoin_cardinality[pair.build];
+			build_cost += detail.materialize_cost + detail.filter_build_cost + detail.replay_cost;
 		}
 		// Probe inspects every input key and emits the survivors.
+		detail.lookup_cost = cost_parameters.semijoin_probe_lookup_weight * before_probe;
+		detail.emit_cost = cost_parameters.semijoin_probe_emit_weight * after_probe;
 		auto &probe_cost = top_down ? summary.round2_probe_cost : summary.round1_probe_cost;
-		probe_cost += cost_parameters.semijoin_probe_lookup_weight * before_probe +
-		              cost_parameters.semijoin_probe_emit_weight * after_probe;
+		probe_cost += detail.lookup_cost + detail.emit_cost;
 		semijoin_cardinality[pair.probe] = after_probe;
+		summary.semijoin_steps.push_back(std::move(detail));
 	};
 
 	for (auto &pair : tree.bottom_up_pairs) {
@@ -409,9 +467,7 @@ void OuterYanDP::InitLeafPlans(OuterYanTree &tree) {
 		// leaves would be redundant in exact DP and biases greedy comparisons
 		// between different relation subsets.
 		node->cost = 0.0;
-		auto reduced = static_cast<idx_t>(MinValue<double>(semijoin_cardinality[i],
-		                                                       static_cast<double>(NumericLimits<idx_t>::Maximum())));
-		node->cardinality = MaxValue<idx_t>(reduced, 1);
+		node->cardinality = static_cast<idx_t>(ClampPlanCardinality(semijoin_cardinality[i]));
 		plans[leaf_set] = std::move(node);
 	}
 }
@@ -653,6 +709,34 @@ OuterYanDP::JoinEstimate OuterYanDP::EstimateJoin(double left_cardinality, doubl
                                                   double left_distinct, double right_distinct,
                                                   OuterYanJoinKind kind) const {
 	JoinEstimate estimate;
+	if (left_cardinality == 0.0 || right_cardinality == 0.0) {
+		estimate.unmatched_left = right_cardinality == 0.0 ? left_cardinality : 0.0;
+		estimate.unmatched_right = left_cardinality == 0.0 ? right_cardinality : 0.0;
+		switch (kind) {
+		case JoinType::INNER:
+			estimate.output = 0.0;
+			break;
+		case JoinType::LEFT:
+			estimate.output = estimate.unmatched_left;
+			estimate.weighted_output_cost =
+			    cost_parameters.unmatched_left_weight * estimate.unmatched_left;
+			break;
+		case JoinType::RIGHT:
+			estimate.output = estimate.unmatched_right;
+			estimate.weighted_output_cost =
+			    cost_parameters.unmatched_right_weight * estimate.unmatched_right;
+			break;
+		case JoinType::OUTER:
+			estimate.output = estimate.unmatched_left + estimate.unmatched_right;
+			estimate.weighted_output_cost =
+			    cost_parameters.unmatched_left_weight * estimate.unmatched_left +
+			    cost_parameters.unmatched_right_weight * estimate.unmatched_right;
+			break;
+		default:
+			throw InternalException("OuterYanDP::EstimateJoin: unsupported join kind");
+		}
+		return estimate;
+	}
 	const double d_l = MinValue<double>(left_cardinality, MaxValue<double>(left_distinct, 1.0));
 	const double d_r = MinValue<double>(right_cardinality, MaxValue<double>(right_distinct, 1.0));
 	estimate.inner = (left_cardinality * right_cardinality) / MaxValue<double>(d_l, d_r);
@@ -695,8 +779,13 @@ double OuterYanDP::ComputeCost(const DPJoinNode &left, const DPJoinNode &right,
 }
 
 double OuterYanDP::ClampPlanCardinality(double cardinality) {
-	if (!(cardinality > 1.0)) {
-		// Also maps NaN to the same conservative minimum used by DPJoinNode.
+	if (!std::isfinite(cardinality) || cardinality < 0.0) {
+		return 1.0;
+	}
+	if (cardinality == 0.0) {
+		return 0.0;
+	}
+	if (cardinality <= 1.0) {
 		return 1.0;
 	}
 	const double max_cardinality = static_cast<double>(NumericLimits<idx_t>::Maximum());
@@ -706,18 +795,30 @@ double OuterYanDP::ClampPlanCardinality(double cardinality) {
 	return static_cast<double>(static_cast<idx_t>(cardinality));
 }
 
-OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(const OTNode &node) const {
+OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(
+    const OuterYanTree &tree, const OTNode &node, const vector<double> *leaf_cardinality_override,
+    vector<OuterYanJoinCostStep> *steps) const {
 	if (node.kind == OTNode::Kind::RELATION) {
 		JoinTreeEstimate leaf;
-		leaf.cardinality = static_cast<double>(MaxValue<idx_t>(node.stats.cardinality, 1));
+		if (leaf_cardinality_override) {
+			if (node.relation_id >= leaf_cardinality_override->size()) {
+				throw InternalException("OuterYanDP::ScoreCurrentJoinTree: leaf override missing relation %llu",
+				                        node.relation_id);
+			}
+			leaf.cardinality = ClampPlanCardinality((*leaf_cardinality_override)[node.relation_id]);
+		} else if (node.stats.stats_initialized) {
+			leaf.cardinality = static_cast<double>(node.stats.cardinality);
+		} else {
+			leaf.cardinality = static_cast<double>(MaxValue<idx_t>(node.stats.cardinality, 1));
+		}
 		return leaf;
 	}
 	if (!node.info || !node.children[0] || !node.children[1]) {
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: malformed JOIN node");
 	}
 
-	auto left = ScoreCurrentJoinTreeNode(*node.children[0]);
-	auto right = ScoreCurrentJoinTreeNode(*node.children[1]);
+	auto left = ScoreCurrentJoinTreeNode(tree, *node.children[0], leaf_cardinality_override, steps);
+	auto right = ScoreCurrentJoinTreeNode(tree, *node.children[1], leaf_cardinality_override, steps);
 	const auto &info = *node.info;
 	const bool lhs_in_left = node.children[0]->subtree_relations.count(info.cond_left_relation_id) != 0;
 	const bool rhs_in_right = node.children[1]->subtree_relations.count(info.cond_right_relation_id) != 0;
@@ -735,16 +836,48 @@ OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(const OTNode &
 	JoinTreeEstimate result;
 	result.cardinality = ClampPlanCardinality(estimate.output);
 	result.cost = left.cost + right.cost + estimate.weighted_output_cost;
+	if (steps) {
+		OuterYanJoinCostStep detail;
+		detail.step = steps->size() + 1;
+		detail.join_kind = info.join_kind;
+		detail.left_table_indexes = StableTableIndexes(tree, node.children[0]->subtree_relations);
+		detail.right_table_indexes = StableTableIndexes(tree, node.children[1]->subtree_relations);
+		detail.output_table_indexes = StableTableIndexes(tree, node.subtree_relations);
+		detail.left_cardinality = left.cardinality;
+		detail.right_cardinality = right.cardinality;
+		detail.left_distinct = left_distinct;
+		detail.right_distinct = right_distinct;
+		detail.inner = estimate.inner;
+		detail.unmatched_left = estimate.unmatched_left;
+		detail.unmatched_right = estimate.unmatched_right;
+		detail.output = result.cardinality;
+		detail.local_cost = estimate.weighted_output_cost;
+		detail.subtree_cost = result.cost;
+		steps->push_back(std::move(detail));
+	}
 	return result;
 }
 
 double OuterYanDP::ScoreCurrentJoinTree(OuterYanTree &tree) {
+	return ScoreCurrentJoinTreeDetailed(tree).total_cost;
+}
+
+OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeDetailed(
+    OuterYanTree &tree, const vector<double> *leaf_cardinality_override) {
 	if (!tree.HasOT()) {
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: tree.ot is null");
 	}
 	BuildLeafRelations(tree);
 	BuildEdgeStatistics(tree);
-	return ScoreCurrentJoinTreeNode(tree.OT().Root()).cost;
+	if (leaf_cardinality_override && leaf_cardinality_override->size() != tree.ot_relations_by_id.size()) {
+		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: expected %llu leaf overrides, got %llu",
+		                        tree.ot_relations_by_id.size(), leaf_cardinality_override->size());
+	}
+	OuterYanJoinCostBreakdown result;
+	auto root = ScoreCurrentJoinTreeNode(tree, tree.OT().Root(), leaf_cardinality_override, &result.steps);
+	result.root_cardinality = root.cardinality;
+	result.total_cost = root.cost;
+	return result;
 }
 
 // ============================================================================
@@ -892,6 +1025,8 @@ void OuterYanDP::RebuildOT(OuterYanTree &tree, JoinRelationSet &full_set) {
 	// and re-populate subtree_relations.
 	tree.OT().Finalize();
 
+	tree.ot_relations_by_id.assign(num_relations, nullptr);
+	RefreshOTRelationsById(*tree.OT().root, tree.ot_relations_by_id);
 	tree.ot_joins_by_order.clear();
 	RefreshOTJoinsByOrder(*tree.OT().root, tree.ot_joins_by_order);
 	// Renumber `order` densely after Finalize; MaterializeNode produced
@@ -899,6 +1034,18 @@ void OuterYanDP::RebuildOT(OuterYanTree &tree, JoinRelationSet &full_set) {
 	for (idx_t i = 0; i < tree.ot_joins_by_order.size(); i++) {
 		tree.ot_joins_by_order[i]->order = i + 1;
 	}
+}
+
+void OuterYanDP::RefreshOTRelationsById(OTNode &node, vector<OTNode *> &out) {
+	if (node.kind == OTNode::Kind::RELATION) {
+		if (node.relation_id >= out.size() || out[node.relation_id]) {
+			throw InternalException("OuterYanDP: invalid rebuilt relation id %llu", node.relation_id);
+		}
+		out[node.relation_id] = &node;
+		return;
+	}
+	RefreshOTRelationsById(*node.children[0], out);
+	RefreshOTRelationsById(*node.children[1], out);
 }
 
 OuterYanDP::JoinGroupingTableSignature OuterYanDP::JoinGroupingSignature(const OuterYanTree &tree) {
@@ -921,6 +1068,38 @@ OuterYanDP::JoinGroupingTableSignature OuterYanDP::JoinGroupingSignature(const O
 		signature.insert(std::move(tables));
 	}
 	return signature;
+}
+
+vector<idx_t> OuterYanDP::StableTableIndexes(const OuterYanTree &tree,
+                                             const unordered_set<idx_t> &relations) {
+	vector<idx_t> tables;
+	for (const auto &entry : tree.table_to_relation) {
+		if (relations.count(entry.second) != 0) {
+			tables.push_back(entry.first);
+		}
+	}
+	if (tables.empty() && !relations.empty()) {
+		throw InternalException("OuterYanDP: relation set has no stable table mapping");
+	}
+	std::sort(tables.begin(), tables.end());
+	tables.erase(std::unique(tables.begin(), tables.end()), tables.end());
+	return tables;
+}
+
+idx_t OuterYanDP::StableTableIndex(const OuterYanTree &tree, idx_t relation_id) {
+	idx_t result = DConstants::INVALID_INDEX;
+	for (const auto &entry : tree.table_to_relation) {
+		if (entry.second != relation_id) {
+			continue;
+		}
+		if (result == DConstants::INVALID_INDEX || entry.first < result) {
+			result = entry.first;
+		}
+	}
+	if (result == DConstants::INVALID_INDEX) {
+		throw InternalException("OuterYanDP: relation %llu has no stable table mapping", relation_id);
+	}
+	return result;
 }
 
 // ============================================================================
@@ -958,6 +1137,9 @@ optional_ptr<const BoundColumnRefExpression> OuterYanDP::FirstColumnRef(const Ex
 idx_t OuterYanDP::LookupDistinctCount(const RelationStats &stats, idx_t column_index) {
 	if (!stats.stats_initialized) {
 		return 1;
+	}
+	if (stats.cardinality == 0) {
+		return 0;
 	}
 	if (column_index >= stats.column_distinct_count.size()) {
 		return MaxValue<idx_t>(stats.cardinality, 1);

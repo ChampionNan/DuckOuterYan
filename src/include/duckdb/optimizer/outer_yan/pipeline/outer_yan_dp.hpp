@@ -48,11 +48,62 @@ struct OuterYanDPCostParameters {
 	double semijoin_probe_emit_weight = 1.0;
 };
 
+//! One post-order real-join cost step. Table indexes are stable across the
+//! separately built DuckDB and OuterYan trees.
+struct OuterYanJoinCostStep {
+	idx_t step = 0;
+	OuterYanJoinKind join_kind = JoinType::INNER;
+	vector<idx_t> left_table_indexes;
+	vector<idx_t> right_table_indexes;
+	vector<idx_t> output_table_indexes;
+	double left_cardinality = 0.0;
+	double right_cardinality = 0.0;
+	double left_distinct = 0.0;
+	double right_distinct = 0.0;
+	double inner = 0.0;
+	double unmatched_left = 0.0;
+	double unmatched_right = 0.0;
+	double output = 0.0;
+	double local_cost = 0.0;
+	double subtree_cost = 0.0;
+};
+
+//! One semi-join pair's row-work components.
+struct OuterYanSemijoinCostStep {
+	idx_t round = 0;
+	idx_t step = 0;
+	idx_t build_relation = DConstants::INVALID_INDEX;
+	idx_t probe_relation = DConstants::INVALID_INDEX;
+	idx_t build_table_index = DConstants::INVALID_INDEX;
+	idx_t probe_table_index = DConstants::INVALID_INDEX;
+	bool filter_reused = false;
+	double build_cardinality = 0.0;
+	double probe_cardinality_before = 0.0;
+	double build_distinct = 0.0;
+	double probe_distinct = 0.0;
+	double survival = 0.0;
+	double probe_cardinality_after = 0.0;
+	double materialize_cost = 0.0;
+	double filter_build_cost = 0.0;
+	double replay_cost = 0.0;
+	double lookup_cost = 0.0;
+	double emit_cost = 0.0;
+};
+
+struct OuterYanJoinCostBreakdown {
+	vector<OuterYanJoinCostStep> steps;
+	double root_cardinality = 0.0;
+	double total_cost = 0.0;
+};
+
 //! Cost information produced alongside the chosen DP tree.  Semi-join work is
 //! fixed for the query and intentionally kept separate from the DP memo; its
 //! weighted contribution is added exactly once by an application-cost gate.
 struct OuterYanDPCostSummary {
+	OuterYanDPCostParameters parameters;
 	vector<double> reduced_cardinalities;
+	vector<OuterYanSemijoinCostStep> semijoin_steps;
+	OuterYanJoinCostBreakdown candidate_join_breakdown;
 	double round1_build_cost = 0.0;
 	double round1_probe_cost = 0.0;
 	double round2_build_cost = 0.0;
@@ -106,6 +157,8 @@ public:
 	//! they are for DP enumeration, then the actual binary OT is evaluated with
 	//! the same type-aware estimator and cost parameters.
 	double ScoreCurrentJoinTree(OuterYanTree &tree);
+	OuterYanJoinCostBreakdown ScoreCurrentJoinTreeDetailed(
+	    OuterYanTree &tree, const vector<double> *leaf_cardinality_override = nullptr);
 
 	//! Stable structural signature of the current OT.  Each JOIN contributes
 	//! the sorted set of base-table indexes below it; using table indexes rather
@@ -213,8 +266,12 @@ private:
 	JoinEstimate EstimateJoin(double left_cardinality, double right_cardinality, double left_distinct,
 	                          double right_distinct, OuterYanJoinKind kind) const;
 	double ComputeCost(const DPJoinNode &left, const DPJoinNode &right, const JoinEstimate &estimate) const;
-	JoinTreeEstimate ScoreCurrentJoinTreeNode(const OTNode &node) const;
+	JoinTreeEstimate ScoreCurrentJoinTreeNode(const OuterYanTree &tree, const OTNode &node,
+	                                          const vector<double> *leaf_cardinality_override,
+	                                          vector<OuterYanJoinCostStep> *steps) const;
 	static double ClampPlanCardinality(double cardinality);
+	static vector<idx_t> StableTableIndexes(const OuterYanTree &tree, const unordered_set<idx_t> &relations);
+	static idx_t StableTableIndex(const OuterYanTree &tree, idx_t relation_id);
 
 	// ---- materialisation ----
 	//! Walk the chosen DP plan rooted at `plans[full_set]`; produce a new OT
@@ -243,6 +300,8 @@ private:
 	static vector<unordered_set<RelationIndex>> GetAllNeighborSets(vector<RelationIndex> neighbors);
 	//! Post-order walk of an OT subtree, appending each JOIN node into `out`.
 	static void RefreshOTJoinsByOrder(OTNode &node, vector<OTNode *> &out);
+	//! Refresh relation-id pointers after the chosen OT replaces the old tree.
+	static void RefreshOTRelationsById(OTNode &node, vector<OTNode *> &out);
 
 private:
 	ClientContext &context;

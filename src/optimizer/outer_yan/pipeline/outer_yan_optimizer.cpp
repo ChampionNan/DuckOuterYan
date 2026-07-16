@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/optimizer/join_order/join_order_optimizer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
@@ -11,12 +12,132 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
+#include "duckdb/optimizer/statistics_propagator.hpp"
 
 #include <cmath>
 #include <iomanip>
 #include <sstream>
 
 namespace duckdb {
+
+namespace {
+
+struct PlanWorkSummary {
+	idx_t real_join_count = 0;
+	idx_t empty_result_count = 0;
+};
+
+struct BaselineEmptyProof {
+	bool eliminates_all_join_work = false;
+	PlanWorkSummary before;
+	PlanWorkSummary after;
+	string proof_plan;
+};
+
+bool IsRealJoin(LogicalOperatorType type) {
+	switch (type) {
+	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+	case LogicalOperatorType::LOGICAL_ANY_JOIN:
+	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+	case LogicalOperatorType::LOGICAL_POSITIONAL_JOIN:
+	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void SummarizePlanWork(const LogicalOperator &op, PlanWorkSummary &summary) {
+	if (IsRealJoin(op.type)) {
+		summary.real_join_count++;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_EMPTY_RESULT) {
+		summary.empty_result_count++;
+	}
+	for (auto &child : op.children) {
+		SummarizePlanWork(*child, summary);
+	}
+}
+
+BaselineEmptyProof ProveBaselineEliminatesJoinWork(Optimizer &optimizer, ClientContext &context,
+                                                   const LogicalOperator &baseline_plan) {
+	BaselineEmptyProof result;
+	SummarizePlanWork(baseline_plan, result.before);
+	auto proof_plan = baseline_plan.Copy(context);
+	StatisticsPropagator propagator(optimizer, *proof_plan);
+	propagator.PropagateStatistics(proof_plan);
+	EmptyResultPullup empty_result_pullup;
+	proof_plan = empty_result_pullup.Optimize(std::move(proof_plan));
+	SummarizePlanWork(*proof_plan, result.after);
+	result.eliminates_all_join_work = result.before.real_join_count > 0 &&
+	                                  result.after.empty_result_count > 0 &&
+	                                  result.after.real_join_count == 0;
+	result.proof_plan = proof_plan->ToString();
+	return result;
+}
+
+string TableList(const vector<idx_t> &tables) {
+	std::ostringstream result;
+	for (idx_t i = 0; i < tables.size(); i++) {
+		if (i > 0) {
+			result << "+";
+		}
+		result << tables[i];
+	}
+	return result.str();
+}
+
+string FormatJoinCostBreakdown(const char *plan, const OuterYanJoinCostBreakdown &breakdown) {
+	std::ostringstream out;
+	out << std::setprecision(17);
+	for (auto &step : breakdown.steps) {
+		out << "[OY_JOIN_COST] plan=" << plan << " step=" << step.step
+		    << " kind=" << JoinTypeToString(step.join_kind)
+		    << " left_tables=" << TableList(step.left_table_indexes)
+		    << " right_tables=" << TableList(step.right_table_indexes)
+		    << " output_tables=" << TableList(step.output_table_indexes)
+		    << " left_cardinality=" << step.left_cardinality
+		    << " right_cardinality=" << step.right_cardinality
+		    << " left_distinct=" << step.left_distinct
+		    << " right_distinct=" << step.right_distinct
+		    << " inner=" << step.inner
+		    << " unmatched_left=" << step.unmatched_left
+		    << " unmatched_right=" << step.unmatched_right
+		    << " output=" << step.output
+		    << " local_cost=" << step.local_cost
+		    << " subtree_cost=" << step.subtree_cost << "\n";
+	}
+	out << "[OY_JOIN_COST_TOTAL] plan=" << plan << " root_cardinality=" << breakdown.root_cardinality
+	    << " total_cost=" << breakdown.total_cost << "\n";
+	return out.str();
+}
+
+string FormatSemijoinCostBreakdown(const OuterYanDPCostSummary &summary) {
+	std::ostringstream out;
+	out << std::setprecision(17);
+	for (auto &step : summary.semijoin_steps) {
+		out << "[OY_SJ_COST] round=" << step.round << " step=" << step.step
+		    << " build_relation=" << step.build_relation << " probe_relation=" << step.probe_relation
+		    << " build_table=" << step.build_table_index << " probe_table=" << step.probe_table_index
+		    << " filter_reused=" << (step.filter_reused ? 1 : 0)
+		    << " build_cardinality=" << step.build_cardinality
+		    << " probe_before=" << step.probe_cardinality_before
+		    << " build_distinct=" << step.build_distinct
+		    << " probe_distinct=" << step.probe_distinct << " survival=" << step.survival
+		    << " probe_after=" << step.probe_cardinality_after
+		    << " materialize_cost=" << step.materialize_cost
+		    << " filter_build_cost=" << step.filter_build_cost << " replay_cost=" << step.replay_cost
+		    << " lookup_cost=" << step.lookup_cost << " emit_cost=" << step.emit_cost << "\n";
+	}
+	return out.str();
+}
+
+bool ValidCost(double value) {
+	return std::isfinite(value) && value >= 0.0;
+}
+
+} // namespace
 
 OuterYanOptimizer::OuterYanOptimizer(Optimizer &optimizer_p)
     : optimizer(optimizer_p), context(optimizer_p.context) {
@@ -63,7 +184,9 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	});
 
 	if (!applicable) {
-		OuterYanTrace::Decision(false, false, false, "INAPPLICABLE");
+		OuterYanDecisionRecord decision;
+		decision.reason = "INAPPLICABLE";
+		OuterYanTrace::Decision(decision);
 		result.plan = std::move(input);
 		return result;
 	}
@@ -87,6 +210,17 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("normal DuckDB candidate (logical plan)", baseline_plan->ToString());
 	}
+	const auto empty_proof = ProveBaselineEliminatesJoinWork(optimizer, context, *baseline_plan);
+	if (OuterYanTrace::Enabled()) {
+		std::ostringstream proof;
+		proof << "before_real_joins=" << empty_proof.before.real_join_count << "\n"
+		      << "before_empty_results=" << empty_proof.before.empty_result_count << "\n"
+		      << "after_real_joins=" << empty_proof.after.real_join_count << "\n"
+		      << "after_empty_results=" << empty_proof.after.empty_result_count << "\n"
+		      << "eliminates_all_join_work=" << (empty_proof.eliminates_all_join_work ? 1 : 0) << "\n"
+		      << empty_proof.proof_plan;
+		OuterYanTrace::Stage("DuckDB baseline empty-result proof", proof.str());
+	}
 
 	// This copy is metadata only. It preserves the selected baseline plan while
 	// giving shape comparison, common cost scoring, and aggregate pushdown a
@@ -98,54 +232,110 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	const bool outer_reordered = candidate_cost.has_complete_plan &&
 	                             candidate_signature != baseline_signature;
 
-	bool cost_gate_applied = false;
-	bool outer_yan_selected = false;
-	const char *reason = "OUTERYAN_FAILED";
 	OuterYanDecisionCosts trace_costs;
+	OuterYanJoinCostBreakdown baseline_breakdown;
 	if (candidate_cost.has_complete_plan) {
-		OuterYanDP baseline_scorer(context);
-		trace_costs.baseline_cost = baseline_scorer.ScoreCurrentJoinTree(baseline_tree);
-		trace_costs.candidate_join_cost = candidate_cost.chosen_real_join_cost;
+		OuterYanDP baseline_scorer(context, candidate_cost.parameters);
+		baseline_breakdown = baseline_scorer.ScoreCurrentJoinTreeDetailed(baseline_tree);
+		trace_costs.baseline_cost = baseline_breakdown.total_cost;
+		trace_costs.candidate_join_cost = candidate_cost.candidate_join_breakdown.total_cost;
 		trace_costs.semijoin_raw_cost = candidate_cost.SemijoinRawCost();
 		trace_costs.semijoin_cost_ratio = SEMIJOIN_COST_RATIO;
 		trace_costs.weighted_semijoin_cost = SEMIJOIN_COST_RATIO * trace_costs.semijoin_raw_cost;
-		trace_costs.candidate_total = candidate_cost.CandidateCost(SEMIJOIN_COST_RATIO);
+		trace_costs.candidate_total = trace_costs.candidate_join_cost + trace_costs.weighted_semijoin_cost;
 		trace_costs.cost_ratio_limit = MAX_CANDIDATE_TO_BASELINE_RATIO;
 		trace_costs.baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * trace_costs.baseline_cost;
 		trace_costs.round1_build = candidate_cost.round1_build_cost;
 		trace_costs.round1_probe = candidate_cost.round1_probe_cost;
 		trace_costs.round2_build = candidate_cost.round2_build_cost;
 		trace_costs.round2_probe = candidate_cost.round2_probe_cost;
-		trace_costs.available = std::isfinite(trace_costs.baseline_cost) &&
-		                        std::isfinite(trace_costs.candidate_join_cost) &&
-		                        std::isfinite(trace_costs.semijoin_raw_cost) &&
-		                        std::isfinite(trace_costs.semijoin_cost_ratio) &&
-		                        std::isfinite(trace_costs.weighted_semijoin_cost) &&
-		                        std::isfinite(trace_costs.candidate_total) &&
-		                        std::isfinite(trace_costs.baseline_threshold);
+		trace_costs.raw_cost_delta = trace_costs.candidate_total - trace_costs.baseline_cost;
+		trace_costs.gate_lhs = trace_costs.candidate_total;
+		trace_costs.gate_rhs = trace_costs.baseline_threshold;
+		trace_costs.gate_margin = trace_costs.gate_rhs - trace_costs.gate_lhs;
+		if (trace_costs.baseline_cost > 0.0) {
+			trace_costs.raw_cost_ratio = trace_costs.candidate_total / trace_costs.baseline_cost;
+			trace_costs.raw_cost_ratio_available = true;
+		}
+		trace_costs.inner_output_weight = candidate_cost.parameters.inner_output_weight;
+		trace_costs.unmatched_left_weight = candidate_cost.parameters.unmatched_left_weight;
+		trace_costs.unmatched_right_weight = candidate_cost.parameters.unmatched_right_weight;
+		trace_costs.semijoin_materialize_weight = candidate_cost.parameters.semijoin_materialize_weight;
+		trace_costs.semijoin_filter_build_weight = candidate_cost.parameters.semijoin_filter_build_weight;
+		trace_costs.semijoin_replay_weight = candidate_cost.parameters.semijoin_replay_weight;
+		trace_costs.semijoin_probe_lookup_weight = candidate_cost.parameters.semijoin_probe_lookup_weight;
+		trace_costs.semijoin_probe_emit_weight = candidate_cost.parameters.semijoin_probe_emit_weight;
+		trace_costs.available =
+		    ValidCost(trace_costs.baseline_cost) && ValidCost(trace_costs.candidate_join_cost) &&
+		    ValidCost(trace_costs.semijoin_raw_cost) && ValidCost(trace_costs.semijoin_cost_ratio) &&
+		    ValidCost(trace_costs.weighted_semijoin_cost) && ValidCost(trace_costs.candidate_total) &&
+		    ValidCost(trace_costs.cost_ratio_limit) && ValidCost(trace_costs.baseline_threshold) &&
+		    ValidCost(trace_costs.round1_build) && ValidCost(trace_costs.round1_probe) &&
+		    ValidCost(trace_costs.round2_build) && ValidCost(trace_costs.round2_probe) &&
+		    ValidCost(trace_costs.inner_output_weight) && ValidCost(trace_costs.unmatched_left_weight) &&
+		    ValidCost(trace_costs.unmatched_right_weight) &&
+		    ValidCost(trace_costs.semijoin_materialize_weight) &&
+		    ValidCost(trace_costs.semijoin_filter_build_weight) &&
+		    ValidCost(trace_costs.semijoin_replay_weight) &&
+		    ValidCost(trace_costs.semijoin_probe_lookup_weight) &&
+		    ValidCost(trace_costs.semijoin_probe_emit_weight) &&
+		    std::isfinite(trace_costs.raw_cost_delta) && std::isfinite(trace_costs.gate_margin) &&
+		    (!trace_costs.raw_cost_ratio_available || std::isfinite(trace_costs.raw_cost_ratio));
 	}
 
-	if (candidate_cost.has_complete_plan && !outer_reordered) {
-		reason = "DUCKDB_PLAN";
-	} else if (candidate_cost.has_complete_plan && !APPLY_COST_GATE) {
-		outer_yan_selected = true;
-		reason = "ALWAYS_OUTERYAN";
-	} else if (candidate_cost.has_complete_plan && APPLY_COST_GATE) {
-		if (trace_costs.available) {
-			cost_gate_applied = true;
-			outer_yan_selected = trace_costs.candidate_total <= trace_costs.baseline_threshold;
-			reason = outer_yan_selected ? "COST_OUTERYAN_BETTER" : "COST_DUCKDB_BETTER";
+	OuterYanDecisionRecord decision;
+	decision.outer_reordered = outer_reordered;
+	decision.baseline_proven_empty = empty_proof.eliminates_all_join_work;
+	decision.costs = trace_costs;
+	if (trace_costs.available) {
+		if (trace_costs.candidate_total < trace_costs.baseline_cost) {
+			decision.raw_cost_winner = OuterYanCostWinner::OUTERYAN_CANDIDATE;
+		} else if (trace_costs.candidate_total > trace_costs.baseline_cost) {
+			decision.raw_cost_winner = OuterYanCostWinner::DUCKDB_BASELINE;
 		} else {
-			reason = "COST_UNAVAILABLE";
+			decision.raw_cost_winner = OuterYanCostWinner::EQUAL;
 		}
 	}
-	candidate_tree.stage_stats.outer_reordered = outer_reordered;
-	candidate_tree.stage_stats.cost_gate_applied = cost_gate_applied;
-	candidate_tree.stage_stats.outer_yan_selected = outer_yan_selected;
+
+	if (!candidate_cost.has_complete_plan) {
+		decision.reason = "OUTERYAN_FAILED";
+	} else if (empty_proof.eliminates_all_join_work) {
+		decision.reason = "DUCKDB_PROVEN_EMPTY";
+	} else if (!outer_reordered) {
+		decision.reason = "DUCKDB_PLAN";
+	} else if (!APPLY_COST_GATE) {
+		decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
+		decision.outer_yan_selected = true;
+		decision.reason = "ALWAYS_OUTERYAN";
+	} else if (!trace_costs.available) {
+		decision.gate_result = OuterYanGateResult::UNAVAILABLE;
+		decision.reason = "COST_UNAVAILABLE";
+	} else {
+		decision.cost_gate_applied = true;
+		if (trace_costs.gate_lhs <= trace_costs.gate_rhs) {
+			decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
+			decision.outer_yan_selected = true;
+			decision.gate_result = OuterYanGateResult::PASS;
+			decision.reason = "COST_OUTERYAN_BETTER";
+		} else {
+			decision.gate_result = OuterYanGateResult::FAIL;
+			decision.reason = "COST_DUCKDB_BETTER";
+		}
+	}
+	candidate_tree.stage_stats.outer_reordered = decision.outer_reordered;
+	candidate_tree.stage_stats.cost_gate_applied = decision.cost_gate_applied;
+	candidate_tree.stage_stats.outer_yan_selected = decision.outer_yan_selected;
 
 	if (OuterYanTrace::Enabled()) {
+		OuterYanTrace::Stage("DuckDB baseline join-cost detail",
+		                     FormatJoinCostBreakdown("DUCKDB", baseline_breakdown));
+		OuterYanTrace::Stage("OuterYan candidate join-cost detail",
+		                     FormatJoinCostBreakdown("OUTERYAN_CANDIDATE",
+		                                             candidate_cost.candidate_join_breakdown));
+		OuterYanTrace::Stage("OuterYan semi-join cost detail", FormatSemijoinCostBreakdown(candidate_cost));
 		std::ostringstream costs;
 		costs << std::setprecision(17)
+		      << "formula_id=" << trace_costs.formula_id << "\n"
 		      << "apply_cost_gate=" << (APPLY_COST_GATE ? 1 : 0) << "\n"
 		      << "baseline_cost=" << trace_costs.baseline_cost << "\n"
 		      << "candidate_join_cost=" << trace_costs.candidate_join_cost << "\n"
@@ -158,26 +348,55 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << "  round2_build=" << trace_costs.round2_build << "\n"
 		      << "  round2_probe=" << trace_costs.round2_probe << "\n"
 		      << "candidate_total=" << trace_costs.candidate_total << "\n"
+		      << "raw_cost_delta=" << trace_costs.raw_cost_delta << "\n"
+		      << "raw_cost_ratio=";
+		if (trace_costs.raw_cost_ratio_available) {
+			costs << trace_costs.raw_cost_ratio;
+		} else {
+			costs << "NA";
+		}
+		costs << "\n"
 		      << "cost_ratio_limit=" << std::setprecision(6) << trace_costs.cost_ratio_limit << "\n"
 		      << std::setprecision(17)
 		      << "baseline_threshold=" << trace_costs.baseline_threshold << "\n"
+		      << "inner_output_weight=" << trace_costs.inner_output_weight << "\n"
+		      << "unmatched_left_weight=" << trace_costs.unmatched_left_weight << "\n"
+		      << "unmatched_right_weight=" << trace_costs.unmatched_right_weight << "\n"
+		      << "semijoin_materialize_weight=" << trace_costs.semijoin_materialize_weight << "\n"
+		      << "semijoin_filter_build_weight=" << trace_costs.semijoin_filter_build_weight << "\n"
+		      << "semijoin_replay_weight=" << trace_costs.semijoin_replay_weight << "\n"
+		      << "semijoin_probe_lookup_weight=" << trace_costs.semijoin_probe_lookup_weight << "\n"
+		      << "semijoin_probe_emit_weight=" << trace_costs.semijoin_probe_emit_weight << "\n"
 		      << "cost_gate_formula=candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost <= "
 		         "cost_ratio_limit * baseline_cost\n"
 		      << "cost_gate_values=" << trace_costs.candidate_join_cost << " + " << std::setprecision(6)
 		      << trace_costs.semijoin_cost_ratio << std::setprecision(17) << " * " << trace_costs.semijoin_raw_cost
 		      << " <= " << std::setprecision(6) << trace_costs.cost_ratio_limit << std::setprecision(17) << " * "
 		      << trace_costs.baseline_cost << "\n"
-		      << "cost_gate_result=" << trace_costs.candidate_total << " <= " << trace_costs.baseline_threshold << " => "
-		      << (trace_costs.available && trace_costs.candidate_total <= trace_costs.baseline_threshold ? "PASS"
-		                                                                                                    : "FAIL")
-		      << "\n";
+		      << "raw_cost_comparison=" << trace_costs.candidate_total << " vs " << trace_costs.baseline_cost << "\n"
+		      << "cost_gate_result=" << trace_costs.gate_lhs << " <= " << trace_costs.gate_rhs << " => ";
+		switch (decision.gate_result) {
+		case OuterYanGateResult::PASS:
+			costs << "PASS";
+			break;
+		case OuterYanGateResult::FAIL:
+			costs << "FAIL";
+			break;
+		case OuterYanGateResult::SKIPPED:
+			costs << "SKIPPED";
+			break;
+		case OuterYanGateResult::UNAVAILABLE:
+			costs << "UNAVAILABLE";
+			break;
+		}
+		costs << "\n";
 		OuterYanTrace::Stage("candidate cost comparison", costs.str());
 	}
-	OuterYanTrace::Decision(outer_reordered, cost_gate_applied, outer_yan_selected, reason, trace_costs);
+	OuterYanTrace::Decision(decision);
 
 	unique_ptr<LogicalOperator> selected_plan;
 	OuterYanTree *selected_tree;
-	if (outer_yan_selected) {
+	if (decision.outer_yan_selected) {
 		optimizer.RunOptimizer(OptimizerType::OUTER_YAN_POST, [&]() {
 			OuterYanPost post(context);
 			selected_plan = post.Optimize(candidate_tree);

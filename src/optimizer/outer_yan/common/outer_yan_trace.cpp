@@ -43,6 +43,44 @@ void Append(const string &text) {
 	}
 }
 
+const char *SelectedPlanToString(OuterYanSelectedPlan plan) {
+	switch (plan) {
+	case OuterYanSelectedPlan::DUCKDB_BASELINE:
+		return "DUCKDB";
+	case OuterYanSelectedPlan::OUTERYAN_CANDIDATE:
+		return "OUTERYAN";
+	}
+	return "UNKNOWN";
+}
+
+const char *CostWinnerToString(OuterYanCostWinner winner) {
+	switch (winner) {
+	case OuterYanCostWinner::DUCKDB_BASELINE:
+		return "DUCKDB";
+	case OuterYanCostWinner::OUTERYAN_CANDIDATE:
+		return "OUTERYAN";
+	case OuterYanCostWinner::EQUAL:
+		return "EQUAL";
+	case OuterYanCostWinner::UNAVAILABLE:
+		return "UNAVAILABLE";
+	}
+	return "UNAVAILABLE";
+}
+
+const char *GateResultToString(OuterYanGateResult result) {
+	switch (result) {
+	case OuterYanGateResult::PASS:
+		return "PASS";
+	case OuterYanGateResult::FAIL:
+		return "FAIL";
+	case OuterYanGateResult::SKIPPED:
+		return "SKIPPED";
+	case OuterYanGateResult::UNAVAILABLE:
+		return "UNAVAILABLE";
+	}
+	return "UNAVAILABLE";
+}
+
 } // namespace
 
 bool OuterYanTrace::Enabled() {
@@ -81,45 +119,63 @@ void OuterYanTrace::Stage(const string &label, const string &body) {
 	Append(block);
 }
 
-void OuterYanTrace::Decision(bool outer_reordered, bool cost_gate_applied, bool outer_yan_selected,
-                             const string &reason, const OuterYanDecisionCosts &costs) {
+void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	if (!Enabled()) {
 		return;
 	}
+	const auto &costs = record.costs;
 	std::ostringstream line;
 	line << std::setprecision(17)
-	     << "[OY_DECISION] outer_reordered=" << (outer_reordered ? 1 : 0)
-	     << " cost_gate_applied=" << (cost_gate_applied ? 1 : 0)
-	     << " outer_yan_selected=" << (outer_yan_selected ? 1 : 0)
-	     << " reason=" << reason;
-	auto metric = [&](const char *name, double value) {
+	     << "[OY_DECISION] formula_id=" << costs.formula_id
+	     << " selected_plan=" << SelectedPlanToString(record.selected_plan)
+	     << " outer_reordered=" << (record.outer_reordered ? 1 : 0)
+	     << " cost_gate_applied=" << (record.cost_gate_applied ? 1 : 0)
+	     << " outer_yan_selected=" << (record.outer_yan_selected ? 1 : 0)
+	     << " baseline_proven_empty=" << (record.baseline_proven_empty ? 1 : 0)
+	     << " reason=" << record.reason
+	     << " raw_cost_winner=" << CostWinnerToString(record.raw_cost_winner)
+	     << " gate_result=" << GateResultToString(record.gate_result);
+	auto metric = [&](const char *name, double value, bool available) {
 		line << " " << name << "=";
-		if (costs.available) {
+		if (available) {
 			line << value;
 		} else {
 			line << "NA";
 		}
 	};
-	auto ratio_metric = [&](const char *name, double value) {
+	auto ratio_metric = [&](const char *name, double value, bool available) {
 		line << " " << name << "=";
-		if (costs.available) {
+		if (available) {
 			line << std::setprecision(6) << value << std::setprecision(17);
 		} else {
 			line << "NA";
 		}
 	};
-	metric("baseline_cost", costs.baseline_cost);
-	metric("candidate_join_cost", costs.candidate_join_cost);
-	metric("semijoin_raw_cost", costs.semijoin_raw_cost);
-	ratio_metric("semijoin_cost_ratio", costs.semijoin_cost_ratio);
-	metric("weighted_semijoin_cost", costs.weighted_semijoin_cost);
-	metric("candidate_total", costs.candidate_total);
-	ratio_metric("cost_ratio_limit", costs.cost_ratio_limit);
-	metric("baseline_threshold", costs.baseline_threshold);
-	metric("round1_build", costs.round1_build);
-	metric("round1_probe", costs.round1_probe);
-	metric("round2_build", costs.round2_build);
-	metric("round2_probe", costs.round2_probe);
+	metric("baseline_cost", costs.baseline_cost, costs.available);
+	metric("candidate_join_cost", costs.candidate_join_cost, costs.available);
+	metric("semijoin_raw_cost", costs.semijoin_raw_cost, costs.available);
+	ratio_metric("semijoin_cost_ratio", costs.semijoin_cost_ratio, costs.available);
+	metric("weighted_semijoin_cost", costs.weighted_semijoin_cost, costs.available);
+	metric("candidate_total", costs.candidate_total, costs.available);
+	ratio_metric("cost_ratio_limit", costs.cost_ratio_limit, costs.available);
+	metric("baseline_threshold", costs.baseline_threshold, costs.available);
+	metric("round1_build", costs.round1_build, costs.available);
+	metric("round1_probe", costs.round1_probe, costs.available);
+	metric("round2_build", costs.round2_build, costs.available);
+	metric("round2_probe", costs.round2_probe, costs.available);
+	metric("raw_cost_delta", costs.raw_cost_delta, costs.available);
+	metric("raw_cost_ratio", costs.raw_cost_ratio, costs.available && costs.raw_cost_ratio_available);
+	metric("gate_lhs", costs.gate_lhs, costs.available);
+	metric("gate_rhs", costs.gate_rhs, costs.available);
+	metric("gate_margin", costs.gate_margin, costs.available);
+	ratio_metric("inner_output_weight", costs.inner_output_weight, costs.available);
+	ratio_metric("unmatched_left_weight", costs.unmatched_left_weight, costs.available);
+	ratio_metric("unmatched_right_weight", costs.unmatched_right_weight, costs.available);
+	ratio_metric("semijoin_materialize_weight", costs.semijoin_materialize_weight, costs.available);
+	ratio_metric("semijoin_filter_build_weight", costs.semijoin_filter_build_weight, costs.available);
+	ratio_metric("semijoin_replay_weight", costs.semijoin_replay_weight, costs.available);
+	ratio_metric("semijoin_probe_lookup_weight", costs.semijoin_probe_lookup_weight, costs.available);
+	ratio_metric("semijoin_probe_emit_weight", costs.semijoin_probe_emit_weight, costs.available);
 	line << "\n";
 	Append(line.str());
 }
