@@ -128,6 +128,11 @@ SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
     --capture-plans
 ```
 
+`run_all.sh` does not build HTTPFS. The benchmark databases use
+local files: graph and JOB downloads use the `curl` executable, and JOB is
+loaded from cached Parquet. HTTPFS can be built separately when needed on a
+host with compatible libcurl development headers.
+
 `experiment_onoff.sh` first executes the bare query with OuterYan ON and OFF,
 then compares the emitted result multisets outside DuckDB. Only equivalent
 queries are timed. It measures both `threads=1` and

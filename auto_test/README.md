@@ -217,6 +217,11 @@ SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
   --only all --query-list auto_test/representative_queries.txt --capture-plans
 ```
 
+The release build enables TPCH and TPCDS but does not build HTTPFS.
+None of the four benchmark builders requires HTTPFS: network downloads use the
+`curl` executable and JOB reads cached local Parquet. Build HTTPFS separately
+only on hosts with compatible libcurl development headers.
+
 The scale variables in the second example describe the prepared databases in
 the report header; rebuild the databases first if they are not already SF1.
 
