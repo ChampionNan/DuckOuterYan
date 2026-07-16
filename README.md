@@ -139,6 +139,16 @@ queries are timed. It measures both `threads=1` and
 `threads=$OY_THREADS`, and writes a human-readable `.txt` report plus a matching
 `.csv` file under `auto_test/results/` by default.
 
+The external correctness sort uses `<repo>/auto_test/results/tmp` by default.
+For the server checkout shown above, that is
+`/home/data/bchenba/DuckYanOuter/auto_test/results/tmp`, backed by the `/home`
+filesystem with roughly 3.9 TB free. The harness prints the resolved path,
+per-run subdirectory, available capacity, and mount point before the first
+query. The per-run directory is removed on normal exit and Ctrl+C. Set
+`OY_TMPDIR=/path/with/free/space` only when another filesystem is preferred.
+Sort or DuckDB write failures are reported as resource errors rather than
+correctness mismatches.
+
 The live log and reports distinguish:
 
 - `outer_reordered`: the OuterYan grouping differs from DuckDB's grouping;
@@ -149,6 +159,12 @@ The live log and reports distinguish:
 - bitmap/hash kernel use; and
 - single-thread categorized operator time for round-1 semi-joins, round-2
   semi-joins, and real joins.
+
+Every query is printed as a separate block beginning with a full-width
+separator followed by exactly two lines. The first line contains correctness,
+reorder, selected plan, TM, and T1. The second line contains all remaining
+decision, cost, gate, weight, profiling, and artifact details. Inapplicable
+queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
 
 The categorized operator values are diagnostics, not three additive wall-clock
 phases. The canonical CSV contains one effective post-retry row per query;

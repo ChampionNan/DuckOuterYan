@@ -125,6 +125,17 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 The phase values are sums of categorized single-thread operator times. They are
 not complete phase wall times and need not add up to the measured query time.
 
+Bare-query equivalence can require temporary space comparable to several query
+result sets. Temporary result and external-sort files default to
+`<repo>/auto_test/results/tmp`. At
+`/home/data/bchenba/DuckYanOuter`, this resolves to
+`/home/data/bchenba/DuckYanOuter/auto_test/results/tmp` on the large `/home`
+filesystem. The harness prints the resolved path and free capacity at run
+start. Each experiment uses a separate `run_<timestamp>.*` subdirectory that
+is removed on normal exit and Ctrl+C. Override `OY_TMPDIR` only when another
+filesystem is preferred. A DuckDB or sort write failure is reported as
+`ERROR` with its concrete stderr and is never classified as `NOT-EQUIV`.
+
 ### Plan decision and cost gate
 
 For an applicable query, OuterYan constructs its DP/OJT candidate and DuckDB's
@@ -240,31 +251,29 @@ With `--out path/name.txt`, the text path is exact and the CSV is
 `path/name.csv`. The canonical CSV contains exactly one effective row per query
 after retries. The attempts CSV retains both main and retry rows.
 
-The live stderr line contains `reorder`, `selected`, `reason`, `raw`, and
-`gate`, followed by an indented calculation:
+Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
-cost: OuterYan=<join> + <sj_ratio>*<sj_raw> = <total> vs DuckDB=<baseline> ...
+====================================================================================================
+[106/366] oy_th_th_agg3                    correct=TRUE reorder=0 selected=DUCKDB  TM:off=0.2750 on=0.2800 spd=0.982  T1:off=3.6540 on=3.6380 spd=1.004
+  details: family=tpch sql=... pass=main timeout=300s note=OK ... decision=[reason=INAPPLICABLE ...] kernel=[- b0h0] cost=[UNAVAILABLE] profile=[...]
 ```
 
-The same record prints all join-output and SJ materialize/build/replay/lookup/
-emit weights. With plan capture enabled, every query has DuckDB-OFF and enabled
-EXPLAIN files, a full trace, and per-join/per-SJ cost records.
+The record always uses two lines: line 1 is the high-level result and timing;
+line 2 contains all other metadata. Applicable queries include the OuterYan and
+DuckDB cost formula, gate comparison, and join/SJ weights on line 2. With plan
+capture enabled, that line also lists the DuckDB-OFF and enabled EXPLAIN files,
+full trace, and per-join/per-SJ cost records.
 
-The text table includes:
+Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| `outer` | `outer_reordered`: candidate grouping differs from DuckDB |
-| `gate` | Numeric gate was applied |
-| `useOY` | OuterYan candidate was actually selected and executed |
-| `decision` | Reason token from the table above |
-| `kernel` | `bitmap`, `hash`, `mixed`, or `-` |
-| `correct` / `note` | Equivalence result and failure category |
-| `T1:*` / `TM:*` | OFF, ON, and `OFF/ON` speed-up at one/many threads |
-| `R1SJ-T1`, `R2SJ-T1`, `JOIN-T1` | Categorized single-thread operator elapsed seconds |
+| Line 1 | Query index/name, correctness, reorder flag, selected plan, and OFF/ON/`OFF/ON` speed-up for TM and T1 |
+| Line 2 | Family/path/pass, note/rows, decision, kernel, cost/gate operands, SJ work, weights, profile, and optional artifacts |
 
-Each correct query is followed by raw cost components and an expanded gate:
+Each applicable, costed query includes raw cost components and an expanded
+gate:
 
 ```text
 gate formula: candidate_join + semijoin_ratio * semijoin_raw <= baseline_ratio * baseline

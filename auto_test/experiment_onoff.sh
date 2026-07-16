@@ -73,6 +73,13 @@ START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
 _default_out="$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt"
 OUT="${OUT:-$_default_out}"
 mkdir -p "$(dirname "$OUT")"
+mkdir -p "$OY_TMPDIR" || { echo "Error: cannot create OY_TMPDIR: $OY_TMPDIR" >&2; exit 1; }
+[ -w "$OY_TMPDIR" ] || { echo "Error: OY_TMPDIR is not writable: $OY_TMPDIR" >&2; exit 1; }
+OY_TMP_FREE="$(df -Ph "$OY_TMPDIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+OY_TMP_MOUNT="$(df -Ph "$OY_TMPDIR" 2>/dev/null | awk 'NR==2 {print $NF}')"
+OY_TMP_FREE="${OY_TMP_FREE:-unknown}"
+OY_TMP_MOUNT="${OY_TMP_MOUNT:-unknown}"
+OY_RUN_TMPDIR=""
 
 [ -x "$DUCKDB_BIN" ] || { echo "Error: duckdb not executable: $DUCKDB_BIN" >&2; exit 1; }
 case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — directional only; pass --bin <release>." >&2;; esac
@@ -85,6 +92,7 @@ OY_ON="SET disabled_optimizers TO '';"
 : "${OY_TIMEOUT_SECS:=300}"
 OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 [ "${OY_TIMEOUT_SECS}" = "0" ] && OY_TIMEOUT_BIN=""
+OY_QUERY_SEPARATOR="===================================================================================================="
 
 # --- duckdb process lifecycle / interrupt-safe cleanup ----------------------
 # Problem: on Ctrl+C a duckdb that is mid-query could be left running, holding
@@ -125,10 +133,21 @@ _oy_cleanup() {
         sleep 0.1; waited=$((waited+1))
     done
     for p in "${OY_DUCK_PIDS[@]:-}"; do [ -n "$p" ] && _oy_kill_tree KILL "$p"; done
+    if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ -n "${OY_RUN_TMPDIR:-}" ]; then
+        case "$OY_RUN_TMPDIR" in
+            "$OY_TMPDIR"/run_*) rm -rf "$OY_RUN_TMPDIR" ;;
+        esac
+    fi
 }
 trap '_oy_cleanup; exit 130' INT
 trap '_oy_cleanup; exit 143' TERM
 trap '_oy_cleanup' EXIT
+
+OY_RUN_TMPDIR="$(mktemp -d "$OY_TMPDIR/run_${START_TS}.XXXXXX")" || {
+    echo "Error: cannot create run temporary directory under $OY_TMPDIR" >&2
+    exit 1
+}
+export TMPDIR="$OY_RUN_TMPDIR"
 
 # Invoke duckdb (optionally under `timeout`) as a tracked background child and
 # wait for it. Reads SQL from stdin (redirect a file in); args/redirs from the
@@ -165,9 +184,8 @@ oy_duck() {
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
     local db="$1" label="$2" query="$3"
-    local off on off_sorted on_sorted eoff eon sql roff ron rc=0
-    off=$(mktemp); on=$(mktemp); off_sorted=$(mktemp); on_sorted=$(mktemp)
-    eoff=$(mktemp); eon=$(mktemp); sql=$(mktemp)
+    local off on eoff eon esort sql roff=0 ron=0 rc=0 off_rows=0 on_rows=0
+    off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); esort=$(mktemp); sql=$(mktemp)
     local prag="PRAGMA threads=${OY_THREADS};"
     # gate timeout = 2 x per-query limit (only while the timeout is enabled)
     local saved_to="$OY_TIMEOUT_SECS" gate_to="$OY_TIMEOUT_SECS"
@@ -176,30 +194,52 @@ oy_equiv_check() {
     fi
 
     printf '%s\n%s\n%s;\n' "$prag" "$OY_OFF" "${query%;}" > "$sql"
-    oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; roff=$?
-    printf '%s\n%s\n%s;\n' "$prag" "$OY_ON" "${query%;}" > "$sql"
-    oy_duck "$db" -csv -noheader < "$sql" > "$on"  2>"$eon";  ron=$?
+    if oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; then roff=0; else roff=$?; fi
+    if [ "$roff" -eq 124 ]; then
+        echo "  TIMEOUT (${gate_to}s, off): $label"; rc=3
+    elif [ "$roff" -ne 0 ] || grep -qE 'Error:' "$eoff"; then
+        echo "  ERROR (off rc=$roff): $label"
+        { grep -m1 -E 'Error:' "$eoff" || sed -n '1p' "$eoff"; } | sed 's/^/        /'
+        rc=2
+    else
+        off_rows="$(wc -l < "$off" | tr -d ' ')"
+        if ! LC_ALL=C sort -o "$off" "$off" 2>"$esort"; then
+            echo "  ERROR (sort off): $label"
+            sed -n '1p' "$esort" | sed 's/^/        /'
+            rc=2
+        fi
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n%s\n%s;\n' "$prag" "$OY_ON" "${query%;}" > "$sql"
+        if oy_duck "$db" -csv -noheader < "$sql" > "$on" 2>"$eon"; then ron=0; else ron=$?; fi
+        if [ "$ron" -eq 124 ]; then
+            echo "  TIMEOUT (${gate_to}s, on): $label"; rc=3
+        elif [ "$ron" -ne 0 ] || grep -qE 'Error:' "$eon"; then
+            echo "  ERROR (on rc=$ron): $label"
+            { grep -m1 -E 'Error:' "$eon" || sed -n '1p' "$eon"; } | sed 's/^/        /'
+            rc=2
+        else
+            on_rows="$(wc -l < "$on" | tr -d ' ')"
+            : > "$esort"
+            if ! LC_ALL=C sort -o "$on" "$on" 2>"$esort"; then
+                echo "  ERROR (sort on): $label"
+                sed -n '1p' "$esort" | sed 's/^/        /'
+                rc=2
+            fi
+        fi
+    fi
     OY_TIMEOUT_SECS="$saved_to"
 
-    if [ "${roff:-0}" -eq 124 ] || [ "${ron:-0}" -eq 124 ]; then
-        echo "  TIMEOUT (${gate_to}s): $label"; rc=3
-    elif grep -qE 'Error:' "$eoff"; then
-        echo "  ERROR (off): $label"; grep -E 'Error:' "$eoff" | head -1 | sed 's/^/        /'; rc=2
-    elif grep -qE 'Error:' "$eon"; then
-        echo "  ERROR (on):  $label"; grep -E 'Error:' "$eon" | head -1 | sed 's/^/        /'; rc=2
-    else
-        LC_ALL=C sort "$off" > "$off_sorted"
-        LC_ALL=C sort "$on" > "$on_sorted"
-    fi
     if [ "$rc" -ne 0 ]; then
         :
-    elif diff -q "$off_sorted" "$on_sorted" >/dev/null; then
-        echo "  equiv OK: $label ($(wc -l < "$off" | tr -d ' ') rows)"; rc=0
+    elif diff -q "$off" "$on" >/dev/null; then
+        echo "  equiv OK: $label ($off_rows rows)"; rc=0
     else
-        echo "  NOT EQUIV: $label (off=$(wc -l < "$off" | tr -d ' ') on=$(wc -l < "$on" | tr -d ' '))"
-        diff "$off_sorted" "$on_sorted" | head -6 | sed 's/^/        /'; rc=1
+        echo "  NOT EQUIV: $label (off=$off_rows on=$on_rows)"
+        diff "$off" "$on" | head -6 | sed 's/^/        /'; rc=1
     fi
-    rm -f "$off" "$on" "$off_sorted" "$on_sorted" "$eoff" "$eon" "$sql"
+    rm -f "$off" "$on" "$eoff" "$eon" "$esort" "$sql"
     return $rc
 }
 
@@ -476,7 +516,7 @@ oy_kernel() {
 oy_phase_profile() {
     local db="$1" query="$2" threads="$3" sqlf profiledir profilef
     sqlf=$(mktemp)
-    profiledir=$(mktemp -d /tmp/oy_profile.XXXXXX)
+    profiledir=$(mktemp -d "$OY_RUN_TMPDIR/oy_profile.XXXXXX")
     profilef="$profiledir/profile.json"
     printf "PRAGMA threads=%s;\n%s\nPRAGMA enable_profiling='json';\nPRAGMA profiling_output='%s';\n%s;\n" \
         "$threads" "$OY_ON" "$profilef" "${query%;}" > "$sqlf"
@@ -680,20 +720,19 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# phases : one profiled ON run at threads=1; R1SJ-T1/R2SJ-T1/JOIN-T1 are summed categorized operator elapsed seconds"
     echo "#          they exclude uncategorized/unprofiled work and need not sum to T1:on"
     echo "# timeout: ${OY_TIMEOUT_SECS}s/query → correctness gate gets $(( OY_TIMEOUT_SECS * 2 ))s (2×, parallel threads=${OY_THREADS}), timing batch gets $(( OY_TIMEOUT_SECS * (RUNS + 1) ))s ((RUNS+1)×); timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
+    echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
     echo "# formula : candidate_total = candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost"
     echo "# gate    : candidate_total <= cost_ratio_limit * baseline_cost"
     echo "# compare : raw_cost_winner compares candidate_total directly with baseline_cost"
     echo "# capture : plans=$CAPTURE_PLANS directory=$PLAN_DIR"
     echo
-    echo "===================== LIVE PER-QUERY RESULTS =========================="
+    echo "===================== PER-QUERY RESULT BLOCKS ========================="
     echo "# Columns: T1 = single-thread, TM = multi-thread (threads=${OY_THREADS})"
-    echo "#   reorder/gate/useOY = reordered vs DuckDB / cost comparison applied / OuterYan selected (0|1)"
-    echo "#   cost estimates are printed on the indented line following each correct query"
+    echo "# Each query has exactly two lines after a full-width separator:"
+    echo "#   line 1 = query, correctness, reorder, selected plan, TM, T1"
+    echo "#   line 2 = decision, cost/gate inputs, weights, profile, and artifacts"
     echo "#   kernel = semi-join filter kernel OuterYan ran: bitmap | hash | mixed | - (no SJ)"
-    printf '%-34s %-4s %-4s %-5s %-20s %-7s %-9s %-10s %9s %9s %7s %9s %9s %7s %9s %9s %9s\n' \
-        query outer gate useOY decision kernel correct note T1:off T1:on T1:spd TM:off TM:on TM:spd R1SJ-T1 R2SJ-T1 JOIN-T1
-    echo "----------------------------------------------------------------------"
 } > "$OUT"
 
 # Per-query state arrays (index = query #). Written by process_one and read by
@@ -855,29 +894,58 @@ process_one() {
     QEFFECTIVE_PASS[$i]="$PASS"; QDUCKDB_PLAN[$i]="$duckdb_plan"; QENABLED_PLAN[$i]="$enabled_plan"
     QTRACE_FILE[$i]="$trace_file"; QCOST_FILE[$i]="$cost_file"
     # ---- append to TXT and attempts CSV ----
-    printf '%-34s %-4s %-4s %-5s %-20s %-7s %-9s %-10s %9s %9s %7s %9s %9s %7s %9s %9s %9s\n' \
-        "$id" "$outer_reordered" "$gate_applied" "$selected" "$decision" "$ker" "$correct" "$note" \
-        "$off1" "$on1" "$ratio1" "$offm" "$onm" "$ratiom" "$r1sj" "$r2sj" "$realjoin" >> "$OUT"
+    local primary_line detail_line detail_suffix gate_detail
+    printf -v primary_line \
+        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s' \
+        "$((i+1))" "${#LABELS[@]}" "$id" "$correct" "$outer_reordered" "$selected_plan" \
+        "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1"
+    printf -v detail_line \
+        '  details: family=%s sql=%s pass=%s timeout=%ss note=%s rows=%s nrel=%s' \
+        "$family" "$sql_path" "$PASS" "$OY_TIMEOUT_SECS" "$note" "$rows" "$nrel"
     if [ "$correct" = "TRUE" ]; then
-        printf '  decision: selected=%s reason=%s reorder=%s raw_winner=%s gate=%s proven_empty=%s formula=%s\n' \
-            "$selected_plan" "$decision" "$outer_reordered" "$raw_winner" "$gate_result" "$proven_empty" "$formula_id" >> "$OUT"
-        printf '  cost: DuckDB=%s OuterYan_total=%s delta=%s raw_ratio=%s; candidate_join=%s + sj_ratio=%s * sj_raw=%s = %s; weighted_sj=%s\n' \
-            "$baseline_cost" "$candidate_total" "$raw_delta" "$raw_ratio" \
-            "$candidate_join_cost" "$semijoin_cost_ratio" "$semijoin_raw_cost" "$candidate_total" \
-            "$weighted_semijoin_cost" >> "$OUT"
-        printf '  SJ detail: raw=R1(build=%s + probe=%s) + R2(build=%s + probe=%s); gate=%s <= %s (limit=%s * baseline=%s), margin=%s\n' \
-            "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" \
-            "$gate_lhs" "$gate_rhs" "$cost_ratio_limit" "$baseline_cost" "$gate_margin" >> "$OUT"
-        printf '  params: join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)\n' \
-            "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
-            "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" \
-            "$sj_lookup_weight" "$sj_emit_weight" >> "$OUT"
-        printf '  legacy totals: baseline=%s threshold=%s candidate_join=%s semijoin_raw=%s candidate_total=%s  R1(build=%s probe=%s) R2(build=%s probe=%s)\n' \
-            "$baseline_cost" "$baseline_threshold" "$candidate_join_cost" "$semijoin_raw_cost" "$candidate_total" \
-            "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" >> "$OUT"
-        [ "$CAPTURE_PLANS" = 1 ] && printf '  artifacts: duckdb=%s enabled=%s trace=%s cost=%s\n' \
-            "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file" >> "$OUT"
+        printf -v detail_suffix \
+            ' decision=[reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s] kernel=[%s %s]' \
+            "$decision" "$raw_winner" "$gate_result" "$gate_applied" "$proven_empty" \
+            "$selected" "$formula_id" "$ker" "$kdetail"
+        detail_line+="$detail_suffix"
+        if [ "$candidate_total" = "NA" ] || [ "$candidate_total" = "-" ] || \
+           [ "$baseline_cost" = "NA" ] || [ "$baseline_cost" = "-" ]; then
+            detail_line+=" cost=[UNAVAILABLE]"
+        else
+            printf -v detail_suffix \
+                ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[%s <= %s (= %s*%s) => %s; margin=%s] SJ=[R1(build=%s probe=%s) R2(build=%s probe=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
+                "$candidate_join_cost" "$semijoin_cost_ratio" "$semijoin_raw_cost" "$candidate_total" \
+                "$baseline_cost" "$raw_delta" "$raw_ratio" \
+                "$gate_lhs" "$gate_rhs" "$cost_ratio_limit" "$baseline_cost" "$gate_result" "$gate_margin" \
+                "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" "$weighted_semijoin_cost" \
+                "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
+                "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" \
+                "$sj_lookup_weight" "$sj_emit_weight"
+            detail_line+="$detail_suffix"
+        fi
+        printf -v detail_suffix ' profile=[R1SJ-T1=%s R2SJ-T1=%s real-join-T1=%s]' \
+            "$r1sj" "$r2sj" "$realjoin"
+        detail_line+="$detail_suffix"
+        if [ "$CAPTURE_PLANS" = 1 ]; then
+            printf -v detail_suffix ' artifacts=[duckdb=%s enabled=%s trace=%s cost=%s]' \
+                "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
+            detail_line+="$detail_suffix"
+        fi
+    else
+        gate_detail="$(printf '%s' "${gate:-ERROR: correctness gate produced no diagnostic}" | tr '\n' ' ')"
+        printf -v detail_suffix ' gate_detail=[%s]' "$gate_detail"
+        detail_line+="$detail_suffix"
     fi
+    {
+        echo
+        echo "$OY_QUERY_SEPARATOR"
+        printf '%s\n%s\n' "$primary_line" "$detail_line"
+    } >> "$OUT"
+    {
+        echo
+        echo "$OY_QUERY_SEPARATOR"
+        printf '%s\n%s\n' "$primary_line" "$detail_line"
+    } >&2
     csv_row "$CSV_ATTEMPTS" \
         "$id" "$family" "$sql_path" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$raw_winner" "$gate_result" \
@@ -890,24 +958,11 @@ process_one() {
         "$ker" "$kdetail" "$correct" "$note" "$off1" "$on1" "$ratio1" \
         "$offm" "$onm" "$ratiom" "$r1sj" "$r2sj" "$realjoin" "$rows" "$PASS" \
         "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
-    local rtag=""; [ "$PASS" = "retry" ] && rtag="  (retry @${OY_TIMEOUT_SECS}s)"
-    if [ "$correct" = "TRUE" ]; then
-        printf '  [%3d/%d] %-34s correct=TRUE reorder=%s selected=%s reason=%s raw=%s gate=%s  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s%s\n' \
-            "$((i+1))" "${#LABELS[@]}" "$id" "$outer_reordered" "$selected_plan" "$decision" \
-            "$raw_winner" "$gate_result" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1" "$rtag" >&2
-        printf '          cost: OuterYan=%s + %s*%s = %s vs DuckDB=%s (winner=%s); gate %s <= %s=%s*%s => %s; join_w=(%s,%s,%s) sj_w=(%s,%s,%s,%s,%s)\n' \
-            "$candidate_join_cost" "$semijoin_cost_ratio" "$semijoin_raw_cost" "$candidate_total" \
-            "$baseline_cost" "$raw_winner" "$gate_lhs" "$gate_rhs" "$cost_ratio_limit" "$baseline_cost" \
-            "$gate_result" "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
-            "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" \
-            "$sj_lookup_weight" "$sj_emit_weight" >&2
-    else
-        printf '  [%3d/%d] %-34s correct=FALSE reorder=%s selected=%s %s%s\n' \
-            "$((i+1))" "${#LABELS[@]}" "$id" "$outer_reordered" "$selected_plan" "$note" "$rtag" >&2
-    fi
 }
 
 # ==== Pass 1: every query under the base timeout ============================
+echo "Temporary result storage: $OY_RUN_TMPDIR" >&2
+echo "Temporary filesystem: $OY_TMP_FREE available on $OY_TMP_MOUNT (base=$OY_TMPDIR)" >&2
 echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
 RETRY_IDX=()
 for ((i=0; i<${#LABELS[@]}; i++)); do

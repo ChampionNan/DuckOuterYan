@@ -95,6 +95,13 @@ export OY_TIMEOUT_RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
 # experiment_onoff.sh --capture-plans flag sets this to 1 for a run.
 export OY_CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 
+# Bare-query correctness emits and externally sorts the complete OFF and ON
+# result multisets. Keep these potentially large temporary files on the same
+# filesystem as the repository instead of the capacity-limited system /tmp.
+# On the Linux server checkout at /home/data/bchenba/DuckYanOuter this resolves
+# to /home/data/bchenba/DuckYanOuter/auto_test/results/tmp, backed by /home.
+export OY_TMPDIR="${OY_TMPDIR:-$OY_REPO_ROOT/auto_test/results/tmp}"
+
 # ===========================================================================
 # 7) Pretty-print summary (only when sourced interactively / verbose)
 # ===========================================================================
@@ -108,6 +115,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per query"
         echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"
         echo "  CAPTURE_PLANS     = $OY_CAPTURE_PLANS"
+        echo "  OY_TMPDIR         = $OY_TMPDIR"
         echo "========================="
     } >&2
 fi
