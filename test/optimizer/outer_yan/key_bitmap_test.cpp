@@ -336,6 +336,18 @@ TEST_CASE("outer_yan key_bitmap: budget boundary — fits exactly vs overflows b
 	REQUIRE(bm_over == nullptr);
 }
 
+TEST_CASE("outer_yan key_bitmap: full BIGINT span rejects without signed overflow",
+          "[outer_yan][key_bitmap]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	auto cdc = MakeBigIntCDC(*con.context,
+	                         {NumericLimits<int64_t>::Minimum(), NumericLimits<int64_t>::Maximum()});
+	vector<LogicalType> types {LogicalType::BIGINT};
+	auto bm = KeyBitmap::TryBuild(*con.context, cdc, {0}, types,
+	                              NumericLimits<idx_t>::Maximum());
+	REQUIRE(bm == nullptr);
+}
+
 TEST_CASE("outer_yan key_bitmap: ProbeBatch narrows selection vector",
           "[outer_yan][key_bitmap]") {
 	DuckDB db(nullptr);

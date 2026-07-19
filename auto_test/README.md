@@ -37,9 +37,8 @@ corresponding environment values.
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREADS` | `48` | Multi-thread timing and equivalence-check threads |
-| `OY_TIMEOUT_SECS` | `600` | Per-query timeout; `0` disables it |
-| `OY_RUNS` | `5` | Timed executions after one warm-up |
-| `OY_TIMEOUT_RETRY_MULT` | `2` | Timeout multiplier for one retry; `1` disables retry |
+| `OY_TIMEOUT_SECS` | `900` | Per-statement timeout; `0` disables it |
+| `OY_RUNS` | `3` | Timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
 
@@ -116,14 +115,18 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
 4. Run one profiled OuterYan-ON execution at `threads=1` and categorize operator
-   elapsed time as round-1 semi-join, round-2 semi-join, and real joins.
+   elapsed time as round-1 semi-join, round-2 semi-join, and real joins. The
+   traced plan supplies the planned pair and newly built filter counts for each
+   round.
 5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-6. Retry timed-out queries once with `OY_TIMEOUT_RETRY_MULT` times the timeout.
-
-The phase values are sums of categorized single-thread operator times. They are
-not complete phase wall times and need not add up to the measured query time.
+The profile values are sums of categorized single-thread operator times. They
+are not complete phase wall times and need not add up to the measured query
+time. `SJ_BUILD` combines sink materialization, replay, and asynchronous
+bitmap/hash task bodies; those components and finalize/event bookkeeping are
+not separately or completely decomposed. The `wall` value and every percentage
+come from this same profiled execution, not from the later `T1:on` median.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -163,9 +166,19 @@ policy decisions.
 
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
-are not environment variables or SQL settings. The current workspace has the
-gate enabled, a semi-join ratio of `0.35`, and a baseline limit of `1.0`. Rebuild
-the CLI after changing them.
+are not environment variables or SQL settings. The current workspace selects
+`FORCE_OUTERYAN`, uses a semi-join ratio of `0.35`, and keeps a baseline limit
+of `1.10` for diagnostic output and future GATED runs. Under GATED, that limit
+admits an OuterYan candidate whose estimated total cost is within 10% of the
+DuckDB baseline. This 10% is an explicit selection preference, not a claim that
+the physical-cost estimator is 10% accurate. Rebuild the CLI after changing
+them.
+
+Set `SELECTION_MODE` to `SelectionMode::GATED` for the cost gate, or to
+`SelectionMode::FORCE_OUTERYAN` to select every complete,
+changed-grouping, non-proven-empty OuterYan candidate. Same-grouping,
+inapplicable, failed, and proven-empty cases continue to use DuckDB in both
+modes. The selected mode is written to `[OY_DECISION]`, TXT, and CSV output.
 
 Decision reasons written to the trace and result files include:
 
@@ -174,7 +187,7 @@ Decision reasons written to the trace and result files include:
 | `INAPPLICABLE` | OuterYan applicability check failed |
 | `DUCKDB_PLAN` | Candidate has the same grouping as DuckDB; use DuckDB |
 | `DUCKDB_PROVEN_EMPTY` | DuckDB's proof copy eliminates all real join work; use DuckDB without SJs |
-| `ALWAYS_OUTERYAN` | Grouping changed and the source-level cost gate is disabled |
+| `FORCE_OUTERYAN` | Changed candidate selected by the forced experiment mode |
 | `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
 | `COST_UNAVAILABLE` | A finite comparison could not be produced |
@@ -190,7 +203,7 @@ OuterYan candidate is selected.
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        timed executions per configuration
-  -t, --timeout S     per-query timeout
+  -t, --timeout S     per-statement timeout
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
@@ -208,7 +221,7 @@ is global and follows that family order.
 
 ```bash
 # Four small graph queries, single-thread smoke run
-GRAPH_DATASET=bitcoin OY_THREADS=1 OY_TIMEOUT_RETRY_MULT=1 \
+GRAPH_DATASET=bitcoin OY_THREADS=1 \
 bash auto_test/experiment_onoff.sh \
   --only graph --pattern '*_N3_*_s0[15]' --limit 4 --runs 1 --timeout 60
 
@@ -248,29 +261,40 @@ auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.plans/
 ```
 
 With `--out path/name.txt`, the text path is exact and the CSV is
-`path/name.csv`. The canonical CSV contains exactly one effective row per query
-after retries. The attempts CSV retains both main and retry rows.
+`path/name.csv`. Each CSV contains exactly one row per query. The historical
+attempts CSV is retained for downstream compatibility and is an identical
+single-attempt copy; timed-out queries are not retried.
 
 Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[106/366] oy_th_th_agg3                    correct=TRUE reorder=0 selected=DUCKDB  TM:off=0.2750 on=0.2800 spd=0.982  T1:off=3.6540 on=3.6380 spd=1.004
-  details: family=tpch sql=... pass=main timeout=300s note=OK ... decision=[reason=INAPPLICABLE ...] kernel=[- b0h0] cost=[UNAVAILABLE] profile=[...]
+[132/366] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[wall=45.696000 R1=NA(no-pairs,pairs=0) R2=0.940435(2.06%,pairs=3,filters=3) real-join=12.297079(26.91%)] TM:... T1:...
+  details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
-The record always uses two lines: line 1 is the high-level result and timing;
-line 2 contains all other metadata. Applicable queries include the OuterYan and
+The record always uses two lines: line 1 contains the high-level result,
+kernel choice, phase profile, and timing; line 2 contains decision/cost metadata.
+Applicable queries include the OuterYan and
 DuckDB cost formula, gate comparison, and join/SJ weights on line 2. With plan
 capture enabled, that line also lists the DuckDB-OFF and enabled EXPLAIN files,
 full trace, and per-join/per-SJ cost records.
+
+`pairs` counts planned semi-join applications in that round. `filters` counts
+new filter constructions; a reused filter contributes another pair without
+another filter. `R1=NA(no-pairs,pairs=0)` therefore means that round was not
+scheduled, rather than that its timer incorrectly measured zero. If DuckDB was
+selected, both rounds show `NA(no-sj-plan)`. A missing plan count or profile is
+reported explicitly instead of being displayed as a valid zero. In particular,
+`profile-missing` means the plan expected at least one pair but the profile JSON
+contained no matching `SJ_BUILD_ROUND_N` or `SJ_PROBE_ROUND_N` operator.
 
 Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query index/name, correctness, reorder flag, selected plan, and OFF/ON/`OFF/ON` speed-up for TM and T1 |
-| Line 2 | Family/path/pass, note/rows, decision, kernel, cost/gate operands, SJ work, weights, profile, and optional artifacts |
+| Line 1 | Query/result, selected plan, kernel counts, profiled wall ratios, and OFF/ON speed-up for TM and T1 |
+| Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
 gate:
@@ -285,10 +309,10 @@ For same-grouping, inapplicable, unavailable, or forced-policy cases, the report
 states that the numeric gate was skipped and prints the decision reason.
 
 The CSV exports the same decision, cost, kernel, correctness, timing, and phase
-fields in machine-readable form. Retry rows use `pass=retry`; when both main and
-retry rows exist, take the last row for that query. The final text summary already
-uses the post-retry state and groups speed-ups separately by `outer_reordered` and
-`outer_yan_selected`.
+fields in machine-readable form, including `round1_pairs`, `round1_filters`,
+`round2_pairs`, `round2_filters`, and the two recognized SJ operator counts.
+`effective_pass` remains `main` for schema compatibility. The final text summary groups speed-ups separately by
+`outer_reordered` and `outer_yan_selected`.
 
 ## Optimizer trace
 
@@ -322,7 +346,7 @@ The graph builder creates R/S/T/K views, so no manual view setup is required.
 
 | Control | Current default | Effect |
 |---|---:|---|
-| `outer_yan_bitmap_max_bytes` | 16 GiB per filter | Bitmap budget; `0` forces hash |
+| `outer_yan_bitmap_max_bytes` | 32 GiB per filter | Bitmap budget; `0` forces hash |
 | `outer_yan_hash_fn` | `duckdb` | Hash implementation; alternative is `murmur` |
 | `outer_yan_stats_prefilter` | `false` | Use base min/max statistics to skip unsuitable bitmap attempts |
 | `DUCKDB_SJ_KERNEL_TRACE` | unset | Emit finalized bitmap/hash kernel records |
@@ -334,6 +358,12 @@ SET VARIABLE outer_yan_bitmap_max_bytes = 0;
 SET VARIABLE outer_yan_hash_fn = 'murmur';
 SET VARIABLE outer_yan_stats_prefilter = true;
 ```
+
+Kernel output uses `not-run`, `bitmap(b=N,h=0)`, `hash(b=0,h=N)`,
+`mixed(b=N,h=M)`, or `none(b=0,h=0)`. Hash and mixed results also report
+reason counts. Raising the bitmap budget can address `overflow` (and
+`force_hash` after replanning), but not `ineligible` key types or composite
+keys.
 
 Disable the cohesive optimizer with:
 

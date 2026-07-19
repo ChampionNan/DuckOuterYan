@@ -75,8 +75,11 @@ candidate_total = candidate_join_cost
 candidate_total <= MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 ```
 
-The current P0/P1 policy uses `SEMIJOIN_COST_RATIO=0.35` and
-`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Before the numeric gate, a conservative
+The current build uses `FORCE_OUTERYAN`. Its diagnostic cost model uses
+`SEMIJOIN_COST_RATIO=0.35` and keeps
+`MAX_CANDIDATE_TO_BASELINE_RATIO=1.10` for GATED experiments. The latter is an
+explicit 10% OuterYan selection tolerance, not a physical-cost coefficient.
+Before policy selection, a conservative
 proof copy runs DuckDB statistics propagation and empty-result pull-up; if that
 removes every real join, DuckDB is selected with `DUCKDB_PROVEN_EMPTY`.
 
@@ -158,7 +161,7 @@ The live log and reports distinguish:
 - the full cost formula and all join/SJ coefficient values;
 - bitmap/hash kernel use; and
 - single-thread categorized operator time for round-1 semi-joins, round-2
-  semi-joins, and real joins.
+  semi-joins, and real joins, with planned pair/new-filter counts per round.
 
 Every query is printed as a separate block beginning with a full-width
 separator followed by exactly two lines. The first line contains correctness,
@@ -167,8 +170,14 @@ decision, cost, gate, weight, profiling, and artifact details. Inapplicable
 queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
 
 The categorized operator values are diagnostics, not three additive wall-clock
-phases. The canonical CSV contains one effective post-retry row per query;
-`.attempts.csv` retains every attempt. `--capture-plans` also stores OFF/ON
+phases. `SJ_BUILD` combines materialization, replay, and asynchronous filter-task
+work; its internal components and finalize/event bookkeeping are not separately
+or completely decomposed. `wall` and all percentages come from the same
+single-thread profiling execution, which is separate from the `T1:on` median.
+A zero-pair round is printed as `NA(no-pairs,pairs=0)` rather than as a measured
+zero. The canonical CSV contains one row per query; `.attempts.csv` is retained
+as an identical single-attempt compatibility artifact. Timed-out queries are not
+retried. `--capture-plans` also stores OFF/ON
 EXPLAIN plans, optimizer traces, and per-step cost details.
 
 Database builders reuse existing database files. To intentionally replace one

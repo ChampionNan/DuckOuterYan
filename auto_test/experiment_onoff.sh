@@ -9,24 +9,18 @@
 #      whether its candidate grouping differs from DuckDB, whether the cost gate
 #      ran, and which candidate was selected.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
-#      (bitmap | hash | mixed | -), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 5 runs).
-#   5. PHASE PROFILE — one single-thread ON run, reporting categorized operator
+#      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
+#      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
+#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 3 runs).
+#   5. PHASE PROFILE — one single-thread ON run, reporting observed operator
 #      elapsed seconds for round-1 semi-joins, round-2 semi-joins, and real joins.
-#
-# After pass 1, any query that TIMED OUT (gate timeout, or a timing batch that
-# produced NA) is re-evaluated once in a RETRY PASS with the timeout multiplied
-# by OY_TIMEOUT_RETRY_MULT (default 2 = "doubled"; set 1 to disable). Retry rows
-# are appended under their own section and to the attempts CSV. The final CSV
-# and SUMMARY reflect the effective post-retry result.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
-#   -n,--runs N       timed iterations per config (default 5; median taken)
-#   -t,--timeout S    per-query timeout sec (default 300; via `timeout`). The
-#                     timing batch runs N+1 executions (1 warm-up + N timed) in one
-#                     process, so its budget is (N+1)×S; the 1-run gate uses S.
-#                     Timed-out queries are retried once at S×OY_TIMEOUT_RETRY_MULT.
+#   -n,--runs N       timed iterations per config (default 3; median taken)
+#   -t,--timeout S    per-statement timeout sec (default 900). DuckDB enforces S
+#                     on every query; the external timing-batch watchdog is
+#                     (N+1)×S for 1 warm-up + N timed executions.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
 #                     (default all); bench = tpch+tpcds+job
 #      --pattern GLOB  only queries whose label matches (default *)
@@ -89,10 +83,19 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=300}"
+: "${OY_TIMEOUT_SECS:=900}"
 OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 [ "${OY_TIMEOUT_SECS}" = "0" ] && OY_TIMEOUT_BIN=""
 OY_QUERY_SEPARATOR="===================================================================================================="
+
+# DuckDB enforces this limit independently for every statement. The external
+# `timeout` remains a process watchdog and is scaled for multi-statement timing
+# batches, but no single bare-query execution can consume that entire batch.
+oy_statement_timeout_sql() {
+    local seconds="$1"
+    [ "$seconds" != "0" ] || return 0
+    printf 'SET max_execution_time=%s;' "$(( seconds * 1000 ))"
+}
 
 # --- duckdb process lifecycle / interrupt-safe cleanup ----------------------
 # Problem: on Ctrl+C a duckdb that is mid-query could be left running, holding
@@ -178,25 +181,19 @@ oy_duck() {
 # execute the bare query; sorting happens on the emitted CSV files so the
 # correctness check cannot change the optimized plan.
 # This is the hard PRE-CONDITION run before any timing: a query that is not
-# verified here (mismatch / error / timeout) is NOT timed. It runs in PARALLEL
-# (threads=OY_THREADS) so it returns fast, and gets 2x the per-query timeout
-# because it executes both configurations and sorts their emitted files.
+# verified here (mismatch / error / timeout) is NOT timed. Each OFF/ON bare-query
+# process has the same fixed per-statement and external timeout.
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
     local db="$1" label="$2" query="$3"
     local off on eoff eon esort sql roff=0 ron=0 rc=0 off_rows=0 on_rows=0
     off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); esort=$(mktemp); sql=$(mktemp)
-    local prag="PRAGMA threads=${OY_THREADS};"
-    # gate timeout = 2 x per-query limit (only while the timeout is enabled)
-    local saved_to="$OY_TIMEOUT_SECS" gate_to="$OY_TIMEOUT_SECS"
-    if [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ]; then
-        gate_to=$(( OY_TIMEOUT_SECS * 2 )); OY_TIMEOUT_SECS="$gate_to"
-    fi
+    local prag="PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"
 
     printf '%s\n%s\n%s;\n' "$prag" "$OY_OFF" "${query%;}" > "$sql"
     if oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; then roff=0; else roff=$?; fi
     if [ "$roff" -eq 124 ]; then
-        echo "  TIMEOUT (${gate_to}s, off): $label"; rc=3
+        echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, off): $label"; rc=3
     elif [ "$roff" -ne 0 ] || grep -qE 'Error:' "$eoff"; then
         echo "  ERROR (off rc=$roff): $label"
         { grep -m1 -E 'Error:' "$eoff" || sed -n '1p' "$eoff"; } | sed 's/^/        /'
@@ -214,7 +211,7 @@ oy_equiv_check() {
         printf '%s\n%s\n%s;\n' "$prag" "$OY_ON" "${query%;}" > "$sql"
         if oy_duck "$db" -csv -noheader < "$sql" > "$on" 2>"$eon"; then ron=0; else ron=$?; fi
         if [ "$ron" -eq 124 ]; then
-            echo "  TIMEOUT (${gate_to}s, on): $label"; rc=3
+            echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, on): $label"; rc=3
         elif [ "$ron" -ne 0 ] || grep -qE 'Error:' "$eon"; then
             echo "  ERROR (on rc=$ron): $label"
             { grep -m1 -E 'Error:' "$eon" || sed -n '1p' "$eon"; } | sed 's/^/        /'
@@ -229,8 +226,6 @@ oy_equiv_check() {
             fi
         fi
     fi
-    OY_TIMEOUT_SECS="$saved_to"
-
     if [ "$rc" -ne 0 ]; then
         :
     elif diff -q "$off" "$on" >/dev/null; then
@@ -253,12 +248,12 @@ oy_equiv_check() {
 # warm-up time so a result is still produced; NA is emitted ONLY when not a single
 # run completed within the timeout.
 # Output: "median_time runs_used"  (runs_used = how many TIMED runs the median spans)
-: "${OY_RUNS:=10}"
+: "${OY_RUNS:=3}"
 
 oy_time_median() {
     local db="$1" set_sql="$2" query="$3" runs="$4" threads="$5"
     local script i
-    script="PRAGMA threads=${threads};"$'\n'"${set_sql}"$'\n'
+    script="PRAGMA threads=${threads};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"$'\n'"${set_sql}"$'\n'
     # 1 warm-up run + $runs timed runs (timer on for all). The warm-up primes the
     # buffer pool and is excluded from the median; timing it too means a killed
     # batch still has a fallback measurement instead of NA.
@@ -297,14 +292,17 @@ oy_time_median() {
 
 # --- OuterYan candidate decision --------------------------------------------
 # OuterYan emits exactly one machine-readable record while optimizing EXPLAIN:
-#   [OY_DECISION] outer_reordered=0|1 cost_gate_applied=0|1 \
+#   [OY_DECISION] selection_mode=GATED|FORCE_OUTERYAN \
+#                 outer_reordered=0|1 cost_gate_applied=0|1 \
 #                 outer_yan_selected=0|1 reason=UPPER_SNAKE_TOKEN \
 #                 baseline_cost=N|NA candidate_join_cost=N|NA \
 #                 semijoin_raw_cost=N|NA semijoin_cost_ratio=N|NA \
 #                 weighted_semijoin_cost=N|NA candidate_total=N|NA \
 #                 cost_ratio_limit=N|NA baseline_threshold=N|NA \
 #                 round1_build=N|NA round1_probe=N|NA \
-#                 round2_build=N|NA round2_probe=N|NA
+#                 round2_build=N|NA round2_probe=N|NA \
+#                 round1_pairs=N|NA round1_filters=N|NA \
+#                 round2_pairs=N|NA round2_filters=N|NA
 #
 # Results are returned through globals so oy_duck runs in this shell and remains
 # covered by the PID-tracking/interrupt cleanup above.
@@ -313,6 +311,7 @@ OY_DECISION_GATE="NA"
 OY_DECISION_SELECTED="NA"
 OY_DECISION_REASON="TRACE_MISSING"
 OY_DECISION_FORMULA_ID="NA"
+OY_DECISION_SELECTION_MODE="NA"
 OY_DECISION_SELECTED_PLAN="NA"
 OY_DECISION_BASELINE_PROVEN_EMPTY="NA"
 OY_DECISION_RAW_COST_WINNER="NA"
@@ -329,6 +328,10 @@ OY_DECISION_ROUND1_BUILD="NA"
 OY_DECISION_ROUND1_PROBE="NA"
 OY_DECISION_ROUND2_BUILD="NA"
 OY_DECISION_ROUND2_PROBE="NA"
+OY_DECISION_ROUND1_PAIRS="NA"
+OY_DECISION_ROUND1_FILTERS="NA"
+OY_DECISION_ROUND2_PAIRS="NA"
+OY_DECISION_ROUND2_FILTERS="NA"
 OY_DECISION_RAW_COST_DELTA="NA"
 OY_DECISION_RAW_COST_RATIO="NA"
 OY_DECISION_GATE_LHS="NA"
@@ -355,6 +358,7 @@ oy_record_value() {
 
 oy_reset_decision() {
     OY_DECISION_FORMULA_ID="NA"
+    OY_DECISION_SELECTION_MODE="NA"
     OY_DECISION_SELECTED_PLAN="NA"
     OY_DECISION_REORDERED="NA"
     OY_DECISION_GATE="NA"
@@ -375,6 +379,10 @@ oy_reset_decision() {
     OY_DECISION_ROUND1_PROBE="NA"
     OY_DECISION_ROUND2_BUILD="NA"
     OY_DECISION_ROUND2_PROBE="NA"
+    OY_DECISION_ROUND1_PAIRS="NA"
+    OY_DECISION_ROUND1_FILTERS="NA"
+    OY_DECISION_ROUND2_PAIRS="NA"
+    OY_DECISION_ROUND2_FILTERS="NA"
     OY_DECISION_RAW_COST_DELTA="NA"
     OY_DECISION_RAW_COST_RATIO="NA"
     OY_DECISION_GATE_LHS="NA"
@@ -395,7 +403,8 @@ oy_decision() {
     local sqlf tracef rc record
     local trace_was_set trace_saved
     sqlf=$(mktemp); tracef=$(mktemp)
-    printf '%s\nEXPLAIN (FORMAT json) %s;\n' "$OY_ON" "${query%;}" > "$sqlf"
+    printf '%s\n%s\nEXPLAIN (FORMAT json) %s;\n' \
+        "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$OY_ON" "${query%;}" > "$sqlf"
 
     # Each probe launches a fresh DuckDB process, so OuterYanTrace's process-wide
     # cached path resolves to this query's private trace file. Preserve a caller's
@@ -416,6 +425,7 @@ oy_decision() {
     [ "$rc" -eq 0 ] || OY_DECISION_REASON="TRACE_ERROR"
     if [ -n "$record" ]; then
         OY_DECISION_FORMULA_ID="$(oy_record_value "$record" formula_id)"
+        OY_DECISION_SELECTION_MODE="$(oy_record_value "$record" selection_mode)"
         OY_DECISION_SELECTED_PLAN="$(oy_record_value "$record" selected_plan)"
         OY_DECISION_REORDERED="$(oy_record_value "$record" outer_reordered)"
         OY_DECISION_GATE="$(oy_record_value "$record" cost_gate_applied)"
@@ -436,6 +446,10 @@ oy_decision() {
         OY_DECISION_ROUND1_PROBE="$(oy_record_value "$record" round1_probe)"
         OY_DECISION_ROUND2_BUILD="$(oy_record_value "$record" round2_build)"
         OY_DECISION_ROUND2_PROBE="$(oy_record_value "$record" round2_probe)"
+        OY_DECISION_ROUND1_PAIRS="$(oy_record_value "$record" round1_pairs)"
+        OY_DECISION_ROUND1_FILTERS="$(oy_record_value "$record" round1_filters)"
+        OY_DECISION_ROUND2_PAIRS="$(oy_record_value "$record" round2_pairs)"
+        OY_DECISION_ROUND2_FILTERS="$(oy_record_value "$record" round2_filters)"
         OY_DECISION_RAW_COST_DELTA="$(oy_record_value "$record" raw_cost_delta)"
         OY_DECISION_RAW_COST_RATIO="$(oy_record_value "$record" raw_cost_ratio)"
         OY_DECISION_GATE_LHS="$(oy_record_value "$record" gate_lhs)"
@@ -472,8 +486,8 @@ oy_decision() {
 oy_capture_plan() {
     local db="$1" setting="$2" query="$3" output="$4" sqlf rc
     sqlf=$(mktemp)
-    printf "PRAGMA explain_output='all';\n%s\nEXPLAIN %s;\n" \
-        "$setting" "${query%;}" > "$sqlf"
+    printf "PRAGMA explain_output='all';\n%s\n%s\nEXPLAIN %s;\n" \
+        "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$setting" "${query%;}" > "$sqlf"
     oy_duck "$db" < "$sqlf" > "$output" 2>&1
     rc=$?
     rm -f "$sqlf"
@@ -487,42 +501,112 @@ oy_capture_plan() {
 # fallback), so we cannot read it from EXPLAIN — instead we run the query ONCE
 # with OuterYan ON and the C++ kernel trace (env DUCKDB_SJ_KERNEL_TRACE) on, then
 # count the per-filter "[SJ_KERNEL] BITMAP|HASH" lines it prints to stderr.
-# Echoes: "<label> b<N>h<M>" — label is bitmap | hash | mixed | - (no SJ filters).
+# Echoes: "<label>|b<N>h<M>|<reason-counts>|<status>". `none` means an
+# OuterYan execution completed but finalized no SJ filter; `not-run` is used
+# only when the trace execution itself failed.
 oy_kernel() {
-    local db="$1" query="$2" sqlf errf nbm nhash label
+    local db="$1" query="$2" sqlf errf nbm nhash label rc
+    local nforce nbudget nineligible noverflow reasons="" separator=""
     sqlf=$(mktemp); errf=$(mktemp)
-    printf '%s\n%s\n' "$OY_ON" "${query%;};" > "$sqlf"
+    printf '%s\n%s\n%s\n' "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+        "$OY_ON" "${query%;};" > "$sqlf"
     # Scope the trace to this single run: export before, unset after, so the
     # timing/equivalence oy_duck calls never see the extra stderr.
     export DUCKDB_SJ_KERNEL_TRACE=1
     oy_duck "$db" -noheader < "$sqlf" >/dev/null 2>"$errf"
+    rc=$?
     unset DUCKDB_SJ_KERNEL_TRACE
     nbm="$(grep -c '\[SJ_KERNEL\] BITMAP' "$errf")"
     nhash="$(grep -c '\[SJ_KERNEL\] HASH' "$errf")"
+    nforce="$(grep -c '\[SJ_KERNEL\] HASH reason=force_hash' "$errf")"
+    nbudget="$(grep -c '\[SJ_KERNEL\] HASH reason=budget0' "$errf")"
+    nineligible="$(grep -c '\[SJ_KERNEL\] HASH reason=ineligible' "$errf")"
+    noverflow="$(grep -c '\[SJ_KERNEL\] HASH reason=overflow' "$errf")"
+    for reason_count in "force_hash:$nforce" "budget0:$nbudget" \
+                        "ineligible:$nineligible" "overflow:$noverflow"; do
+        [ "${reason_count##*:}" -gt 0 ] || continue
+        reasons+="${separator}${reason_count}"
+        separator=","
+    done
+    [ -n "$reasons" ] || reasons="-"
     rm -f "$sqlf" "$errf"
+    if [ "$rc" -ne 0 ]; then
+        echo "not-run|b0h0|$reasons|error"
+        return
+    fi
     if   [ "$nbm" -gt 0 ] && [ "$nhash" -gt 0 ]; then label="mixed"
     elif [ "$nbm" -gt 0 ]; then label="bitmap"
     elif [ "$nhash" -gt 0 ]; then label="hash"
-    else label="-"; fi
-    echo "$label b${nbm}h${nhash}"
+    else label="none"; fi
+    echo "$label|b${nbm}h${nhash}|$reasons|ok"
+}
+
+oy_kernel_display() {
+    local label="$1" detail="$2" b h
+    if [ "$label" = "not-run" ]; then
+        printf 'not-run'
+        return
+    fi
+    b="$(printf '%s' "$detail" | sed -nE 's/^b([0-9]+)h[0-9]+$/\1/p')"
+    h="$(printf '%s' "$detail" | sed -nE 's/^b[0-9]+h([0-9]+)$/\1/p')"
+    printf '%s(b=%s,h=%s)' "$label" "${b:-0}" "${h:-0}"
+}
+
+# Format one semi-join round without conflating "no planned work" with a
+# missing/zero profiler measurement. Pair/filter counts come from the exact
+# candidate selected by the optimizer; elapsed time comes from the separate
+# single-thread profile execution below.
+oy_round_profile_display() {
+    local label="$1" elapsed="$2" ratio="$3" pairs="$4" filters="$5" operators="$6"
+    case "$pairs" in
+        0)
+            case "$operators" in
+                0|NA|-|'') printf '%s=NA(no-pairs,pairs=0)' "$label";;
+                *) printf '%s=NA(plan-profile-mismatch,pairs=0,operators=%s)' "$label" "$operators";;
+            esac
+            ;;
+        ''|NA|-|*[!0-9]*)
+            printf '%s=NA(missing-plan-counts)' "$label"
+            ;;
+        *)
+            if [ "$operators" = "0" ]; then
+                printf '%s=NA(profile-missing,pairs=%s,filters=%s)' \
+                    "$label" "$pairs" "$filters"
+            elif [ "$operators" = "NA" ] || [ "$operators" = "-" ] || \
+                 [ -z "$operators" ] || [ "$elapsed" = "NA" ] || [ "$elapsed" = "-" ] || \
+                 [ "$ratio" = "NA" ] || [ "$ratio" = "-" ]; then
+                printf '%s=NA(profile-error,pairs=%s,filters=%s)' \
+                    "$label" "$pairs" "$filters"
+            else
+                printf '%s=%s(%s,pairs=%s,filters=%s)' \
+                    "$label" "$elapsed" "$ratio" "$pairs" "$filters"
+            fi
+            ;;
+    esac
 }
 
 # Profile one OuterYan-ON execution and sum DuckDB's per-operator elapsed timing
 # into three categories. Dynamic physical operator names distinguish the two SJ
 # rounds; real joins are identified from their physical operator type. The caller
 # uses threads=1 so concurrent worker durations are not added together. These are
-# categorized operator timings, not a complete wall-time decomposition.
-# Echoes: "round1_s round2_s real_join_s" (NA triplet on failure).
+# categorized operator timings, not a complete wall-time decomposition. An
+# SJ_BUILD timer combines sink/replay/filter-task work; those components and
+# finalize/event bookkeeping are not separately or completely decomposed.
+# Echoes: "round1_s round2_s real_join_s wall_s r1_pct r2_pct sj_pct
+# real_join_pct round1_operator_count round2_operator_count" (ten NA values on
+# failure). Ratios use the wall latency from this same profiling execution
+# rather than a separately timed run.
 oy_phase_profile() {
     local db="$1" query="$2" threads="$3" sqlf profiledir profilef
     sqlf=$(mktemp)
     profiledir=$(mktemp -d "$OY_RUN_TMPDIR/oy_profile.XXXXXX")
     profilef="$profiledir/profile.json"
-    printf "PRAGMA threads=%s;\n%s\nPRAGMA enable_profiling='json';\nPRAGMA profiling_output='%s';\n%s;\n" \
-        "$threads" "$OY_ON" "$profilef" "${query%;}" > "$sqlf"
+    printf "PRAGMA threads=%s;\n%s\n%s\nPRAGMA enable_profiling='json';\nPRAGMA profiling_output='%s';\n%s;\n" \
+        "$threads" "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$OY_ON" "$profilef" \
+        "${query%;}" > "$sqlf"
     oy_duck "$db" -noheader < "$sqlf" >/dev/null 2>&1
     if [ ! -s "$profilef" ]; then
-        echo "NA NA NA"
+        echo "NA NA NA NA NA NA NA NA NA NA"
     else
         python3 - "$profilef" <<'PY'
 import json
@@ -532,6 +616,8 @@ with open(sys.argv[1], encoding="utf-8") as f:
     root = json.load(f)
 
 totals = [0.0, 0.0, 0.0]
+sj_operator_counts = [0, 0]
+wall = float(root.get("latency", 0.0) or 0.0)
 stack = list(root.get("children", []))
 while stack:
     node = stack.pop()
@@ -541,11 +627,19 @@ while stack:
     timing = float(node.get("operator_timing", 0.0) or 0.0)
     if name in ("SJ_BUILD_ROUND_1", "SJ_PROBE_ROUND_1"):
         totals[0] += timing
+        sj_operator_counts[0] += 1
     elif name in ("SJ_BUILD_ROUND_2", "SJ_PROBE_ROUND_2"):
         totals[1] += timing
+        sj_operator_counts[1] += 1
     elif op_type != "SJ_PROBE" and (op_type.endswith("_JOIN") or op_type == "CROSS_PRODUCT"):
         totals[2] += timing
-print("{:.6f} {:.6f} {:.6f}".format(*totals))
+def pct(value):
+    return "{:.2f}%".format(100.0 * value / wall) if wall > 0.0 else "NA"
+
+print("{:.6f} {:.6f} {:.6f} {:.6f} {} {} {} {} {} {}".format(
+    totals[0], totals[1], totals[2], wall,
+    pct(totals[0]), pct(totals[1]), pct(totals[0] + totals[1]), pct(totals[2]),
+    sj_operator_counts[0], sj_operator_counts[1]))
 PY
     fi
     rm -f "$sqlf" "$profilef"
@@ -671,7 +765,7 @@ fi
 SIZES="families=[$FAMS]  graph=$GRAPH_DATASET  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF  job db=$JOB_DB"
 
 # ============================================================================
-# RUN: gate -> decision -> kernel/profile/time, streaming to TXT/attempt CSV
+# RUN: gate -> decision -> kernel/profile/time, streaming to TXT/CSV
 # ============================================================================
 CSV_FINAL="${OUT%.txt}.csv"
 CSV_ATTEMPTS="${OUT%.txt}.attempts.csv"
@@ -695,19 +789,29 @@ csv_row() {
     printf '\n' >> "$output"
 }
 
+csv_result_row() {
+    csv_row "$CSV_FINAL" "$@"
+    csv_row "$CSV_ATTEMPTS" "$@"
+}
+
 CSV_HEADER=(
     query family sql_path reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
-    baseline_proven_empty decision_reason formula_id raw_cost_winner gate_result
+    baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
     baseline_cost candidate_join_cost semijoin_raw_cost semijoin_cost_ratio weighted_semijoin_cost
     candidate_total cost_ratio_limit baseline_threshold round1_build round1_probe round2_build round2_probe
+    round1_pairs round1_filters round2_pairs round2_filters
     raw_cost_delta raw_cost_ratio gate_lhs gate_rhs gate_margin
     inner_output_weight unmatched_left_weight unmatched_right_weight semijoin_materialize_weight
     semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight semijoin_probe_emit_weight
-    kernel kernel_detail correct note t1_off t1_on t1_speedup tm_off tm_on tm_speedup
-    t1_round1_sj_operator_elapsed_s t1_round2_sj_operator_elapsed_s t1_real_join_operator_elapsed_s rows
-    effective_pass duckdb_plan enabled_plan trace_file cost_file
+    kernel kernel_detail kernel_hash_reasons correct note t1_off t1_on t1_speedup tm_off tm_on tm_speedup
+    t1_round1_sj_operator_elapsed_s t1_round2_sj_operator_elapsed_s t1_real_join_operator_elapsed_s
+    t1_round1_sj_operator_count t1_round2_sj_operator_count
+    t1_profile_wall_s t1_round1_sj_wall_pct t1_round2_sj_wall_pct t1_observed_sj_operator_wall_pct
+    t1_real_join_wall_pct rows effective_pass duckdb_plan enabled_plan trace_file cost_file
 )
+: > "$CSV_FINAL"
 : > "$CSV_ATTEMPTS"
+csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
 csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
 
 # Header (truncate + write)
@@ -717,9 +821,9 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# tables : $SIZES"
     echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
-    echo "# phases : one profiled ON run at threads=1; R1SJ-T1/R2SJ-T1/JOIN-T1 are summed categorized operator elapsed seconds"
-    echo "#          they exclude uncategorized/unprofiled work and need not sum to T1:on"
-    echo "# timeout: ${OY_TIMEOUT_SECS}s/query → correctness gate gets $(( OY_TIMEOUT_SECS * 2 ))s (2×, parallel threads=${OY_THREADS}), timing batch gets $(( OY_TIMEOUT_SECS * (RUNS + 1) ))s ((RUNS+1)×); timed-out queries retried once at ×${OY_TIMEOUT_RETRY_MULT:-2}"
+    echo "# phases : one profiled ON run at threads=1; SJ/join elapsed values are categorized operator seconds"
+    echo "#          percentages divide by that same profile's wall latency and need not sum to 100%"
+    echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
     echo "# formula : candidate_total = candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost"
@@ -730,40 +834,38 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "===================== PER-QUERY RESULT BLOCKS ========================="
     echo "# Columns: T1 = single-thread, TM = multi-thread (threads=${OY_THREADS})"
     echo "# Each query has exactly two lines after a full-width separator:"
-    echo "#   line 1 = query, correctness, reorder, selected plan, TM, T1"
-    echo "#   line 2 = decision, cost/gate inputs, weights, profile, and artifacts"
-    echo "#   kernel = semi-join filter kernel OuterYan ran: bitmap | hash | mixed | - (no SJ)"
+    echo "#   line 1 = query/result, selected plan, kernel, profile, TM, and T1"
+    echo "#   line 2 = decision, cost/gate inputs, weights, notices, and artifacts"
+    echo "#   kernel = not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) | none(b=0,h=0)"
 } > "$OUT"
 
 # Per-query state arrays (index = query #). Written by process_one and read by
-# the final summary, so that a RETRY-pass result OVERWRITES the first-pass value
-# at the same index and the summary reflects the post-retry outcome.
+# the final summary.
 QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
-QDB=(); QSQL=(); QFAMILY=(); QPATH=(); QKER=(); QKDETAIL=()
+QDB=(); QSQL=(); QFAMILY=(); QPATH=(); QKER=(); QKDETAIL=(); QKREASONS=()
 QREORDERED=(); QGATE=(); QSELECTED=(); QDECISION=()
-QFORMULA=(); QSELECTED_PLAN=(); QPROVEN_EMPTY=(); QRAW_WINNER=(); QGATE_RESULT=()
+QFORMULA=(); QSELECTION_MODE=(); QSELECTED_PLAN=(); QPROVEN_EMPTY=(); QRAW_WINNER=(); QGATE_RESULT=()
 QBASELINE_COST=(); QCANDIDATE_JOIN_COST=(); QSEMIJOIN_RAW_COST=(); QSEMIJOIN_COST_RATIO=()
 QWEIGHTED_SEMIJOIN_COST=(); QCANDIDATE_TOTAL=()
 QCOST_RATIO_LIMIT=(); QBASELINE_THRESHOLD=()
 QROUND1_BUILD=(); QROUND1_PROBE=(); QROUND2_BUILD=(); QROUND2_PROBE=()
+QROUND1_PAIRS=(); QROUND1_FILTERS=(); QROUND2_PAIRS=(); QROUND2_FILTERS=()
 QRAW_DELTA=(); QRAW_RATIO=(); QGATE_LHS=(); QGATE_RHS=(); QGATE_MARGIN=()
 QINNER_WEIGHT=(); QUNMATCHED_LEFT_WEIGHT=(); QUNMATCHED_RIGHT_WEIGHT=()
 QSJ_MATERIALIZE_WEIGHT=(); QSJ_FILTER_BUILD_WEIGHT=(); QSJ_REPLAY_WEIGHT=()
 QSJ_LOOKUP_WEIGHT=(); QSJ_EMIT_WEIGHT=()
 QOFF1=(); QON1=(); QRATIO1=()
 QOFFM=(); QONM=(); QRATIOM=()
-QR1SJ=(); QR2SJ=(); QREALJOIN=()
+QR1SJ=(); QR2SJ=(); QREALJOIN=(); QPROFILE_WALL=()
+QR1SJ_OPERATOR_COUNT=(); QR2SJ_OPERATOR_COUNT=()
+QR1RATIO=(); QR2RATIO=(); QSJRATIO=(); QREALJOIN_RATIO=()
 QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FILE=()
 
-PASS="main"            # "main" | "retry": value of the CSV `pass` column
-OY_LAST_TIMEDOUT=0     # set by process_one: 1 iff query i hit a timeout/NA
+PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
 # process_one <i> — run the full pipeline for query i (gate -> decision -> kernel
-# -> timing) under the CURRENT $OY_TIMEOUT_SECS, store the result in the Q*
-# arrays at index i, and append one row to TXT and the attempts CSV.
-# Sets OY_LAST_TIMEDOUT=1 when query i timed out — gate TIMEOUT, or a timing
-# batch that returned NA (the `timeout` killed the process) — so the caller can
-# queue it for the doubled-timeout retry pass.
+# -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
     local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
@@ -778,19 +880,22 @@ process_one() {
         *)             correct="FALSE"; note="ERROR";     rows="-";;
     esac
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
-    local formula_id="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
+    local formula_id="-" selection_mode="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
     local baseline_cost="-" candidate_join_cost="-" semijoin_raw_cost="-"
     local semijoin_cost_ratio="-" weighted_semijoin_cost="-" candidate_total="-"
     local cost_ratio_limit="-" baseline_threshold="-"
     local round1_build="-" round1_probe="-" round2_build="-" round2_probe="-"
+    local round1_pairs="-" round1_filters="-" round2_pairs="-" round2_filters="-"
     local raw_delta="-" raw_ratio="-" gate_lhs="-" gate_rhs="-" gate_margin="-"
     local inner_weight="-" unmatched_left_weight="-" unmatched_right_weight="-"
     local sj_materialize_weight="-" sj_filter_build_weight="-" sj_replay_weight="-"
     local sj_lookup_weight="-" sj_emit_weight="-"
-    local ker="-" kdetail="-" offm="-" onm="-" ratiom="-" off1="-" on1="-" ratio1="-"
-    local r1sj="-" r2sj="-" realjoin="-"
+    local ker="not-run" kdetail="b0h0" kreasons="-" kernel_status="not-run" kernel_display="not-run"
+    local offm="-" onm="-" ratiom="-" off1="-" on1="-" ratio1="-"
+    local r1sj="-" r2sj="-" realjoin="-" profile_wall="-"
+    local r1sj_operator_count="-" r2sj_operator_count="-"
+    local r1ratio="-" r2ratio="-" sjratio="-" realjoin_ratio="-" profile_display="not-run"
     local duckdb_plan="-" enabled_plan="-" trace_file="-" cost_file="-"
-    OY_LAST_TIMEDOUT=0
     if [ "$correct" = "TRUE" ]; then
         if [ "$CAPTURE_PLANS" = 1 ]; then
             local artifact_stem="$PLAN_DIR/${family}__${id}.${PASS}"
@@ -803,6 +908,7 @@ process_one() {
             "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$trace_file")" \
             "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$cost_file")"
         formula_id="$OY_DECISION_FORMULA_ID"
+        selection_mode="$OY_DECISION_SELECTION_MODE"
         selected_plan="$OY_DECISION_SELECTED_PLAN"
         outer_reordered="$OY_DECISION_REORDERED"
         gate_applied="$OY_DECISION_GATE"
@@ -823,6 +929,10 @@ process_one() {
         round1_probe="$OY_DECISION_ROUND1_PROBE"
         round2_build="$OY_DECISION_ROUND2_BUILD"
         round2_probe="$OY_DECISION_ROUND2_PROBE"
+        round1_pairs="$OY_DECISION_ROUND1_PAIRS"
+        round1_filters="$OY_DECISION_ROUND1_FILTERS"
+        round2_pairs="$OY_DECISION_ROUND2_PAIRS"
+        round2_filters="$OY_DECISION_ROUND2_FILTERS"
         raw_delta="$OY_DECISION_RAW_COST_DELTA"
         raw_ratio="$OY_DECISION_RAW_COST_RATIO"
         gate_lhs="$OY_DECISION_GATE_LHS"
@@ -846,14 +956,34 @@ process_one() {
             oy_capture_plan "$db" "$OY_ON" "$sql" "$enabled_plan" || note="${note};ON-PLAN-ERROR"
         fi
         if [ "$selected_plan" = "OUTERYAN" ]; then
-            local kraw; kraw="$(oy_kernel "$db" "$sql")"; ker="${kraw%% *}"; kdetail="${kraw##* }"
+            local kraw
+            kraw="$(oy_kernel "$db" "$sql")"
+            IFS='|' read -r ker kdetail kreasons kernel_status <<< "$kraw"
+            if [ "$kernel_status" != "ok" ]; then
+                note="${note};KERNEL-TRACE-ERROR"
+            fi
         else
-            ker="-"; kdetail="b0h0"
+            ker="not-run"; kdetail="b0h0"; kreasons="-"; kernel_status="not-run"
         fi
+        kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
         local praw; praw="$(oy_phase_profile "$db" "$sql" 1)"
-        r1sj="$(echo "$praw" | awk '{print $1}')"
-        r2sj="$(echo "$praw" | awk '{print $2}')"
-        realjoin="$(echo "$praw" | awk '{print $3}')"
+        read -r r1sj r2sj realjoin profile_wall r1ratio r2ratio sjratio realjoin_ratio \
+            r1sj_operator_count r2sj_operator_count <<< "$praw"
+        if [ "$selected_plan" = "OUTERYAN" ]; then
+            local r1_display r2_display
+            r1_display="$(oy_round_profile_display R1 "$r1sj" "$r1ratio" \
+                "$round1_pairs" "$round1_filters" "$r1sj_operator_count")"
+            r2_display="$(oy_round_profile_display R2 "$r2sj" "$r2ratio" \
+                "$round2_pairs" "$round2_filters" "$r2sj_operator_count")"
+            printf -v profile_display 'wall=%s %s %s real-join=%s(%s)' \
+                "$profile_wall" "$r1_display" "$r2_display" "$realjoin" "$realjoin_ratio"
+        else
+            r1sj="NA"; r2sj="NA"; r1ratio="NA"; r2ratio="NA"; sjratio="NA"
+            r1sj_operator_count="NA"; r2sj_operator_count="NA"
+            printf -v profile_display \
+                'wall=%s R1=NA(no-sj-plan) R2=NA(no-sj-plan) real-join=%s(%s)' \
+                "$profile_wall" "$realjoin" "$realjoin_ratio"
+        fi
         local local_rom local_rnm local_ro1 local_rn1
         local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
@@ -863,17 +993,14 @@ process_one() {
         local_rn1="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
         off1="$(echo "$local_ro1" | awk '{print $1}')"; on1="$(echo "$local_rn1" | awk '{print $1}')"
         ratio1="$(awk -v off="$off1" -v on="$on1" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-        # a timing batch killed by `timeout` yields NA -> retry candidate
-        case "$offm$onm$off1$on1" in *NA*) OY_LAST_TIMEDOUT=1;; esac
-    elif [ "$note" = "TIMEOUT" ]; then
-        OY_LAST_TIMEDOUT=1
     fi
-    # store final state (RETRY overwrites first-pass values at the same index)
+    # Store final state for the summary.
     QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
     QREG[$i]="$reg"; QDB[$i]="$db"; QSQL[$i]="$sql"; QFAMILY[$i]="$family"; QPATH[$i]="$sql_path"
-    QKER[$i]="$ker"; QKDETAIL[$i]="$kdetail"
+    QKER[$i]="$ker"; QKDETAIL[$i]="$kdetail"; QKREASONS[$i]="$kreasons"
     QREORDERED[$i]="$outer_reordered"; QGATE[$i]="$gate_applied"; QSELECTED[$i]="$selected"; QDECISION[$i]="$decision"
-    QFORMULA[$i]="$formula_id"; QSELECTED_PLAN[$i]="$selected_plan"; QPROVEN_EMPTY[$i]="$proven_empty"
+    QFORMULA[$i]="$formula_id"; QSELECTION_MODE[$i]="$selection_mode"
+    QSELECTED_PLAN[$i]="$selected_plan"; QPROVEN_EMPTY[$i]="$proven_empty"
     QRAW_WINNER[$i]="$raw_winner"; QGATE_RESULT[$i]="$gate_result"
     QBASELINE_COST[$i]="$baseline_cost"; QCANDIDATE_JOIN_COST[$i]="$candidate_join_cost"
     QSEMIJOIN_RAW_COST[$i]="$semijoin_raw_cost"; QSEMIJOIN_COST_RATIO[$i]="$semijoin_cost_ratio"
@@ -881,6 +1008,8 @@ process_one() {
     QCOST_RATIO_LIMIT[$i]="$cost_ratio_limit"; QBASELINE_THRESHOLD[$i]="$baseline_threshold"
     QROUND1_BUILD[$i]="$round1_build"; QROUND1_PROBE[$i]="$round1_probe"
     QROUND2_BUILD[$i]="$round2_build"; QROUND2_PROBE[$i]="$round2_probe"
+    QROUND1_PAIRS[$i]="$round1_pairs"; QROUND1_FILTERS[$i]="$round1_filters"
+    QROUND2_PAIRS[$i]="$round2_pairs"; QROUND2_FILTERS[$i]="$round2_filters"
     QRAW_DELTA[$i]="$raw_delta"; QRAW_RATIO[$i]="$raw_ratio"; QGATE_LHS[$i]="$gate_lhs"
     QGATE_RHS[$i]="$gate_rhs"; QGATE_MARGIN[$i]="$gate_margin"
     QINNER_WEIGHT[$i]="$inner_weight"; QUNMATCHED_LEFT_WEIGHT[$i]="$unmatched_left_weight"
@@ -891,41 +1020,50 @@ process_one() {
     QOFFM[$i]="$offm"; QONM[$i]="$onm"; QRATIOM[$i]="$ratiom"
     QOFF1[$i]="$off1"; QON1[$i]="$on1"; QRATIO1[$i]="$ratio1"
     QR1SJ[$i]="$r1sj"; QR2SJ[$i]="$r2sj"; QREALJOIN[$i]="$realjoin"
+    QR1SJ_OPERATOR_COUNT[$i]="$r1sj_operator_count"; QR2SJ_OPERATOR_COUNT[$i]="$r2sj_operator_count"
+    QPROFILE_WALL[$i]="$profile_wall"; QR1RATIO[$i]="$r1ratio"; QR2RATIO[$i]="$r2ratio"
+    QSJRATIO[$i]="$sjratio"; QREALJOIN_RATIO[$i]="$realjoin_ratio"
     QEFFECTIVE_PASS[$i]="$PASS"; QDUCKDB_PLAN[$i]="$duckdb_plan"; QENABLED_PLAN[$i]="$enabled_plan"
     QTRACE_FILE[$i]="$trace_file"; QCOST_FILE[$i]="$cost_file"
-    # ---- append to TXT and attempts CSV ----
+    # ---- append to TXT and CSV ----
     local primary_line detail_line detail_suffix gate_detail
     printf -v primary_line \
-        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s' \
+        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s kernel=%s profile=[%s]  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s' \
         "$((i+1))" "${#LABELS[@]}" "$id" "$correct" "$outer_reordered" "$selected_plan" \
-        "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1"
+        "$kernel_display" "$profile_display" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1"
     printf -v detail_line \
         '  details: family=%s sql=%s pass=%s timeout=%ss note=%s rows=%s nrel=%s' \
         "$family" "$sql_path" "$PASS" "$OY_TIMEOUT_SECS" "$note" "$rows" "$nrel"
     if [ "$correct" = "TRUE" ]; then
         printf -v detail_suffix \
-            ' decision=[reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s] kernel=[%s %s]' \
+            ' decision=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
+            "$selection_mode" \
             "$decision" "$raw_winner" "$gate_result" "$gate_applied" "$proven_empty" \
-            "$selected" "$formula_id" "$ker" "$kdetail"
+            "$selected" "$formula_id"
         detail_line+="$detail_suffix"
+        if [ "$ker" = "hash" ] || [ "$ker" = "mixed" ]; then
+            printf -v detail_suffix ' kernel_notice=[HASH-FALLBACK reasons=%s default_bitmap_budget_bytes=34359738368]' \
+                "$kreasons"
+            detail_line+="$detail_suffix"
+            printf 'NOTICE %s: %s; hash reasons=%s. More bitmap memory helps overflow/force_hash after replanning, not ineligible keys.\n' \
+                "$id" "$kernel_display" "$kreasons" >&2
+        fi
         if [ "$candidate_total" = "NA" ] || [ "$candidate_total" = "-" ] || \
            [ "$baseline_cost" = "NA" ] || [ "$baseline_cost" = "-" ]; then
             detail_line+=" cost=[UNAVAILABLE]"
         else
             printf -v detail_suffix \
-                ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[%s <= %s (= %s*%s) => %s; margin=%s] SJ=[R1(build=%s probe=%s) R2(build=%s probe=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
+                ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[%s <= %s (= %s*%s) => %s; margin=%s] SJ=[R1(build=%s probe=%s pairs=%s filters=%s) R2(build=%s probe=%s pairs=%s filters=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
                 "$candidate_join_cost" "$semijoin_cost_ratio" "$semijoin_raw_cost" "$candidate_total" \
                 "$baseline_cost" "$raw_delta" "$raw_ratio" \
                 "$gate_lhs" "$gate_rhs" "$cost_ratio_limit" "$baseline_cost" "$gate_result" "$gate_margin" \
-                "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" "$weighted_semijoin_cost" \
+                "$round1_build" "$round1_probe" "$round1_pairs" "$round1_filters" \
+                "$round2_build" "$round2_probe" "$round2_pairs" "$round2_filters" "$weighted_semijoin_cost" \
                 "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
                 "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" \
                 "$sj_lookup_weight" "$sj_emit_weight"
             detail_line+="$detail_suffix"
         fi
-        printf -v detail_suffix ' profile=[R1SJ-T1=%s R2SJ-T1=%s real-join-T1=%s]' \
-            "$r1sj" "$r2sj" "$realjoin"
-        detail_line+="$detail_suffix"
         if [ "$CAPTURE_PLANS" = 1 ]; then
             printf -v detail_suffix ' artifacts=[duckdb=%s enabled=%s trace=%s cost=%s]' \
                 "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
@@ -946,79 +1084,32 @@ process_one() {
         echo "$OY_QUERY_SEPARATOR"
         printf '%s\n%s\n' "$primary_line" "$detail_line"
     } >&2
-    csv_row "$CSV_ATTEMPTS" \
+    csv_result_row \
         "$id" "$family" "$sql_path" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
-        "$proven_empty" "$decision" "$formula_id" "$raw_winner" "$gate_result" \
+        "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
         "$baseline_cost" "$candidate_join_cost" "$semijoin_raw_cost" "$semijoin_cost_ratio" \
         "$weighted_semijoin_cost" "$candidate_total" "$cost_ratio_limit" "$baseline_threshold" \
         "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" \
+        "$round1_pairs" "$round1_filters" "$round2_pairs" "$round2_filters" \
         "$raw_delta" "$raw_ratio" "$gate_lhs" "$gate_rhs" "$gate_margin" \
         "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
         "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" "$sj_lookup_weight" "$sj_emit_weight" \
-        "$ker" "$kdetail" "$correct" "$note" "$off1" "$on1" "$ratio1" \
-        "$offm" "$onm" "$ratiom" "$r1sj" "$r2sj" "$realjoin" "$rows" "$PASS" \
+        "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$off1" "$on1" "$ratio1" \
+        "$offm" "$onm" "$ratiom" "$r1sj" "$r2sj" "$realjoin" \
+        "$r1sj_operator_count" "$r2sj_operator_count" \
+        "$profile_wall" "$r1ratio" "$r2ratio" "$sjratio" "$realjoin_ratio" "$rows" "$PASS" \
         "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
 }
 
-# ==== Pass 1: every query under the base timeout ============================
+# ==== Every query, once, under the fixed per-statement timeout =============
 echo "Temporary result storage: $OY_RUN_TMPDIR" >&2
 echo "Temporary filesystem: $OY_TMP_FREE available on $OY_TMP_MOUNT (base=$OY_TMPDIR)" >&2
 echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
-RETRY_IDX=()
 for ((i=0; i<${#LABELS[@]}; i++)); do
     process_one "$i"
-    [ "$OY_LAST_TIMEDOUT" = 1 ] && RETRY_IDX+=("$i")
 done
 
-# ==== Pass 2 (retry): re-evaluate timed-out queries with a DOUBLED timeout ===
-# Each query that timed out under the base limit is re-run once with the timeout
-# multiplied by OY_TIMEOUT_RETRY_MULT (default 2). Rows are appended under a
-# clearly-labelled section and tagged pass=retry in the attempts CSV; the Q*
-# arrays (and thus final CSV/SUMMARY) are overwritten by the post-retry result.
-BASE_TIMEOUT="$OY_TIMEOUT_SECS"
-RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
-NRETRY=0; NRECOVERED=0; RETRY_TO=""
-if [ "${#RETRY_IDX[@]}" -gt 0 ] && [ -n "$OY_TIMEOUT_BIN" ] \
-   && [ "$BASE_TIMEOUT" != "0" ] && [ "$RETRY_MULT" -gt 1 ] 2>/dev/null; then
-    RETRY_TO=$(( BASE_TIMEOUT * RETRY_MULT ))
-    NRETRY="${#RETRY_IDX[@]}"
-    {
-        echo
-        echo "============== RETRY PASS (timeout ${BASE_TIMEOUT}s ×${RETRY_MULT} = ${RETRY_TO}s) =============="
-        echo "# ${NRETRY} query(ies) timed out under ${BASE_TIMEOUT}s; re-evaluated below with ${RETRY_TO}s."
-    } >> "$OUT"
-    echo "--- RETRY: ${NRETRY} timed-out query(ies) with timeout=${RETRY_TO}s ---" >&2
-    PASS="retry"; export OY_TIMEOUT_SECS="$RETRY_TO"
-    for i in "${RETRY_IDX[@]}"; do
-        process_one "$i"
-        [ "$OY_LAST_TIMEDOUT" = 0 ] && NRECOVERED=$((NRECOVERED+1))
-    done
-    export OY_TIMEOUT_SECS="$BASE_TIMEOUT"; PASS="main"
-fi
-
-# Canonical final CSV: exactly one effective row per query after retries.
-: > "$CSV_FINAL"
-csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
-for ((i=0; i<${#LABELS[@]}; i++)); do
-    csv_row "$CSV_FINAL" \
-        "${QLBL[i]}" "${QFAMILY[i]}" "${QPATH[i]}" "${QREG[i]}" "${QREORDERED[i]}" \
-        "${QGATE[i]}" "${QSELECTED[i]}" "${QSELECTED_PLAN[i]}" "${QPROVEN_EMPTY[i]}" \
-        "${QDECISION[i]}" "${QFORMULA[i]}" "${QRAW_WINNER[i]}" "${QGATE_RESULT[i]}" \
-        "${QBASELINE_COST[i]}" "${QCANDIDATE_JOIN_COST[i]}" "${QSEMIJOIN_RAW_COST[i]}" \
-        "${QSEMIJOIN_COST_RATIO[i]}" "${QWEIGHTED_SEMIJOIN_COST[i]}" "${QCANDIDATE_TOTAL[i]}" \
-        "${QCOST_RATIO_LIMIT[i]}" "${QBASELINE_THRESHOLD[i]}" "${QROUND1_BUILD[i]}" \
-        "${QROUND1_PROBE[i]}" "${QROUND2_BUILD[i]}" "${QROUND2_PROBE[i]}" \
-        "${QRAW_DELTA[i]}" "${QRAW_RATIO[i]}" "${QGATE_LHS[i]}" "${QGATE_RHS[i]}" "${QGATE_MARGIN[i]}" \
-        "${QINNER_WEIGHT[i]}" "${QUNMATCHED_LEFT_WEIGHT[i]}" "${QUNMATCHED_RIGHT_WEIGHT[i]}" \
-        "${QSJ_MATERIALIZE_WEIGHT[i]}" "${QSJ_FILTER_BUILD_WEIGHT[i]}" "${QSJ_REPLAY_WEIGHT[i]}" \
-        "${QSJ_LOOKUP_WEIGHT[i]}" "${QSJ_EMIT_WEIGHT[i]}" "${QKER[i]}" "${QKDETAIL[i]}" \
-        "${QCORRECT[i]}" "${QNOTE[i]}" "${QOFF1[i]}" "${QON1[i]}" "${QRATIO1[i]}" \
-        "${QOFFM[i]}" "${QONM[i]}" "${QRATIOM[i]}" "${QR1SJ[i]}" "${QR2SJ[i]}" "${QREALJOIN[i]}" \
-        "${QROWS[i]}" "${QEFFECTIVE_PASS[i]}" "${QDUCKDB_PLAN[i]}" "${QENABLED_PLAN[i]}" \
-        "${QTRACE_FILE[i]}" "${QCOST_FILE[i]}"
-done
-
-# ==== Final summary computed from the Q* arrays (reflects retry results) =====
+# ==== Final summary computed from the Q* arrays =============================
 QN="${#LABELS[@]}"
 NCORRECT=0; NTIMED=0; NKBM=0; NKHASH=0; NKMIX=0
 NNO=0; NYES=0; SUMNO=0; SUMYES=0
@@ -1065,7 +1156,6 @@ MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
     echo "============================== SUMMARY ================================"
     echo "queries=$QN  correct=$NCORRECT  incorrect/skipped=$NSKIP  timed=$NTIMED"
     echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
-    [ "$NRETRY" -gt 0 ] && echo "retry pass: $NRETRY timed-out query(ies) re-run at ${RETRY_TO}s — $NRECOVERED now fully timed, $((NRETRY-NRECOVERED)) still timing out / partial (see retry rows above)"
     echo "threads: single=1, multi=${OY_THREADS}"
     echo "OuterYan decisions: same-grouping=$NSAME  changed-rejected=$NREJECT  selected=$NSELECTED  unknown=$NDECISION_UNKNOWN  cost-gate-applied=$NGATE_APPLIED"
     echo "speed-up by outer_reordered (reorder CSV compatibility column):"
@@ -1082,7 +1172,7 @@ MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
 
 echo "Results written to $OUT"
 echo "Final CSV written to $CSV_FINAL"
-echo "Attempts CSV written to $CSV_ATTEMPTS"
+echo "Attempts CSV written to $CSV_ATTEMPTS (single attempt; no retries)"
 if [ "$CAPTURE_PLANS" = 1 ]; then
     echo "Plan artifacts written to $PLAN_DIR"
 fi

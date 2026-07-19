@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/common/types.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -29,16 +30,20 @@ struct OuterYanOptimizationResult {
 //! the winner, and run aggregate pushdown with winner-local metadata.
 class OuterYanOptimizer {
 public:
-	//! Final candidate-cost judgment. This is deliberately a class-local
+	//! Final candidate-selection policy. This is deliberately a class-local
 	//! source-level knob rather than a session/environment setting, so one
-	//! build has one unambiguous experiment policy.
-	static constexpr bool APPLY_COST_GATE = true;
+	//! build has one unambiguous experiment policy. Change SELECTION_MODE and
+	//! rebuild to switch experiment modes.
+	enum class SelectionMode : uint8_t { GATED, FORCE_OUTERYAN };
+	static constexpr SelectionMode SELECTION_MODE = SelectionMode::FORCE_OUTERYAN;
+	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
 	//! it to the OuterYan candidate's real-join cost.
 	static constexpr double SEMIJOIN_COST_RATIO = 0.35;
-	//! Require the weighted candidate cost to be no larger than DuckDB's
-	//! baseline estimate. The value remains a source-level calibration knob.
-	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
+	//! GATED-mode selection tolerance. A value of 1.10 admits an OuterYan
+	//! candidate whose estimated total cost is within 10% of DuckDB's baseline.
+	//! This is an explicit preference bias, not a physical-cost calibration.
+	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.10;
 
 	explicit OuterYanOptimizer(Optimizer &optimizer);
 

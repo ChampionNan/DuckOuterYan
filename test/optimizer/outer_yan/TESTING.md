@@ -136,7 +136,7 @@ SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- independen
 
 -- Bitmap budget control:
 SET VARIABLE outer_yan_bitmap_max_bytes = 0;          -- force HashFilter
-SET VARIABLE outer_yan_bitmap_max_bytes = 17179869184; -- restore server default (16 GiB)
+SET VARIABLE outer_yan_bitmap_max_bytes = 34359738368; -- restore server default (32 GiB)
 ```
 
 ---
@@ -358,7 +358,7 @@ accepted queries with OuterYan enabled vs disabled.
 
 | Block | What it tests |
 |---|---|
-| Default budget (16 GiB) | Small INTEGER keys → BITMAP path; result correct |
+| Default budget (32 GiB) | Small INTEGER keys → BITMAP path; result correct |
 | Budget = 0 | Forces HashFilter on all filters; result identical to BITMAP path |
 | Tiny budget (16 bytes) | Range [1, 999] exceeds 16 bytes → HashFilter |
 | VARCHAR keys | Type-ineligible → HashFilter; result correct at budget 0 and default |
@@ -447,7 +447,7 @@ three temp tables (one per path) then compared via `EXCEPT ALL`.
 
 | Command | Path elected |
 |---|---|
-| `SET VARIABLE outer_yan_bitmap_max_bytes = 17179869184` + `SET disabled_optimizers TO ''` | **BITMAP** (KeyBitmap for integer keys within range) |
+| `SET VARIABLE outer_yan_bitmap_max_bytes = 34359738368` + `SET disabled_optimizers TO ''` | **BITMAP** (KeyBitmap for integer keys within range) |
 | `SET VARIABLE outer_yan_bitmap_max_bytes = 0` + `SET disabled_optimizers TO ''` | **HASH** (HashFilter for every key type, budget = 0) |
 | `SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'` | **BASELINE** (DuckDB's own hash-join engine, no SJ operators) |
 

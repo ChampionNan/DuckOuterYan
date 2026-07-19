@@ -98,14 +98,16 @@ def enrich(df, run):
     df["nb"], df["nh"] = nb, nh
 
     def ktype(r):
+        declared = str(r.get("kernel", "")).strip()
+        if declared == "not-run":
+            return "not-run"
         b, h = r["nb"], r["nh"]
         if pd.notna(b):
             if b > 0 and h > 0: return "mixed"
             if b > 0:           return "bitmap"
             if h > 0:           return "hash"
             return "none"
-        k = str(r.get("kernel", "")).strip()
-        return "none" if k in ("-", "", "nan") else k
+        return "none" if declared in ("-", "", "nan") else declared
     df["kernel_type"] = df.apply(ktype, axis=1)
 
     def family(q):

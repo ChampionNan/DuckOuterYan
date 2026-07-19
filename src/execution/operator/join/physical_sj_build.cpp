@@ -53,7 +53,7 @@
 namespace duckdb {
 
 // Per-session budget knob. Set via:
-//   SET VARIABLE outer_yan_bitmap_max_bytes = 17179869184;
+//   SET VARIABLE outer_yan_bitmap_max_bytes = 34359738368;
 // Read from ClientConfig::user_variables (DuckDB's case-insensitive map
 // populated by SET VARIABLE) rather than registering a global
 // ConfigurationOption — the latter would require touching generated
@@ -545,10 +545,10 @@ SinkFinalizeType PhysicalSJBuild::Finalize(Pipeline &pipeline, Event &event, Cli
 		const bool must_hash = filter->force_hash() || !elig.eligible || budget == 0;
 		const bool hash_is_parallelizable = HashFilter::IsInline64Eligible(build_col_types);
 		// Static reason string for the DUCKDB_SJ_KERNEL_TRACE diagnostic; only
-		// meaningful when must_hash. force_hash wins, then the budget=0 escape
-		// hatch, else the type/arity was not bitmap-eligible.
+		// meaningful when must_hash. Structural ineligibility wins so the trace
+		// never recommends more bitmap memory for an unsupported type/arity.
 		const char *hash_reason =
-		    filter->force_hash() ? "force_hash" : (budget == 0 ? "budget0" : "ineligible");
+		    !elig.eligible ? "ineligible" : (filter->force_hash() ? "force_hash" : "budget0");
 
 		if (must_hash && hash_is_parallelizable) {
 			// Parallel INLINE_64 hash — atomic-CAS slot claim via SJBuildHashInsertEvent.

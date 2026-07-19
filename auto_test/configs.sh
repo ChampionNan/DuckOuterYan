@@ -72,24 +72,20 @@ export OY_THREADS="${OY_THREADS:-48}"
 # ===========================================================================
 # 5) Timeouts
 # ===========================================================================
-# Per-query timeout (seconds). Each duckdb invocation is wrapped with `timeout`.
-# If a query exceeds this limit, it is killed and marked TIMEOUT. 0 disables.
-export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-600}"
+# Per-statement timeout (seconds), enforced by DuckDB's max_execution_time.
+# Each process also has a scaled external `timeout` watchdog. 0 disables both.
+export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-900}"
 
 # ===========================================================================
 # 6) Iteration counts
 # ===========================================================================
-# Fixed number of timed runs per query (after 2 warm-up runs). Median is taken.
-# NOTE: the timing phase runs (OY_RUNS + 2) executions inside ONE duckdb process
+# Fixed number of timed runs per query (after 1 warm-up run). Median is taken.
+# NOTE: the timing phase runs (OY_RUNS + 1) executions inside ONE duckdb process
 # under ONE timeout window, so the effective per-run budget is
-# OY_TIMEOUT_SECS / (OY_RUNS + 2). Higher OY_RUNS => smaller per-run budget =>
-# more timing-phase timeouts on slow (e.g. large-graph) queries.
-export OY_RUNS="${OY_RUNS:-5}"
-
-# Retry pass: after the first pass, any query that TIMED OUT (gate timeout, or a
-# timing batch that produced NA) is re-evaluated once with the timeout multiplied
-# by this factor. 2 = "doubled timeout" retry. Set 1 to disable the retry pass.
-export OY_TIMEOUT_RETRY_MULT="${OY_TIMEOUT_RETRY_MULT:-2}"
+# OY_TIMEOUT_SECS after the harness scales the batch window by (OY_RUNS + 1).
+# Higher OY_RUNS therefore increases total experiment time and can expose more
+# timing-phase timeouts on slow (e.g. large-graph) queries.
+export OY_RUNS="${OY_RUNS:-3}"
 
 # Save OFF/ON EXPLAIN plans plus OuterYan trace/cost artifacts. The
 # experiment_onoff.sh --capture-plans flag sets this to 1 for a run.
@@ -112,7 +108,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  GRAPH_DATASET    = $GRAPH_DATASET"
         echo "  TPCH_SF/TPCDS_SF = $TPCH_SF / $TPCDS_SF"
         echo "  OY_THREADS       = $OY_THREADS"
-        echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per query"
+        echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per statement"
         echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"
         echo "  CAPTURE_PLANS     = $OY_CAPTURE_PLANS"
         echo "  OY_TMPDIR         = $OY_TMPDIR"

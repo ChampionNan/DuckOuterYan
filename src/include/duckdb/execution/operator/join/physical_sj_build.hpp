@@ -107,10 +107,10 @@ public:
 	void BuildPipelinesFromRelated(Pipeline &current, MetaPipeline &meta_pipeline);
 
 public:
-	//! 16 GiB per-filter default for the large-memory experiment server. This
-	//! covers dense integer domains up to 137B values while retaining the
+	//! 32 GiB per-filter default for the large-memory experiment server. This
+	//! covers dense integer domains up to 275B values while retaining the
 	//! session-level zero-budget hash escape hatch.
-	static constexpr idx_t kDefaultBitmapBudgetBytes = 1ULL << 34;
+	static constexpr idx_t kDefaultBitmapBudgetBytes = 1ULL << 35;
 	//! Per-session SET VARIABLE knob name. Read via ClientConfig::user_variables.
 	static constexpr const char *kBitmapBudgetVar = "outer_yan_bitmap_max_bytes";
 

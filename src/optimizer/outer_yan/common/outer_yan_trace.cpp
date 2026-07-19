@@ -127,6 +127,7 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	std::ostringstream line;
 	line << std::setprecision(17)
 	     << "[OY_DECISION] formula_id=" << costs.formula_id
+	     << " selection_mode=" << record.selection_mode
 	     << " selected_plan=" << SelectedPlanToString(record.selected_plan)
 	     << " outer_reordered=" << (record.outer_reordered ? 1 : 0)
 	     << " cost_gate_applied=" << (record.cost_gate_applied ? 1 : 0)
@@ -151,6 +152,14 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 			line << "NA";
 		}
 	};
+	auto count_metric = [&](const char *name, idx_t value, bool available) {
+		line << " " << name << "=";
+		if (available) {
+			line << value;
+		} else {
+			line << "NA";
+		}
+	};
 	metric("baseline_cost", costs.baseline_cost, costs.available);
 	metric("candidate_join_cost", costs.candidate_join_cost, costs.available);
 	metric("semijoin_raw_cost", costs.semijoin_raw_cost, costs.available);
@@ -163,6 +172,10 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	metric("round1_probe", costs.round1_probe, costs.available);
 	metric("round2_build", costs.round2_build, costs.available);
 	metric("round2_probe", costs.round2_probe, costs.available);
+	count_metric("round1_pairs", costs.round1_pairs, costs.available);
+	count_metric("round1_filters", costs.round1_filters, costs.available);
+	count_metric("round2_pairs", costs.round2_pairs, costs.available);
+	count_metric("round2_filters", costs.round2_filters, costs.available);
 	metric("raw_cost_delta", costs.raw_cost_delta, costs.available);
 	metric("raw_cost_ratio", costs.raw_cost_ratio, costs.available && costs.raw_cost_ratio_available);
 	metric("gate_lhs", costs.gate_lhs, costs.available);

@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/outer_yan/semi_join/semijoin_insertion.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -327,7 +328,7 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 		if (it == keyMapping.end()) {
 			filter = make_shared_ptr<SemiJoinFilter>();
 			filter_id = next_filter_id++;
-				// Stats-prefilter (opt-in): only single-column keys are bitmap-
+			// Stats-prefilter (opt-in): only single-column keys are bitmap-
 			// eligible. If base-table min/max predicts the implied bitmap
 			// would exceed the byte budget, tag force_hash so
 			// PhysicalSJBuild::Finalize skips the wasted TryBuild scan.
@@ -335,8 +336,11 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 				int64_t min_v = 0;
 				int64_t max_v = 0;
 				if (LookupBaseStatsRange(*plan, key[0], context, min_v, max_v)) {
-					const auto range = static_cast<uint64_t>(max_v - min_v) + 1ULL;
-					const auto bytes_needed = (range + 7ULL) / 8ULL;
+					const auto distance = static_cast<uint64_t>(max_v) - static_cast<uint64_t>(min_v);
+					const auto bytes_needed =
+					    distance == NumericLimits<uint64_t>::Maximum()
+					        ? NumericLimits<uint64_t>::Maximum()
+					        : (distance + 1ULL) / 8ULL + ((distance + 1ULL) % 8ULL != 0);
 					if (bytes_needed > bitmap_byte_budget) {
 						filter->ForceHash();
 					}

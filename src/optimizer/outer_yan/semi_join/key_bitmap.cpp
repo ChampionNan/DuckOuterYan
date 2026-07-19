@@ -149,15 +149,24 @@ unique_ptr<KeyBitmap> KeyBitmap::Allocate(ClientContext &context, const MinMaxRa
 		return bm;
 	}
 
-	// (max - min + 1) bits required. Use uint64_t arithmetic since the
-	// range can exceed int64_t bounds in pathological cases.
-	uint64_t range_size = static_cast<uint64_t>(range.max_key - range.min_key) + 1ULL;
-	uint64_t bytes_needed = (range_size + 7ULL) / 8ULL;
+	// (max - min + 1) bits required. Unsigned subtraction avoids signed
+	// overflow when a BIGINT range crosses zero. A full 2^64-value domain
+	// cannot be represented by range_size and is never a practical bitmap.
+	const uint64_t distance = static_cast<uint64_t>(range.max_key) - static_cast<uint64_t>(range.min_key);
+	if (distance == NumericLimits<uint64_t>::Maximum()) {
+		return nullptr;
+	}
+	const uint64_t range_size = distance + 1ULL;
+	const uint64_t bytes_needed = range_size / 8ULL + (range_size % 8ULL != 0);
 	if (bytes_needed > byte_budget) {
 		return nullptr;
 	}
 
-	uint64_t words_needed = (range_size + 63ULL) / 64ULL;
+	const uint64_t words_needed = range_size / 64ULL + (range_size % 64ULL != 0);
+	if (words_needed > (NumericLimits<idx_t>::Maximum() - 64ULL) / sizeof(uint64_t) ||
+	    words_needed > NumericLimits<idx_t>::Maximum() / 64ULL) {
+		return nullptr;
+	}
 	auto bm = make_uniq<KeyBitmap>();
 	bm->min_key_ = range.min_key;
 	bm->max_key_ = range.max_key;

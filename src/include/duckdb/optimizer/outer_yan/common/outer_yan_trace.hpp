@@ -39,6 +39,12 @@ struct OuterYanDecisionCosts {
 	double round1_probe = 0.0;
 	double round2_build = 0.0;
 	double round2_probe = 0.0;
+	//! Planned semi-join applications and newly constructed filters per round.
+	//! A reused filter contributes a pair but not another filter build.
+	idx_t round1_pairs = 0;
+	idx_t round1_filters = 0;
+	idx_t round2_pairs = 0;
+	idx_t round2_filters = 0;
 	//! Raw candidate-vs-baseline comparison (not the policy threshold).
 	double raw_cost_delta = 0.0;
 	double raw_cost_ratio = 0.0;
@@ -62,6 +68,7 @@ struct OuterYanDecisionCosts {
 //! harness all consume this record so selection cannot be inferred differently
 //! in different layers.
 struct OuterYanDecisionRecord {
+	string selection_mode = "GATED";
 	bool outer_reordered = false;
 	bool cost_gate_applied = false;
 	bool outer_yan_selected = false;

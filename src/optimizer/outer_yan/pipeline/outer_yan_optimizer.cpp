@@ -137,6 +137,16 @@ bool ValidCost(double value) {
 	return std::isfinite(value) && value >= 0.0;
 }
 
+const char *SelectionModeToString(OuterYanOptimizer::SelectionMode mode) {
+	switch (mode) {
+	case OuterYanOptimizer::SelectionMode::GATED:
+		return "GATED";
+	case OuterYanOptimizer::SelectionMode::FORCE_OUTERYAN:
+		return "FORCE_OUTERYAN";
+	}
+	return "UNKNOWN";
+}
+
 } // namespace
 
 OuterYanOptimizer::OuterYanOptimizer(Optimizer &optimizer_p)
@@ -185,6 +195,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	if (!applicable) {
 		OuterYanDecisionRecord decision;
+		decision.selection_mode = SelectionModeToString(SELECTION_MODE);
 		decision.reason = "INAPPLICABLE";
 		OuterYanTrace::Decision(decision);
 		result.plan = std::move(input);
@@ -249,6 +260,17 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		trace_costs.round1_probe = candidate_cost.round1_probe_cost;
 		trace_costs.round2_build = candidate_cost.round2_build_cost;
 		trace_costs.round2_probe = candidate_cost.round2_probe_cost;
+		for (const auto &step : candidate_cost.semijoin_steps) {
+			if (step.round == 1) {
+				trace_costs.round1_pairs++;
+				trace_costs.round1_filters += step.filter_reused ? 0 : 1;
+			} else if (step.round == 2) {
+				trace_costs.round2_pairs++;
+				trace_costs.round2_filters += step.filter_reused ? 0 : 1;
+			} else {
+				throw InternalException("OuterYan semi-join cost step has invalid round %llu", step.round);
+			}
+		}
 		trace_costs.raw_cost_delta = trace_costs.candidate_total - trace_costs.baseline_cost;
 		trace_costs.gate_lhs = trace_costs.candidate_total;
 		trace_costs.gate_rhs = trace_costs.baseline_threshold;
@@ -284,6 +306,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	}
 
 	OuterYanDecisionRecord decision;
+	decision.selection_mode = SelectionModeToString(SELECTION_MODE);
 	decision.outer_reordered = outer_reordered;
 	decision.baseline_proven_empty = empty_proof.eliminates_all_join_work;
 	decision.costs = trace_costs;
@@ -306,7 +329,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	} else if (!APPLY_COST_GATE) {
 		decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
 		decision.outer_yan_selected = true;
-		decision.reason = "ALWAYS_OUTERYAN";
+		decision.reason = "FORCE_OUTERYAN";
 	} else if (!trace_costs.available) {
 		decision.gate_result = OuterYanGateResult::UNAVAILABLE;
 		decision.reason = "COST_UNAVAILABLE";
@@ -336,6 +359,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		std::ostringstream costs;
 		costs << std::setprecision(17)
 		      << "formula_id=" << trace_costs.formula_id << "\n"
+		      << "selection_mode=" << decision.selection_mode << "\n"
 		      << "apply_cost_gate=" << (APPLY_COST_GATE ? 1 : 0) << "\n"
 		      << "baseline_cost=" << trace_costs.baseline_cost << "\n"
 		      << "candidate_join_cost=" << trace_costs.candidate_join_cost << "\n"
@@ -347,6 +371,10 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << "  round1_probe=" << trace_costs.round1_probe << "\n"
 		      << "  round2_build=" << trace_costs.round2_build << "\n"
 		      << "  round2_probe=" << trace_costs.round2_probe << "\n"
+		      << "  round1_pairs=" << trace_costs.round1_pairs << "\n"
+		      << "  round1_filters=" << trace_costs.round1_filters << "\n"
+		      << "  round2_pairs=" << trace_costs.round2_pairs << "\n"
+		      << "  round2_filters=" << trace_costs.round2_filters << "\n"
 		      << "candidate_total=" << trace_costs.candidate_total << "\n"
 		      << "raw_cost_delta=" << trace_costs.raw_cost_delta << "\n"
 		      << "raw_cost_ratio=";
