@@ -160,8 +160,9 @@ The live log and reports distinguish:
 - baseline, candidate-join, raw/weighted semi-join, and total estimated costs;
 - the full cost formula and all join/SJ coefficient values;
 - bitmap/hash kernel use; and
-- single-thread categorized operator time for round-1 semi-joins, round-2
-  semi-joins, and real joins, with planned pair/new-filter counts per round.
+- a matched, median profiled single-thread wall sample (`P1:on`) decomposed into
+  round-1 semi-joins, round-2 semi-joins, real joins, and `Other`, with planned
+  pair/new-filter counts per round.
 
 Every query is printed as a separate block beginning with a full-width
 separator followed by exactly two lines. The first line contains correctness,
@@ -169,15 +170,17 @@ reorder, selected plan, TM, and T1. The second line contains all remaining
 decision, cost, gate, weight, profiling, and artifact details. Inapplicable
 queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
 
-The categorized operator values are diagnostics, not three additive wall-clock
-phases. `SJ_BUILD` combines materialization, replay, and asynchronous filter-task
-work; its internal components and finalize/event bookkeeping are not separately
-or completely decomposed. `wall` and all percentages come from the same
-single-thread profiling execution, which is separate from the `T1:on` median.
-A zero-pair round is printed as `NA(no-pairs,pairs=0)` rather than as a measured
-zero. The canonical CSV contains one row per query; `.attempts.csv` is retained
-as an identical single-attempt compatibility artifact. Timed-out queries are not
-retried. `--capture-plans` also stores OFF/ON
+The categorized operator values are diagnostics rather than independently
+timed phases. `SJ_BUILD` combines materialization, replay, and asynchronous
+filter-task work. `Other` contains all uncategorized operator work,
+finalize/event bookkeeping, CLI overhead, and profiling serialization, making
+`R1 + R2 + real-join + Other = P1:on`. P1 uses the same single-thread CLI timing
+estimator as T1 but is a separate profiled median, so instrumentation can make
+it differ from the unprofiled `T1:on` median. A zero-pair round is printed as
+`NA(no-pairs,pairs=0)` rather than as a measured zero. The canonical CSV
+contains one row per query; `.attempts.csv` is retained as an identical
+single-attempt compatibility artifact. Timed-out queries are not retried.
+`--capture-plans` also stores OFF/ON
 EXPLAIN plans, optimizer traces, and per-step cost details.
 
 Database builders reuse existing database files. To intentionally replace one

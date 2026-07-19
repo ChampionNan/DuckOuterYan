@@ -114,19 +114,23 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 2. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record.
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
-4. Run one profiled OuterYan-ON execution at `threads=1` and categorize operator
-   elapsed time as round-1 semi-join, round-2 semi-join, and real joins. The
-   traced plan supplies the planned pair and newly built filter counts for each
-   round.
+4. Run one profiled warm-up followed by `--runs N` profiled OuterYan-ON
+   executions at `threads=1`, using the same `.mode trash` plus CLI `.timer
+   real` estimator as T1. Keep the complete tuple associated with the median
+   CLI wall sample and categorize its operator elapsed time as round-1
+   semi-join, round-2 semi-join, and real joins. The traced plan supplies the
+   planned pair and newly built filter counts for each round.
 5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-The profile values are sums of categorized single-thread operator times. They
-are not complete phase wall times and need not add up to the measured query
-time. `SJ_BUILD` combines sink materialization, replay, and asynchronous
-bitmap/hash task bodies; those components and finalize/event bookkeeping are
-not separately or completely decomposed. The `wall` value and every percentage
-come from this same profiled execution, not from the later `T1:on` median.
+The profile denominator is labeled `P1:on`: the median wall time from that
+profiled single-thread batch. Each numerator and `P1:on` therefore come from a
+matched execution. `Other = P1:on - R1 - R2 - real-join`, so the four displayed
+components add to 100%. `SJ_BUILD` combines sink materialization, replay, and
+asynchronous bitmap/hash task bodies; uncategorized operators, finalize/event
+bookkeeping, CLI overhead, and profiling serialization land in `Other`. P1 and
+T1 use the same timing estimator, but P1 is deliberately labeled separately
+because profiling instrumentation can change its measured time.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -269,7 +273,7 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[132/366] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[wall=45.696000 R1=NA(no-pairs,pairs=0) R2=0.940435(2.06%,pairs=3,filters=3) real-join=12.297079(26.91%)] TM:... T1:...
+[132/366] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[P1:on=45.6960 R1=NA(no-pairs,pairs=0) R2=0.940435(2.06%,pairs=3,filters=3) real-join=12.297079(26.91%) Other=32.458486(71.03%)] TM:... T1:...
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
@@ -293,7 +297,7 @@ Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query/result, selected plan, kernel counts, profiled wall ratios, and OFF/ON speed-up for TM and T1 |
+| Line 1 | Query/result, selected plan, kernel counts, profiled P1 decomposition, and OFF/ON speed-up for TM and T1 |
 | Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
