@@ -213,7 +213,7 @@ against an existing database and records the OuterYan stages selected by
 bash auto_test/trace_outer_yan.sh \
     --bin build/release/duckdb \
     --db graph_db \
-    --file auto_test/outerjoin_query/graph/line_N3_mixB_s10.sql
+    --file auto_test/outerjoin_query/graph/line_N3_mixB_s67.sql
 ```
 
 Useful runtime controls are:

@@ -37,6 +37,54 @@ JOB_DIR = os.path.join(BASE, "job")
 KIND = {"INNER": "INNER JOIN", "LEFT": "LEFT OUTER JOIN",
         "RIGHT": "RIGHT OUTER JOIN", "FULL": "FULL OUTER JOIN"}
 
+
+def _graph_variants(prefixes, selectivities):
+    return {
+        f"graph/{prefix}_{selectivity}.sql"
+        for prefix in prefixes
+        for selectivity in selectivities
+    }
+
+
+# Empirical corpus pruning from the SF100/bitcoin run started 2026-07-20
+# 00:45:09. Only queries present in that partial report are classified here.
+# A query is considered too fast only when both unprofiled T1 variants are
+# below 0.5 seconds; this deliberately retains rdeep_N4_mixB_s01, whose
+# DuckDB/OuterYan T1 values were 45.673/0.426 seconds.
+FAST_CORPUS_EXCLUSIONS = (
+    _graph_variants(
+        ("bushyBal_N4_mixA", "bushyBal_N4_mixB", "line_N4_mixA"),
+        ("s01",),
+    )
+    | _graph_variants(
+        ("line_N3_mixB", "rdeep_N3_mixC"),
+        ("s01", "s05", "s10", "s20", "s33", "s50"),
+    )
+)
+
+TIMEOUT_CORPUS_EXCLUSIONS = (
+    _graph_variants(
+        ("bushyBal_N4_mixA", "bushyBal_N4_mixB", "line_N4_mixA", "rdeep_N4_mixB"),
+        ("s50", "s67", "s80", "s95"),
+    )
+    | _graph_variants(
+        ("bushyBal_N6_mixA", "bushy_N6_mixB"),
+        ("s01", "s05", "s10", "s20", "s33", "s50", "s67", "s80", "s95"),
+    )
+    | _graph_variants(
+        ("bushy_N5_mixA", "bushy_N5_mixC"),
+        ("s05", "s10", "s20", "s33", "s50", "s67", "s80", "s95"),
+    )
+    | {"tpch/oy_th_real_order_full.sql"}
+)
+
+EXCLUDED_CORPUS_QUERIES = FAST_CORPUS_EXCLUSIONS | TIMEOUT_CORPUS_EXCLUSIONS
+
+
+def is_excluded_query(outdir, filename):
+    relative_path = os.path.relpath(os.path.join(outdir, filename), BASE)
+    return relative_path.replace(os.sep, "/") in EXCLUDED_CORPUS_QUERIES
+
 # ----------------------------------------------------------------------------
 # Shape-mix policy — applies to EVERY corpus (graph, tpch, tpcds, job).
 # BUSHY is the dominant shape: that is where OuterYan's join reordering +
@@ -63,16 +111,21 @@ def vectors(e):
 
 
 def write_pair(outdir, label, sql):
-    with open(os.path.join(outdir, f"{label}.sql"), "w") as f:
+    filename = f"{label}.sql"
+    if is_excluded_query(outdir, filename):
+        return False
+    with open(os.path.join(outdir, filename), "w") as f:
         f.write(sql + "\n")
+    return True
 
 
 def emit(outdir, queries):
     """Write all pairs into outdir (creating it); does NOT wipe pre-existing files."""
     os.makedirs(outdir, exist_ok=True)
+    emitted = 0
     for label, sql in queries.items():
-        write_pair(outdir, label, sql)
-    return len(queries)
+        emitted += int(write_pair(outdir, label, sql))
+    return emitted
 
 
 def wipe(outdir, keep=lambda f: False):
@@ -226,8 +279,8 @@ def gen_graph_pred():
     n = 0
     for bname, expr in pred_bases().items():
         for pname, pred in GRAPH_PREDS.items():
-            write_pair(PRED_DIR, f"{bname}_{pname}", f"SELECT * FROM {expr} WHERE {pred};")
-            n += 1
+            n += int(write_pair(PRED_DIR, f"{bname}_{pname}",
+                                f"SELECT * FROM {expr} WHERE {pred};"))
     print(f"graph/: {n} pairs")
 
 
@@ -1306,6 +1359,15 @@ def gen_job_queries():
 # ============================================================================
 # Bench output helpers
 # ============================================================================
+def filter_excluded_bench_queries(queries, outdir, prefix):
+    """Return only benchmark queries retained by the empirical corpus policy."""
+    return {
+        label: sql
+        for label, sql in queries.items()
+        if not is_excluded_query(outdir, f"{prefix}_{label}.sql")
+    }
+
+
 def write_bench_queries(queries, outdir, prefix):
     """Write all bench queries as individual .sql files (wipes old ones first)."""
     os.makedirs(outdir, exist_ok=True)
@@ -1314,9 +1376,14 @@ def write_bench_queries(queries, outdir, prefix):
             os.remove(os.path.join(outdir, f))
     for label, sql in sorted(queries.items()):
         fname = f"{prefix}_{label}.sql"
+        if is_excluded_query(outdir, fname):
+            continue
         with open(os.path.join(outdir, fname), "w") as f:
             f.write(sql + "\n")
-    return len(queries)
+    return sum(
+        not is_excluded_query(outdir, f"{prefix}_{label}.sql")
+        for label in queries
+    )
 
 
 def verify_bench_queries(queries, name):
@@ -1352,19 +1419,19 @@ def verify_bench_queries(queries, name):
 
 # --- bench top-level generators -----------------------------------------------
 def gen_bench_tpch():
-    q = gen_tpch_queries()
+    q = filter_excluded_bench_queries(gen_tpch_queries(), TPCH_DIR, "oy_th")
     n = write_bench_queries(q, TPCH_DIR, "oy_th")
     verify_bench_queries(q, "TPC-H")
     print(f"  tpch/: {n} files written")
 
 def gen_bench_tpcds():
-    q = gen_tpcds_queries()
+    q = filter_excluded_bench_queries(gen_tpcds_queries(), TPCDS_DIR, "oy_ds")
     n = write_bench_queries(q, TPCDS_DIR, "oy_ds")
     verify_bench_queries(q, "TPC-DS")
     print(f"  tpcds/: {n} files written")
 
 def gen_bench_job():
-    q = gen_job_queries()
+    q = filter_excluded_bench_queries(gen_job_queries(), JOB_DIR, "oy_jb")
     n = write_bench_queries(q, JOB_DIR, "oy_jb")
     verify_bench_queries(q, "JOB")
     print(f"  job/: {n} files written")

@@ -23,4 +23,4 @@ job/oy_jb_jb_line6_019_v0.sql
 tpcds/oy_ds_ds_line5b_v0.sql
 
 # Fast smoke
-graph/line_N3_mixB_s01.sql
+graph/line_N3_mixB_s67.sql
