@@ -160,23 +160,32 @@ The live log and reports distinguish:
 - baseline, candidate-join, raw/weighted semi-join, and total estimated costs;
 - the full cost formula and all join/SJ coefficient values;
 - bitmap/hash kernel use; and
-- a matched, median profiled single-thread wall sample (`P1:on`) decomposed into
-  round-1 semi-joins, round-2 semi-joins, real joins, and `Other`, with planned
-  pair/new-filter counts per round.
+- a matched, median profiled single-thread query-latency sample (`Total-Time`)
+  decomposed into native active-operator time for round-1 semi-joins, round-2
+  semi-joins, real joins (`R3`), and the residual `Other`, with planned
+  pair/new-filter counts and observed operator counts per round.
 
 Every query is printed as a separate block beginning with a full-width
 separator followed by exactly two lines. The first line contains correctness,
-reorder, selected plan, TM, and T1. The second line contains all remaining
-decision, cost, gate, weight, profiling, and artifact details. Inapplicable
+reorder, selected plan, kernel, phase profile, TM, and T1. The second line
+contains decision, cost, gate, weight, and artifact details. Inapplicable
 queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
 
-The categorized operator values are diagnostics rather than independently
-timed phases. `SJ_BUILD` combines materialization, replay, and asynchronous
-filter-task work. `Other` contains all uncategorized operator work,
-finalize/event bookkeeping, CLI overhead, and profiling serialization, making
-`R1 + R2 + real-join + Other = P1:on`. P1 uses the same single-thread CLI timing
-estimator as T1 but is a separate profiled median, so instrumentation can make
-it differ from the unprofiled `T1:on` median. A zero-pair round is printed as
+R1, R2, and R3 are sums from DuckDB's native `OPERATOR_TIMING` tree, not
+contiguous phase wall timers. R1 matches `SJ_BUILD_ROUND_1` and
+`SJ_PROBE_ROUND_1`; R2 matches the corresponding round-2 names; R3 matches
+physical join operator types. `Other` contains every unmatched operator plus
+planning, scheduling, state setup, waits, profiler overhead, and other work not
+represented by those operator timings. Integer-nanosecond arithmetic makes
+`R1 + R2 + R3 + Other = Total-Time` exact. The log renders ratios as
+percentages and reports matched physical-operator counts; the CSV retains
+ratios in `[0,1]`.
+Total-Time is DuckDB's high-resolution JSON query latency from a separate
+profiled median sample, so instrumentation can make it differ from the
+unprofiled `T1:on` median. T1/TM use fresh `-no-init` CLI processes, explicitly
+disable profiling before the timer starts, and do not run the native profile
+batch.
+A zero-pair round is printed as
 `NA(no-pairs,pairs=0)` rather than as a measured zero. The canonical CSV
 contains one row per query; `.attempts.csv` is retained as an identical
 single-attempt compatibility artifact. Timed-out queries are not retried.

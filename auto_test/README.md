@@ -38,7 +38,8 @@ corresponding environment values.
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREADS` | `48` | Multi-thread timing and equivalence-check threads |
 | `OY_TIMEOUT_SECS` | `900` | Per-statement timeout; `0` disables it |
-| `OY_RUNS` | `3` | Timed executions after one warm-up |
+| `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
+| `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
 
@@ -115,22 +116,31 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
 4. Run one profiled warm-up followed by `--runs N` profiled OuterYan-ON
-   executions at `threads=1`, using the same `.mode trash` plus CLI `.timer
-   real` estimator as T1. Keep the complete tuple associated with the median
-   CLI wall sample and categorize its operator elapsed time as round-1
-   semi-join, round-2 semi-join, and real joins. The traced plan supplies the
-   planned pair and newly built filter counts for each round.
+   executions at `threads=1` using `.mode trash`. Keep the complete tuple
+   associated with the median high-resolution JSON query latency. Sum native
+   `OPERATOR_TIMING` values for round-1 semi-join operators, round-2 semi-join
+   operators, and real-join operators. The traced plan supplies planned pair
+   and newly built filter counts for each round.
 5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-The profile denominator is labeled `P1:on`: the median wall time from that
-profiled single-thread batch. Each numerator and `P1:on` therefore come from a
-matched execution. `Other = P1:on - R1 - R2 - real-join`, so the four displayed
-components add to 100%. `SJ_BUILD` combines sink materialization, replay, and
-asynchronous bitmap/hash task bodies; uncategorized operators, finalize/event
-bookkeeping, CLI overhead, and profiling serialization land in `Other`. P1 and
-T1 use the same timing estimator, but P1 is deliberately labeled separately
-because profiling instrumentation can change its measured time.
+The profile denominator is labeled `Total-Time`: the median JSON query latency
+from that profiled single-thread batch. Each numerator and `Total-Time`
+therefore come from a matched execution. `Other = Total-Time - R1 - R2 - R3`,
+so the four components close the same sample. They are active operator times,
+not contiguous phase wall times. R1 matches `SJ_BUILD_ROUND_1` and
+`SJ_PROBE_ROUND_1`; R2 matches the round-2 names. R3 matches DuckDB's physical
+join types (`HASH_JOIN`, nested-loop, merge, IE, delim, positional, ASOF, and
+cross-product variants). `Other` includes unmatched operators and work outside
+native operator timing, such as planning, scheduling, state setup, waits, and
+profiler overhead. Times are converted to integer nanoseconds before
+subtraction. The log renders ratios as percentages; the CSV retains ratios in
+`[0,1]`.
+Profiling serialization and CLI output are outside Total-Time. Total-Time is
+labeled separately because profiling instrumentation can change its measured
+time. T1/TM run in fresh `-no-init` CLI processes and explicitly disable
+profiling before `.timer on`; no custom production phase instrumentation is
+used.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -206,7 +216,7 @@ OuterYan candidate is selected.
 ```text
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
-  -n, --runs N        timed executions per configuration
+  -n, --runs N        positive odd timed executions per configuration
   -t, --timeout S     per-statement timeout
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
@@ -273,7 +283,7 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[132/366] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[P1:on=45.6960 R1=NA(no-pairs,pairs=0) R2=0.940435(2.06%,pairs=3,filters=3) real-join=12.297079(26.91%) Other=32.458486(71.03%)] TM:... T1:...
+[132/366] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[Total-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) Other=32.458486000s(71.03%)] TM:... T1:...
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
@@ -290,14 +300,14 @@ another filter. `R1=NA(no-pairs,pairs=0)` therefore means that round was not
 scheduled, rather than that its timer incorrectly measured zero. If DuckDB was
 selected, both rounds show `NA(no-sj-plan)`. A missing plan count or profile is
 reported explicitly instead of being displayed as a valid zero. In particular,
-`profile-missing` means the plan expected at least one pair but the profile JSON
-contained no matching `SJ_BUILD_ROUND_N` or `SJ_PROBE_ROUND_N` operator.
+`profile-missing` means the plan expected at least one pair but the runtime
+profile observed no matching physical operator for that round.
 
 Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query/result, selected plan, kernel counts, profiled P1 decomposition, and OFF/ON speed-up for TM and T1 |
+| Line 1 | Query/result, selected plan, kernel counts, profiled Total-Time decomposition, and OFF/ON speed-up for TM and T1 |
 | Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
@@ -314,7 +324,7 @@ states that the numeric gate was skipped and prints the decision reason.
 
 The CSV exports the same decision, cost, kernel, correctness, timing, and phase
 fields in machine-readable form, including `round1_pairs`, `round1_filters`,
-`round2_pairs`, `round2_filters`, and the two recognized SJ operator counts.
+`round2_pairs`, `round2_filters`, and the native operator counts.
 `effective_pass` remains `main` for schema compatibility. The final text summary groups speed-ups separately by
 `outer_reordered` and `outer_yan_selected`.
 

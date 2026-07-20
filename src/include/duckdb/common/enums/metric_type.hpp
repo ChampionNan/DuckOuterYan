@@ -101,6 +101,7 @@ enum class MetricType : uint8_t {
 	OPTIMIZER_OUTER_YAN_DP = 63,
 	OPTIMIZER_OUTER_YAN_POST = 64,
 	OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER = 65,
+	OPTIMIZER_OUTER_YAN = 66,
 	// PhaseTiming metrics
 	ALL_OPTIMIZERS = 18,
 	CUMULATIVE_OPTIMIZER_TIMING = 19,
@@ -125,7 +126,7 @@ typedef unordered_map<MetricType, Value, MetricTypeHashFunction> profiler_metric
 class MetricsUtils {
 public:
 	static constexpr uint8_t START_OPTIMIZER = static_cast<uint8_t>(MetricType::OPTIMIZER_EXPRESSION_REWRITER);
-	static constexpr uint8_t END_OPTIMIZER = static_cast<uint8_t>(MetricType::OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER);
+	static constexpr uint8_t END_OPTIMIZER = static_cast<uint8_t>(MetricType::OPTIMIZER_OUTER_YAN);
 
 public:
 

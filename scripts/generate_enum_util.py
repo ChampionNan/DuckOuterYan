@@ -22,6 +22,10 @@ blacklist = [
     "CellTag",
     "HashKind",
     "Kind",
+    "OuterYanCostWinner",
+    "OuterYanGateResult",
+    "OuterYanSelectedPlan",
+    "SelectionMode",
     "StorageMode",
 ]
 

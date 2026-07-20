@@ -75,14 +75,17 @@ export OY_THREADS="${OY_THREADS:-48}"
 # Per-statement timeout (seconds), enforced by DuckDB's max_execution_time.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
 export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-900}"
+# Extra seconds for CLI startup and profile serialization around a timing batch.
+export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 
 # ===========================================================================
 # 6) Iteration counts
 # ===========================================================================
-# Fixed number of timed runs per query (after 1 warm-up run). Median is taken.
+# Positive odd number of timed runs per query (after 1 warm-up run).
 # NOTE: the timing phase runs (OY_RUNS + 1) executions inside ONE duckdb process
-# under ONE timeout window, so the effective per-run budget is
-# OY_TIMEOUT_SECS after the harness scales the batch window by (OY_RUNS + 1).
+# under ONE external timeout window. The harness keeps max_execution_time at
+# OY_TIMEOUT_SECS per statement, scales the process watchdog by (OY_RUNS + 1),
+# and adds a small process/serialization grace period.
 # Higher OY_RUNS therefore increases total experiment time and can expose more
 # timing-phase timeouts on slow (e.g. large-graph) queries.
 export OY_RUNS="${OY_RUNS:-3}"
@@ -109,6 +112,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  TPCH_SF/TPCDS_SF = $TPCH_SF / $TPCDS_SF"
         echo "  OY_THREADS       = $OY_THREADS"
         echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per statement"
+        echo "  BATCH GRACE      = ${OY_BATCH_GRACE_SECS}s"
         echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"
         echo "  CAPTURE_PLANS     = $OY_CAPTURE_PLANS"
         echo "  OY_TMPDIR         = $OY_TMPDIR"

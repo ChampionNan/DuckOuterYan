@@ -63,6 +63,7 @@ void ProfilingUtils::SetMetricToDefault(profiler_metrics_t &metrics, const Metri
 	case MetricType::LATENCY:
 	case MetricType::OPERATOR_TIMING:
 	case MetricType::OPTIMIZER_AGGREGATE_FUNCTION_REWRITER:
+	case MetricType::OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER:
 	case MetricType::OPTIMIZER_BUILD_SIDE_PROBE_SIDE:
 	case MetricType::OPTIMIZER_COLUMN_LIFETIME:
 	case MetricType::OPTIMIZER_COMMON_AGGREGATE:
@@ -86,6 +87,10 @@ void ProfilingUtils::SetMetricToDefault(profiler_metrics_t &metrics, const Metri
 	case MetricType::OPTIMIZER_LIMIT_PUSHDOWN:
 	case MetricType::OPTIMIZER_MATERIALIZED_CTE:
 	case MetricType::OPTIMIZER_OUTER_JOIN_SIMPLIFICATION:
+	case MetricType::OPTIMIZER_OUTER_YAN:
+	case MetricType::OPTIMIZER_OUTER_YAN_DP:
+	case MetricType::OPTIMIZER_OUTER_YAN_POST:
+	case MetricType::OPTIMIZER_OUTER_YAN_PRE:
 	case MetricType::OPTIMIZER_PROJECTION_PULLUP:
 	case MetricType::OPTIMIZER_REGEX_RANGE:
 	case MetricType::OPTIMIZER_REORDER_FILTER:
@@ -151,6 +156,7 @@ void ProfilingUtils::MetricToJson(duckdb_yyjson::yyjson_mut_doc *doc, duckdb_yyj
 	case MetricType::LATENCY:
 	case MetricType::OPERATOR_TIMING:
 	case MetricType::OPTIMIZER_AGGREGATE_FUNCTION_REWRITER:
+	case MetricType::OPTIMIZER_AGGREGATE_PUSHDOWN_OUTER:
 	case MetricType::OPTIMIZER_BUILD_SIDE_PROBE_SIDE:
 	case MetricType::OPTIMIZER_COLUMN_LIFETIME:
 	case MetricType::OPTIMIZER_COMMON_AGGREGATE:
@@ -174,6 +180,10 @@ void ProfilingUtils::MetricToJson(duckdb_yyjson::yyjson_mut_doc *doc, duckdb_yyj
 	case MetricType::OPTIMIZER_LIMIT_PUSHDOWN:
 	case MetricType::OPTIMIZER_MATERIALIZED_CTE:
 	case MetricType::OPTIMIZER_OUTER_JOIN_SIMPLIFICATION:
+	case MetricType::OPTIMIZER_OUTER_YAN:
+	case MetricType::OPTIMIZER_OUTER_YAN_DP:
+	case MetricType::OPTIMIZER_OUTER_YAN_POST:
+	case MetricType::OPTIMIZER_OUTER_YAN_PRE:
 	case MetricType::OPTIMIZER_PROJECTION_PULLUP:
 	case MetricType::OPTIMIZER_REGEX_RANGE:
 	case MetricType::OPTIMIZER_REORDER_FILTER:

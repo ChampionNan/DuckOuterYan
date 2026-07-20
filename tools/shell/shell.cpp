@@ -169,10 +169,10 @@ static void setTextMode(FILE *file, int isOutput) {
 /* True if the timer is enabled */
 static bool enableTimer = false;
 
-/* Return the current wall-clock time */
+/* Return monotonic wall-clock nanoseconds for the CLI timer. */
 static int64_t timeOfDay(void) {
-	auto current_time = std::chrono::system_clock::now().time_since_epoch();
-	return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(current_time).count();
+	auto current_time = std::chrono::steady_clock::now().time_since_epoch();
+	return (int64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(current_time).count();
 }
 
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__minux)
@@ -215,7 +215,7 @@ static void endTimer(void) {
 		int64_t iEnd = timeOfDay();
 		struct rusage sEnd;
 		getrusage(RUSAGE_SELF, &sEnd);
-		printf("Run Time (s): real %.3f user %f sys %f\n", (iEnd - iBegin) * 0.001,
+		printf("Run Time (s): real %.9f user %f sys %f\n", (iEnd - iBegin) * 0.000000001,
 		       timeDiff(&sBegin.ru_utime, &sEnd.ru_utime), timeDiff(&sBegin.ru_stime, &sEnd.ru_stime));
 	}
 }
@@ -289,7 +289,7 @@ static void endTimer(void) {
 		FILETIME ftCreation, ftExit, ftKernelEnd, ftUserEnd;
 		int64_t ftWallEnd = timeOfDay();
 		getProcessTimesAddr(hProcess, &ftCreation, &ftExit, &ftKernelEnd, &ftUserEnd);
-		printf("Run Time (s): real %.3f user %f sys %f\n", (ftWallEnd - ftWallBegin) * 0.001,
+		printf("Run Time (s): real %.9f user %f sys %f\n", (ftWallEnd - ftWallBegin) * 0.000000001,
 		       timeDiff(&ftUserBegin, &ftUserEnd), timeDiff(&ftKernelBegin, &ftKernelEnd));
 	}
 }
