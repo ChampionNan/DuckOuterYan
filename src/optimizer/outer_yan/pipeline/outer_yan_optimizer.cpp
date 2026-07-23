@@ -15,6 +15,7 @@
 #include "duckdb/optimizer/statistics_propagator.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 
@@ -33,6 +34,19 @@ struct BaselineEmptyProof {
 	PlanWorkSummary after;
 	string proof_plan;
 };
+
+bool ContainsAggregateLikeOperator(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY ||
+	    op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
+		return true;
+	}
+	for (const auto &child : op.children) {
+		if (ContainsAggregateLikeOperator(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
 
 bool IsRealJoin(LogicalOperatorType type) {
 	switch (type) {
@@ -147,6 +161,11 @@ const char *SelectionModeToString(OuterYanOptimizer::SelectionMode mode) {
 	return "UNKNOWN";
 }
 
+bool ForceCandidateForCorrectnessValidation() {
+	const auto value = std::getenv("DUCKDB_OY_FORCE_CANDIDATE");
+	return value && value[0] == '1' && value[1] == '\0';
+}
+
 } // namespace
 
 OuterYanOptimizer::OuterYanOptimizer(Optimizer &optimizer_p)
@@ -158,11 +177,16 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	if (!input) {
 		throw InternalException("OuterYanOptimizer::Optimize: null input plan");
 	}
+	const bool force_candidate_for_validation = ForceCandidateForCorrectnessValidation();
+	const auto selection_mode =
+	    force_candidate_for_validation ? "FORCE_OUTERYAN_DIAGNOSTIC" : SelectionModeToString(SELECTION_MODE);
+	const bool apply_cost_gate = APPLY_COST_GATE && !force_candidate_for_validation;
 
 	OuterYanTree candidate_tree;
 	unique_ptr<LogicalOperator> explain_wrapper;
 	unique_ptr<LogicalOperator> baseline_plan;
 	bool applicable = false;
+	bool contains_aggregate = false;
 
 	optimizer.RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
 		// Applicability must inspect the real plan inside EXPLAIN, but an
@@ -170,6 +194,10 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		LogicalOperator *candidate_input = input.get();
 		if (input->type == LogicalOperatorType::LOGICAL_EXPLAIN && input->children.size() == 1) {
 			candidate_input = input->children[0].get();
+		}
+		contains_aggregate = ContainsAggregateLikeOperator(*candidate_input);
+		if (contains_aggregate) {
+			return;
 		}
 		applicable = candidate_tree.CheckApplicability(*candidate_input);
 		if (!applicable) {
@@ -195,8 +223,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	if (!applicable) {
 		OuterYanDecisionRecord decision;
-		decision.selection_mode = SelectionModeToString(SELECTION_MODE);
-		decision.reason = "INAPPLICABLE";
+		decision.selection_mode = selection_mode;
+		decision.reason = contains_aggregate ? "DUCKDB_AGGREGATE" : "INAPPLICABLE";
 		OuterYanTrace::Decision(decision);
 		result.plan = std::move(input);
 		return result;
@@ -306,7 +334,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	}
 
 	OuterYanDecisionRecord decision;
-	decision.selection_mode = SelectionModeToString(SELECTION_MODE);
+	decision.selection_mode = selection_mode;
 	decision.outer_reordered = outer_reordered;
 	decision.baseline_proven_empty = empty_proof.eliminates_all_join_work;
 	decision.costs = trace_costs;
@@ -324,9 +352,16 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		decision.reason = "OUTERYAN_FAILED";
 	} else if (empty_proof.eliminates_all_join_work) {
 		decision.reason = "DUCKDB_PROVEN_EMPTY";
+	} else if (force_candidate_for_validation) {
+		// Diagnostic-only override used by the ON/OFF correctness harness. It
+		// deliberately bypasses both grouping equality and the cost gate so the
+		// candidate's semi-join plan is executed rather than merely costed.
+		decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
+		decision.outer_yan_selected = true;
+		decision.reason = "FORCE_OUTERYAN_DIAGNOSTIC";
 	} else if (!outer_reordered) {
 		decision.reason = "DUCKDB_PLAN";
-	} else if (!APPLY_COST_GATE) {
+	} else if (!apply_cost_gate) {
 		decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
 		decision.outer_yan_selected = true;
 		decision.reason = "FORCE_OUTERYAN";
@@ -360,7 +395,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		costs << std::setprecision(17)
 		      << "formula_id=" << trace_costs.formula_id << "\n"
 		      << "selection_mode=" << decision.selection_mode << "\n"
-		      << "apply_cost_gate=" << (APPLY_COST_GATE ? 1 : 0) << "\n"
+		      << "apply_cost_gate=" << (apply_cost_gate ? 1 : 0) << "\n"
 		      << "baseline_cost=" << trace_costs.baseline_cost << "\n"
 		      << "candidate_join_cost=" << trace_costs.candidate_join_cost << "\n"
 		      << "semijoin_raw_cost=" << trace_costs.semijoin_raw_cost << "\n"

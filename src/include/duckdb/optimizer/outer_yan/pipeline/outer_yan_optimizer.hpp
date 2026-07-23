@@ -26,8 +26,9 @@ struct OuterYanOptimizationResult {
 
 //! Owns the complete two-candidate policy for an OuterYan-applicable query:
 //! build the normal DuckDB baseline, build the OuterYan candidate, compare
-//! base-relation join groupings, optionally apply the common cost gate, lower
-//! the winner, and run aggregate pushdown with winner-local metadata.
+//! base-relation join groupings, optionally apply the common cost gate, and
+//! lower the winner. Queries containing aggregation or DISTINCT bypass this
+//! pipeline and continue through DuckDB's normal optimizer unchanged.
 class OuterYanOptimizer {
 public:
 	//! Final candidate-selection policy. This is deliberately a class-local

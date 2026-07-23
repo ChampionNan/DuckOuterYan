@@ -91,11 +91,10 @@ struct OJTEdge {
 	//! an SJBuild + SJProbe pair on this edge.
 	optional<bool> top_down;
 
-	//! Whether the edge carries a PK-FK key constraint, derived from the
-	//! underlying logical plan: walk down to the base `LogicalGet` (through
-	//! a single-child `LogicalFilter` if present) and check whether its
-	//! `TableCatalogEntry` exposes a `UniqueConstraint` covering the join
-	//! key bindings on that side. See
+	//! Whether either side's join keys cover a UNIQUE / PRIMARY KEY
+	//! constraint. This legacy uniqueness marker is used by aggregate pushdown;
+	//! on its own it does not prove FK coverage and must not justify semi-join
+	//! elimination. See
 	//! `AggregationPushdown::CheckPKFK` in DuckDBYanPlus
 	//! (src/optimizer/aggregation_pushdown.cpp ~L547) for the reference
 	//! implementation: bindings → `LogicalGet::GetColumnIds()` →
@@ -106,29 +105,32 @@ struct OJTEdge {
 	//! `false` — parent is PK side, child is FK side.
 	//! Undefined when `has_pk_fk_constraint` is false.
 	bool child_is_pk = false;
+	//! Every parent join-key tuple is guaranteed to match a child tuple. This
+	//! requires an exact, enforced parent-FK -> child-UNIQUE/PK mapping and a
+	//! declared NOT NULL constraint on every parent FK component.
+	bool parent_covered_by_child = false;
+	//! Every child join-key tuple is guaranteed to match a parent tuple. This is
+	//! the direction-reversed counterpart of `parent_covered_by_child`.
+	bool child_covered_by_parent = false;
 	//! Bottom-up semi-join R_parent ⋉ R_child on this edge is provably
 	//! redundant; OuterYanPre::BottomUpPass skips the pair. Set by
 	//! BuildOJTImpl after the full tree is assembled. True iff:
-	//!   (1) child_is_pk — child's join key is unique.
+	//!   (1) parent_covered_by_child — exact total FK coverage is proven.
 	//!   (2) child is a terminal leaf — no OJT children reduce it before
 	//!       its SJBuild materialises (stack: SJBuild ← GET, no probe
 	//!       operators in between).
 	//!   (3) child has no base predicates — no LOGICAL_FILTER above its
 	//!       GET and no single-relation filter_record targets it.
-	//! FK referential integrity (every FK value in parent matches a PK
-	//! value in child) is assumed implicitly when (1)-(3) hold.
 	bool bottom_up_eliminated = false;
 	//! Top-down semi-join R_child ⋉ R_parent on this edge is provably
 	//! redundant; OuterYanPre::TopDownPass skips the pair. True iff:
-	//!   (1) parent is the PK side (!child_is_pk && has_pk_fk_constraint).
+	//!   (1) child_covered_by_parent — exact total FK coverage is proven.
 	//!   (2) parent has no base predicates.
 	//!   (3) parent has no bottom-up probes — none of its OJT children
 	//!       connect via RIGHT or INNER (those would sit below its
 	//!       top-down SJBuild and reduce it first).
 	//!   (4) parent has no top-down probe from its grandparent — i.e.
 	//!       parent is the OJT root, or its incoming edge has kind RIGHT.
-	//! FK referential integrity (every FK value in child matches a PK
-	//! value in parent) is assumed implicitly when (1)-(4) hold.
 	bool top_down_eliminated = false;
 };
 

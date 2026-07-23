@@ -2,6 +2,7 @@
 #include "test_helpers.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
@@ -12,6 +13,7 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -108,6 +110,52 @@ unique_ptr<OuterYanTree> BuildFullIRFor(Connection &con, const string &sql) {
 	OuterYanPost(ctx).Optimize(*tree);             // Resimplify (reverts) → lower plan
 	ctx.transaction.Commit();
 	return tree;
+}
+
+//! Drive only the pre-DP phase so tests can inspect the exact semi-join pairs
+//! recorded from the simplified OJT. Unlike BuildFullIRFor, this leaves the OT
+//! and its base-relation metadata alive.
+unique_ptr<OuterYanTree> BuildPreIRFor(Connection &con, const string &sql) {
+	REQUIRE_NO_FAIL(con.Query(
+	    "SET disabled_optimizers TO "
+	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,"
+	    "column_lifetime,statistics_propagation,outer_join_simplification,"
+	    "join_elimination'"));
+	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	REQUIRE(plan);
+	auto tree = make_uniq<OuterYanTree>();
+	if (!tree->CheckApplicability(*plan)) {
+		return tree;
+	}
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	OuterYanPre().Optimize(std::move(plan), *tree);
+	ctx.transaction.Commit();
+	return tree;
+}
+
+RelationId RelationForTable(const OuterYanTree &tree, const string &table_name) {
+	for (auto *relation : tree.ot_relations_by_id) {
+		if (!relation) {
+			continue;
+		}
+		auto *base = FindBaseOp(relation->origin);
+		if (!base || base->type != LogicalOperatorType::LOGICAL_GET) {
+			continue;
+		}
+		auto table = base->Cast<LogicalGet>().GetTable();
+		if (table && table->name == table_name) {
+			return relation->relation_id;
+		}
+	}
+	throw InternalException("RelationForTable: table %s not found", table_name);
+}
+
+bool HasSemiPair(const vector<OuterYanSemiPair> &pairs, RelationId build, RelationId probe) {
+	return std::any_of(pairs.begin(), pairs.end(), [&](const OuterYanSemiPair &pair) {
+		return pair.build == build && pair.probe == probe;
+	});
 }
 
 //! Count OTNode JOIN nodes via a recursive walk.
@@ -222,6 +270,14 @@ void AssertOuterYanPreservesResults(Connection &con, const string &sql) {
 	REQUIRE_FALSE(optimized->HasError());
 
 	REQUIRE(CollectSortedRows(*optimized) == CollectSortedRows(*baseline));
+}
+
+string ExplainOptimizedPlan(Connection &con, const string &disabled_optimizers, const string &sql) {
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO '" + disabled_optimizers + "'"));
+	auto result = con.Query("EXPLAIN " + sql);
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->RowCount() == 1);
+	return result->GetValue(1, 0).ToString();
 }
 
 } // namespace
@@ -393,6 +449,166 @@ TEST_CASE("outer_yan passes: semi-join pair recording populates both phases",
 	auto plan_text = result->ToString();
 	REQUIRE(plan_text.find("SJ_BUILD") != string::npos);
 	REQUIRE(plan_text.find("SJ_PROBE") != string::npos);
+}
+
+TEST_CASE("outer_yan semi-join elimination: NOT NULL enforced FK makes PK build redundant",
+          "[outer_yan][passes][semi][elimination]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE fact(id INTEGER PRIMARY KEY, "
+	                          "dim_k INTEGER NOT NULL REFERENCES dim(k))"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1), (2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1), (20, 2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (10)"));
+
+	const string sql = "SELECT * FROM fact INNER JOIN dim ON fact.dim_k=dim.k "
+	                   "LEFT JOIN opt ON fact.id=opt.fact_id";
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	const auto fact = RelationForTable(*tree, "fact");
+	const auto dim = RelationForTable(*tree, "dim");
+	// The enforced FK proves existence and NOT NULL excludes the one SQL value
+	// that an FK permits without a referenced PK row, hence fact ⋉ dim = fact.
+	REQUIRE_FALSE(HasSemiPair(tree->bottom_up_pairs, dim, fact));
+	// The opposite round is not an identity: unreferenced dimension rows may
+	// exist. Its presence also proves the INNER edge itself was recorded.
+	REQUIRE(HasSemiPair(tree->top_down_pairs, fact, dim));
+	AssertOuterYanPreservesResults(con, sql);
+}
+
+TEST_CASE("outer_yan semi-join elimination: nullable FK retains PK-to-FK reduction",
+          "[outer_yan][passes][semi][elimination]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE fact(id INTEGER PRIMARY KEY, "
+	                          "dim_k INTEGER REFERENCES dim(k))"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1), (2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1), (20, 2), (30, NULL)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (10)"));
+
+	const string sql = "SELECT * FROM fact INNER JOIN dim ON fact.dim_k=dim.k "
+	                   "LEFT JOIN opt ON fact.id=opt.fact_id";
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	const auto fact = RelationForTable(*tree, "fact");
+	const auto dim = RelationForTable(*tree, "dim");
+	// NULL satisfies the FK constraint but cannot match under equality, so this
+	// Round-1 pair is required to reproduce the INNER join's rejection.
+	REQUIRE(HasSemiPair(tree->bottom_up_pairs, dim, fact));
+	AssertOuterYanPreservesResults(con, sql);
+}
+
+TEST_CASE("outer_yan semi-join elimination: NOT NULL without FK retains orphan reduction",
+          "[outer_yan][passes][semi][elimination]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE fact(id INTEGER PRIMARY KEY, dim_k INTEGER NOT NULL)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1), (2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1), (20, 2), (30, 999)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (10)"));
+
+	const string sql = "SELECT * FROM fact INNER JOIN dim ON fact.dim_k=dim.k "
+	                   "LEFT JOIN opt ON fact.id=opt.fact_id";
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	const auto fact = RelationForTable(*tree, "fact");
+	const auto dim = RelationForTable(*tree, "dim");
+	// NOT NULL proves only that a value exists, not that the value is covered by
+	// dim's key. The orphan 999 makes fact ⋉ dim a strict reduction.
+	REQUIRE(HasSemiPair(tree->bottom_up_pairs, dim, fact));
+	AssertOuterYanPreservesResults(con, sql);
+}
+
+TEST_CASE("outer_yan semi-join elimination: nullable probe key survives RIGHT-FULL desimplification",
+          "[outer_yan][passes][semi][elimination][bushy5b]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE ss(id INTEGER, item_id INTEGER, promo_id INTEGER, cust_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE it(item_id INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE pr(promo_id INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE cu(cust_id INTEGER PRIMARY KEY, addr_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE ad(addr_id INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO it VALUES (1), (2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO pr VALUES (10), (20), (30)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO ad VALUES (100), (200), (20000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO cu VALUES (1000, 100), (2000, 200), (4000, 20000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO ss VALUES "
+	                          "(1, 1, 10, 1000), "
+	                          "(2, 2, NULL, 2000), "
+	                          "(3, 999, 20, 9999), "
+	                          "(4, 1, 999, 1000)"));
+
+	// Reduced form of oy_ds_ds_bushy5b_v0:
+	// ((SS LEFT I) RIGHT P) FULL ((C LEFT CA)), followed by a CA predicate.
+	// Simplification makes SS-P INNER; desimplification may turn that into a
+	// synthetic outer edge, whose correctness depends on retaining P -> SS.
+	const string sql =
+	    "SELECT ss.id, ss.promo_id, pr.promo_id, cu.cust_id, ad.addr_id "
+	    "FROM (((ss LEFT OUTER JOIN it ON ss.item_id=it.item_id) "
+	    "RIGHT OUTER JOIN pr ON ss.promo_id=pr.promo_id) "
+	    "FULL OUTER JOIN (cu LEFT OUTER JOIN ad ON cu.addr_id=ad.addr_id) "
+	    "ON ss.cust_id=cu.cust_id) "
+	    "WHERE ad.addr_id > 0 AND ad.addr_id < 10000";
+
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	REQUIRE(tree->stage_stats.simplify_collapses >= 3);
+	REQUIRE(tree->stage_stats.desimplify_changes >= 1);
+	const auto ss_relation = RelationForTable(*tree, "ss");
+	const auto promotion_relation = RelationForTable(*tree, "pr");
+	REQUIRE(HasSemiPair(tree->bottom_up_pairs, promotion_relation, ss_relation));
+
+	AssertOuterYanPreservesResults(con, sql);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	auto optimized = con.Query(sql);
+	REQUIRE_FALSE(optimized->HasError());
+	const vector<string> expected {
+	    "1|10|10|1000|100",
+	    "NULL|NULL|NULL|2000|200",
+	};
+	REQUIRE(CollectSortedRows(*optimized) == expected);
+}
+
+TEST_CASE("outer_yan policy: aggregate queries use the exact DuckDB plan",
+          "[outer_yan][passes][aggregate_policy]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedPasses(con);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA explain_output='optimized_only'"));
+
+	const string root_aggregate =
+	    "SELECT a.id, SUM(c.cx) FROM a LEFT JOIN b ON a.id=b.id "
+	    "LEFT JOIN c ON b.id=c.id GROUP BY a.id";
+	const auto root_baseline = ExplainOptimizedPlan(con, "outer_yan", root_aggregate);
+	const auto root_enabled = ExplainOptimizedPlan(con, "", root_aggregate);
+	REQUIRE(root_enabled == root_baseline);
+	REQUIRE(root_enabled.find("SJ_BUILD") == string::npos);
+	REQUIRE(root_enabled.find("SJ_PROBE") == string::npos);
+
+	const string nested_aggregate =
+	    "SELECT a.id, b.bx, totals.total FROM a LEFT JOIN b ON a.id=b.id "
+	    "LEFT JOIN (SELECT id, SUM(cx) AS total FROM c GROUP BY id) totals "
+	    "ON b.id=totals.id";
+	const auto nested_baseline = ExplainOptimizedPlan(con, "outer_yan", nested_aggregate);
+	const auto nested_enabled = ExplainOptimizedPlan(con, "", nested_aggregate);
+	REQUIRE(nested_enabled == nested_baseline);
+	REQUIRE(nested_enabled.find("SJ_BUILD") == string::npos);
+	REQUIRE(nested_enabled.find("SJ_PROBE") == string::npos);
+
+	const string distinct_query =
+	    "SELECT DISTINCT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id=b.id "
+	    "LEFT JOIN c ON b.id=c.id";
+	const auto distinct_baseline = ExplainOptimizedPlan(con, "outer_yan", distinct_query);
+	const auto distinct_enabled = ExplainOptimizedPlan(con, "", distinct_query);
+	REQUIRE(distinct_enabled == distinct_baseline);
+	REQUIRE(distinct_enabled.find("SJ_BUILD") == string::npos);
+	REQUIRE(distinct_enabled.find("SJ_PROBE") == string::npos);
 }
 
 // ============================================================================
@@ -595,6 +811,46 @@ TEST_CASE("outer_yan passes: equivalence — full schema incl. null-supplying si
 	                                     "FROM na LEFT JOIN nb ON na.k = nb.k");
 }
 
+TEST_CASE("outer_yan passes: base NOT NULL does not survive outer-join null extension",
+          "[outer_yan][passes][equivalence][semi][elimination]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE fact(id INTEGER PRIMARY KEY, "
+	                          "dim_k INTEGER NOT NULL REFERENCES dim(k))"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE carrier(cid INTEGER, fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(cid INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1), (2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1), (20, 2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO carrier VALUES (100, 10), (200, 99)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (100)"));
+
+	const string sql =
+	    "SELECT carrier.cid, fact.id, fact.dim_k, dim.k, opt.cid "
+	    "FROM carrier "
+	    "LEFT JOIN fact ON carrier.fact_id=fact.id "
+	    "LEFT JOIN dim ON fact.dim_k=dim.k "
+	    "LEFT JOIN opt ON carrier.cid=opt.cid";
+	AssertOuterYanPreservesResults(con, sql);
+
+	// fact.dim_k is NOT NULL at its base scan, but the first LEFT join creates
+	// a synthetic NULL fact tuple for carrier 200. That row must survive both
+	// later LEFT joins; schema nullability must never be applied to join output.
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	auto optimized = con.Query(sql);
+	REQUIRE_FALSE(optimized->HasError());
+	const vector<string> expected {
+	    "100|10|1|1|100",
+	    "200|NULL|NULL|NULL|NULL",
+	};
+	REQUIRE(CollectSortedRows(*optimized) == expected);
+
+	// Keep this an OuterYan execution regression rather than an accidental
+	// equality between two ordinary DuckDB plans.
+	const auto plan = ExplainOptimizedPlan(con, "", sql);
+	REQUIRE(plan.find("SJ_PROBE") != string::npos);
+}
+
 TEST_CASE("outer_yan passes: equivalence — 5-relation LEFT chain stresses DP enumeration",
           "[outer_yan][passes][equivalence]") {
 	DuckDB db(nullptr);
@@ -730,24 +986,13 @@ TEST_CASE("outer_yan passes: equivalence — full SELECT* 10-relation LEFT chain
 }
 
 // ============================================================================
-// Broader aggregation variants over outer-join chains. Same on-vs-off
-// equivalence contract, but with a root aggregate (COUNT(*) / SUM / GROUP BY /
-// MIN-MAX) above 3..6-relation mixed skeletons.
-//
-// KNOWN-FAILING — hidden behind the `[.]` tag so the default suite stays green.
-// These currently raise an internal error under OuterYan and PIN two open bugs:
-//   * "OuterYanPost::Optimize: tree has no OJT"  — OuterYanDP early-returns
-//     without `BuildOJT()` when the GROUP BY anchors a single star-center
-//     relation, leaving Post with no OJT (see feature_flag.test:175).
-//   * "Failed to bind column reference …"        — OJTToLogicalPlan re-attaches
-//     only `root_projection` and drops the intermediate root aggregate, so the
-//     output projection references a now-absent aggregate output
-//     (see outer_join_aggregate.test:49).
-// Re-tag to `[outer_yan][passes][equivalence]` once both are fixed.
+// Broader aggregate-policy variants over 3..6-relation outer-join skeletons.
+// These verify ON/OFF result equivalence while the production policy routes
+// every aggregate query through DuckDB's normal optimizer.
 // ============================================================================
 
-TEST_CASE("outer_yan passes: equivalence — COUNT(*) over 3-relation LEFT chain (PINS BUG)",
-          "[outer_yan][passes][equivalence][aggregate][.]") {
+TEST_CASE("outer_yan policy: COUNT(*) over 3-relation LEFT chain stays on DuckDB",
+          "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
@@ -757,8 +1002,8 @@ TEST_CASE("outer_yan passes: equivalence — COUNT(*) over 3-relation LEFT chain
 	                                     "LEFT JOIN c ON a.id = c.id");
 }
 
-TEST_CASE("outer_yan passes: equivalence — GROUP BY + SUM over LEFT chain (PINS BUG)",
-          "[outer_yan][passes][equivalence][aggregate][.]") {
+TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain stays on DuckDB",
+          "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
@@ -769,8 +1014,8 @@ TEST_CASE("outer_yan passes: equivalence — GROUP BY + SUM over LEFT chain (PIN
 	                                     "GROUP BY a.id");
 }
 
-TEST_CASE("outer_yan passes: equivalence — GROUP BY + COUNT/MIN/MAX mixed joins (PINS BUG)",
-          "[outer_yan][passes][equivalence][aggregate][.]") {
+TEST_CASE("outer_yan policy: GROUP BY + COUNT/MIN/MAX stays on DuckDB",
+          "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
@@ -782,8 +1027,8 @@ TEST_CASE("outer_yan passes: equivalence — GROUP BY + COUNT/MIN/MAX mixed join
 	                                     "GROUP BY a.id");
 }
 
-TEST_CASE("outer_yan passes: equivalence — SUM over 6-relation chain, no GROUP BY (PINS BUG)",
-          "[outer_yan][passes][equivalence][aggregate][.]") {
+TEST_CASE("outer_yan policy: SUM over 6-relation chain stays on DuckDB",
+          "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);

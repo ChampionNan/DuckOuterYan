@@ -1,8 +1,10 @@
 # name: test/sql/optimizer/outer_yan/outer_join_aggregate.test
-# description: OuterYan optimizer — aggregation over outer-join chains. Each
-#              variant runs the SAME query twice — once with OuterYan disabled
-#              (baseline) and once enabled — and asserts the two row multisets
-#              are identical (symmetric difference = 0). This self-validating
+# description: Aggregate-policy regression over outer-join chains. Each variant
+#              runs the SAME query twice — once with OuterYan disabled and once
+#              enabled — and asserts the two row multisets are identical
+#              (symmetric difference = 0). Aggregate queries must remain on
+#              DuckDB's normal optimizer path in both configurations. This
+#              self-validating
 #              form needs no hand-computed expected values (the previous version
 #              hard-coded results that ignored the c-table fan-out and were
 #              wrong on several rows); the engine's own baseline is the oracle.

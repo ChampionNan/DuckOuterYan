@@ -1,5 +1,6 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
+#include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/enums/join_type.hpp"
@@ -9,6 +10,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/optimizer/join_order/join_relation.hpp"
 #include "duckdb/optimizer/join_order/relation_index.hpp"
+#include "duckdb/parser/constraints/foreign_key_constraint.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -439,8 +442,21 @@ void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 // `filter_records` that references only `relation_id`.
 static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
                                const vector<unique_ptr<OuterYanFilterRecord>> &filter_records) {
-	if (base_op && base_op->type == LogicalOperatorType::LOGICAL_FILTER) {
-		return true;
+	// A base subtree may contain an arbitrary Filter/Projection wrapper chain.
+	// Inspect every wrapper rather than only the outermost node: Projection ->
+	// Filter -> Get is just as filtered as Filter -> Projection -> Get.
+	const LogicalOperator *base = base_op;
+	while (base && (base->type == LogicalOperatorType::LOGICAL_FILTER ||
+	                base->type == LogicalOperatorType::LOGICAL_PROJECTION)) {
+		if (base->type == LogicalOperatorType::LOGICAL_FILTER) {
+			return true;
+		}
+		if (base->children.size() != 1 || !base->children[0]) {
+			// An unexpected wrapper shape cannot support the "complete build"
+			// proof, so conservatively retain the semi-join.
+			return true;
+		}
+		base = base->children[0].get();
 	}
 	// FILTER_PUSHDOWN runs before OuterYan and folds a unary "col OP const"
 	// predicate into LogicalGet::table_filters, deleting the LogicalFilter
@@ -453,11 +469,9 @@ static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
 	// does not null-reject join keys into table_filters, and runtime/dynamic
 	// join filters are added later by JOIN_FILTER_PUSHDOWN. A table filter on a
 	// Get is single-relation by construction, so no relation_id match is needed.
-	if (const auto *op = FindBaseOp(base_op)) {
-		if (op->type == LogicalOperatorType::LOGICAL_GET &&
-		    op->Cast<LogicalGet>().table_filters.HasFilters()) {
-			return true;
-		}
+	if (base && base->type == LogicalOperatorType::LOGICAL_GET &&
+	    base->Cast<LogicalGet>().table_filters.HasFilters()) {
+		return true;
 	}
 	for (const auto &rec : filter_records) {
 		if (rec && rec->filter && rec->referenced_relations.size() == 1 &&
@@ -505,24 +519,24 @@ static void ComputeEliminationFlags(OJTNode &node, bool top_down_probed_by_paren
 		// Bottom-up: R_node ⋉ R_child (build=child, probe=node).
 		// Fires when edge.kind ∈ {RIGHT, INNER} — child is preserved or inner,
 		// so the bottom-up pass uses child's keys to reduce the parent (node).
-		// Redundant iff child's SJBuild sees all its base rows: child is
-		// PK-side, a terminal leaf (no probes from below reduce it first),
-		// and has no base predicates.
+		// Redundant iff every parent key is covered by the child and the
+		// child's SJBuild sees all its base rows: child is PK-side, a terminal
+		// leaf (no probes from below reduce it first), and has no predicates.
 		if (edge.kind == JoinType::RIGHT || edge.kind == JoinType::INNER) {
 			edge.bottom_up_eliminated =
-			    edge.child_is_pk && edge.child->children.empty() &&
+			    edge.parent_covered_by_child && edge.child->children.empty() &&
 			    !HasBasePredicates(edge.child->base_op, edge.child->relation_id, filter_records);
 		}
 
 		// Top-down: R_child ⋉ R_node (build=node, probe=child).
 		// Fires when edge.kind ∈ {LEFT, INNER} — parent (node) is preserved
 		// or inner, so the top-down pass uses the parent's keys to reduce the
-		// child. Redundant iff node's SJBuild sees all its base rows: node is
-		// PK-side, has no predicates, no bottom-up probes from its own
-		// children, and no top-down probe from its grandparent.
+		// child. Redundant iff every child key is covered by the parent and
+		// node's SJBuild sees all its base rows: node is PK-side, has no
+		// predicates, no bottom-up probes from its own children, and no
+		// top-down probe from its grandparent.
 		if (edge.kind == JoinType::LEFT || edge.kind == JoinType::INNER) {
-			const bool parent_is_pk = !edge.child_is_pk && edge.has_pk_fk_constraint;
-			edge.top_down_eliminated = parent_is_pk && !node_has_predicates &&
+			edge.top_down_eliminated = edge.child_covered_by_parent && !node_has_predicates &&
 			                           !node_has_bottom_up_probe && !top_down_probed_by_parent;
 		}
 
@@ -588,9 +602,12 @@ static bool JoinSideIsUnique(LogicalOperator *origin, const vector<JoinCondition
 			if (binding.table_index.index != my_table_index) {
 				continue;
 			}
-			idx_t proj_idx = binding.column_index;
+			const auto proj_idx = binding.column_index.GetIndexUnsafe();
 			if (proj_idx < column_ids.size()) {
-				key_cols.push_back(column_ids[proj_idx].GetPrimaryIndex());
+				const auto &column_id = column_ids[proj_idx];
+				if (column_id.HasPrimaryIndex() && !column_id.IsVirtualColumn() && !column_id.HasChildren()) {
+					key_cols.push_back(column_id.GetPrimaryIndex());
+				}
 			}
 		}
 	}
@@ -638,6 +655,190 @@ static bool JoinSideIsUnique(LogicalOperator *origin, const vector<JoinCondition
 			if (all_present) {
 				return true;
 			}
+		}
+	}
+	return false;
+}
+
+struct JoinColumnPair {
+	idx_t probe_logical;
+	idx_t probe_physical;
+	idx_t build_physical;
+};
+
+static const LogicalGet *GetBaseTableGet(const LogicalOperator *origin) {
+	const auto *base = FindBaseOp(origin);
+	if (!base || base->type != LogicalOperatorType::LOGICAL_GET) {
+		return nullptr;
+	}
+	return &base->Cast<LogicalGet>();
+}
+
+static bool TryGetBaseColumn(const LogicalGet &get, const BoundColumnRefExpression &column_ref,
+                             idx_t &logical_index) {
+	const auto &binding = column_ref.binding;
+	if (binding.table_index != get.table_index) {
+		return false;
+	}
+	const auto projection_index = binding.column_index.GetIndexUnsafe();
+	const auto &column_ids = get.GetColumnIds();
+	if (projection_index >= column_ids.size()) {
+		return false;
+	}
+	const auto &column_id = column_ids[projection_index];
+	if (!column_id.HasPrimaryIndex() || column_id.IsVirtualColumn() || column_id.HasChildren()) {
+		return false;
+	}
+	logical_index = column_id.GetPrimaryIndex();
+	return true;
+}
+
+static bool ExtractJoinColumnPairs(const LogicalGet &probe_get, const LogicalGet &build_get,
+                                   const vector<JoinCondition> &conditions, vector<JoinColumnPair> &result) {
+	auto probe_table = probe_get.GetTable();
+	auto build_table = build_get.GetTable();
+	if (!probe_table || !build_table || conditions.empty()) {
+		return false;
+	}
+
+	result.clear();
+	result.reserve(conditions.size());
+	for (const auto &condition : conditions) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
+		    condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			return false;
+		}
+
+		const auto &lhs = condition.GetLHS().Cast<BoundColumnRefExpression>();
+		const auto &rhs = condition.GetRHS().Cast<BoundColumnRefExpression>();
+		const BoundColumnRefExpression *probe_ref = nullptr;
+		const BoundColumnRefExpression *build_ref = nullptr;
+		if (lhs.binding.table_index == probe_get.table_index && rhs.binding.table_index == build_get.table_index) {
+			probe_ref = &lhs;
+			build_ref = &rhs;
+		} else if (rhs.binding.table_index == probe_get.table_index &&
+		           lhs.binding.table_index == build_get.table_index) {
+			probe_ref = &rhs;
+			build_ref = &lhs;
+		} else {
+			return false;
+		}
+
+		idx_t probe_logical;
+		idx_t build_logical;
+		if (!TryGetBaseColumn(probe_get, *probe_ref, probe_logical) ||
+		    !TryGetBaseColumn(build_get, *build_ref, build_logical)) {
+			return false;
+		}
+		const auto &probe_columns = probe_table->GetColumns();
+		const auto &build_columns = build_table->GetColumns();
+		if (probe_logical >= probe_columns.LogicalColumnCount() ||
+		    build_logical >= build_columns.LogicalColumnCount()) {
+			return false;
+		}
+		const auto &probe_column = probe_columns.GetColumn(LogicalIndex(probe_logical));
+		const auto &build_column = build_columns.GetColumn(LogicalIndex(build_logical));
+		if (probe_column.Generated() || build_column.Generated()) {
+			return false;
+		}
+		result.push_back({probe_logical, probe_columns.LogicalToPhysical(LogicalIndex(probe_logical)).index,
+		                  build_columns.LogicalToPhysical(LogicalIndex(build_logical)).index});
+	}
+	return true;
+}
+
+static bool IsDeclaredNotNull(const TableCatalogEntry &table, idx_t logical_index) {
+	for (const auto &constraint : table.GetConstraints()) {
+		if (constraint->type != ConstraintType::NOT_NULL) {
+			continue;
+		}
+		if (constraint->Cast<NotNullConstraint>().index.index == logical_index) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// True iff every row read from `probe_origin` has exactly one guaranteed match
+// in `build_origin` for this join. Uniqueness alone proves "at most one"; the
+// exact enforced FK proves existence for non-NULL keys, and explicit NOT NULL
+// constraints close the SQL-FK NULL exemption.
+static bool JoinSideHasTotalCoverage(LogicalOperator *probe_origin, LogicalOperator *build_origin,
+                                     const vector<JoinCondition> &conditions, bool build_is_unique) {
+	const auto *probe_get = GetBaseTableGet(probe_origin);
+	const auto *build_get = GetBaseTableGet(build_origin);
+	if (!probe_get || !build_get) {
+		return false;
+	}
+	auto probe_table = probe_get->GetTable();
+	auto build_table = build_get->GetTable();
+	if (!probe_table || !build_table || !probe_table->IsDuckTable() || !build_table->IsDuckTable()) {
+		return false;
+	}
+
+	// Retain the independent build-key uniqueness proof. Foreign keys can target
+	// either PRIMARY KEY or UNIQUE constraints in DuckDB.
+	if (!build_is_unique) {
+		return false;
+	}
+
+	vector<JoinColumnPair> join_pairs;
+	if (!ExtractJoinColumnPairs(*probe_get, *build_get, conditions, join_pairs)) {
+		return false;
+	}
+	vector<pair<idx_t, idx_t>> actual_pairs;
+	actual_pairs.reserve(join_pairs.size());
+	for (const auto &join_pair : join_pairs) {
+		if (!IsDeclaredNotNull(*probe_table, join_pair.probe_logical)) {
+			return false;
+		}
+		actual_pairs.emplace_back(join_pair.probe_physical, join_pair.build_physical);
+	}
+	std::sort(actual_pairs.begin(), actual_pairs.end());
+	if (std::adjacent_find(actual_pairs.begin(), actual_pairs.end()) != actual_pairs.end()) {
+		return false;
+	}
+
+	const bool self_reference = probe_table.get() == build_table.get();
+	if (&probe_table->ParentCatalog() != &build_table->ParentCatalog() ||
+	    &probe_table->ParentSchema() != &build_table->ParentSchema()) {
+		return false;
+	}
+	for (const auto &constraint : probe_table->GetConstraints()) {
+		if (constraint->type != ConstraintType::FOREIGN_KEY) {
+			continue;
+		}
+		const auto &foreign_key = constraint->Cast<ForeignKeyConstraint>();
+		if (self_reference) {
+			if (foreign_key.info.type != ForeignKeyType::FK_TYPE_SELF_REFERENCE_TABLE) {
+				continue;
+			}
+		} else if (foreign_key.info.type != ForeignKeyType::FK_TYPE_FOREIGN_KEY_TABLE) {
+			continue;
+		}
+		if (!StringUtil::CIEquals(foreign_key.info.table, build_table->name)) {
+			continue;
+		}
+		if (!foreign_key.info.schema.empty() &&
+		    !StringUtil::CIEquals(foreign_key.info.schema, build_table->ParentSchema().name)) {
+			continue;
+		}
+		const auto key_count = foreign_key.info.fk_keys.size();
+		if (key_count != foreign_key.info.pk_keys.size() || key_count != foreign_key.fk_columns.size() ||
+		    key_count != foreign_key.pk_columns.size() || key_count != actual_pairs.size()) {
+			continue;
+		}
+
+		vector<pair<idx_t, idx_t>> declared_pairs;
+		declared_pairs.reserve(key_count);
+		for (idx_t key_idx = 0; key_idx < key_count; key_idx++) {
+			declared_pairs.emplace_back(foreign_key.info.fk_keys[key_idx].index,
+			                            foreign_key.info.pk_keys[key_idx].index);
+		}
+		std::sort(declared_pairs.begin(), declared_pairs.end());
+		if (declared_pairs == actual_pairs) {
+			return true;
 		}
 	}
 	return false;
@@ -741,14 +942,20 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 		auto &ot_info = *ot_join->info;
 		idx_t left_rel = ot_info.cond_left_relation_id;
 		idx_t right_rel = ot_info.cond_right_relation_id;
+		auto *left_origin = ot_relations[left_rel]->origin;
+		auto *right_origin = ot_relations[right_rel]->origin;
 		// PK side is judged on the JOIN COLUMN, not the relation: a side is the
 		// PK side iff its join-key column(s) cover a unique constraint. A
 		// per-relation "table has some unique column" check would misfire whenever
 		// a table carries a surrogate PK on a non-join column (e.g. orders.o_orderkey
 		// while the join is on o_custkey) — the common case once real PK-FK schemas
 		// are loaded. See JoinSideIsUnique.
-		bool left_pk = JoinSideIsUnique(ot_relations[left_rel]->origin, ot_info.conditions);
-		bool right_pk = JoinSideIsUnique(ot_relations[right_rel]->origin, ot_info.conditions);
+		bool left_pk = JoinSideIsUnique(left_origin, ot_info.conditions);
+		bool right_pk = JoinSideIsUnique(right_origin, ot_info.conditions);
+		bool left_covered_by_right =
+		    JoinSideHasTotalCoverage(left_origin, right_origin, ot_info.conditions, right_pk);
+		bool right_covered_by_left =
+		    JoinSideHasTotalCoverage(right_origin, left_origin, ot_info.conditions, left_pk);
 		bool child_pk = (child_id == left_rel) ? left_pk : right_pk;
 		bool parent_is_left = (parent_id == left_rel);
 
@@ -770,6 +977,8 @@ unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
 		edge.info = std::move(edge_info);
 		edge.has_pk_fk_constraint = left_pk || right_pk;
 		edge.child_is_pk = child_pk;
+		edge.parent_covered_by_child = parent_is_left ? left_covered_by_right : right_covered_by_left;
+		edge.child_covered_by_parent = parent_is_left ? right_covered_by_left : left_covered_by_right;
 		edge.child = std::move(nodes_by_id[child_id]);
 		node_pointer[parent_id]->children.push_back(std::move(edge));
 	};

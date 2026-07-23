@@ -132,7 +132,7 @@ PRAGMA explain_output='optimized_only';
 -- Safe disable options (dp / post alone break plan ownership; do not use):
 SET disabled_optimizers TO 'outer_yan_pre';                        -- short-circuits whole pipeline
 SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';  -- explicit all-off
-SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- independent; always safe
+SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- legacy pass; aggregates bypass OuterYan
 
 -- Bitmap budget control:
 SET VARIABLE outer_yan_bitmap_max_bytes = 0;          -- force HashFilter
@@ -163,8 +163,8 @@ Tests `OuterYanApplicability::Check` (white-box) and
 | rejects set op above join | `UNION ALL` above skeleton → `applicable = false` |
 | rejects window operator above join | `ROW_NUMBER() OVER` above skeleton → `applicable = false` |
 | rejects cyclic 3-relation graph | Triangle (a–b, a–c, b–c) → `applicable = false` |
-| accepts root aggregation (COUNT_STAR) | Aggregate at root → `applicable = true`, `has_root_aggregate = true` |
-| accepts GROUP BY at root | Group-by at root → `applicable = true`, `has_root_aggregate = true` |
+| accepts root aggregation (COUNT_STAR) | The low-level applicability checker accepts it and records `has_root_aggregate`; the optimizer policy bypasses it before this checker is called |
+| accepts GROUP BY at root | The low-level applicability checker accepts it and records `has_root_aggregate`; the optimizer policy bypasses it before this checker is called |
 | relation table-index mapping is populated | 3 distinct `RelationId`s in [0, 3) after accept |
 | edges hold valid LogicalComparisonJoin pointers | `edge.join != nullptr`, `edge.left != edge.right` |
 | rejection populates reason string | `result.reason` non-empty on any rejection |
@@ -378,9 +378,9 @@ correlated subquery.
 
 ### `feature_flag.test` — Safe pass disable combinations
 
-`outer_yan_pre` is the only individually safe toggle: disabling it keeps
-`outer_yan_active = false`, so DP / Post / AggPushdown are all skipped by
-the `if (outer_yan_active)` guard in `optimizer.cpp`. Disabling `dp` or
+`outer_yan_pre` is the only individually safe OuterYan pipeline toggle:
+disabling it keeps `outer_yan_active = false`, so DP / Post are skipped by
+the optimizer facade. Disabling `dp` or
 `post` alone corrupts plan ownership because Pre has already moved the plan
 into the tree.
 
@@ -391,7 +391,8 @@ into the tree.
 | All three disabled | Full revert to baseline JoinOrderOptimizer |
 | Re-enable after disable | `SJ_PROBE` reappears; toggle is reversible |
 | Pure-INNER query under `outer_yan_pre` disabled | Same baseline; no interference |
-| `aggregate_pushdown_outer` disabled alone | Pre/DP/Post still fire; pushdown skipped; results identical |
+| Aggregate query, all passes enabled | Exact normal DuckDB optimized plan; no `SJ_BUILD`/`SJ_PROBE` |
+| Aggregate query with `aggregate_pushdown_outer` disabled | Same normal DuckDB plan; no `SJ_BUILD`/`SJ_PROBE` |
 
 ### `outer_join_chain.test` — Outer-join chain semantics (15 variants)
 
@@ -415,11 +416,12 @@ Every variant runs the query with OuterYan enabled and disabled; results must ma
 | 14 | Build side has NULL keys (NULLs must never match) |
 | 15 | Multi-row build side (many-to-one, fanout preserved) |
 
-### `outer_join_aggregate.test` — Aggregate root over outer-join chains
+### `outer_join_aggregate.test` — Aggregate policy over outer-join chains
 
-Covers all `OuterYanAggregationType` variants with a result-equivalence
-assertion (OuterYan enabled vs disabled). A pass-isolation section then
-keeps pre/dp/post enabled and toggles only `aggregate_pushdown_outer`.
+Covers all aggregate variants with a result-equivalence assertion (OuterYan
+enabled vs disabled). Production policy bypasses the complete OuterYan
+pipeline whenever any aggregate operator occurs in the logical tree; focused
+plan tests separately assert exact ON/OFF plan equality and no SJ operators.
 
 | Variant | Aggregate shape |
 |---|---|
@@ -432,7 +434,7 @@ keeps pre/dp/post enabled and toggles only `aggregate_pushdown_outer`.
 | 7 | `COUNT(*)` on 4-way chain |
 | 8 | Aggregation with mixed LEFT/RIGHT/FULL |
 | 9 | `SUM(d.dx)` from deepest relation in 4-way chain |
-| Pass-isolation | Each of COUNT_STAR, SUM, MIN/MAX, plain SUM, DISTINCT toggled under `aggregate_pushdown_outer` only |
+| Flag stability | Aggregate and DISTINCT cases use DuckDB's normal plan; toggling the legacy `aggregate_pushdown_outer` flag does not change aggregate plans |
 
 ### `semijoin_passes.test` — SJ_BUILD / SJ_PROBE presence per join type
 

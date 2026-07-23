@@ -313,7 +313,7 @@ oy_time_median() {
 
 # --- OuterYan candidate decision --------------------------------------------
 # OuterYan emits exactly one machine-readable record while optimizing EXPLAIN:
-#   [OY_DECISION] selection_mode=GATED|FORCE_OUTERYAN \
+#   [OY_DECISION] selection_mode=GATED|FORCE_OUTERYAN|FORCE_OUTERYAN_DIAGNOSTIC \
 #                 outer_reordered=0|1 cost_gate_applied=0|1 \
 #                 outer_yan_selected=0|1 reason=UPPER_SNAKE_TOKEN \
 #                 baseline_cost=N|NA candidate_join_cost=N|NA \
@@ -1375,7 +1375,7 @@ for ((i=0; i<QN; i++)); do
     case "${QREORDERED[i]}:${QSELECTED[i]}" in
         0:0) NSAME=$((NSAME+1));;
         1:0) NREJECT=$((NREJECT+1));;
-        1:1) NSELECTED=$((NSELECTED+1));;
+        0:1|1:1) NSELECTED=$((NSELECTED+1));;
         *)   NDECISION_UNKNOWN=$((NDECISION_UNKNOWN+1));;
     esac
     case "${QPROFILE_WALL[i]}" in

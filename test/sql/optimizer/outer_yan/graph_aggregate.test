@@ -1,10 +1,11 @@
 # name: test/sql/optimizer/outer_yan/graph_aggregate.test
-# description: OuterYan optimizer — aggregation over the generated graph dataset,
+# description: Aggregate-policy regression over the generated graph dataset,
 #              incorporating the query shapes from outerjoin_test/{count,
 #              aggregation} (tables R,S,T,K = R1..R4, the R.dst=S.src chain).
 #              COUNT(*) / SUM / GROUP BY over mixed INNER/LEFT/RIGHT/FULL OUTER
 #              joins, compared OuterYan-disabled vs enabled (symmetric difference
-#              = 0). These are the "complex" aggregate cases, kept separate from
+#              = 0). Both configurations must use DuckDB's normal plan. These are
+#              the "complex" aggregate cases, kept separate from
 #              the full-output equivalence in graph_full_query.test. The base
 #              outerjoin_test queries (no nested subqueries) are reused under new
 #              names; their hand-written predicate-transfer rewrites (the *_r.sql

@@ -2,7 +2,9 @@
 
 This repository is a DuckDB research fork for optimizing acyclic queries with
 inner and outer joins. Its `OuterYan` path combines join reordering, two-round
-semi-join reduction, aggregate pushdown, and bitmap/hash semi-join kernels.
+semi-join reduction, and bitmap/hash semi-join kernels. Aggregate-pushdown code
+is retained for research, but the current policy keeps aggregate and DISTINCT
+queries on DuckDB's normal optimizer path.
 
 ## Build
 
@@ -89,11 +91,50 @@ materialize/build/replay/lookup/emit coefficients.
 
 The policy constants, including `APPLY_COST_GATE`, live in
 [`outer_yan_optimizer.hpp`](src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp).
-They are deliberately build-wide source knobs rather than environment or SQL
-settings. The selected OuterYan plan receives semi-join insertion; aggregate
-pushdown is applied to either winner using metadata for that exact join shape.
-Inapplicable queries, and queries with OuterYan disabled, continue through
-DuckDB's normal optimizer.
+They are deliberately build-wide source knobs rather than SQL settings. The
+selected OuterYan plan receives semi-join insertion. Aggregate and DISTINCT
+queries bypass candidate construction entirely; inapplicable queries and
+queries with OuterYan disabled likewise continue through DuckDB's normal
+optimizer.
+
+### Force the OuterYan candidate for correctness validation
+
+`FORCE_OUTERYAN` is the normal source-level experiment mode. It bypasses the
+cost gate for a changed grouping, but the same-grouping policy can still select
+DuckDB. To execute a valid OuterYan candidate even when its grouping matches
+DuckDB or its estimated cost is worse, scope the diagnostic override to the
+test command:
+
+```bash
+DUCKDB_OY_FORCE_CANDIDATE=1 \
+bash auto_test/experiment_onoff.sh \
+    --only tpcds \
+    --pattern 'oy_ds_ds_bushy5b_v0' \
+    --runs 3 \
+    --capture-plans
+```
+
+The OFF execution still disables OuterYan, while every ON subprocess inherits
+the diagnostic override. This makes the bare-query equivalence check compare
+DuckDB with the actually executed OuterYan candidate. The override applies only
+to a complete, applicable, non-aggregate, non-proven-empty candidate; it does
+not override safety fallbacks for aggregate/DISTINCT, inapplicable, failed, or
+DuckDB-proven-empty plans.
+
+Confirm the result line contains `selected=OUTERYAN`, and confirm its decision
+contains:
+
+```text
+mode=FORCE_OUTERYAN_DIAGNOSTIC
+reason=FORCE_OUTERYAN_DIAGNOSTIC
+outer_yan_selected=1
+gate=SKIPPED
+```
+
+`reorder=0` is valid in this mode: it means only that the real-join grouping is
+the same, not that DuckDB executed. Kernel and R1/R2 fields provide additional
+evidence that the semi-join plan ran. Keep the variable command-scoped as shown;
+without it, normal `GATED`/`FORCE_OUTERYAN` selection is unchanged.
 
 Disable the cohesive OuterYan path for a session with:
 
@@ -123,6 +164,11 @@ bash auto_test/experiment_onoff.sh \
 # Run one exact TPC-H query label.
 bash auto_test/experiment_onoff.sh \
     --only tpch --pattern 'oy_th_th_branch5a_v2'
+
+# Force one complete OuterYan candidate, ignoring grouping equality and cost.
+DUCKDB_OY_FORCE_CANDIDATE=1 \
+bash auto_test/experiment_onoff.sh \
+    --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
 
 # Release build plus P0/P1 representative bare-query validation.
 SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
@@ -220,6 +266,9 @@ Useful runtime controls are:
 
 - `DUCKDB_OYTRACE=/path/to/trace.txt`: record optimizer stages and the final
   machine-readable candidate decision;
+- `DUCKDB_OY_FORCE_CANDIDATE=1`: diagnostic correctness mode that forces a
+  complete, applicable, non-proven-empty OuterYan candidate past grouping and
+  cost selection;
 - `DUCKDB_SJ_KERNEL_TRACE=1`: print the selected bitmap/hash kernel per filter;
 - `SET VARIABLE outer_yan_bitmap_max_bytes = N`: set the per-filter bitmap
   budget (`0` forces hash fallback);

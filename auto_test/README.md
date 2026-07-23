@@ -42,6 +42,7 @@ corresponding environment values.
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
+| `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
 
 Always inspect `configs.sh` before a server run because these experiment defaults
 are intentionally adjusted for the current machine.
@@ -194,22 +195,64 @@ changed-grouping, non-proven-empty OuterYan candidate. Same-grouping,
 inapplicable, failed, and proven-empty cases continue to use DuckDB in both
 modes. The selected mode is written to `[OY_DECISION]`, TXT, and CSV output.
 
+#### Force a same-grouping or cost-rejected candidate
+
+The source-level `FORCE_OUTERYAN` mode still preserves the same-grouping
+shortcut. Therefore `correct=TRUE selected=DUCKDB` does not validate the
+OuterYan candidate. For a targeted correctness run, use the command-scoped
+diagnostic override:
+
+```bash
+DUCKDB_OY_FORCE_CANDIDATE=1 \
+bash auto_test/experiment_onoff.sh \
+  --only tpcds \
+  --pattern 'oy_ds_ds_bushy5b_v0' \
+  --runs 3 \
+  --capture-plans
+```
+
+The harness's OFF processes continue to use
+`SET disabled_optimizers TO 'outer_yan';`. Its ON processes execute the
+OuterYan candidate even if `outer_reordered=0` or `raw_cost_winner=DUCKDB`.
+This override bypasses grouping equality and the cost gate only after the
+candidate is known to be complete and the DuckDB baseline is not proven empty.
+Aggregate/DISTINCT, inapplicable, failed, and proven-empty cases remain on
+DuckDB.
+
+A successful validation must report:
+
+```text
+correct=TRUE ... selected=OUTERYAN ...
+decision=[mode=FORCE_OUTERYAN_DIAGNOSTIC
+          reason=FORCE_OUTERYAN_DIAGNOSTIC
+          ... gate=SKIPPED ... outer_yan_selected=1 ...]
+```
+
+`reorder=0` means that the two candidates have the same base-relation grouping;
+it does not contradict `selected=OUTERYAN`. Use `kernel=bitmap(...)`,
+`kernel=hash(...)`, `kernel=mixed(...)`, or `kernel=none(...)`, plus the saved
+enabled plan and trace, to inspect the executed semi-join candidate. Keep the
+variable command-scoped so later experiments return to the configured
+`GATED`/`FORCE_OUTERYAN` policy automatically.
+
 Decision reasons written to the trace and result files include:
 
 | Reason | Meaning |
 |---|---|
 | `INAPPLICABLE` | OuterYan applicability check failed |
+| `DUCKDB_AGGREGATE` | Query contains aggregation or DISTINCT and bypasses OuterYan |
 | `DUCKDB_PLAN` | Candidate has the same grouping as DuckDB; use DuckDB |
 | `DUCKDB_PROVEN_EMPTY` | DuckDB's proof copy eliminates all real join work; use DuckDB without SJs |
 | `FORCE_OUTERYAN` | Changed candidate selected by the forced experiment mode |
+| `FORCE_OUTERYAN_DIAGNOSTIC` | Complete candidate forced past grouping and cost selection for a targeted correctness run |
 | `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
 | `COST_UNAVAILABLE` | A finite comparison could not be produced |
 | `OUTERYAN_FAILED` | OuterYan did not produce a complete candidate |
 
-AggregatePushdownOuter is applied to either winner using metadata corresponding
-to that winner's join shape. Semi-join operators are inserted only when the
-OuterYan candidate is selected.
+Aggregate and DISTINCT queries bypass OuterYan and use DuckDB's normal plan.
+Semi-join operators are inserted only when a non-aggregate OuterYan candidate
+is selected.
 
 ### Command-line options
 
@@ -247,6 +290,11 @@ bash auto_test/experiment_onoff.sh \
 # Full TPC-H family
 bash auto_test/experiment_onoff.sh --only tpch
 
+# Force one valid OuterYan candidate for a bare-query correctness comparison
+DUCKDB_OY_FORCE_CANDIDATE=1 \
+bash auto_test/experiment_onoff.sh \
+  --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
+
 # Skip JOB bushy-7 labels
 bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
 
@@ -283,7 +331,7 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[ 66/300] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[Total-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) Other=32.458486000s(71.03%)] TM:... T1:...
+[ 63/296] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[Total-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) Other=32.458486000s(71.03%)] TM:... T1:...
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 

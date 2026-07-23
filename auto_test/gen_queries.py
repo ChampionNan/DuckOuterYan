@@ -78,7 +78,16 @@ TIMEOUT_CORPUS_EXCLUSIONS = (
     | {"tpch/oy_th_real_order_full.sql"}
 )
 
-EXCLUDED_CORPUS_QUERIES = FAST_CORPUS_EXCLUSIONS | TIMEOUT_CORPUS_EXCLUSIONS
+SHORT_CORPUS_EXCLUSIONS = {
+    "tpch/oy_th_th_agg8.sql",
+    "tpch/oy_th_th_agg9.sql",
+    "tpch/oy_th_th_branch5a_v1.sql",
+    "tpcds/oy_ds_ds_bushy4e_v2.sql",
+}
+
+EXCLUDED_CORPUS_QUERIES = (
+    FAST_CORPUS_EXCLUSIONS | TIMEOUT_CORPUS_EXCLUSIONS | SHORT_CORPUS_EXCLUSIONS
+)
 
 
 def is_excluded_query(outdir, filename):

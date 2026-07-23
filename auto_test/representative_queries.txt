@@ -1,5 +1,4 @@
 # Proven-empty cliffs
-tpch/oy_th_th_branch5a_v1.sql
 tpch/oy_th_th_bushy6_v0.sql
 job/oy_jb_jb_rd4_045_v0.sql
 tpcds/oy_ds_ds_bushy5b_v5.sql
@@ -12,7 +11,6 @@ tpcds/oy_ds_ds_agg5.sql
 tpcds/oy_ds_real_store_agg.sql
 
 # Selective and output-heavy coverage
-tpcds/oy_ds_ds_bushy4e_v2.sql
 job/oy_jb_jb_rd3_042_v1.sql
 tpcds/oy_ds_real_web_geo.sql
 tpch/oy_th_real_custdist.sql

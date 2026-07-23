@@ -6,7 +6,8 @@
 #                outer_yan_pre            — applicability + LogicalPlanToOT + simplify
 #                outer_yan_dp             — DP enumeration
 #                outer_yan_post           — Resimplify + semi-join insertion
-#                aggregate_pushdown_outer — push the root aggregate below the joins
+#                aggregate_pushdown_outer — retained internal rewrite pass;
+#                                           aggregate queries bypass OuterYan
 # group: [outer_yan]
 
 statement ok
@@ -162,11 +163,9 @@ statement ok
 SET disabled_optimizers TO ''
 
 # ============================================================================
-# Fourth pass — aggregate_pushdown_outer. Toggled independently of pre/dp/post:
-# disabling it keeps OuterYan's join reordering + semi-join insertion but skips
-# pushing the root aggregate below the joins. Results must be identical either
-# way (the rewrite is correctness-preserving), and the toggle must be
-# reversible. Uses an aggregation query so the pass has something to do.
+# Aggregate policy guard. Aggregate queries always remain on DuckDB's normal
+# optimizer path, regardless of FORCE_OUTERYAN or the aggregate-pushdown flag.
+# In particular, they must not contain OuterYan semi-join operators.
 # ============================================================================
 
 statement ok
@@ -182,7 +181,15 @@ GROUP BY a.id
 3	3000
 4	NULL
 
-# Skip only the pushdown pass — pre/dp/post still fire.
+query II
+EXPLAIN
+SELECT a.id, SUM(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+GROUP BY a.id
+----
+logical_opt	<!REGEX>:.*SJ_(BUILD|PROBE).*
+
+# Disabling the legacy pushdown pass does not alter the aggregate policy.
 statement ok
 SET disabled_optimizers TO 'aggregate_pushdown_outer'
 
@@ -196,7 +203,15 @@ GROUP BY a.id
 3	3000
 4	NULL
 
-# Reversible — re-enabling restores the full pipeline.
+query II
+EXPLAIN
+SELECT a.id, SUM(c.cx)
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+GROUP BY a.id
+----
+logical_opt	<!REGEX>:.*SJ_(BUILD|PROBE).*
+
+# Re-enable all optimizer passes and confirm the bypass is stable.
 statement ok
 SET disabled_optimizers TO ''
 
