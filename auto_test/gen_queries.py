@@ -85,8 +85,45 @@ SHORT_CORPUS_EXCLUSIONS = {
     "tpcds/oy_ds_ds_bushy4e_v2.sql",
 }
 
+JOB_CORPUS_EXCLUSIONS = {
+    "job/oy_jb_jb_agg1.sql",
+    "job/oy_jb_jb_agg2.sql",
+    "job/oy_jb_jb_agg3.sql",
+    "job/oy_jb_jb_agg4.sql",
+    "job/oy_jb_jb_agg5.sql",
+    "job/oy_jb_jb_agg6.sql",
+    "job/oy_jb_jb_agg7.sql",
+    "job/oy_jb_jb_bushy4a_v0.sql",
+    "job/oy_jb_jb_bushy4a_v3.sql",
+    "job/oy_jb_jb_bushy4b_v4.sql",
+    "job/oy_jb_jb_bushy5b_v1.sql",
+    "job/oy_jb_jb_bushy6b_v2.sql",
+    "job/oy_jb_jb_bushy6b_v3.sql",
+    "job/oy_jb_jb_line3_002_v0.sql",
+    "job/oy_jb_jb_line3_003_v0.sql",
+    "job/oy_jb_jb_line3_004_v0.sql",
+    "job/oy_jb_jb_line3_005_v0.sql",
+    "job/oy_jb_jb_line5_016_v0.sql",
+    "job/oy_jb_jb_line6_018_v0.sql",
+    "job/oy_jb_jb_line6_019_v0.sql",
+    "job/oy_jb_jb_rd3_033_v0.sql",
+    "job/oy_jb_jb_rd3_034_v1.sql",
+    "job/oy_jb_jb_rd3_035_v0.sql",
+    "job/oy_jb_jb_rd3_036_v1.sql",
+    "job/oy_jb_jb_rd3_039_v0.sql",
+    "job/oy_jb_jb_rd3_040_v1.sql",
+    "job/oy_jb_jb_rd3_041_v0.sql",
+    "job/oy_jb_jb_rd3_042_v1.sql",
+    "job/oy_jb_jb_rd3_043_v0.sql",
+    "job/oy_jb_jb_rd4_045_v0.sql",
+    "job/oy_jb_jb_rd4_048_v1.sql",
+}
+
 EXCLUDED_CORPUS_QUERIES = (
-    FAST_CORPUS_EXCLUSIONS | TIMEOUT_CORPUS_EXCLUSIONS | SHORT_CORPUS_EXCLUSIONS
+    FAST_CORPUS_EXCLUSIONS
+    | TIMEOUT_CORPUS_EXCLUSIONS
+    | SHORT_CORPUS_EXCLUSIONS
+    | JOB_CORPUS_EXCLUSIONS
 )
 
 
