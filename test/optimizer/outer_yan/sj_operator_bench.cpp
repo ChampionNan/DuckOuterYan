@@ -12,8 +12,8 @@
 //   see executor.hpp::Initialize and QueryProfiler::StartPhase guards).
 //
 // Modes
-//   BITMAP    OuterYan forced on; outer_yan_bitmap_max_bytes=34359738368
-//   HASH      OuterYan forced on; outer_yan_bitmap_max_bytes=0
+//   BITMAP    OuterYan enabled; outer_yan_bitmap_max_bytes=34359738368
+//   HASH      OuterYan enabled; outer_yan_bitmap_max_bytes=0
 //   BASELINE  disabled_optimizers='outer_yan_pre,outer_yan_dp,outer_yan_post'
 //
 // Test tiers

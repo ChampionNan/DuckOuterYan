@@ -1,9 +1,9 @@
 # name: test/sql/optimizer/outer_yan/semijoin_passes.test
-# description: OuterYan optimizer — bottom-up and top-down semi-join pair
-#              recording from src/optimizer/outer_yan/semijoin_insertion.cpp.
-#              Verifies that LOGICAL_SJ_BUILD and LOGICAL_SJ_PROBE both appear
-#              in the plan for each OJTEdgeKind (INNER, L-outer, R-outer,
-#              F-outer) — proves both passes fire.
+# description: OuterYan optimizer — strict cost-gate coverage across each
+#              OJTEdgeKind. These tiny fixtures make fixed semi-join work more
+#              expensive than DuckDB, so the selected plans contain no SJ
+#              operators. Forced insertion mechanics are covered by the C++
+#              outer_yan pass integration tests.
 # group: [outer_yan]
 
 statement ok
@@ -34,7 +34,7 @@ statement ok
 PRAGMA explain_output='optimized_only'
 
 # ============================================================================
-# At least one SJ_BUILD AND one SJ_PROBE must appear when OuterYan accepts.
+# Applicable LEFT chain is cost-rejected on this tiny input.
 # ============================================================================
 
 query II
@@ -42,18 +42,17 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_BUILD.*
+logical_opt	<!REGEX>:.*SJ_BUILD.*
 
 query II
 EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# INNER + outer mix — inner edge participates in both bottom-up and top-down
-# passes; outer edges have direction-dependent participation.
+# INNER + outer mix — fixed semi-join work is also cost-rejected.
 # ============================================================================
 
 query II
@@ -61,10 +60,10 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# LEFT OUTER chain — exercises top-down pass primarily (child = preserved side).
+# LEFT OUTER chain — strict gate keeps the cheaper DuckDB plan.
 # ============================================================================
 
 query II
@@ -72,7 +71,7 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
 # RIGHT OUTER chain — DP retains this small input shape, so the normal DuckDB
@@ -87,8 +86,7 @@ FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
 logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# FULL OUTER — neither side is preserved; both passes can still run on
-# child→parent and parent→child semantics.
+# FULL OUTER — strict gate again keeps the cheaper DuckDB plan.
 # ============================================================================
 
 query II
@@ -96,11 +94,10 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# Correctness regression across each kind — the semi-join insertion must not
-# alter the row multiset. Each block is a result-equivalence assertion.
+# Correctness regression across each kind under normal cost selection.
 # ============================================================================
 
 statement ok

@@ -36,15 +36,14 @@ public:
 	//! build has one unambiguous experiment policy. Change SELECTION_MODE and
 	//! rebuild to switch experiment modes.
 	enum class SelectionMode : uint8_t { GATED, FORCE_OUTERYAN };
-	static constexpr SelectionMode SELECTION_MODE = SelectionMode::FORCE_OUTERYAN;
+	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
 	//! it to the OuterYan candidate's real-join cost.
 	static constexpr double SEMIJOIN_COST_RATIO = 0.35;
-	//! GATED-mode selection tolerance. A value of 1.10 admits an OuterYan
-	//! candidate whose estimated total cost is within 10% of DuckDB's baseline.
-	//! This is an explicit preference bias, not a physical-cost calibration.
-	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.10;
+	//! GATED-mode selection threshold. A value of 1.0 selects OuterYan only
+	//! when its estimated total cost does not exceed DuckDB's baseline cost.
+	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
 
 	explicit OuterYanOptimizer(Optimizer &optimizer);
 

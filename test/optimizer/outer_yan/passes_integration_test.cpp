@@ -16,6 +16,7 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <functional>
 
@@ -29,6 +30,43 @@ using namespace duckdb;
 // =============================================================================
 
 namespace {
+
+class ScopedOuterYanCandidateForce {
+public:
+	ScopedOuterYanCandidateForce() {
+		const auto current_value = std::getenv("DUCKDB_OY_FORCE_CANDIDATE");
+		if (current_value) {
+			had_previous_value = true;
+			previous_value = current_value;
+		}
+#ifdef _WIN32
+		if (_putenv_s("DUCKDB_OY_FORCE_CANDIDATE", "1") != 0) {
+#else
+		if (setenv("DUCKDB_OY_FORCE_CANDIDATE", "1", 1) != 0) {
+#endif
+			throw InternalException("Failed to set DUCKDB_OY_FORCE_CANDIDATE for test");
+		}
+	}
+
+	~ScopedOuterYanCandidateForce() {
+#ifdef _WIN32
+		_putenv_s("DUCKDB_OY_FORCE_CANDIDATE", had_previous_value ? previous_value.c_str() : "");
+#else
+		if (had_previous_value) {
+			setenv("DUCKDB_OY_FORCE_CANDIDATE", previous_value.c_str(), 1);
+		} else {
+			unsetenv("DUCKDB_OY_FORCE_CANDIDATE");
+		}
+#endif
+	}
+
+	ScopedOuterYanCandidateForce(const ScopedOuterYanCandidateForce &) = delete;
+	ScopedOuterYanCandidateForce &operator=(const ScopedOuterYanCandidateForce &) = delete;
+
+private:
+	bool had_previous_value = false;
+	string previous_value;
+};
 
 void SeedPasses(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(id INTEGER, ax INTEGER)"));
@@ -265,6 +303,7 @@ void AssertOuterYanPreservesResults(Connection &con, const string &sql) {
 	auto baseline = con.Query(sql);
 	REQUIRE_FALSE(baseline->HasError());
 
+	ScopedOuterYanCandidateForce force_candidate;
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	auto optimized = con.Query(sql);
 	REQUIRE_FALSE(optimized->HasError());
@@ -442,6 +481,7 @@ TEST_CASE("outer_yan passes: semi-join pair recording populates both phases",
 	REQUIRE_NO_FAIL(con.Query("PRAGMA explain_output='optimized_only'"));
 	// The b→c chain is deliberately cost-reordered; a star on a.id now takes
 	// the no-reorder fallback and correctly contains no SJ operators.
+	ScopedOuterYanCandidateForce force_candidate;
 	auto result = con.Query("EXPLAIN SELECT a.id, b.bx, c.cx "
 	                        "FROM a LEFT JOIN b ON a.id = b.id "
 	                        "LEFT JOIN c ON b.id = c.id");
@@ -847,6 +887,7 @@ TEST_CASE("outer_yan passes: base NOT NULL does not survive outer-join null exte
 
 	// Keep this an OuterYan execution regression rather than an accidental
 	// equality between two ordinary DuckDB plans.
+	ScopedOuterYanCandidateForce force_candidate;
 	const auto plan = ExplainOptimizedPlan(con, "", sql);
 	REQUIRE(plan.find("SJ_PROBE") != string::npos);
 }

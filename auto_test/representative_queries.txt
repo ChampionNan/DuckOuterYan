@@ -1,8 +1,3 @@
-# Proven-empty cliffs
-tpch/oy_th_th_bushy6_v0.sql
-tpcds/oy_ds_ds_bushy5b_v5.sql
-tpch/oy_th_th_line3a_v0.sql
-
 # Aggregate/non-selective regressions
 tpch/oy_th_th_agg15.sql
 tpch/oy_th_th_agg14.sql

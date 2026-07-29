@@ -182,12 +182,10 @@ policy decisions.
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
-`FORCE_OUTERYAN`, uses a semi-join ratio of `0.35`, and keeps a baseline limit
-of `1.10` for diagnostic output and future GATED runs. Under GATED, that limit
-admits an OuterYan candidate whose estimated total cost is within 10% of the
-DuckDB baseline. This 10% is an explicit selection preference, not a claim that
-the physical-cost estimator is 10% accurate. Rebuild the CLI after changing
-them.
+`GATED`, uses a semi-join ratio of `0.35`, and keeps a baseline limit
+of `1.0`. Under GATED, this selects OuterYan only when its estimated total cost
+does not exceed the DuckDB baseline. Rebuild the CLI after changing these
+source-level settings.
 
 Set `SELECTION_MODE` to `SelectionMode::GATED` for the cost gate, or to
 `SelectionMode::FORCE_OUTERYAN` to select every complete,

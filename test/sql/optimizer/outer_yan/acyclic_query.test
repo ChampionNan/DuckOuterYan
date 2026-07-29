@@ -42,11 +42,12 @@ statement ok
 pragma explain_output='optimized_only'
 
 # ============================================================================
-# ACCEPTED — OuterYan considers these shapes; SJ operators appear only when DP
-# actually changes the join grouping. No-reorder shapes fall back to DuckDB.
+# APPLICABLE — OuterYan considers these shapes, then independently applies the
+# strict cost gate. These tiny fixtures are cost-rejected or keep the same
+# grouping, so their selected plans contain no SJ operators.
 # ============================================================================
 
-# 3-relation LEFT-LEFT chain — primary accepted shape.
+# 3-relation LEFT-LEFT chain — applicable but cost-rejected.
 query III rowsort
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
@@ -60,7 +61,7 @@ query II
 EXPLAIN SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # 3-relation LEFT-RIGHT mix.
 query III rowsort

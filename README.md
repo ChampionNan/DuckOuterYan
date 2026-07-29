@@ -77,10 +77,10 @@ candidate_total = candidate_join_cost
 candidate_total <= MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 ```
 
-The current build uses `FORCE_OUTERYAN`. Its diagnostic cost model uses
-`SEMIJOIN_COST_RATIO=0.35` and keeps
-`MAX_CANDIDATE_TO_BASELINE_RATIO=1.10` for GATED experiments. The latter is an
-explicit 10% OuterYan selection tolerance, not a physical-cost coefficient.
+The current build uses `GATED`. Its cost model uses
+`SEMIJOIN_COST_RATIO=0.35` and
+`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`, so OuterYan is selected only when its
+estimated total cost does not exceed DuckDB's baseline cost.
 Before policy selection, a conservative
 proof copy runs DuckDB statistics propagation and empty-result pull-up; if that
 removes every real join, DuckDB is selected with `DUCKDB_PROVEN_EMPTY`.
@@ -99,7 +99,7 @@ optimizer.
 
 ### Force the OuterYan candidate for correctness validation
 
-`FORCE_OUTERYAN` is the normal source-level experiment mode. It bypasses the
+`FORCE_OUTERYAN` is an optional source-level experiment mode. It bypasses the
 cost gate for a changed grouping, but the same-grouping policy can still select
 DuckDB. To execute a valid OuterYan candidate even when its grouping matches
 DuckDB or its estimated cost is worse, scope the diagnostic override to the

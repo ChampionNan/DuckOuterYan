@@ -37,10 +37,11 @@ INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
 statement ok
 PRAGMA explain_output='optimized_only'
 
-# Canonical accepted query — 3-way LEFT chain that DP actually reorders.
+# Canonical applicable query — DP produces a different grouping, but the
+# strict cost gate rejects fixed semi-join work on this tiny fixture.
 
 # ============================================================================
-# All OuterYan passes enabled — SJ_PROBE present.
+# All OuterYan passes enabled — cost-selected DuckDB plan has no SJ_PROBE.
 # ============================================================================
 
 statement ok
@@ -60,7 +61,7 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
 # Disable outer_yan_pre alone — safe: outer_yan_active stays false so DP,
@@ -112,7 +113,7 @@ FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
-# Re-enable — confirm the toggle is fully reversible.
+# Re-enable — confirm the gated result remains stable.
 # ============================================================================
 
 statement ok
@@ -132,7 +133,7 @@ EXPLAIN
 SELECT a.id, b.bx, c.cx
 FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
 ----
-logical_opt	<REGEX>:.*SJ_PROBE.*
+logical_opt	<!REGEX>:.*SJ_PROBE.*
 
 # ============================================================================
 # Coexists with baseline JOIN_ORDER for non-applicable queries.
@@ -164,7 +165,7 @@ SET disabled_optimizers TO ''
 
 # ============================================================================
 # Aggregate policy guard. Aggregate queries always remain on DuckDB's normal
-# optimizer path, regardless of FORCE_OUTERYAN or the aggregate-pushdown flag.
+# optimizer path, regardless of selection mode or the aggregate-pushdown flag.
 # In particular, they must not contain OuterYan semi-join operators.
 # ============================================================================
 

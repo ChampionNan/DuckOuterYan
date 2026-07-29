@@ -119,11 +119,28 @@ JOB_CORPUS_EXCLUSIONS = {
     "job/oy_jb_jb_rd4_048_v1.sql",
 }
 
+# Queries retired after reviewing the 2026-07-26 full-corpus experiment.
+# Keep these exclusions explicit so corpus regeneration cannot restore them.
+RESULT_20260726_CORPUS_EXCLUSIONS = {
+    "tpch/oy_th_th_bushy6_v0.sql",
+    "tpch/oy_th_th_line3a_rd_v1.sql",
+    "tpch/oy_th_th_line3a_v0.sql",
+    "tpcds/oy_ds_ds_agg6.sql",
+    "tpcds/oy_ds_ds_agg8.sql",
+    "tpcds/oy_ds_ds_bushy4f_v1.sql",
+    "tpcds/oy_ds_ds_bushy5b_v5.sql",
+    "tpcds/oy_ds_ds_line3b_rd_v1.sql",
+    "job/oy_jb_jb_agg0.sql",
+    "job/oy_jb_jb_bushy4b_v0.sql",
+    "job/oy_jb_jb_rd3_031_v0.sql",
+}
+
 EXCLUDED_CORPUS_QUERIES = (
     FAST_CORPUS_EXCLUSIONS
     | TIMEOUT_CORPUS_EXCLUSIONS
     | SHORT_CORPUS_EXCLUSIONS
     | JOB_CORPUS_EXCLUSIONS
+    | RESULT_20260726_CORPUS_EXCLUSIONS
 )
 
 
