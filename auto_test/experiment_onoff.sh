@@ -323,7 +323,12 @@ oy_time_median() {
 #                 round1_build=N|NA round1_probe=N|NA \
 #                 round2_build=N|NA round2_probe=N|NA \
 #                 round1_pairs=N|NA round1_filters=N|NA \
-#                 round2_pairs=N|NA round2_filters=N|NA
+#                 round2_pairs=N|NA round2_filters=N|NA \
+#                 default_filter_upper_bound_checked=0|1 \
+#                 default_filter_upper_bound_selected=0|1 \
+#                 uncertain_filter_amplification_guard=0|1 \
+#                 semijoin_retained_cardinality_ratio=N|NA \
+#                 uncertain_filter_cardinality_amplification=N|NA
 #
 # Results are returned through globals so oy_duck runs in this shell and remains
 # covered by the PID-tracking/interrupt cleanup above.
@@ -337,6 +342,11 @@ OY_DECISION_SELECTED_PLAN="NA"
 OY_DECISION_BASELINE_PROVEN_EMPTY="NA"
 OY_DECISION_RAW_COST_WINNER="NA"
 OY_DECISION_GATE_RESULT="NA"
+OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="NA"
+OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="NA"
+OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
+OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
+OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
 OY_DECISION_BASELINE_COST="NA"
 OY_DECISION_CANDIDATE_JOIN_COST="NA"
 OY_DECISION_SEMIJOIN_RAW_COST="NA"
@@ -388,6 +398,11 @@ oy_reset_decision() {
     OY_DECISION_REASON="TRACE_MISSING"
     OY_DECISION_RAW_COST_WINNER="NA"
     OY_DECISION_GATE_RESULT="NA"
+    OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="NA"
+    OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="NA"
+    OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
+    OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
+    OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
     OY_DECISION_BASELINE_COST="NA"
     OY_DECISION_CANDIDATE_JOIN_COST="NA"
     OY_DECISION_SEMIJOIN_RAW_COST="NA"
@@ -455,6 +470,11 @@ oy_decision() {
         OY_DECISION_REASON="$(oy_record_value "$record" reason)"
         OY_DECISION_RAW_COST_WINNER="$(oy_record_value "$record" raw_cost_winner)"
         OY_DECISION_GATE_RESULT="$(oy_record_value "$record" gate_result)"
+        OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="$(oy_record_value "$record" default_filter_upper_bound_checked)"
+        OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="$(oy_record_value "$record" default_filter_upper_bound_selected)"
+        OY_DECISION_UNCERTAIN_FILTER_GUARD="$(oy_record_value "$record" uncertain_filter_amplification_guard)"
+        OY_DECISION_SEMIJOIN_RETAINED_RATIO="$(oy_record_value "$record" semijoin_retained_cardinality_ratio)"
+        OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="$(oy_record_value "$record" uncertain_filter_cardinality_amplification)"
         OY_DECISION_BASELINE_COST="$(oy_record_value "$record" baseline_cost)"
         OY_DECISION_CANDIDATE_JOIN_COST="$(oy_record_value "$record" candidate_join_cost)"
         OY_DECISION_SEMIJOIN_RAW_COST="$(oy_record_value "$record" semijoin_raw_cost)"
@@ -917,7 +937,23 @@ fi
 # ============================================================================
 # COLLECT QUERIES — each tagged with its family DB
 # ============================================================================
-LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=()
+LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=()
+
+# Corpus queries are deliberately flat: one FROM relation followed by explicit
+# JOIN relations (no CTEs or subqueries). Count those SQL tokens instead of
+# inferring depth from the label, whose convention differs across families.
+oy_relation_count() {
+    printf '%s\n' "$1" | awk '
+        {
+            gsub(/[^[:alnum:]_]+/, " ")
+            for (i = 1; i <= NF; i++) {
+                token = tolower($i)
+                if (token == "from" || token == "join") count++
+            }
+        }
+        END { if (count > 0) print count; else print "-" }
+    '
+}
 
 db_for_family() {
     case "$1" in
@@ -930,7 +966,7 @@ db_for_family() {
 }
 
 append_query() {
-    local family="$1" rel="$2" fdb existing
+    local family="$1" rel="$2" fdb existing query_sql relation_count
     local full="$CORPUS/$rel"
     [ -f "$full" ] || { echo "Missing query: $rel" >&2; exit 2; }
     for existing in "${SQL_PATHS[@]:-}"; do
@@ -938,11 +974,15 @@ append_query() {
     done
     fdb="$(db_for_family "$family")" || { echo "Unknown query family: $family" >&2; exit 2; }
     [ -n "$fdb" ] && [ -f "$fdb" ] || { echo "Database unavailable for $rel: $fdb" >&2; exit 2; }
+    query_sql="$(<"$full")"
+    relation_count="$(oy_relation_count "$query_sql")"
+    [ "$relation_count" != "-" ] || { echo "Could not count relations in $rel" >&2; exit 2; }
     LABELS+=("$(basename "$full" .sql)")
-    SQLS+=("$(<"$full")")
+    SQLS+=("$query_sql")
     DBS+=("$fdb")
     QUERY_FAMILIES+=("$family")
     SQL_PATHS+=("$rel")
+    RELATION_COUNTS+=("$relation_count")
 }
 
 if [ -n "$QUERY_LIST" ]; then
@@ -1016,8 +1056,11 @@ csv_result_row() {
 }
 
 CSV_HEADER=(
-    query family sql_path reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
+    query family sql_path relation_count reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
     baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
+    default_filter_upper_bound_checked default_filter_upper_bound_selected
+    uncertain_filter_amplification_guard semijoin_retained_cardinality_ratio
+    uncertain_filter_cardinality_amplification
     baseline_cost candidate_join_cost semijoin_raw_cost semijoin_cost_ratio weighted_semijoin_cost
     candidate_total cost_ratio_limit baseline_threshold round1_build round1_probe round2_build round2_probe
     round1_pairs round1_filters round2_pairs round2_filters
@@ -1041,6 +1084,7 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# OuterYan on/off experiment   started $START_HUMAN"
     echo "# binary : $DUCKDB_BIN"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
+    echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
     echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
     echo "# phases : native OPERATOR_TIMING at threads=1 (1 warm-up + ${RUNS} timed); Total-Time is JSON query latency"
@@ -1095,7 +1139,7 @@ process_one() {
     local i="$1"
     local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
     local family="${QUERY_FAMILIES[i]}" sql_path="${SQL_PATHS[i]}"
-    local nrel="-"; case "$id" in *_N[0-9]*) nrel="$(printf '%s' "$id" | sed -nE 's/.*_N([0-9]+)_.*/\1/p')";; esac
+    local nrel="${RELATION_COUNTS[i]}"
     local gate correct note rows
     gate="$(oy_equiv_check "$db" "$id" "$sql")"
     case "$gate" in
@@ -1106,6 +1150,8 @@ process_one() {
     esac
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
     local formula_id="-" selection_mode="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
+    local default_filter_upper_checked="-" default_filter_upper_selected="-" uncertain_filter_guard="-"
+    local semijoin_retained_ratio="-" uncertain_filter_amplification="-"
     local baseline_cost="-" candidate_join_cost="-" semijoin_raw_cost="-"
     local semijoin_cost_ratio="-" weighted_semijoin_cost="-" candidate_total="-"
     local cost_ratio_limit="-" baseline_threshold="-"
@@ -1143,6 +1189,11 @@ process_one() {
         decision="$OY_DECISION_REASON"
         raw_winner="$OY_DECISION_RAW_COST_WINNER"
         gate_result="$OY_DECISION_GATE_RESULT"
+        default_filter_upper_checked="$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED"
+        default_filter_upper_selected="$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED"
+        uncertain_filter_guard="$OY_DECISION_UNCERTAIN_FILTER_GUARD"
+        semijoin_retained_ratio="$OY_DECISION_SEMIJOIN_RETAINED_RATIO"
+        uncertain_filter_amplification="$OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION"
         baseline_cost="$OY_DECISION_BASELINE_COST"
         candidate_join_cost="$OY_DECISION_CANDIDATE_JOIN_COST"
         semijoin_raw_cost="$OY_DECISION_SEMIJOIN_RAW_COST"
@@ -1291,6 +1342,11 @@ process_one() {
             "$decision" "$raw_winner" "$gate_result" "$gate_applied" "$proven_empty" \
             "$selected" "$formula_id"
         detail_line+="$detail_suffix"
+        printf -v detail_suffix \
+            ' risk=[default_filter_upper_checked=%s selected=%s retained=%s amplification=%s guard=%s]' \
+            "$default_filter_upper_checked" "$default_filter_upper_selected" \
+            "$semijoin_retained_ratio" "$uncertain_filter_amplification" "$uncertain_filter_guard"
+        detail_line+="$detail_suffix"
         if [ "$ker" = "hash" ] || [ "$ker" = "mixed" ]; then
             printf -v detail_suffix ' kernel_notice=[HASH-FALLBACK reasons=%s default_bitmap_budget_bytes=34359738368]' \
                 "$kreasons"
@@ -1303,7 +1359,7 @@ process_one() {
             detail_line+=" cost=[UNAVAILABLE]"
         else
             printf -v detail_suffix \
-                ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[%s <= %s (= %s*%s) => %s; margin=%s] SJ=[R1(build=%s probe=%s pairs=%s filters=%s) R2(build=%s probe=%s pairs=%s filters=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
+                ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[numeric:%s <= %s (= %s*%s); final=%s; margin=%s] SJ=[R1(build=%s probe=%s pairs=%s filters=%s) R2(build=%s probe=%s pairs=%s filters=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
                 "$candidate_join_cost" "$semijoin_cost_ratio" "$semijoin_raw_cost" "$candidate_total" \
                 "$baseline_cost" "$raw_delta" "$raw_ratio" \
                 "$gate_lhs" "$gate_rhs" "$cost_ratio_limit" "$baseline_cost" "$gate_result" "$gate_margin" \
@@ -1335,8 +1391,10 @@ process_one() {
         printf '%s\n%s\n' "$primary_line" "$detail_line"
     } >&2
     csv_result_row \
-        "$id" "$family" "$sql_path" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
+        "$id" "$family" "$sql_path" "$nrel" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
+        "$default_filter_upper_checked" "$default_filter_upper_selected" "$uncertain_filter_guard" \
+        "$semijoin_retained_ratio" "$uncertain_filter_amplification" \
         "$baseline_cost" "$candidate_join_cost" "$semijoin_raw_cost" "$semijoin_cost_ratio" \
         "$weighted_semijoin_cost" "$candidate_total" "$cost_ratio_limit" "$baseline_threshold" \
         "$round1_build" "$round1_probe" "$round2_build" "$round2_probe" \
@@ -1369,7 +1427,10 @@ NSAME=0; NREJECT=0; NSELECTED=0; NDECISION_UNKNOWN=0; NGATE_APPLIED=0
 NPHASE=0; SUMR1=0; SUMR2=0; SUMJOIN=0
 for ((i=0; i<QN; i++)); do
     [ "${QCORRECT[i]}" = "TRUE" ] || continue
-    NCORRECT=$((NCORRECT+1)); NTIMED=$((NTIMED+1))
+    NCORRECT=$((NCORRECT+1))
+    if [ "${QRATIO1[i]}" != "NA" ] || [ "${QRATIOM[i]}" != "NA" ]; then
+        NTIMED=$((NTIMED+1))
+    fi
     case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
     [ "${QGATE[i]}" = "1" ] && NGATE_APPLIED=$((NGATE_APPLIED+1))
     case "${QREORDERED[i]}:${QSELECTED[i]}" in
@@ -1412,6 +1473,21 @@ MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
     echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
     echo "threads: single=1, multi=${OY_THREADS}"
     echo "OuterYan decisions: same-grouping=$NSAME  changed-rejected=$NREJECT  selected=$NSELECTED  unknown=$NDECISION_UNKNOWN  cost-gate-applied=$NGATE_APPLIED"
+    echo "coverage by relation count:"
+    while IFS= read -r nrel; do
+        [ -n "$nrel" ] || continue
+        nrel_queries=0; nrel_correct=0; nrel_timed=0
+        for ((i=0; i<QN; i++)); do
+            [ "${QNREL[i]}" = "$nrel" ] || continue
+            nrel_queries=$((nrel_queries+1))
+            [ "${QCORRECT[i]}" = "TRUE" ] || continue
+            nrel_correct=$((nrel_correct+1))
+            if [ "${QRATIO1[i]}" != "NA" ] || [ "${QRATIOM[i]}" != "NA" ]; then
+                nrel_timed=$((nrel_timed+1))
+            fi
+        done
+        echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  timed=$nrel_timed"
+    done < <(printf '%s\n' "${QNREL[@]}" | sort -n -u)
     echo "speed-up by outer_reordered (reorder CSV compatibility column):"
     echo "  No:  n=$NNO  mean speed-up(TM)=$MNO"
     echo "  Yes: n=$NYES  mean speed-up(TM)=$MYES"

@@ -84,8 +84,20 @@ idx_t RelationStatisticsHelper::GetDistinctCount(LogicalGet &get, ClientContext 
 RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientContext &context) {
 	auto return_stats = RelationStats();
 
+	// `ExtractGetStats` can be called more than once while independently
+	// scoring candidate plans. `get.EstimateCardinality` returns the cached
+	// post-filter estimate after the first call, which would apply the generic
+	// selectivity repeatedly (20% of 20%, and so on). Ask the table function for
+	// its unfiltered cardinality whenever possible so extraction is idempotent.
 	auto base_table_cardinality = get.EstimateCardinality(context);
+	if (get.function.cardinality) {
+		auto node_stats = get.function.cardinality(context, get.bind_data.get());
+		if (node_stats && node_stats->has_estimated_cardinality) {
+			base_table_cardinality = node_stats->estimated_cardinality;
+		}
+	}
 	auto cardinality_after_filters = base_table_cardinality;
+	return_stats.base_cardinality = base_table_cardinality;
 
 	auto catalog_table = get.GetTable();
 	auto name = string("some table");
@@ -150,6 +162,7 @@ RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientC
 			cardinality_after_filters = MaxValue<idx_t>(
 			    LossyNumericCast<idx_t>(double(base_table_cardinality) * RelationStatisticsHelper::DEFAULT_SELECTIVITY),
 			    1U);
+			return_stats.cardinality_uses_default_filter_selectivity = true;
 		}
 		if (base_table_cardinality == 0) {
 			cardinality_after_filters = 0;
@@ -225,6 +238,8 @@ void RelationStatisticsHelper::CopyRelationStats(RelationStats &to, const Relati
 	to.column_distinct_count = from.column_distinct_count;
 	to.column_names = from.column_names;
 	to.cardinality = from.cardinality;
+	to.base_cardinality = from.base_cardinality;
+	to.cardinality_uses_default_filter_selectivity = from.cardinality_uses_default_filter_selectivity;
 	to.table_name = from.table_name;
 	to.stats_initialized = from.stats_initialized;
 }

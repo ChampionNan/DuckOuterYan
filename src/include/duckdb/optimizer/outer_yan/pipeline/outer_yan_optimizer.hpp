@@ -42,8 +42,14 @@ public:
 	//! it to the OuterYan candidate's real-join cost.
 	static constexpr double SEMIJOIN_COST_RATIO = 0.35;
 	//! GATED-mode selection threshold. A value of 1.0 selects OuterYan only
-	//! when its estimated total cost does not exceed DuckDB's baseline cost.
+	//! when its limiting estimated total cost does not exceed DuckDB's baseline
+	//! cost. Uncertain table filters are checked under both their estimated and
+	//! unfiltered-cardinality scenarios.
 	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
+	//! A generic-selectivity filter on a tiny relation is too uncertain to drive
+	//! a large reorder when the two reducer rounds retain essentially all rows.
+	static constexpr double MAX_UNCERTAIN_FILTER_RETAINED_CARDINALITY_RATIO = 0.99;
+	static constexpr double MIN_UNCERTAIN_FILTER_CARDINALITY_AMPLIFICATION = 1000.0;
 
 	explicit OuterYanOptimizer(Optimizer &optimizer);
 

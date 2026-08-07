@@ -17,7 +17,7 @@ synopsis.
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_queries.py` | Generate and validate the SQL corpus |
 | `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
-| `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest |
+| `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | SQL corpus, divided into `graph`, `tpch`, `tpcds`, and `job` |
 | `results/` | Generated text, CSV, profile, and trace output |
@@ -172,6 +172,20 @@ baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 
 select OuterYan iff candidate_total <= baseline_threshold
 ```
+
+Cost formula V3 applies two consistency checks before that final comparison.
+For fully reduced all-INNER candidates, every intermediate estimate is bounded
+below by the largest reduced leaf in its subtree. For table filters that used
+DuckDB's generic selectivity fallback, the candidate and baseline are also
+scored with unfiltered base cardinalities; the gate uses whichever scenario
+has the higher candidate/baseline ratio. These checks target false-positive
+selections in the slow tail without globally tightening the `1.0` limit and
+discarding unrelated wins.
+
+The uncertain-filter amplification guard also rejects a candidate when the
+largest input is at least `1000x` the uncertain filtered relation and the two
+reducer rounds retain at least `99%` of estimated input cardinality. The trace
+records the retention ratio, amplification, and guard result explicitly.
 
 The trace and CSV report two separate comparisons: `raw_cost_winner` compares
 `candidate_total` directly with `baseline_cost`, while `gate_result` compares
@@ -369,10 +383,24 @@ For same-grouping, inapplicable, unavailable, or forced-policy cases, the report
 states that the numeric gate was skipped and prints the decision reason.
 
 The CSV exports the same decision, cost, kernel, correctness, timing, and phase
-fields in machine-readable form, including `round1_pairs`, `round1_filters`,
-`round2_pairs`, `round2_filters`, and the native operator counts.
+fields in machine-readable form, including the SQL-derived `relation_count`,
+`default_filter_upper_bound_checked`, `default_filter_upper_bound_selected`,
+`uncertain_filter_amplification_guard`,
+`semijoin_retained_cardinality_ratio`,
+`uncertain_filter_cardinality_amplification`, `round1_pairs`,
+`round1_filters`, `round2_pairs`, `round2_filters`, and the native operator
+counts.
 `effective_pass` remains `main` for schema compatibility. The final text summary groups speed-ups separately by
-`outer_reordered` and `outer_yan_selected`.
+`outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
+counts for every relation depth present in the run.
+
+`plot_speedup.py` renders separate per-family phase figures named
+`phase_breakdown_<family>`. Each query has grouped R1, R2, R3, and residual
+`Other` elapsed-time bars on a base-10 logarithmic x-axis, plus a marker and
+label for its matched profiled total. This keeps small R1/R2 measurements
+visible beside much larger phases. Structurally absent DuckDB R1/R2 phases are
+blank; incomplete or internally inconsistent profiles are omitted rather than
+converted to zero.
 
 ## Optimizer trace
 

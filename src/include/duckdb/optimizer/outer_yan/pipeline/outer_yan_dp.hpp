@@ -101,6 +101,7 @@ struct OuterYanJoinCostBreakdown {
 //! weighted contribution is added exactly once by an application-cost gate.
 struct OuterYanDPCostSummary {
 	OuterYanDPCostParameters parameters;
+	vector<double> input_cardinalities;
 	vector<double> reduced_cardinalities;
 	vector<OuterYanSemijoinCostStep> semijoin_steps;
 	OuterYanJoinCostBreakdown candidate_join_breakdown;
@@ -159,6 +160,12 @@ public:
 	double ScoreCurrentJoinTree(OuterYanTree &tree);
 	OuterYanJoinCostBreakdown ScoreCurrentJoinTreeDetailed(
 	    OuterYanTree &tree, const vector<double> *leaf_cardinality_override = nullptr);
+	//! Re-score a normal join tree with unfiltered base cardinalities wherever
+	//! the generic 20% table-filter estimate was used.
+	OuterYanJoinCostBreakdown ScoreCurrentJoinTreeConservatively(OuterYanTree &tree, bool &used_upper_bound);
+	//! Re-score the current OuterYan tree, including reducer work, under the
+	//! same conservative uncertain-filter scenario.
+	OuterYanDPCostSummary ScoreCurrentSemijoinPlanConservatively(OuterYanTree &tree, bool &used_upper_bound);
 
 	//! Stable structural signature of the current OT.  Each JOIN contributes
 	//! the sorted set of base-table indexes below it; using table indexes rather
@@ -207,7 +214,12 @@ private:
 	//! Estimate both reducer rounds before enumeration. The resulting leaf
 	//! cardinalities feed every real-join candidate. Fixed build/probe work is
 	//! returned separately and never charged to a DP leaf.
-	void BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary);
+	void BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary,
+	                            const vector<double> *base_cardinality_override = nullptr);
+	vector<double> ConservativeLeafCardinalities(OuterYanTree &tree, bool &used_upper_bound);
+	bool CanApplyFullReductionCardinalityLowerBound(const OuterYanTree &tree) const;
+	double ReducedSetCardinalityLowerBound(const JoinRelationSet &set) const;
+	double ReducedSubtreeCardinalityLowerBound(const OTNode &node) const;
 	void InitLeafPlans(OuterYanTree &tree);
 	//! Translate `tree.root_relations` (RelationId, the GROUP BY / DISTINCT
 	//! anchor set) into the DP-side `output_relations` (RelationIndex) and
@@ -255,6 +267,7 @@ private:
 		double cardinality = 0.0;
 		double cost = 0.0;
 	};
+	void ApplyFullReductionCardinalityLowerBound(JoinEstimate &estimate, double lower_bound) const;
 
 	//! Output cardinality of `L_set joinKind R_set` via the OT JOIN's owned
 	//! metadata. Applies the user's outer-join correction formula on top of
@@ -329,6 +342,10 @@ private:
 	//! reduction. Reducer work is query-global and returned separately from the
 	//! DP memo in OuterYanDPCostSummary.
 	vector<double> semijoin_cardinality;
+	//! In a fully reduced all-INNER acyclic join, every surviving base tuple
+	//! extends to the full result. Intermediate cardinalities therefore cannot
+	//! fall below the largest reduced leaf in their subset.
+	bool enforce_full_reduction_cardinality_lower_bound = false;
 	//! Set if greedy could not connect all relations without a cross product.
 	//! On true, `Optimize` leaves the OT untouched (Path A bail-out).
 	bool bailed_out = false;

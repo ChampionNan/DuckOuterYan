@@ -1234,6 +1234,74 @@ TEST_CASE("outer_yan passes: DP — cost model restructures the join order",
 	REQUIRE(OuterYanDP::JoinGroupingSignature(*tree) != input_signature);
 }
 
+TEST_CASE("outer_yan passes: DP — full inner reduction bounds every intermediate",
+          "[outer_yan][passes][dp][cost]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE title AS SELECT i % 1876 AS id FROM range(2528) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE cast_info AS SELECT i % 2079 AS movie_id, i % 1746 AS person_id "
+	    "FROM range(36244) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE name AS SELECT i % 3607 AS id FROM range(4168) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE aka_name AS SELECT 10 + (i % 285) AS person_id FROM range(901) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE"));
+
+	const string sql =
+	    "SELECT * FROM title t INNER JOIN "
+	    "(cast_info ci LEFT JOIN (name n FULL JOIN aka_name an ON n.id = an.person_id) "
+	    "ON ci.person_id = n.id) ON t.id = ci.movie_id WHERE an.person_id >= 10";
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	auto summary = OuterYanDP(ctx).Optimize(*tree);
+	ctx.transaction.Commit();
+	REQUIRE(summary.has_complete_plan);
+	REQUIRE(summary.candidate_join_breakdown.steps.size() == 3);
+
+	bool observed_active_bound = false;
+	for (const auto &step : summary.candidate_join_breakdown.steps) {
+		REQUIRE(step.join_kind == JoinType::INNER);
+		const auto lower_bound = MaxValue(step.left_cardinality, step.right_cardinality);
+		REQUIRE(step.output >= lower_bound);
+		if (lower_bound > 4.0 * MinValue(step.left_cardinality, step.right_cardinality) &&
+		    step.output == lower_bound) {
+			observed_active_bound = true;
+		}
+	}
+	REQUIRE(observed_active_bound);
+}
+
+TEST_CASE("outer_yan policy: uncertain tiny filter without reduction keeps DuckDB",
+          "[outer_yan][policy][cost]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE region AS SELECT i AS r_regionkey FROM range(5) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE nation AS SELECT i AS n_nationkey, i % 5 AS n_regionkey FROM range(25) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE supplier AS SELECT i AS s_suppkey, i % 25 AS s_nationkey FROM range(1000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query(
+	    "CREATE TABLE partsupp AS SELECT i % 700 AS ps_suppkey FROM range(80000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE"));
+
+	const string sql =
+	    "SELECT * FROM ((region RIGHT JOIN nation ON r_regionkey = n_regionkey) "
+	    "INNER JOIN (supplier FULL JOIN partsupp ON s_suppkey = ps_suppkey) "
+	    "ON n_nationkey = s_nationkey) WHERE n_nationkey % 7 <> 0";
+	const auto gated_plan = ExplainOptimizedPlan(con, "", sql);
+	REQUIRE(gated_plan.find("SJ_BUILD") == string::npos);
+	REQUIRE(gated_plan.find("SJ_PROBE") == string::npos);
+
+	ScopedOuterYanCandidateForce force_candidate;
+	const auto forced_plan = ExplainOptimizedPlan(con, "", sql);
+	REQUIRE(forced_plan.find("SJ_BUILD") != string::npos);
+	REQUIRE(forced_plan.find("SJ_PROBE") != string::npos);
+}
+
 // ---- 4d Resimplification: a de-simplified edge reverts; the flag is recorded.
 TEST_CASE("outer_yan passes: Resimplify — de-simplified edge reverts (flag recorded)",
           "[outer_yan][passes][resimplify]") {

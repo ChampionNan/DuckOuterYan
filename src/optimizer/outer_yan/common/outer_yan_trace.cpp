@@ -128,6 +128,12 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	line << std::setprecision(17)
 	     << "[OY_DECISION] formula_id=" << costs.formula_id
 	     << " selection_mode=" << record.selection_mode
+	     << " default_filter_upper_bound_checked="
+	     << (costs.default_filter_upper_bound_checked ? 1 : 0)
+	     << " default_filter_upper_bound_selected="
+	     << (costs.default_filter_upper_bound_selected ? 1 : 0)
+	     << " uncertain_filter_amplification_guard="
+	     << (costs.uncertain_filter_amplification_guard ? 1 : 0)
 	     << " selected_plan=" << SelectedPlanToString(record.selected_plan)
 	     << " outer_reordered=" << (record.outer_reordered ? 1 : 0)
 	     << " cost_gate_applied=" << (record.cost_gate_applied ? 1 : 0)
@@ -161,6 +167,10 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 		}
 	};
 	metric("baseline_cost", costs.baseline_cost, costs.available);
+	ratio_metric("semijoin_retained_cardinality_ratio", costs.semijoin_retained_cardinality_ratio,
+	             costs.available);
+	metric("uncertain_filter_cardinality_amplification",
+	       costs.uncertain_filter_cardinality_amplification, costs.available);
 	metric("candidate_join_cost", costs.candidate_join_cost, costs.available);
 	metric("semijoin_raw_cost", costs.semijoin_raw_cost, costs.available);
 	ratio_metric("semijoin_cost_ratio", costs.semijoin_cost_ratio, costs.available);

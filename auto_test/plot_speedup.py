@@ -7,6 +7,8 @@ auto_test/experiment_onoff.sh) and renders a set of comparison figures:
 
   * box_*        : T1 & TM speed-up distributions grouped by kernel / reorder /
                    family / topology
+  * relations    : T1 & TM speed-up by relation count across every family
+  * phase_breakdown_* : per-query native R1 / R2 / R3 / Other profile breakdown
   * sparsity     : TM speed-up vs sparsity (s01..s95) for the graph corpus
   * ratio        : median TM/T1  (multi-thread amplifies >1 / penalises <1)
   * winloss      : win / no-op / regress counts per kernel & family
@@ -49,6 +51,12 @@ KERNEL_ORDER = ["bitmap", "mixed", "hash", "none"]
 KERNEL_COLOR = {"bitmap": "#55A868", "mixed": "#C44E52",
                 "hash": "#8172B3", "none": "#999999"}
 FAMILY_ORDER = ["graph", "TPC-H", "TPC-DS", "JOB"]
+PHASES = [
+    ("R1 semi-join", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
+    ("R2 semi-join", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
+    ("R3 real join", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
+    ("Other", "profile_other_elapsed_s", "profile_other_ratio", "#B0B0B0"),
+]
 
 # =============================== EDIT ME : defaults ==================================
 # Used when you run `python3 plot_speedup.py` with NO command-line arguments.
@@ -83,7 +91,13 @@ def fmt(x):
 def enrich(df, run):
     df = df.copy()
     df["run"] = run
-    for c in ["t1_off", "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup", "rows"]:
+    numeric_columns = [
+        "t1_off", "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup", "rows",
+        "profile_total_time_s",
+        *(seconds for _, seconds, _, _ in PHASES),
+        *(ratio for _, _, ratio, _ in PHASES),
+    ]
+    for c in numeric_columns:
         if c in df:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
@@ -129,9 +143,51 @@ def enrich(df, run):
     def grab(pat, q, conv=str):
         m = re.search(pat, q)
         return conv(m.group(1)) if m else None
-    df["N"] = df["query"].map(
-        lambda q: grab(r"N(\d+)", q, int)
-        or grab(r"(?:line|bushy|bushyBal|rdeep|branch|star)(\d+)", q, int))
+
+    def relation_count_from_name(q):
+        """Best-effort fallback for CSVs written before relation_count existed."""
+        for pat in (r"(?:^|_)N(\d+)(?=_|$)",
+                    r"(?:^|_)(?:line|bushyBal|bushy|rdeep|rd|branch|star)"
+                    r"(\d+)[a-z]?(?=_|$)"):
+            count = grab(pat, q, int)
+            if count is not None:
+                return count
+        # Every generated numbered aggregate uses one three-relation base.
+        if re.search(r"_(?:th|ds|jb)_agg\d+$", q):
+            return 3
+        return np.nan
+
+    fallback_count = df["query"].map(relation_count_from_name)
+    if "sql_path" in df:
+        corpus_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "outerjoin_query")
+
+        def relation_count_from_sql_path(relative_path):
+            """Recover exact metadata for old CSV rows whose label omits depth."""
+            if not isinstance(relative_path, str) or not relative_path:
+                return np.nan
+            normalized = os.path.normpath(relative_path)
+            unsafe_parent = normalized == ".." or normalized.startswith(".." + os.sep)
+            if os.path.isabs(normalized) or unsafe_parent:
+                return np.nan
+            query_path = os.path.join(corpus_root, normalized)
+            try:
+                with open(query_path, encoding="utf-8") as query_file:
+                    sql = query_file.read()
+            except OSError:
+                return np.nan
+            count = len(re.findall(r"\b(?:FROM|JOIN)\b", sql, flags=re.IGNORECASE))
+            return count if count > 0 else np.nan
+
+        path_count = df["sql_path"].map(relation_count_from_sql_path)
+        fallback_count = fallback_count.fillna(path_count)
+    if "relation_count" in df:
+        reported_count = pd.to_numeric(df["relation_count"], errors="coerce")
+        reported_count = reported_count.where(
+            (reported_count > 0) & (reported_count == np.floor(reported_count)))
+        df["relation_count"] = reported_count.fillna(fallback_count)
+    else:
+        df["relation_count"] = fallback_count
     df["mix"] = df["query"].map(lambda q: grab(r"mix([ABC])", q))
     df["sparsity"] = df["query"].map(lambda q: grab(r"_s(\d+)", q, int))
     df["is_agg"] = df["query"].str.contains("agg")
@@ -220,7 +276,14 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
     olabel = other.split("_")[0].upper()
     BAR = 0.40                                        # fixed bar thickness (data units)
     for fam in FAMILY_ORDER:
-        sub = t[t["family"] == fam].dropna(subset=[col]).sort_values(col)
+        sub = t[t["family"] == fam].dropna(subset=[col]).copy()
+        plans = sub.get(
+            "selected_plan", pd.Series("", index=sub.index, dtype="object")
+        ).astype(str).str.upper()
+        sub["_plan_label"] = np.select(
+            [plans.eq("OUTERYAN"), plans.eq("DUCKDB")], ["OY", "D"], default="?"
+        )
+        sub = sub.sort_values(col)
         n = len(sub)
         if n == 0:
             continue
@@ -236,7 +299,10 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
                             fontsize=6, color="0.2")
         ax.axvline(1, color="grey", ls="--", lw=1)
         ax.set_xscale("log")
-        ax.set_yticks(y); ax.set_yticklabels(sub["query"], fontsize=7)
+        query_labels = [
+            f"{query} [{plan}]" for query, plan in zip(sub["query"], sub["_plan_label"])
+        ]
+        ax.set_yticks(y); ax.set_yticklabels(query_labels, fontsize=7)
         ax.set_ylim(-1, n)
         ax.set_xlabel("speed-up (×, log, >1 = ON faster)")
         ax.set_title(f"{fam}: all {n} timed queries by {metric.upper()} speed-up")
@@ -245,6 +311,123 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
                   fontsize=7, loc="lower right")
         fig.tight_layout()
         save(fig, outdir, f"per_query_{fam.replace('-', '').lower()}")
+
+
+def fig_phase_by_family(t, outdir):
+    """Plot per-phase native operator time for every complete query profile.
+
+    The four phase bars are grouped rather than stacked and their endpoints use
+    a base-10 logarithmic x-axis. This keeps small R1/R2 measurements visible
+    beside much larger R3/Other values. DuckDB plans legitimately have no R1/R2
+    operators, so structural zeros are left blank on the logarithmic axis; all
+    other missing or inconsistent profiles are omitted.
+    """
+    seconds_columns = [seconds for _, seconds, _, _ in PHASES]
+    ratio_columns = [ratio for _, _, ratio, _ in PHASES]
+    required = seconds_columns + ratio_columns + ["profile_total_time_s"]
+    if not set(required).issubset(t.columns):
+        return
+
+    for fam in FAMILY_ORDER:
+        family_rows = t[t["family"] == fam].copy()
+        if family_rows.empty:
+            continue
+
+        for column in required:
+            family_rows[column] = pd.to_numeric(family_rows[column], errors="coerce")
+        plans = family_rows.get(
+            "selected_plan", pd.Series("", index=family_rows.index, dtype="object")
+        ).astype(str).str.upper()
+        duckdb = plans.eq("DUCKDB")
+        sj_columns = seconds_columns[:2] + ratio_columns[:2]
+        for column in sj_columns:
+            family_rows.loc[duckdb & family_rows[column].isna(), column] = 0.0
+
+        seconds = family_rows[seconds_columns]
+        ratios = family_rows[ratio_columns]
+        seconds_total = seconds.sum(axis=1, min_count=len(seconds_columns))
+        ratio_total = ratios.sum(axis=1, min_count=len(ratio_columns))
+        total_time = family_rows["profile_total_time_s"]
+        finite_seconds = np.isfinite(seconds).all(axis=1)
+        nonnegative_seconds = seconds.ge(0).all(axis=1)
+        finite_ratios = np.isfinite(ratios).all(axis=1)
+        bounded_ratios = ratios.ge(0).all(axis=1) & ratios.le(1).all(axis=1)
+        seconds_close = np.isclose(seconds_total, total_time, rtol=1e-6, atol=1e-9)
+        ratios_close = (ratio_total - 1.0).abs().le(1e-6)
+        paired_ratios_close = np.isclose(
+            ratios.to_numpy(float), seconds.div(total_time, axis=0).to_numpy(float),
+            rtol=0, atol=1e-6,
+        ).all(axis=1)
+        known_plan = plans.isin(["DUCKDB", "OUTERYAN"])
+        duckdb_sj_is_zero = ~duckdb | family_rows[sj_columns].eq(0).all(axis=1)
+        complete = (finite_seconds & nonnegative_seconds & finite_ratios & bounded_ratios
+                    & np.isfinite(total_time) & total_time.gt(0)
+                    & seconds_close & ratios_close & paired_ratios_close
+                    & known_plan & duckdb_sj_is_zero)
+        sub = family_rows.loc[complete].copy()
+        if sub.empty:
+            continue
+
+        sub["_plan_label"] = np.select(
+            [plans.loc[complete].eq("OUTERYAN"), plans.loc[complete].eq("DUCKDB")],
+            ["OY", "D"], default="?"
+        )
+        sub = sub.sort_values(["profile_total_time_s", "query"], kind="stable")
+        n = len(sub)
+        skipped = len(family_rows) - n
+        height = min(50, max(3.2, 0.42 * n + 1.4))
+        fig, ax = plt.subplots(figsize=(11.0, height))
+        y = np.arange(n)
+        positive_phase_times = sub[seconds_columns].to_numpy(float)
+        positive_phase_times = positive_phase_times[positive_phase_times > 0]
+        if positive_phase_times.size == 0:
+            continue
+        axis_floor = 10 ** np.floor(np.log10(positive_phase_times.min()))
+        phase_offsets = np.linspace(-0.27, 0.27, len(PHASES))
+        for offset, (label, seconds, _, color) in zip(phase_offsets, PHASES):
+            values = sub[seconds].to_numpy(float)
+            positive = values > 0
+            # On a logarithmic axis bars cannot start at zero. Starting at the
+            # common decade floor makes the endpoint (the encoded value) exact
+            # while keeping structural zero phases absent.
+            ax.barh(y[positive] + offset, values[positive] - axis_floor,
+                    left=axis_floor, height=0.16, color=color,
+                    edgecolor="white", linewidth=0.25, label=label)
+
+        # Mark and label the matched total without treating it as another phase.
+        totals = sub["profile_total_time_s"].to_numpy(float)
+        ax.scatter(totals, y, marker="|", s=42, linewidths=0.8,
+                   color="black", zorder=4, label="Total-Time")
+        for yi, total in zip(y, sub["profile_total_time_s"].to_numpy(float)):
+            ax.annotate(f"{total:.3g} s", xy=(total, yi), xytext=(4, 0),
+                        textcoords="offset points", ha="left", va="center",
+                        fontsize=6, color="0.2", clip_on=False)
+
+        query_labels = [
+            f"{query} [{plan}]" for query, plan in zip(sub["query"], sub["_plan_label"])
+        ]
+        ax.set_yticks(y)
+        ax.set_yticklabels(query_labels, fontsize=7)
+        ax.set_ylim(-0.8, n - 0.2)
+        ax.set_xscale("log", base=10)
+        ax.set_xlim(axis_floor, totals.max() * 1.55)
+        ax.grid(axis="x", which="major", color="0.84", linewidth=0.65)
+        ax.grid(axis="x", which="minor", color="0.92", linewidth=0.4)
+        ax.set_axisbelow(True)
+        ax.set_xlabel("native operator time (seconds, base-10 log scale)")
+        omission = f"; {skipped} incomplete omitted" if skipped else ""
+        title = f"{fam}: native phase breakdown ({n} queries{omission})"
+        top = 1.0 - min(0.20, 0.55 / height)
+        fig.tight_layout(rect=(0, 0, 1, top))
+        fig.suptitle(title, y=0.995)
+        fig.legend(
+            handles=[Patch(facecolor=color, label=label) for label, _, _, color in PHASES]
+                    + [plt.Line2D([], [], color="black", marker="|", linestyle="None",
+                                  markersize=8, label="Total-Time")],
+            ncol=5, fontsize=7, loc="upper center",
+            bbox_to_anchor=(0.5, 0.995 - 0.25 / height), frameon=False,
+        )
+        save(fig, outdir, f"phase_breakdown_{fam.replace('-', '').lower()}")
 
 
 def fig_machine_cmp(t, outdir):
@@ -300,16 +483,19 @@ def render_run(t, outdir, metric, runlabel):
     grouped_box(ax, t, "topology", topo, "Speed-up by shape", label_pos="above")
     fig.tight_layout(); save(fig, outdir, "speedup_by_shape")
 
-    # speed-up by chain depth (#relations), graph corpus
-    g = t[t["family"] == "graph"]
-    if len(g) and g["N"].notna().any():
-        g = g.copy(); g["depth"] = g["N"].astype("Int64").astype(str)
-        fig, ax = plt.subplots(figsize=(8, 5))
-        grouped_box(ax, g, "depth", sorted(g["depth"].unique(), key=int),
-                    "Speed-up by #relations", label_pos="above")
+    # speed-up by relation count across every benchmark family
+    by_relations = t[t["relation_count"].notna()].copy()
+    if len(by_relations):
+        by_relations["relation_count_label"] = (
+            by_relations["relation_count"].astype("Int64").astype(str))
+        relation_order = sorted(by_relations["relation_count_label"].unique(), key=int)
+        fig, ax = plt.subplots(figsize=(max(8, 0.9 * len(relation_order)), 5))
+        grouped_box(ax, by_relations, "relation_count_label", relation_order,
+                    "Speed-up by #relations (all families)", label_pos="above")
         fig.tight_layout(); save(fig, outdir, "speedup_by_relations")
 
     fig_per_query_by_family(t, outdir, metric)
+    fig_phase_by_family(t, outdir)
 
     print(f"\n[{runlabel}] geomean speed-up (T1 / TM):")
     for k in KERNEL_ORDER:

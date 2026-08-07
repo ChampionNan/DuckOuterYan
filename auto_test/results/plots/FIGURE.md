@@ -3,15 +3,19 @@
 These figures are produced by [`auto_test/plot_speedup.py`](../../plot_speedup.py) from the
 `experiment_onoff_*.csv` result files. 
 
-### The one rule that explains every figure
-**speed-up = time(OFF) / time(ON).**
+### Scales used by the figures
+
+For speed-up figures, **speed-up = time(OFF) / time(ON).**
+
 - **> 1** → OuterYan **ON is faster** (good).
 - **= 1** → no difference.
 - **< 1** → OuterYan **ON is slower** (regression).
 
-A dashed/grey line at **1.0** appears on every chart as the break-even reference.
-`T1` = single-thread, `TM` = multi-thread. Only **correct & timed** queries are
-plotted; `TIMEOUT`/`ERROR` rows are dropped (the skipped count is printed to stdout).
+A dashed/grey line at **1.0** marks break-even on speed-up charts. `T1` is
+single-thread and `TM` is multi-thread. Phase-breakdown figures instead show
+native elapsed seconds on a base-10 logarithmic axis; the matched total is
+marked and printed beside every query. Only **correct & timed** queries are
+plotted; `TIMEOUT`/`ERROR` rows are dropped.
 
 ---
 
@@ -22,11 +26,14 @@ plots/
 ├── <run>/                 # one sub-folder per source CSV (e.g. 20260622_081932/)
 │   ├── speedup_by_kernel_joinorder.pdf  speedup_by_benchmark.pdf  speedup_by_shape.pdf
 │   ├── speedup_by_relations.pdf
-│   └── per_query_graph.pdf  per_query_tpch.pdf  per_query_tpcds.pdf  per_query_job.pdf
+│   ├── per_query_graph.pdf  per_query_tpch.pdf  per_query_tpcds.pdf  per_query_job.pdf
+│   └── phase_breakdown_graph.pdf  phase_breakdown_tpch.pdf
+│       phase_breakdown_tpcds.pdf  phase_breakdown_job.pdf
 └── machine_cmp.pdf        # only when ≥2 CSVs: run-vs-run comparison
 ```
-A family figure (e.g. `per_query_job.png`) **only exists if that run actually has
-timed queries in that family** — a run with no JOB results produces no JOB figure.
+A family figure (for example, `phase_breakdown_job.png`) **only exists if that
+run has valid rows for that family**. A phase-profile error is omitted from the
+phase chart and counted in its title; it is never rendered as zero work.
 
 ---
 
@@ -39,6 +46,10 @@ timed queries in that family** — a run with no JOB results produces no JOB fig
 | **family** | `graph` (synthetic chains) · `TPC-H` · `TPC-DS` · `JOB` |
 | **topology** | join-graph shape: `line` · `bushy` · `bushyBal` · `rdeep` · `branch` · `star` · `agg` · `real` |
 | **T1 / TM** | single-thread / multi-thread speed-up |
+| **R1** | bottom-up semi-join native operator time (blue) |
+| **R2** | top-down semi-join native operator time (green) |
+| **R3** | real-join native operator time (orange) |
+| **Other** | residual needed to close the matched profiled `Total-Time` (grey) |
 
 ---
 
@@ -124,7 +135,7 @@ the systematically generated topologies above.
 ### Other name tokens
 | token | meaning |
 |---|---|
-| `N3 … N6` | number of joined relations (chain depth) |
+| `N3, N4, …` | number of joined relations (chain depth) |
 | `mixA / mixB / mixC` | cyclic pattern of join *types* along the tree — `mixA = LEFT,INNER,RIGHT,FULL`; `mixB = FULL,RIGHT,INNER,LEFT`; `mixC = RIGHT,FULL,LEFT,INNER` |
 | `s01 … s95` | selectivity of the `WHERE R1.src % k` predicate ≈ % of base rows kept → result size (`s01`≈1%, `s95`≈95%); the `rows` column grows with it |
 | `_rd_` | right-deep variant of a chain topology (chains only) |
@@ -148,15 +159,25 @@ Same box format, grouped by **graph / TPC-H / TPC-DS / JOB**; diamond + number =
 Same box format, grouped by topology (`line, bushy, bushyBal, rdeep, rd, branch, agg, real`); x-labels horizontal, geomean number placed **above** each box.
 - **Takeaway:** `line`/`rdeep`/`bushyBal` lean positive; `agg` carries most regressions.
 
-### `speedup_by_relations.pdf` — speed-up by chain depth (#relations), graph corpus
-Single box panel grouped by **#relations** (`N3, N4, …`); geomean number above each box. Graph corpus only (where depth varies systematically).
-- **Takeaway:** deeper chains win more — N4 TM geomean ~3.1× vs N3 ~1.7× (more relations = more predicate-transfer reduction).
+### `speedup_by_relations.pdf` — speed-up by number of relations, all families
+Single box panel grouped by **#relations** (`3, 4, …`); the geomean is printed
+above each box. Every correctly timed graph, TPC-H, TPC-DS, and JOB query with a
+known relation count participates. New CSVs provide `relation_count` directly;
+older CSVs recover it from the corpus SQL path, with a query-label fallback when
+that historical SQL file is no longer present.
 
 ### `per_query_graph.pdf` · `per_query_tpch.pdf` · `per_query_tpcds.pdf` · `per_query_job.pdf`
 - **Every timed query in that family**, one horizontal row, sorted by speed-up. Each row has an **orange bar = TM** and a **grey bar = T1** beneath it — one consistent colour (kernel is **not** colour-coded); log x; reference line at 1.
+- `[OY]` identifies an executed OuterYan candidate; `[D]` identifies a DuckDB-selected row, where an ON/OFF deviation is benchmark variance rather than candidate runtime.
 - **Bar thickness is fixed**, so the figure height grows with the query count — it adapts to any corpus size without crowding. Exact values are labelled only when a family has ≤ 24 rows (else too dense).
 - **How to read:** scan top→bottom; where the orange (TM) bar is shorter than the grey (T1) bar, multi-thread helped less than single-thread.
 - **Takeaway:** the full per-query detail for one family.
+
+### `phase_breakdown_graph.pdf` · `phase_breakdown_tpch.pdf` · `phase_breakdown_tpcds.pdf` · `phase_breakdown_job.pdf`
+
+- Four grouped elapsed-time bars per complete query profile: **blue R1**, **green R2**, **orange R3**, and **grey Other**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The matched `Total-Time` is marked and labelled separately.
+- `[OY]` means the OuterYan candidate executed; `[D]` means DuckDB executed. DuckDB therefore has structural zero R1/R2 segments. Missing OuterYan phases or inconsistent profiles are omitted and counted in the title.
+- `Other` is not a fourth optimizer round. It includes unmatched operators and work outside native operator timing, and is retained so every bar truthfully closes `Total-Time`.
 
 ### `machine_cmp.png` — run-vs-run (root folder, only with ≥2 CSVs)
 - **x = TM speed-up on run A, y = TM speed-up on run B**, one dot per query common to both; log-log with the y=x diagonal.
@@ -173,4 +194,5 @@ Single box panel grouped by **#relations** (`N3, N4, …`); geomean number above
 | Which kernel wins / regresses? | `speedup_by_kernel_joinorder.pdf` (left) |
 | Does join order matter? | `speedup_by_kernel_joinorder.pdf` (right) |
 | Which exact queries are best/worst? | `per_query_<family>.pdf` |
+| Which round consumes each query's profiled time? | `phase_breakdown_<family>.pdf` |
 | Are the two machines consistent? | `machine_cmp.pdf` |

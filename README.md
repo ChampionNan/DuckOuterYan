@@ -80,7 +80,20 @@ candidate_total <= MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 The current build uses `GATED`. Its cost model uses
 `SEMIJOIN_COST_RATIO=0.35` and
 `MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`, so OuterYan is selected only when its
-estimated total cost does not exceed DuckDB's baseline cost.
+estimated total cost does not exceed DuckDB's baseline cost. Cost formula V3
+also closes two lower-tail false positives without changing that global
+threshold:
+
+- A fully reduced all-INNER candidate cannot estimate an intermediate result
+  below the largest reduced leaf in that subtree.
+- When DuckDB had to use its generic table-filter selectivity, both plans are
+  re-scored once with the unfiltered base cardinality. The gate must pass the
+  worse of the ordinary and conservative candidate/baseline ratios.
+- A candidate is rejected when such an uncertain tiny relation is amplified
+  by at least `1000x` while both reducer rounds retain at least `99%` of their
+  estimated input rows. In that pattern, the filter assumption is driving a
+  large reorder without a credible reduction benefit.
+
 Before policy selection, a conservative
 proof copy runs DuckDB statistics propagation and empty-result pull-up; if that
 removes every real join, DuckDB is selected with `DUCKDB_PROVEN_EMPTY`.
@@ -170,7 +183,7 @@ DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
     --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
 
-# Release build plus P0/P1 representative bare-query validation.
+# Release build plus P0/P1 representative bare-query validation (3–7 relations).
 SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
     --only all \
     --query-list auto_test/representative_queries.txt \

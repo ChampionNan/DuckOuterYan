@@ -38,6 +38,7 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 	BuildLeafRelations(tree);
 	BuildEdgesFromOT(tree);
 	BuildSemijoinCostModel(tree, summary);
+	enforce_full_reduction_cardinality_lower_bound = CanApplyFullReductionCardinalityLowerBound(tree);
 	PopulateOutputRelations(tree);
 
 	if (num_relations <= 1) {
@@ -346,15 +347,24 @@ void OuterYanDP::BuildEdgesFromOT(OuterYanTree &tree) {
 	}
 }
 
-void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary) {
+void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary,
+                                        const vector<double> *base_cardinality_override) {
 	semijoin_cardinality.resize(num_relations);
 	vector<double> base_cardinality(num_relations);
+	if (base_cardinality_override && base_cardinality_override->size() != num_relations) {
+		throw InternalException("OuterYanDP::BuildSemijoinCostModel: expected %llu base overrides, got %llu",
+		                        num_relations, base_cardinality_override->size());
+	}
 	for (idx_t r = 0; r < num_relations; r++) {
 		auto &stats = tree.ot_relations_by_id[r]->stats;
-		base_cardinality[r] = static_cast<double>(stats.stats_initialized ? stats.cardinality
-		                                                               : MaxValue<idx_t>(stats.cardinality, 1));
+		base_cardinality[r] =
+		    base_cardinality_override
+		        ? ClampPlanCardinality((*base_cardinality_override)[r])
+		        : static_cast<double>(stats.stats_initialized ? stats.cardinality
+		                                                      : MaxValue<idx_t>(stats.cardinality, 1));
 		semijoin_cardinality[r] = base_cardinality[r];
 	}
+	summary.input_cardinalities = base_cardinality;
 
 	std::set<vector<std::pair<idx_t, idx_t>>> built_filters;
 	idx_t round1_step = 0;
@@ -457,6 +467,73 @@ void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummar
 		process_pair(pair, true);
 	}
 	summary.reduced_cardinalities = semijoin_cardinality;
+}
+
+vector<double> OuterYanDP::ConservativeLeafCardinalities(OuterYanTree &tree, bool &used_upper_bound) {
+	used_upper_bound = false;
+	vector<double> result;
+	result.reserve(tree.ot_relations_by_id.size());
+	for (auto *relation : tree.ot_relations_by_id) {
+		if (!relation) {
+			throw InternalException("OuterYanDP::ConservativeLeafCardinalities: missing relation");
+		}
+		auto &stats = relation->stats;
+		double cardinality = static_cast<double>(stats.stats_initialized ? stats.cardinality
+		                                                               : MaxValue<idx_t>(stats.cardinality, 1));
+		if (stats.cardinality_uses_default_filter_selectivity && stats.base_cardinality > stats.cardinality) {
+			cardinality = static_cast<double>(stats.base_cardinality);
+			used_upper_bound = true;
+		}
+		result.push_back(cardinality);
+	}
+	return result;
+}
+
+bool OuterYanDP::CanApplyFullReductionCardinalityLowerBound(const OuterYanTree &tree) const {
+	auto has_pair = [&](idx_t build, idx_t probe) {
+		auto matches = [&](const OuterYanSemiPair &pair) {
+			return pair.build == build && pair.probe == probe;
+		};
+		return std::any_of(tree.bottom_up_pairs.begin(), tree.bottom_up_pairs.end(), matches) ||
+		       std::any_of(tree.top_down_pairs.begin(), tree.top_down_pairs.end(), matches);
+	};
+	if (tree.ot_joins_by_order.empty()) {
+		return false;
+	}
+	for (auto *join : tree.ot_joins_by_order) {
+		if (!join || !join->info || join->info->join_kind != JoinType::INNER) {
+			return false;
+		}
+		auto left = join->info->cond_left_relation_id;
+		auto right = join->info->cond_right_relation_id;
+		if (!has_pair(left, right) || !has_pair(right, left)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+double OuterYanDP::ReducedSetCardinalityLowerBound(const JoinRelationSet &set) const {
+	double result = 0.0;
+	for (idx_t i = 0; i < set.count; i++) {
+		auto relation = set.relations[i].index;
+		if (relation >= semijoin_cardinality.size()) {
+			throw InternalException("OuterYanDP: reduced-cardinality lower bound missing relation %llu", relation);
+		}
+		result = MaxValue(result, semijoin_cardinality[relation]);
+	}
+	return result;
+}
+
+double OuterYanDP::ReducedSubtreeCardinalityLowerBound(const OTNode &node) const {
+	double result = 0.0;
+	for (auto relation : node.subtree_relations) {
+		if (relation >= semijoin_cardinality.size()) {
+			throw InternalException("OuterYanDP: reduced-cardinality lower bound missing relation %llu", relation);
+		}
+		result = MaxValue(result, semijoin_cardinality[relation]);
+	}
+	return result;
 }
 
 void OuterYanDP::InitLeafPlans(OuterYanTree &tree) {
@@ -664,6 +741,9 @@ unique_ptr<DPJoinNode> OuterYanDP::CreateJoinTree(JoinRelationSet &set,
 	const auto &join_info = *ot_joins_by_filter_index[fi_idx]->info;
 
 	auto estimate = EdgeCardinality(left.set, right.set, left, right, join_info);
+	if (enforce_full_reduction_cardinality_lower_bound) {
+		ApplyFullReductionCardinalityLowerBound(estimate, ReducedSetCardinalityLowerBound(set));
+	}
 	double cost = ComputeCost(left, right, estimate);
 
 	auto result = make_uniq<DPJoinNode>(set, best_connection, left.set, right.set, cost);
@@ -770,6 +850,22 @@ OuterYanDP::JoinEstimate OuterYanDP::EstimateJoin(double left_cardinality, doubl
 	return estimate;
 }
 
+void OuterYanDP::ApplyFullReductionCardinalityLowerBound(JoinEstimate &estimate, double lower_bound) const {
+	if (!enforce_full_reduction_cardinality_lower_bound || estimate.output >= lower_bound) {
+		return;
+	}
+	// CanApplyFullReductionCardinalityLowerBound restricts this correction to
+	// all-INNER trees with reducer pairs in both directions on every edge.
+	// Yannakakis full reduction guarantees every remaining base tuple extends
+	// to the full join, so no intermediate can contain fewer tuples than its
+	// largest reduced leaf.
+	estimate.inner = lower_bound;
+	estimate.output = lower_bound;
+	estimate.unmatched_left = 0.0;
+	estimate.unmatched_right = 0.0;
+	estimate.weighted_output_cost = cost_parameters.inner_output_weight * lower_bound;
+}
+
 double OuterYanDP::ComputeCost(const DPJoinNode &left, const DPJoinNode &right,
                                const JoinEstimate &estimate) const {
 	// Same cumulative shape as DuckDB's CostModel: child costs plus the
@@ -833,6 +929,9 @@ OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(
 	// `info.join_kind` is children-relative in an actual OT. Only the condition
 	// side statistics need swapping when its bindings are reversed.
 	auto estimate = EstimateJoin(left.cardinality, right.cardinality, left_distinct, right_distinct, info.join_kind);
+	if (enforce_full_reduction_cardinality_lower_bound) {
+		ApplyFullReductionCardinalityLowerBound(estimate, ReducedSubtreeCardinalityLowerBound(node));
+	}
 	JoinTreeEstimate result;
 	result.cardinality = ClampPlanCardinality(estimate.output);
 	result.cost = left.cost + right.cost + estimate.weighted_output_cost;
@@ -878,6 +977,35 @@ OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeDetailed(
 	result.root_cardinality = root.cardinality;
 	result.total_cost = root.cost;
 	return result;
+}
+
+OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeConservatively(OuterYanTree &tree,
+                                                                        bool &used_upper_bound) {
+	if (!tree.HasOT()) {
+		throw InternalException("OuterYanDP::ScoreCurrentJoinTreeConservatively: tree.ot is null");
+	}
+	BuildLeafRelations(tree);
+	BuildEdgeStatistics(tree);
+	auto leaf_cardinalities = ConservativeLeafCardinalities(tree, used_upper_bound);
+	return ScoreCurrentJoinTreeDetailed(tree, &leaf_cardinalities);
+}
+
+OuterYanDPCostSummary OuterYanDP::ScoreCurrentSemijoinPlanConservatively(OuterYanTree &tree,
+                                                                        bool &used_upper_bound) {
+	if (!tree.HasOT()) {
+		throw InternalException("OuterYanDP::ScoreCurrentSemijoinPlanConservatively: tree.ot is null");
+	}
+	OuterYanDPCostSummary summary;
+	summary.parameters = cost_parameters;
+	BuildLeafRelations(tree);
+	BuildEdgesFromOT(tree);
+	auto leaf_cardinalities = ConservativeLeafCardinalities(tree, used_upper_bound);
+	BuildSemijoinCostModel(tree, summary, &leaf_cardinalities);
+	enforce_full_reduction_cardinality_lower_bound = CanApplyFullReductionCardinalityLowerBound(tree);
+	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	summary.chosen_real_join_cost = summary.candidate_join_breakdown.total_cost;
+	summary.has_complete_plan = true;
+	return summary;
 }
 
 // ============================================================================

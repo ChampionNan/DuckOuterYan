@@ -22,7 +22,17 @@ enum class OuterYanGateResult : uint8_t { PASS, FAIL, SKIPPED, UNAVAILABLE };
 //! depending on DP implementation types.
 struct OuterYanDecisionCosts {
 	bool available = false;
-	string formula_id = "OUTER_YAN_COST_V2";
+	string formula_id = "OUTER_YAN_COST_V3";
+	//! The generic table-filter estimate was also checked with unfiltered base
+	//! cardinalities. The selected flag means that conservative scenario was
+	//! the limiting (higher candidate/baseline ratio) gate input.
+	bool default_filter_upper_bound_checked = false;
+	bool default_filter_upper_bound_selected = false;
+	//! Risk guard for an unknown-selectivity filter on a tiny relation when the
+	//! reducers retain almost all estimated input rows.
+	bool uncertain_filter_amplification_guard = false;
+	double semijoin_retained_cardinality_ratio = 0.0;
+	double uncertain_filter_cardinality_amplification = 0.0;
 	double baseline_cost = 0.0;
 	double candidate_join_cost = 0.0;
 	//! Raw sum of the four round build/probe estimates below.

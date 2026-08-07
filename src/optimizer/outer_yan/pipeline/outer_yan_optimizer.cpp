@@ -151,6 +151,60 @@ bool ValidCost(double value) {
 	return std::isfinite(value) && value >= 0.0;
 }
 
+bool HasDefaultFilterUpperBound(const OuterYanTree &tree) {
+	for (const auto *relation : tree.ot_relations_by_id) {
+		if (relation && relation->stats.cardinality_uses_default_filter_selectivity &&
+		    relation->stats.base_cardinality > relation->stats.cardinality) {
+			return true;
+		}
+	}
+	return false;
+}
+
+struct UncertainFilterAmplification {
+	double retained_cardinality_ratio = 0.0;
+	double cardinality_amplification = 0.0;
+	bool guard = false;
+};
+
+UncertainFilterAmplification InspectUncertainFilterAmplification(
+    const OuterYanTree &tree, const OuterYanDPCostSummary &summary) {
+	UncertainFilterAmplification result;
+	if (summary.input_cardinalities.size() != summary.reduced_cardinalities.size() ||
+	    summary.input_cardinalities.size() != tree.ot_relations_by_id.size()) {
+		return result;
+	}
+	double input_total = 0.0;
+	double reduced_total = 0.0;
+	double largest_input = 0.0;
+	double smallest_uncertain_base = NumericLimits<double>::Maximum();
+	for (idx_t relation_id = 0; relation_id < summary.input_cardinalities.size(); relation_id++) {
+		const auto input = summary.input_cardinalities[relation_id];
+		input_total += input;
+		reduced_total += summary.reduced_cardinalities[relation_id];
+		largest_input = MaxValue(largest_input, input);
+		const auto *relation = tree.ot_relations_by_id[relation_id];
+		if (relation && relation->stats.cardinality_uses_default_filter_selectivity &&
+		    relation->stats.base_cardinality > relation->stats.cardinality) {
+			smallest_uncertain_base =
+			    MinValue(smallest_uncertain_base, static_cast<double>(relation->stats.base_cardinality));
+		}
+	}
+	if (input_total <= 0.0) {
+		return result;
+	}
+	result.retained_cardinality_ratio = reduced_total / input_total;
+	if (smallest_uncertain_base == NumericLimits<double>::Maximum() || smallest_uncertain_base <= 0.0) {
+		return result;
+	}
+	result.cardinality_amplification = largest_input / smallest_uncertain_base;
+	result.guard = result.retained_cardinality_ratio >=
+	                       OuterYanOptimizer::MAX_UNCERTAIN_FILTER_RETAINED_CARDINALITY_RATIO &&
+	               result.cardinality_amplification >=
+	                   OuterYanOptimizer::MIN_UNCERTAIN_FILTER_CARDINALITY_AMPLIFICATION;
+	return result;
+}
+
 const char *SelectionModeToString(OuterYanOptimizer::SelectionMode mode) {
 	switch (mode) {
 	case OuterYanOptimizer::SelectionMode::GATED:
@@ -276,6 +330,68 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	if (candidate_cost.has_complete_plan) {
 		OuterYanDP baseline_scorer(context, candidate_cost.parameters);
 		baseline_breakdown = baseline_scorer.ScoreCurrentJoinTreeDetailed(baseline_tree);
+
+		// DuckDB assigns a generic 20% estimate to table filters it cannot
+		// estimate from column statistics. Require the candidate to survive the
+		// more conservative unfiltered-cardinality scenario too, but only select
+		// that scenario when it produces the worse candidate/baseline ratio. This
+		// protects the gate without penalising queries whose uncertainty affects
+		// the baseline more than the candidate.
+		trace_costs.default_filter_upper_bound_checked =
+		    HasDefaultFilterUpperBound(candidate_tree) || HasDefaultFilterUpperBound(baseline_tree);
+		if (trace_costs.default_filter_upper_bound_checked) {
+			bool candidate_used_upper_bound = false;
+			bool baseline_used_upper_bound = false;
+			OuterYanDP conservative_candidate_scorer(context, candidate_cost.parameters);
+			auto conservative_candidate = conservative_candidate_scorer.ScoreCurrentSemijoinPlanConservatively(
+			    candidate_tree, candidate_used_upper_bound);
+			OuterYanDP conservative_baseline_scorer(context, candidate_cost.parameters);
+			auto conservative_baseline = conservative_baseline_scorer.ScoreCurrentJoinTreeConservatively(
+			    baseline_tree, baseline_used_upper_bound);
+			if (OuterYanTrace::Enabled()) {
+				OuterYanTrace::Stage("DuckDB conservative-filter join-cost detail",
+				                     FormatJoinCostBreakdown("DUCKDB_CONSERVATIVE_FILTER", conservative_baseline));
+				OuterYanTrace::Stage(
+				    "OuterYan conservative-filter join-cost detail",
+				    FormatJoinCostBreakdown("OUTERYAN_CONSERVATIVE_FILTER",
+				                            conservative_candidate.candidate_join_breakdown));
+				OuterYanTrace::Stage("OuterYan conservative-filter semi-join cost detail",
+				                     FormatSemijoinCostBreakdown(conservative_candidate));
+				std::ostringstream scenario;
+				scenario << std::setprecision(17)
+				         << "baseline_cost=" << conservative_baseline.total_cost << "\n"
+				         << "candidate_join_cost="
+				         << conservative_candidate.candidate_join_breakdown.total_cost << "\n"
+				         << "semijoin_raw_cost=" << conservative_candidate.SemijoinRawCost() << "\n"
+				         << "candidate_total=" << conservative_candidate.CandidateCost(SEMIJOIN_COST_RATIO) << "\n";
+				if (conservative_baseline.total_cost > 0.0) {
+					scenario << "raw_cost_ratio="
+					         << conservative_candidate.CandidateCost(SEMIJOIN_COST_RATIO) /
+					                conservative_baseline.total_cost
+					         << "\n";
+				} else {
+					scenario << "raw_cost_ratio=NA\n";
+				}
+				OuterYanTrace::Stage("conservative-filter cost comparison", scenario.str());
+			}
+			if ((candidate_used_upper_bound || baseline_used_upper_bound) && baseline_breakdown.total_cost > 0.0 &&
+			    conservative_baseline.total_cost > 0.0) {
+				const auto normal_ratio = candidate_cost.CandidateCost(SEMIJOIN_COST_RATIO) /
+				                          baseline_breakdown.total_cost;
+				const auto conservative_ratio = conservative_candidate.CandidateCost(SEMIJOIN_COST_RATIO) /
+				                                conservative_baseline.total_cost;
+				if (std::isfinite(conservative_ratio) &&
+				    (!std::isfinite(normal_ratio) || conservative_ratio > normal_ratio)) {
+					candidate_cost = std::move(conservative_candidate);
+					baseline_breakdown = std::move(conservative_baseline);
+					trace_costs.default_filter_upper_bound_selected = true;
+				}
+			}
+		}
+		const auto uncertain_filter = InspectUncertainFilterAmplification(candidate_tree, candidate_cost);
+		trace_costs.semijoin_retained_cardinality_ratio = uncertain_filter.retained_cardinality_ratio;
+		trace_costs.uncertain_filter_cardinality_amplification = uncertain_filter.cardinality_amplification;
+		trace_costs.uncertain_filter_amplification_guard = uncertain_filter.guard;
 		trace_costs.baseline_cost = baseline_breakdown.total_cost;
 		trace_costs.candidate_join_cost = candidate_cost.candidate_join_breakdown.total_cost;
 		trace_costs.semijoin_raw_cost = candidate_cost.SemijoinRawCost();
@@ -317,6 +433,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		trace_costs.semijoin_probe_emit_weight = candidate_cost.parameters.semijoin_probe_emit_weight;
 		trace_costs.available =
 		    ValidCost(trace_costs.baseline_cost) && ValidCost(trace_costs.candidate_join_cost) &&
+		    ValidCost(trace_costs.semijoin_retained_cardinality_ratio) &&
+		    ValidCost(trace_costs.uncertain_filter_cardinality_amplification) &&
 		    ValidCost(trace_costs.semijoin_raw_cost) && ValidCost(trace_costs.semijoin_cost_ratio) &&
 		    ValidCost(trace_costs.weighted_semijoin_cost) && ValidCost(trace_costs.candidate_total) &&
 		    ValidCost(trace_costs.cost_ratio_limit) && ValidCost(trace_costs.baseline_threshold) &&
@@ -368,6 +486,10 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	} else if (!trace_costs.available) {
 		decision.gate_result = OuterYanGateResult::UNAVAILABLE;
 		decision.reason = "COST_UNAVAILABLE";
+	} else if (trace_costs.uncertain_filter_amplification_guard) {
+		decision.cost_gate_applied = true;
+		decision.gate_result = OuterYanGateResult::FAIL;
+		decision.reason = "COST_UNCERTAIN_FILTER_AMPLIFICATION";
 	} else {
 		decision.cost_gate_applied = true;
 		if (trace_costs.gate_lhs <= trace_costs.gate_rhs) {
@@ -396,6 +518,16 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << "formula_id=" << trace_costs.formula_id << "\n"
 		      << "selection_mode=" << decision.selection_mode << "\n"
 		      << "apply_cost_gate=" << (apply_cost_gate ? 1 : 0) << "\n"
+		      << "default_filter_upper_bound_checked="
+		      << (trace_costs.default_filter_upper_bound_checked ? 1 : 0) << "\n"
+		      << "default_filter_upper_bound_selected="
+		      << (trace_costs.default_filter_upper_bound_selected ? 1 : 0) << "\n"
+		      << "uncertain_filter_amplification_guard="
+		      << (trace_costs.uncertain_filter_amplification_guard ? 1 : 0) << "\n"
+		      << "semijoin_retained_cardinality_ratio="
+		      << trace_costs.semijoin_retained_cardinality_ratio << "\n"
+		      << "uncertain_filter_cardinality_amplification="
+		      << trace_costs.uncertain_filter_cardinality_amplification << "\n"
 		      << "baseline_cost=" << trace_costs.baseline_cost << "\n"
 		      << "candidate_join_cost=" << trace_costs.candidate_join_cost << "\n"
 		      << "semijoin_raw_cost=" << trace_costs.semijoin_raw_cost << "\n"
@@ -437,7 +569,12 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << " <= " << std::setprecision(6) << trace_costs.cost_ratio_limit << std::setprecision(17) << " * "
 		      << trace_costs.baseline_cost << "\n"
 		      << "raw_cost_comparison=" << trace_costs.candidate_total << " vs " << trace_costs.baseline_cost << "\n"
-		      << "cost_gate_result=" << trace_costs.gate_lhs << " <= " << trace_costs.gate_rhs << " => ";
+		      << "cost_gate_result=";
+		if (trace_costs.uncertain_filter_amplification_guard) {
+			costs << "uncertain_filter_amplification_guard => ";
+		} else {
+			costs << trace_costs.gate_lhs << " <= " << trace_costs.gate_rhs << " => ";
+		}
 		switch (decision.gate_result) {
 		case OuterYanGateResult::PASS:
 			costs << "PASS";
