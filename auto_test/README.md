@@ -398,9 +398,9 @@ counts for every relation depth present in the run.
 `phase_breakdown_<family>`. Each query has grouped R1, R2, R3, and residual
 `Other` elapsed-time bars on a base-10 logarithmic x-axis, plus a marker and
 label for its matched profiled total. This keeps small R1/R2 measurements
-visible beside much larger phases. Structurally absent DuckDB R1/R2 phases are
-blank; incomplete or internally inconsistent profiles are omitted rather than
-converted to zero.
+visible beside much larger phases. DuckDB-selected queries are excluded because
+they only have the ordinary real-join phase; incomplete or internally
+inconsistent OuterYan profiles are omitted rather than converted to zero.
 
 ## Optimizer trace
 

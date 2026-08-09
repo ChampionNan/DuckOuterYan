@@ -314,13 +314,13 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
 
 
 def fig_phase_by_family(t, outdir):
-    """Plot per-phase native operator time for every complete query profile.
+    """Plot per-phase native operator time for complete OuterYan profiles.
 
     The four phase bars are grouped rather than stacked and their endpoints use
     a base-10 logarithmic x-axis. This keeps small R1/R2 measurements visible
-    beside much larger R3/Other values. DuckDB plans legitimately have no R1/R2
-    operators, so structural zeros are left blank on the logarithmic axis; all
-    other missing or inconsistent profiles are omitted.
+    beside much larger R3/Other values. DuckDB-selected queries only have the
+    ordinary real-join phase and are excluded from this OuterYan breakdown.
+    Missing or inconsistent OuterYan profiles are omitted.
     """
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
     ratio_columns = [ratio for _, _, ratio, _ in PHASES]
@@ -333,15 +333,15 @@ def fig_phase_by_family(t, outdir):
         if family_rows.empty:
             continue
 
-        for column in required:
-            family_rows[column] = pd.to_numeric(family_rows[column], errors="coerce")
         plans = family_rows.get(
             "selected_plan", pd.Series("", index=family_rows.index, dtype="object")
         ).astype(str).str.upper()
-        duckdb = plans.eq("DUCKDB")
-        sj_columns = seconds_columns[:2] + ratio_columns[:2]
-        for column in sj_columns:
-            family_rows.loc[duckdb & family_rows[column].isna(), column] = 0.0
+        family_rows = family_rows.loc[plans.eq("OUTERYAN")].copy()
+        if family_rows.empty:
+            continue
+
+        for column in required:
+            family_rows[column] = pd.to_numeric(family_rows[column], errors="coerce")
 
         seconds = family_rows[seconds_columns]
         ratios = family_rows[ratio_columns]
@@ -358,20 +358,14 @@ def fig_phase_by_family(t, outdir):
             ratios.to_numpy(float), seconds.div(total_time, axis=0).to_numpy(float),
             rtol=0, atol=1e-6,
         ).all(axis=1)
-        known_plan = plans.isin(["DUCKDB", "OUTERYAN"])
-        duckdb_sj_is_zero = ~duckdb | family_rows[sj_columns].eq(0).all(axis=1)
         complete = (finite_seconds & nonnegative_seconds & finite_ratios & bounded_ratios
                     & np.isfinite(total_time) & total_time.gt(0)
-                    & seconds_close & ratios_close & paired_ratios_close
-                    & known_plan & duckdb_sj_is_zero)
+                    & seconds_close & ratios_close & paired_ratios_close)
         sub = family_rows.loc[complete].copy()
         if sub.empty:
             continue
 
-        sub["_plan_label"] = np.select(
-            [plans.loc[complete].eq("OUTERYAN"), plans.loc[complete].eq("DUCKDB")],
-            ["OY", "D"], default="?"
-        )
+        sub["_plan_label"] = "OY"
         sub = sub.sort_values(["profile_total_time_s", "query"], kind="stable")
         n = len(sub)
         skipped = len(family_rows) - n
@@ -416,7 +410,7 @@ def fig_phase_by_family(t, outdir):
         ax.set_axisbelow(True)
         ax.set_xlabel("native operator time (seconds, base-10 log scale)")
         omission = f"; {skipped} incomplete omitted" if skipped else ""
-        title = f"{fam}: native phase breakdown ({n} queries{omission})"
+        title = f"{fam}: OuterYan native phase breakdown ({n} queries{omission})"
         top = 1.0 - min(0.20, 0.55 / height)
         fig.tight_layout(rect=(0, 0, 1, top))
         fig.suptitle(title, y=0.995)

@@ -74,7 +74,7 @@ export OY_THREADS="${OY_THREADS:-48}"
 # ===========================================================================
 # Per-statement timeout (seconds), enforced by DuckDB's max_execution_time.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
-export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-900}"
+export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-1800}"
 # Extra seconds for CLI startup and profile serialization around a timing batch.
 export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 

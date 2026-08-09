@@ -32,8 +32,9 @@ plots/
 └── machine_cmp.pdf        # only when ≥2 CSVs: run-vs-run comparison
 ```
 A family figure (for example, `phase_breakdown_job.png`) **only exists if that
-run has valid rows for that family**. A phase-profile error is omitted from the
-phase chart and counted in its title; it is never rendered as zero work.
+run has valid OuterYan-selected rows for that family**. DuckDB-selected rows are
+excluded. An OuterYan phase-profile error is omitted from the phase chart and
+counted in its title; it is never rendered as zero work.
 
 ---
 
@@ -175,8 +176,8 @@ that historical SQL file is no longer present.
 
 ### `phase_breakdown_graph.pdf` · `phase_breakdown_tpch.pdf` · `phase_breakdown_tpcds.pdf` · `phase_breakdown_job.pdf`
 
-- Four grouped elapsed-time bars per complete query profile: **blue R1**, **green R2**, **orange R3**, and **grey Other**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The matched `Total-Time` is marked and labelled separately.
-- `[OY]` means the OuterYan candidate executed; `[D]` means DuckDB executed. DuckDB therefore has structural zero R1/R2 segments. Missing OuterYan phases or inconsistent profiles are omitted and counted in the title.
+- Four grouped elapsed-time bars per complete OuterYan query profile: **blue R1**, **green R2**, **orange R3**, and **grey Other**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The matched `Total-Time` is marked and labelled separately.
+- Only `[OY]` rows are included. DuckDB-selected queries are excluded because they only execute the ordinary real-join phase. Missing OuterYan phases or inconsistent profiles are omitted and counted in the title.
 - `Other` is not a fourth optimizer round. It includes unmatched operators and work outside native operator timing, and is retained so every bar truthfully closes `Total-Time`.
 
 ### `machine_cmp.png` — run-vs-run (root folder, only with ≥2 CSVs)
