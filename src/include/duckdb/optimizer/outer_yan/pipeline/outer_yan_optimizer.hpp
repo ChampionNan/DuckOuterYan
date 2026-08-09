@@ -9,6 +9,7 @@
 
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
@@ -22,6 +23,17 @@ class Optimizer;
 struct OuterYanOptimizationResult {
 	unique_ptr<LogicalOperator> plan;
 	bool outer_yan_applied = false;
+};
+
+//! Pure result of the numeric candidate gate. Keeping this policy independent
+//! of plan construction makes its strict/stretch boundaries directly testable.
+struct OuterYanCostGatePolicyResult {
+	bool available = false;
+	bool stretch_eligible = false;
+	bool pass = false;
+	bool stretch_selected = false;
+	double cost_ratio_limit = 0.0;
+	double baseline_threshold = 0.0;
 };
 
 //! Owns the complete two-candidate policy for an OuterYan-applicable query:
@@ -46,6 +58,13 @@ public:
 	//! cost. Uncertain table filters are checked under both their estimated and
 	//! unfiltered-cardinality scenarios.
 	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
+	//! A changed candidate may use this relaxed ceiling only when the V4
+	//! confidence predicate succeeds. It is deliberately not a global
+	//! multiplier.
+	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
+	//! Require a material real-join build/probe input reduction before allowing
+	//! the stretch tier.
+	static constexpr double STRETCH_MAX_JOIN_INPUT_RATIO = 0.75;
 	//! A generic-selectivity filter on a tiny relation is too uncertain to drive
 	//! a large reorder when the two reducer rounds retain essentially all rows.
 	static constexpr double MAX_UNCERTAIN_FILTER_RETAINED_CARDINALITY_RATIO = 0.99;
@@ -54,6 +73,11 @@ public:
 	explicit OuterYanOptimizer(Optimizer &optimizer);
 
 	OuterYanOptimizationResult Optimize(unique_ptr<LogicalOperator> input);
+
+	//! Evaluate the strict 1.0 gate and the confidence-aware stretch gate from
+	//! already-computed costs. Hard plan guards (failed candidate, proven empty,
+	//! same grouping) remain in Optimize.
+	static OuterYanCostGatePolicyResult EvaluateCostGate(const OuterYanDecisionCosts &costs);
 
 private:
 	Optimizer &optimizer;

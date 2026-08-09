@@ -74,15 +74,18 @@ For a different grouping, the default source-level cost gate evaluates:
 candidate_total = candidate_join_cost
                 + SEMIJOIN_COST_RATIO * semijoin_raw_cost
 
-candidate_total <= MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
+strict:  candidate_total <= 1.0 * baseline_cost
+stretch: candidate_total <= 1.20 * baseline_cost, only when confidence checks pass
 ```
 
 The current build uses `GATED`. Its cost model uses
 `SEMIJOIN_COST_RATIO=0.35` and
-`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`, so OuterYan is selected only when its
-estimated total cost does not exceed DuckDB's baseline cost. Cost formula V3
-also closes two lower-tail false positives without changing that global
-threshold:
+`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Cost formula V4 keeps that strict tier
+and adds a confidence-aware `1.20` stretch tier. The stretch tier is not a
+global multiplier: it requires no generic-filter uncertainty, no uncertain
+filter amplification guard, no active full-reduction lower-bound correction,
+a lower candidate real-join cost, and candidate real-join input work at most
+`0.75` of DuckDB's. V4 retains the V3 lower-tail protections:
 
 - A fully reduced all-INNER candidate cannot estimate an intermediate result
   below the largest reduced leaf in that subtree.
@@ -93,6 +96,10 @@ threshold:
   by at least `1000x` while both reducer rounds retain at least `99%` of their
   estimated input rows. In that pattern, the filter assumption is driving a
   large reorder without a credible reduction benefit.
+
+The stretch thresholds are experimental safety margins rather than a runtime
+performance guarantee. Trace and CSV output distinguish stretch eligibility
+from an actual stretch selection.
 
 Before policy selection, a conservative
 proof copy runs DuckDB statistics propagation and empty-result pull-up; if that

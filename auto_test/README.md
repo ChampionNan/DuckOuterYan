@@ -168,9 +168,9 @@ source-level gate computes:
 semijoin_raw_cost = round1_build + round1_probe + round2_build + round2_probe
 weighted_semijoin_cost = SEMIJOIN_COST_RATIO * semijoin_raw_cost
 candidate_total = candidate_join_cost + weighted_semijoin_cost
-baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
+strict_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
 
-select OuterYan iff candidate_total <= baseline_threshold
+select OuterYan on the strict tier iff candidate_total <= strict_threshold
 ```
 
 Cost formula V3 applies two consistency checks before that final comparison.
@@ -187,6 +187,26 @@ largest input is at least `1000x` the uncertain filtered relation and the two
 reducer rounds retain at least `99%` of estimated input cardinality. The trace
 records the retention ratio, amplification, and guard result explicitly.
 
+Cost formula V4 adds a confidence-aware stretch tier without changing DP
+enumeration. The relaxed ceiling is `1.20`, but it is available only when all
+of the following planner-visible checks pass:
+
+```text
+no generic/default-filter upper-bound scenario
+no uncertain-filter amplification guard
+no active full-reduction cardinality lower-bound correction
+candidate_join_cost < baseline_cost
+candidate_join_input_rows <= 0.75 * baseline_join_input_rows
+```
+
+`candidate_join_input_rows` and `baseline_join_input_rows` sum the left and
+right cardinalities processed by every real join, approximating hash
+build/probe work that the output-only join cost does not capture. An eligible
+candidate whose total lies in `(1.0, 1.20] * baseline_cost` is selected with
+reason `COST_OUTERYAN_STRETCH`. All other candidates retain the strict `1.0`
+limit. The stretch constants are experimental safety margins, not a runtime
+performance guarantee.
+
 The trace and CSV report two separate comparisons: `raw_cost_winner` compares
 `candidate_total` directly with `baseline_cost`, while `gate_result` compares
 `candidate_total` with `baseline_threshold`. `selected_plan` is the plan that
@@ -197,9 +217,8 @@ The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
 `GATED`, uses a semi-join ratio of `0.35`, and keeps a baseline limit
-of `1.0`. Under GATED, this selects OuterYan only when its estimated total cost
-does not exceed the DuckDB baseline. Rebuild the CLI after changing these
-source-level settings.
+of `1.0`, plus the confidence-gated `1.20` stretch ceiling described above.
+Rebuild the CLI after changing these source-level settings.
 
 Set `SELECTION_MODE` to `SelectionMode::GATED` for the cost gate, or to
 `SelectionMode::FORCE_OUTERYAN` to select every complete,
@@ -258,7 +277,9 @@ Decision reasons written to the trace and result files include:
 | `FORCE_OUTERYAN` | Changed candidate selected by the forced experiment mode |
 | `FORCE_OUTERYAN_DIAGNOSTIC` | Complete candidate forced past grouping and cost selection for a targeted correctness run |
 | `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
+| `COST_OUTERYAN_STRETCH` | High-confidence candidate passed the relaxed `1.20` stretch threshold |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
+| `COST_UNCERTAIN_FILTER_AMPLIFICATION` | Unknown-selectivity amplification guard rejected the candidate |
 | `COST_UNAVAILABLE` | A finite comparison could not be produced |
 | `OUTERYAN_FAILED` | OuterYan did not produce a complete candidate |
 
@@ -385,7 +406,11 @@ states that the numeric gate was skipped and prints the decision reason.
 The CSV exports the same decision, cost, kernel, correctness, timing, and phase
 fields in machine-readable form, including the SQL-derived `relation_count`,
 `default_filter_upper_bound_checked`, `default_filter_upper_bound_selected`,
+`full_reduction_cardinality_lower_bound_applied`,
 `uncertain_filter_amplification_guard`,
+`stretch_cost_gate_eligible`, `stretch_cost_gate_selected`,
+`baseline_join_input_rows`, `candidate_join_input_rows`,
+`candidate_to_baseline_join_input_ratio`,
 `semijoin_retained_cardinality_ratio`,
 `uncertain_filter_cardinality_amplification`, `round1_pairs`,
 `round1_filters`, `round2_pairs`, `round2_filters`, and the native operator

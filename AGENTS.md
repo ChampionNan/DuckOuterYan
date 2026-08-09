@@ -46,8 +46,10 @@ aggregate pushdown, and bitmap/hash filter kernels.
   wrappers. A same-grouping result always uses the DuckDB candidate.
 - `OuterYanOptimizer::APPLY_COST_GATE` defaults to true. When enabled, select
   OuterYan only if real-join cost plus `SEMIJOIN_COST_RATIO` times fixed SJ work
-  is within `MAX_CANDIDATE_TO_BASELINE_RATIO` of the baseline; all are
-  source-level experiment knobs, not session variables.
+  passes the strict `MAX_CANDIDATE_TO_BASELINE_RATIO` gate, or the candidate
+  passes the confidence-aware stretch gate (currently `1.20` with real-join
+  input ratio at most `0.75` and no active uncertainty guard/lower-bound
+  correction); all are source-level experiment knobs, not session variables.
 - Bitmap budget is per filter. `outer_yan_bitmap_max_bytes=0` remains the hash
   fallback escape hatch.
 

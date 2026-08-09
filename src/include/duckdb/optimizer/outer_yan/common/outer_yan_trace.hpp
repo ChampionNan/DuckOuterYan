@@ -22,12 +22,16 @@ enum class OuterYanGateResult : uint8_t { PASS, FAIL, SKIPPED, UNAVAILABLE };
 //! depending on DP implementation types.
 struct OuterYanDecisionCosts {
 	bool available = false;
-	string formula_id = "OUTER_YAN_COST_V3";
+	string formula_id = "OUTER_YAN_COST_V4";
 	//! The generic table-filter estimate was also checked with unfiltered base
 	//! cardinalities. The selected flag means that conservative scenario was
 	//! the limiting (higher candidate/baseline ratio) gate input.
 	bool default_filter_upper_bound_checked = false;
 	bool default_filter_upper_bound_selected = false;
+	//! The selected candidate's join estimates needed the all-INNER
+	//! full-reduction lower-bound correction. The strict gate may still use the
+	//! corrected score, but the confidence-aware stretch tier may not.
+	bool full_reduction_cardinality_lower_bound_applied = false;
 	//! Risk guard for an unknown-selectivity filter on a tiny relation when the
 	//! reducers retain almost all estimated input rows.
 	bool uncertain_filter_amplification_guard = false;
@@ -35,6 +39,14 @@ struct OuterYanDecisionCosts {
 	double uncertain_filter_cardinality_amplification = 0.0;
 	double baseline_cost = 0.0;
 	double candidate_join_cost = 0.0;
+	//! Sum of build/probe-side input rows across the real joins in each tree.
+	double baseline_join_input_rows = 0.0;
+	double candidate_join_input_rows = 0.0;
+	double candidate_to_baseline_join_input_ratio = 0.0;
+	bool candidate_to_baseline_join_input_ratio_available = false;
+	//! True when planner-visible confidence signals permit the relaxed cost
+	//! ceiling. This does not itself mean the candidate passed that ceiling.
+	bool stretch_cost_gate_eligible = false;
 	//! Raw sum of the four round build/probe estimates below.
 	double semijoin_raw_cost = 0.0;
 	//! Calibration applied once to semijoin_raw_cost by the final gate.
@@ -81,6 +93,9 @@ struct OuterYanDecisionRecord {
 	string selection_mode = "GATED";
 	bool outer_reordered = false;
 	bool cost_gate_applied = false;
+	//! True only when a candidate that lost the strict 1.0 comparison was
+	//! selected through the confidence-aware stretch tier.
+	bool stretch_cost_gate_selected = false;
 	bool outer_yan_selected = false;
 	bool baseline_proven_empty = false;
 	OuterYanSelectedPlan selected_plan = OuterYanSelectedPlan::DUCKDB_BASELINE;

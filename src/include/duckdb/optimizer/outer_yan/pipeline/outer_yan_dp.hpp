@@ -93,6 +93,10 @@ struct OuterYanSemijoinCostStep {
 struct OuterYanJoinCostBreakdown {
 	vector<OuterYanJoinCostStep> steps;
 	double root_cardinality = 0.0;
+	//! Sum of the left and right inputs seen by every real join. Unlike
+	//! `total_cost`, this captures hash build/probe input work rather than only
+	//! estimated join outputs.
+	double total_input_rows = 0.0;
 	double total_cost = 0.0;
 };
 
@@ -110,6 +114,10 @@ struct OuterYanDPCostSummary {
 	double round2_build_cost = 0.0;
 	double round2_probe_cost = 0.0;
 	double chosen_real_join_cost = 0.0;
+	//! True when the selected tree's uniform-NDV estimate had to be raised to
+	//! the full-reduction cardinality lower bound. This is a useful confidence
+	//! signal for the final selection policy.
+	bool full_reduction_cardinality_lower_bound_applied = false;
 	bool has_complete_plan = false;
 
 	double SemijoinRawCost() const {
@@ -346,6 +354,10 @@ private:
 	//! extends to the full result. Intermediate cardinalities therefore cannot
 	//! fall below the largest reduced leaf in their subset.
 	bool enforce_full_reduction_cardinality_lower_bound = false;
+	//! Reset before scoring a materialized tree and set by
+	//! ApplyFullReductionCardinalityLowerBound when that tree needs a
+	//! correction. Mutable because detailed tree scoring is logically const.
+	mutable bool full_reduction_cardinality_lower_bound_applied = false;
 	//! Set if greedy could not connect all relations without a cross product.
 	//! On true, `Optimize` leaves the OT untouched (Path A bail-out).
 	bool bailed_out = false;

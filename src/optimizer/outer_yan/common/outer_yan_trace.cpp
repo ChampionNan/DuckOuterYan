@@ -132,8 +132,12 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	     << (costs.default_filter_upper_bound_checked ? 1 : 0)
 	     << " default_filter_upper_bound_selected="
 	     << (costs.default_filter_upper_bound_selected ? 1 : 0)
+	     << " full_reduction_cardinality_lower_bound_applied="
+	     << (costs.full_reduction_cardinality_lower_bound_applied ? 1 : 0)
 	     << " uncertain_filter_amplification_guard="
 	     << (costs.uncertain_filter_amplification_guard ? 1 : 0)
+	     << " stretch_cost_gate_eligible=" << (costs.stretch_cost_gate_eligible ? 1 : 0)
+	     << " stretch_cost_gate_selected=" << (record.stretch_cost_gate_selected ? 1 : 0)
 	     << " selected_plan=" << SelectedPlanToString(record.selected_plan)
 	     << " outer_reordered=" << (record.outer_reordered ? 1 : 0)
 	     << " cost_gate_applied=" << (record.cost_gate_applied ? 1 : 0)
@@ -167,6 +171,10 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 		}
 	};
 	metric("baseline_cost", costs.baseline_cost, costs.available);
+	metric("baseline_join_input_rows", costs.baseline_join_input_rows, costs.available);
+	metric("candidate_join_input_rows", costs.candidate_join_input_rows, costs.available);
+	ratio_metric("candidate_to_baseline_join_input_ratio", costs.candidate_to_baseline_join_input_ratio,
+	             costs.available && costs.candidate_to_baseline_join_input_ratio_available);
 	ratio_metric("semijoin_retained_cardinality_ratio", costs.semijoin_retained_cardinality_ratio,
 	             costs.available);
 	metric("uncertain_filter_cardinality_amplification",

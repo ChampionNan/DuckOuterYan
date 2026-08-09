@@ -9,6 +9,7 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_dp.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <functional>
+#include <limits>
 
 using namespace duckdb;
 
@@ -1261,6 +1263,7 @@ TEST_CASE("outer_yan passes: DP — full inner reduction bounds every intermedia
 	ctx.transaction.Commit();
 	REQUIRE(summary.has_complete_plan);
 	REQUIRE(summary.candidate_join_breakdown.steps.size() == 3);
+	REQUIRE(summary.full_reduction_cardinality_lower_bound_applied);
 
 	bool observed_active_bound = false;
 	for (const auto &step : summary.candidate_join_breakdown.steps) {
@@ -1273,6 +1276,121 @@ TEST_CASE("outer_yan passes: DP — full inner reduction bounds every intermedia
 		}
 	}
 	REQUIRE(observed_active_bound);
+}
+
+TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
+          "[outer_yan][policy][cost]") {
+	auto costs = []() {
+		OuterYanDecisionCosts result;
+		result.available = true;
+		result.baseline_cost = 100.0;
+		result.candidate_join_cost = 70.0;
+		result.candidate_total = 100.0;
+		result.baseline_join_input_rows = 1000.0;
+		result.candidate_join_input_rows = 700.0;
+		result.candidate_to_baseline_join_input_ratio = 0.70;
+		result.candidate_to_baseline_join_input_ratio_available = true;
+		return result;
+	};
+
+	REQUIRE(OuterYanOptimizer::MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.0));
+	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
+	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.75));
+	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V4");
+
+	SECTION("strict boundary remains inclusive") {
+		auto result = OuterYanOptimizer::EvaluateCostGate(costs());
+		REQUIRE(result.available);
+		REQUIRE(result.stretch_eligible);
+		REQUIRE(result.pass);
+		REQUIRE_FALSE(result.stretch_selected);
+		REQUIRE(result.cost_ratio_limit == Approx(1.0));
+		REQUIRE(result.baseline_threshold == Approx(100.0));
+	}
+
+	SECTION("stretch boundary is inclusive") {
+		auto input = costs();
+		input.candidate_total = 120.0;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.stretch_eligible);
+		REQUIRE(result.pass);
+		REQUIRE(result.stretch_selected);
+		REQUIRE(result.cost_ratio_limit == Approx(1.20));
+		REQUIRE(result.baseline_threshold == Approx(120.0));
+
+		input.candidate_total = 120.0001;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.pass);
+		REQUIRE_FALSE(result.stretch_selected);
+	}
+
+	SECTION("uncertain estimates retain the strict limit") {
+		auto input = costs();
+		input.candidate_total = 110.0;
+		input.default_filter_upper_bound_checked = true;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+		REQUIRE(result.cost_ratio_limit == Approx(1.0));
+
+		input = costs();
+		input.candidate_total = 110.0;
+		input.full_reduction_cardinality_lower_bound_applied = true;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("stretch requires material real-join input and output savings") {
+		auto input = costs();
+		input.candidate_total = 110.0;
+		input.candidate_join_input_rows = 750.0;
+		input.candidate_to_baseline_join_input_ratio = 0.75;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.stretch_eligible);
+		REQUIRE(result.pass);
+		REQUIRE(result.stretch_selected);
+
+		input = costs();
+		input.candidate_total = 110.0;
+		input.candidate_join_input_rows = 750.001;
+		input.candidate_to_baseline_join_input_ratio = 0.750001;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+
+		input = costs();
+		input.candidate_total = 110.0;
+		input.candidate_join_cost = input.baseline_cost;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("missing or invalid input ratios cannot use stretch") {
+		auto input = costs();
+		input.candidate_total = 110.0;
+		input.candidate_to_baseline_join_input_ratio_available = false;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.available);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+
+		input = costs();
+		input.candidate_total = 110.0;
+		input.candidate_to_baseline_join_input_ratio = std::numeric_limits<double>::quiet_NaN();
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.available);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("unavailable costs never pass") {
+		auto input = costs();
+		input.available = false;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.available);
+		REQUIRE_FALSE(result.pass);
+	}
 }
 
 TEST_CASE("outer_yan policy: uncertain tiny filter without reduction keeps DuckDB",

@@ -326,7 +326,13 @@ oy_time_median() {
 #                 round2_pairs=N|NA round2_filters=N|NA \
 #                 default_filter_upper_bound_checked=0|1 \
 #                 default_filter_upper_bound_selected=0|1 \
+#                 full_reduction_cardinality_lower_bound_applied=0|1 \
 #                 uncertain_filter_amplification_guard=0|1 \
+#                 stretch_cost_gate_eligible=0|1 \
+#                 stretch_cost_gate_selected=0|1 \
+#                 baseline_join_input_rows=N|NA \
+#                 candidate_join_input_rows=N|NA \
+#                 candidate_to_baseline_join_input_ratio=N|NA \
 #                 semijoin_retained_cardinality_ratio=N|NA \
 #                 uncertain_filter_cardinality_amplification=N|NA
 #
@@ -344,11 +350,17 @@ OY_DECISION_RAW_COST_WINNER="NA"
 OY_DECISION_GATE_RESULT="NA"
 OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="NA"
 OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="NA"
+OY_DECISION_FULL_REDUCTION_LOWER_BOUND="NA"
 OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
+OY_DECISION_STRETCH_ELIGIBLE="NA"
+OY_DECISION_STRETCH_SELECTED="NA"
 OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
 OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
 OY_DECISION_BASELINE_COST="NA"
 OY_DECISION_CANDIDATE_JOIN_COST="NA"
+OY_DECISION_BASELINE_JOIN_INPUT_ROWS="NA"
+OY_DECISION_CANDIDATE_JOIN_INPUT_ROWS="NA"
+OY_DECISION_JOIN_INPUT_RATIO="NA"
 OY_DECISION_SEMIJOIN_RAW_COST="NA"
 OY_DECISION_SEMIJOIN_COST_RATIO="NA"
 OY_DECISION_WEIGHTED_SEMIJOIN_COST="NA"
@@ -400,11 +412,17 @@ oy_reset_decision() {
     OY_DECISION_GATE_RESULT="NA"
     OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="NA"
     OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="NA"
+    OY_DECISION_FULL_REDUCTION_LOWER_BOUND="NA"
     OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
+    OY_DECISION_STRETCH_ELIGIBLE="NA"
+    OY_DECISION_STRETCH_SELECTED="NA"
     OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
     OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
     OY_DECISION_BASELINE_COST="NA"
     OY_DECISION_CANDIDATE_JOIN_COST="NA"
+    OY_DECISION_BASELINE_JOIN_INPUT_ROWS="NA"
+    OY_DECISION_CANDIDATE_JOIN_INPUT_ROWS="NA"
+    OY_DECISION_JOIN_INPUT_RATIO="NA"
     OY_DECISION_SEMIJOIN_RAW_COST="NA"
     OY_DECISION_SEMIJOIN_COST_RATIO="NA"
     OY_DECISION_WEIGHTED_SEMIJOIN_COST="NA"
@@ -472,11 +490,17 @@ oy_decision() {
         OY_DECISION_GATE_RESULT="$(oy_record_value "$record" gate_result)"
         OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED="$(oy_record_value "$record" default_filter_upper_bound_checked)"
         OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED="$(oy_record_value "$record" default_filter_upper_bound_selected)"
+        OY_DECISION_FULL_REDUCTION_LOWER_BOUND="$(oy_record_value "$record" full_reduction_cardinality_lower_bound_applied)"
         OY_DECISION_UNCERTAIN_FILTER_GUARD="$(oy_record_value "$record" uncertain_filter_amplification_guard)"
+        OY_DECISION_STRETCH_ELIGIBLE="$(oy_record_value "$record" stretch_cost_gate_eligible)"
+        OY_DECISION_STRETCH_SELECTED="$(oy_record_value "$record" stretch_cost_gate_selected)"
         OY_DECISION_SEMIJOIN_RETAINED_RATIO="$(oy_record_value "$record" semijoin_retained_cardinality_ratio)"
         OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="$(oy_record_value "$record" uncertain_filter_cardinality_amplification)"
         OY_DECISION_BASELINE_COST="$(oy_record_value "$record" baseline_cost)"
         OY_DECISION_CANDIDATE_JOIN_COST="$(oy_record_value "$record" candidate_join_cost)"
+        OY_DECISION_BASELINE_JOIN_INPUT_ROWS="$(oy_record_value "$record" baseline_join_input_rows)"
+        OY_DECISION_CANDIDATE_JOIN_INPUT_ROWS="$(oy_record_value "$record" candidate_join_input_rows)"
+        OY_DECISION_JOIN_INPUT_RATIO="$(oy_record_value "$record" candidate_to_baseline_join_input_ratio)"
         OY_DECISION_SEMIJOIN_RAW_COST="$(oy_record_value "$record" semijoin_raw_cost)"
         OY_DECISION_SEMIJOIN_COST_RATIO="$(oy_record_value "$record" semijoin_cost_ratio)"
         OY_DECISION_WEIGHTED_SEMIJOIN_COST="$(oy_record_value "$record" weighted_semijoin_cost)"
@@ -514,6 +538,20 @@ oy_decision() {
             OUTERYAN:[01]:[01]:1:[01]:EQUAL:*) ;;
             *) OY_DECISION_REASON="TRACE_INVALID";;
         esac
+        case "$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED:$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED:$OY_DECISION_FULL_REDUCTION_LOWER_BOUND:$OY_DECISION_UNCERTAIN_FILTER_GUARD:$OY_DECISION_STRETCH_ELIGIBLE:$OY_DECISION_STRETCH_SELECTED" in
+            [01]:[01]:[01]:[01]:[01]:[01]) ;;
+            *) OY_DECISION_REASON="TRACE_INVALID";;
+        esac
+        if [ "$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED" = 1 ] && \
+           [ "$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED" != 1 ]; then
+            OY_DECISION_REASON="TRACE_INVALID"
+        fi
+        if [ "$OY_DECISION_STRETCH_SELECTED" = 1 ]; then
+            case "$OY_DECISION_STRETCH_ELIGIBLE:$OY_DECISION_SELECTED_PLAN:$OY_DECISION_SELECTED:$OY_DECISION_GATE_RESULT:$OY_DECISION_REASON" in
+                1:OUTERYAN:1:PASS:COST_OUTERYAN_STRETCH) ;;
+                *) OY_DECISION_REASON="TRACE_INVALID";;
+            esac
+        fi
     fi
     if [ -n "$trace_dest" ]; then
         cp "$tracef" "$trace_dest"
@@ -1059,7 +1097,10 @@ CSV_HEADER=(
     query family sql_path relation_count reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
     baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
     default_filter_upper_bound_checked default_filter_upper_bound_selected
-    uncertain_filter_amplification_guard semijoin_retained_cardinality_ratio
+    full_reduction_cardinality_lower_bound_applied uncertain_filter_amplification_guard
+    stretch_cost_gate_eligible stretch_cost_gate_selected
+    baseline_join_input_rows candidate_join_input_rows candidate_to_baseline_join_input_ratio
+    semijoin_retained_cardinality_ratio
     uncertain_filter_cardinality_amplification
     baseline_cost candidate_join_cost semijoin_raw_cost semijoin_cost_ratio weighted_semijoin_cost
     candidate_total cost_ratio_limit baseline_threshold round1_build round1_probe round2_build round2_probe
@@ -1113,6 +1154,8 @@ QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
 QDB=(); QSQL=(); QFAMILY=(); QPATH=(); QKER=(); QKDETAIL=(); QKREASONS=()
 QREORDERED=(); QGATE=(); QSELECTED=(); QDECISION=()
 QFORMULA=(); QSELECTION_MODE=(); QSELECTED_PLAN=(); QPROVEN_EMPTY=(); QRAW_WINNER=(); QGATE_RESULT=()
+QFULL_REDUCTION_LOWER_BOUND=(); QSTRETCH_ELIGIBLE=(); QSTRETCH_SELECTED=()
+QBASELINE_JOIN_INPUT_ROWS=(); QCANDIDATE_JOIN_INPUT_ROWS=(); QJOIN_INPUT_RATIO=()
 QBASELINE_COST=(); QCANDIDATE_JOIN_COST=(); QSEMIJOIN_RAW_COST=(); QSEMIJOIN_COST_RATIO=()
 QWEIGHTED_SEMIJOIN_COST=(); QCANDIDATE_TOTAL=()
 QCOST_RATIO_LIMIT=(); QBASELINE_THRESHOLD=()
@@ -1151,6 +1194,8 @@ process_one() {
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
     local formula_id="-" selection_mode="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
     local default_filter_upper_checked="-" default_filter_upper_selected="-" uncertain_filter_guard="-"
+    local full_reduction_lower_bound="-" stretch_eligible="-" stretch_selected="-"
+    local baseline_join_input_rows="-" candidate_join_input_rows="-" join_input_ratio="-"
     local semijoin_retained_ratio="-" uncertain_filter_amplification="-"
     local baseline_cost="-" candidate_join_cost="-" semijoin_raw_cost="-"
     local semijoin_cost_ratio="-" weighted_semijoin_cost="-" candidate_total="-"
@@ -1191,11 +1236,17 @@ process_one() {
         gate_result="$OY_DECISION_GATE_RESULT"
         default_filter_upper_checked="$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED"
         default_filter_upper_selected="$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED"
+        full_reduction_lower_bound="$OY_DECISION_FULL_REDUCTION_LOWER_BOUND"
         uncertain_filter_guard="$OY_DECISION_UNCERTAIN_FILTER_GUARD"
+        stretch_eligible="$OY_DECISION_STRETCH_ELIGIBLE"
+        stretch_selected="$OY_DECISION_STRETCH_SELECTED"
         semijoin_retained_ratio="$OY_DECISION_SEMIJOIN_RETAINED_RATIO"
         uncertain_filter_amplification="$OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION"
         baseline_cost="$OY_DECISION_BASELINE_COST"
         candidate_join_cost="$OY_DECISION_CANDIDATE_JOIN_COST"
+        baseline_join_input_rows="$OY_DECISION_BASELINE_JOIN_INPUT_ROWS"
+        candidate_join_input_rows="$OY_DECISION_CANDIDATE_JOIN_INPUT_ROWS"
+        join_input_ratio="$OY_DECISION_JOIN_INPUT_RATIO"
         semijoin_raw_cost="$OY_DECISION_SEMIJOIN_RAW_COST"
         semijoin_cost_ratio="$OY_DECISION_SEMIJOIN_COST_RATIO"
         weighted_semijoin_cost="$OY_DECISION_WEIGHTED_SEMIJOIN_COST"
@@ -1301,6 +1352,10 @@ process_one() {
     QFORMULA[$i]="$formula_id"; QSELECTION_MODE[$i]="$selection_mode"
     QSELECTED_PLAN[$i]="$selected_plan"; QPROVEN_EMPTY[$i]="$proven_empty"
     QRAW_WINNER[$i]="$raw_winner"; QGATE_RESULT[$i]="$gate_result"
+    QFULL_REDUCTION_LOWER_BOUND[$i]="$full_reduction_lower_bound"
+    QSTRETCH_ELIGIBLE[$i]="$stretch_eligible"; QSTRETCH_SELECTED[$i]="$stretch_selected"
+    QBASELINE_JOIN_INPUT_ROWS[$i]="$baseline_join_input_rows"
+    QCANDIDATE_JOIN_INPUT_ROWS[$i]="$candidate_join_input_rows"; QJOIN_INPUT_RATIO[$i]="$join_input_ratio"
     QBASELINE_COST[$i]="$baseline_cost"; QCANDIDATE_JOIN_COST[$i]="$candidate_join_cost"
     QSEMIJOIN_RAW_COST[$i]="$semijoin_raw_cost"; QSEMIJOIN_COST_RATIO[$i]="$semijoin_cost_ratio"
     QWEIGHTED_SEMIJOIN_COST[$i]="$weighted_semijoin_cost"; QCANDIDATE_TOTAL[$i]="$candidate_total"
@@ -1343,9 +1398,10 @@ process_one() {
             "$selected" "$formula_id"
         detail_line+="$detail_suffix"
         printf -v detail_suffix \
-            ' risk=[default_filter_upper_checked=%s selected=%s retained=%s amplification=%s guard=%s]' \
+            ' risk=[default_filter_upper_checked=%s selected=%s retained=%s amplification=%s guard=%s full_reduction_bound=%s stretch_eligible=%s stretch_selected=%s join_input_ratio=%s]' \
             "$default_filter_upper_checked" "$default_filter_upper_selected" \
-            "$semijoin_retained_ratio" "$uncertain_filter_amplification" "$uncertain_filter_guard"
+            "$semijoin_retained_ratio" "$uncertain_filter_amplification" "$uncertain_filter_guard" \
+            "$full_reduction_lower_bound" "$stretch_eligible" "$stretch_selected" "$join_input_ratio"
         detail_line+="$detail_suffix"
         if [ "$ker" = "hash" ] || [ "$ker" = "mixed" ]; then
             printf -v detail_suffix ' kernel_notice=[HASH-FALLBACK reasons=%s default_bitmap_budget_bytes=34359738368]' \
@@ -1393,7 +1449,9 @@ process_one() {
     csv_result_row \
         "$id" "$family" "$sql_path" "$nrel" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
-        "$default_filter_upper_checked" "$default_filter_upper_selected" "$uncertain_filter_guard" \
+        "$default_filter_upper_checked" "$default_filter_upper_selected" "$full_reduction_lower_bound" \
+        "$uncertain_filter_guard" "$stretch_eligible" "$stretch_selected" \
+        "$baseline_join_input_rows" "$candidate_join_input_rows" "$join_input_ratio" \
         "$semijoin_retained_ratio" "$uncertain_filter_amplification" \
         "$baseline_cost" "$candidate_join_cost" "$semijoin_raw_cost" "$semijoin_cost_ratio" \
         "$weighted_semijoin_cost" "$candidate_total" "$cost_ratio_limit" "$baseline_threshold" \

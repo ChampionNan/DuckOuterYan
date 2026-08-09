@@ -123,7 +123,7 @@ string FormatJoinCostBreakdown(const char *plan, const OuterYanJoinCostBreakdown
 		    << " subtree_cost=" << step.subtree_cost << "\n";
 	}
 	out << "[OY_JOIN_COST_TOTAL] plan=" << plan << " root_cardinality=" << breakdown.root_cardinality
-	    << " total_cost=" << breakdown.total_cost << "\n";
+	    << " total_input_rows=" << breakdown.total_input_rows << " total_cost=" << breakdown.total_cost << "\n";
 	return out.str();
 }
 
@@ -224,6 +224,55 @@ bool ForceCandidateForCorrectnessValidation() {
 
 OuterYanOptimizer::OuterYanOptimizer(Optimizer &optimizer_p)
     : optimizer(optimizer_p), context(optimizer_p.context) {
+}
+
+OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanDecisionCosts &costs) {
+	OuterYanCostGatePolicyResult result;
+	if (!costs.available || !ValidCost(costs.baseline_cost) || !ValidCost(costs.candidate_join_cost) ||
+	    !ValidCost(costs.candidate_total) || !ValidCost(costs.baseline_join_input_rows) ||
+	    !ValidCost(costs.candidate_join_input_rows)) {
+		return result;
+	}
+	if (costs.candidate_to_baseline_join_input_ratio_available &&
+	    (costs.baseline_join_input_rows <= 0.0 ||
+	     !ValidCost(costs.candidate_to_baseline_join_input_ratio))) {
+		return result;
+	}
+
+	const auto strict_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * costs.baseline_cost;
+	if (!ValidCost(strict_threshold)) {
+		return result;
+	}
+	result.stretch_eligible =
+	    !costs.default_filter_upper_bound_checked && !costs.uncertain_filter_amplification_guard &&
+	    !costs.full_reduction_cardinality_lower_bound_applied &&
+	    costs.candidate_to_baseline_join_input_ratio_available &&
+	    costs.candidate_join_cost < costs.baseline_cost &&
+	    costs.candidate_to_baseline_join_input_ratio <= STRETCH_MAX_JOIN_INPUT_RATIO;
+	result.available = true;
+	result.cost_ratio_limit = MAX_CANDIDATE_TO_BASELINE_RATIO;
+	result.baseline_threshold = strict_threshold;
+	// Preserve the strict threshold and margin in diagnostics whenever the
+	// candidate already wins at 1.0; the stretch ceiling is activated only
+	// after this comparison loses.
+	if (costs.candidate_total <= strict_threshold) {
+		result.pass = true;
+		return result;
+	}
+	if (!result.stretch_eligible) {
+		return result;
+	}
+
+	result.cost_ratio_limit = STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO;
+	result.baseline_threshold = result.cost_ratio_limit * costs.baseline_cost;
+	if (!ValidCost(result.cost_ratio_limit) || !ValidCost(result.baseline_threshold)) {
+		result.available = false;
+		return result;
+	}
+
+	result.pass = costs.candidate_total <= result.baseline_threshold;
+	result.stretch_selected = result.pass;
+	return result;
 }
 
 OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperator> input) {
@@ -327,6 +376,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	OuterYanDecisionCosts trace_costs;
 	OuterYanJoinCostBreakdown baseline_breakdown;
+	OuterYanCostGatePolicyResult gate_policy;
 	if (candidate_cost.has_complete_plan) {
 		OuterYanDP baseline_scorer(context, candidate_cost.parameters);
 		baseline_breakdown = baseline_scorer.ScoreCurrentJoinTreeDetailed(baseline_tree);
@@ -394,12 +444,19 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		trace_costs.uncertain_filter_amplification_guard = uncertain_filter.guard;
 		trace_costs.baseline_cost = baseline_breakdown.total_cost;
 		trace_costs.candidate_join_cost = candidate_cost.candidate_join_breakdown.total_cost;
+		trace_costs.baseline_join_input_rows = baseline_breakdown.total_input_rows;
+		trace_costs.candidate_join_input_rows = candidate_cost.candidate_join_breakdown.total_input_rows;
+		trace_costs.full_reduction_cardinality_lower_bound_applied =
+		    candidate_cost.full_reduction_cardinality_lower_bound_applied;
+		if (trace_costs.baseline_join_input_rows > 0.0) {
+			trace_costs.candidate_to_baseline_join_input_ratio =
+			    trace_costs.candidate_join_input_rows / trace_costs.baseline_join_input_rows;
+			trace_costs.candidate_to_baseline_join_input_ratio_available = true;
+		}
 		trace_costs.semijoin_raw_cost = candidate_cost.SemijoinRawCost();
 		trace_costs.semijoin_cost_ratio = SEMIJOIN_COST_RATIO;
 		trace_costs.weighted_semijoin_cost = SEMIJOIN_COST_RATIO * trace_costs.semijoin_raw_cost;
 		trace_costs.candidate_total = trace_costs.candidate_join_cost + trace_costs.weighted_semijoin_cost;
-		trace_costs.cost_ratio_limit = MAX_CANDIDATE_TO_BASELINE_RATIO;
-		trace_costs.baseline_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * trace_costs.baseline_cost;
 		trace_costs.round1_build = candidate_cost.round1_build_cost;
 		trace_costs.round1_probe = candidate_cost.round1_probe_cost;
 		trace_costs.round2_build = candidate_cost.round2_build_cost;
@@ -416,9 +473,6 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 			}
 		}
 		trace_costs.raw_cost_delta = trace_costs.candidate_total - trace_costs.baseline_cost;
-		trace_costs.gate_lhs = trace_costs.candidate_total;
-		trace_costs.gate_rhs = trace_costs.baseline_threshold;
-		trace_costs.gate_margin = trace_costs.gate_rhs - trace_costs.gate_lhs;
 		if (trace_costs.baseline_cost > 0.0) {
 			trace_costs.raw_cost_ratio = trace_costs.candidate_total / trace_costs.baseline_cost;
 			trace_costs.raw_cost_ratio_available = true;
@@ -433,11 +487,12 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		trace_costs.semijoin_probe_emit_weight = candidate_cost.parameters.semijoin_probe_emit_weight;
 		trace_costs.available =
 		    ValidCost(trace_costs.baseline_cost) && ValidCost(trace_costs.candidate_join_cost) &&
+		    ValidCost(trace_costs.baseline_join_input_rows) &&
+		    ValidCost(trace_costs.candidate_join_input_rows) &&
 		    ValidCost(trace_costs.semijoin_retained_cardinality_ratio) &&
 		    ValidCost(trace_costs.uncertain_filter_cardinality_amplification) &&
 		    ValidCost(trace_costs.semijoin_raw_cost) && ValidCost(trace_costs.semijoin_cost_ratio) &&
 		    ValidCost(trace_costs.weighted_semijoin_cost) && ValidCost(trace_costs.candidate_total) &&
-		    ValidCost(trace_costs.cost_ratio_limit) && ValidCost(trace_costs.baseline_threshold) &&
 		    ValidCost(trace_costs.round1_build) && ValidCost(trace_costs.round1_probe) &&
 		    ValidCost(trace_costs.round2_build) && ValidCost(trace_costs.round2_probe) &&
 		    ValidCost(trace_costs.inner_output_weight) && ValidCost(trace_costs.unmatched_left_weight) &&
@@ -446,9 +501,19 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		    ValidCost(trace_costs.semijoin_filter_build_weight) &&
 		    ValidCost(trace_costs.semijoin_replay_weight) &&
 		    ValidCost(trace_costs.semijoin_probe_lookup_weight) &&
-		    ValidCost(trace_costs.semijoin_probe_emit_weight) &&
-		    std::isfinite(trace_costs.raw_cost_delta) && std::isfinite(trace_costs.gate_margin) &&
+		    ValidCost(trace_costs.semijoin_probe_emit_weight) && std::isfinite(trace_costs.raw_cost_delta) &&
+		    (!trace_costs.candidate_to_baseline_join_input_ratio_available ||
+		     ValidCost(trace_costs.candidate_to_baseline_join_input_ratio)) &&
 		    (!trace_costs.raw_cost_ratio_available || std::isfinite(trace_costs.raw_cost_ratio));
+
+		gate_policy = EvaluateCostGate(trace_costs);
+		trace_costs.available = gate_policy.available;
+		trace_costs.stretch_cost_gate_eligible = gate_policy.stretch_eligible;
+		trace_costs.cost_ratio_limit = gate_policy.cost_ratio_limit;
+		trace_costs.baseline_threshold = gate_policy.baseline_threshold;
+		trace_costs.gate_lhs = trace_costs.candidate_total;
+		trace_costs.gate_rhs = trace_costs.baseline_threshold;
+		trace_costs.gate_margin = trace_costs.gate_rhs - trace_costs.gate_lhs;
 	}
 
 	OuterYanDecisionRecord decision;
@@ -492,11 +557,12 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		decision.reason = "COST_UNCERTAIN_FILTER_AMPLIFICATION";
 	} else {
 		decision.cost_gate_applied = true;
-		if (trace_costs.gate_lhs <= trace_costs.gate_rhs) {
+		if (gate_policy.pass) {
 			decision.selected_plan = OuterYanSelectedPlan::OUTERYAN_CANDIDATE;
 			decision.outer_yan_selected = true;
 			decision.gate_result = OuterYanGateResult::PASS;
-			decision.reason = "COST_OUTERYAN_BETTER";
+			decision.stretch_cost_gate_selected = gate_policy.stretch_selected;
+			decision.reason = gate_policy.stretch_selected ? "COST_OUTERYAN_STRETCH" : "COST_OUTERYAN_BETTER";
 		} else {
 			decision.gate_result = OuterYanGateResult::FAIL;
 			decision.reason = "COST_DUCKDB_BETTER";
@@ -522,14 +588,29 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << (trace_costs.default_filter_upper_bound_checked ? 1 : 0) << "\n"
 		      << "default_filter_upper_bound_selected="
 		      << (trace_costs.default_filter_upper_bound_selected ? 1 : 0) << "\n"
+		      << "full_reduction_cardinality_lower_bound_applied="
+		      << (trace_costs.full_reduction_cardinality_lower_bound_applied ? 1 : 0) << "\n"
 		      << "uncertain_filter_amplification_guard="
 		      << (trace_costs.uncertain_filter_amplification_guard ? 1 : 0) << "\n"
+		      << "stretch_cost_gate_eligible="
+		      << (trace_costs.stretch_cost_gate_eligible ? 1 : 0) << "\n"
+		      << "stretch_cost_gate_selected="
+		      << (decision.stretch_cost_gate_selected ? 1 : 0) << "\n"
 		      << "semijoin_retained_cardinality_ratio="
 		      << trace_costs.semijoin_retained_cardinality_ratio << "\n"
 		      << "uncertain_filter_cardinality_amplification="
 		      << trace_costs.uncertain_filter_cardinality_amplification << "\n"
 		      << "baseline_cost=" << trace_costs.baseline_cost << "\n"
 		      << "candidate_join_cost=" << trace_costs.candidate_join_cost << "\n"
+		      << "baseline_join_input_rows=" << trace_costs.baseline_join_input_rows << "\n"
+		      << "candidate_join_input_rows=" << trace_costs.candidate_join_input_rows << "\n"
+		      << "candidate_to_baseline_join_input_ratio=";
+		if (trace_costs.candidate_to_baseline_join_input_ratio_available) {
+			costs << trace_costs.candidate_to_baseline_join_input_ratio;
+		} else {
+			costs << "NA";
+		}
+		costs << "\n"
 		      << "semijoin_raw_cost=" << trace_costs.semijoin_raw_cost << "\n"
 		      << "semijoin_cost_ratio=" << std::setprecision(6) << trace_costs.semijoin_cost_ratio << "\n"
 		      << std::setprecision(17)
@@ -569,6 +650,11 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << " <= " << std::setprecision(6) << trace_costs.cost_ratio_limit << std::setprecision(17) << " * "
 		      << trace_costs.baseline_cost << "\n"
 		      << "raw_cost_comparison=" << trace_costs.candidate_total << " vs " << trace_costs.baseline_cost << "\n"
+		      << "stretch_gate_predicate=no_default_filter_upper_bound && no_uncertain_filter_guard && "
+		         "no_full_reduction_lower_bound && candidate_join_cost < baseline_cost && "
+		         "candidate_join_input_rows <= "
+		      << std::setprecision(6) << STRETCH_MAX_JOIN_INPUT_RATIO << std::setprecision(17)
+		      << " * baseline_join_input_rows\n"
 		      << "cost_gate_result=";
 		if (trace_costs.uncertain_filter_amplification_guard) {
 			costs << "uncertain_filter_amplification_guard => ";

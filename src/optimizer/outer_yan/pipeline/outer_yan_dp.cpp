@@ -146,6 +146,8 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 	summary.has_complete_plan = true;
 	RebuildOT(tree, full_set);
 	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	summary.full_reduction_cardinality_lower_bound_applied =
+	    full_reduction_cardinality_lower_bound_applied;
 	if (!ApproxEqual(summary.candidate_join_breakdown.total_cost, summary.chosen_real_join_cost)) {
 		throw InternalException("OuterYanDP: detailed candidate cost %.17g differs from DP cost %.17g",
 		                        summary.candidate_join_breakdown.total_cost, summary.chosen_real_join_cost);
@@ -854,6 +856,7 @@ void OuterYanDP::ApplyFullReductionCardinalityLowerBound(JoinEstimate &estimate,
 	if (!enforce_full_reduction_cardinality_lower_bound || estimate.output >= lower_bound) {
 		return;
 	}
+	full_reduction_cardinality_lower_bound_applied = true;
 	// CanApplyFullReductionCardinalityLowerBound restricts this correction to
 	// all-INNER trees with reducer pairs in both directions on every edge.
 	// Yannakakis full reduction guarantees every remaining base tuple extends
@@ -972,9 +975,13 @@ OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeDetailed(
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: expected %llu leaf overrides, got %llu",
 		                        tree.ot_relations_by_id.size(), leaf_cardinality_override->size());
 	}
+	full_reduction_cardinality_lower_bound_applied = false;
 	OuterYanJoinCostBreakdown result;
 	auto root = ScoreCurrentJoinTreeNode(tree, tree.OT().Root(), leaf_cardinality_override, &result.steps);
 	result.root_cardinality = root.cardinality;
+	for (const auto &step : result.steps) {
+		result.total_input_rows += step.left_cardinality + step.right_cardinality;
+	}
 	result.total_cost = root.cost;
 	return result;
 }
@@ -1003,6 +1010,8 @@ OuterYanDPCostSummary OuterYanDP::ScoreCurrentSemijoinPlanConservatively(OuterYa
 	BuildSemijoinCostModel(tree, summary, &leaf_cardinalities);
 	enforce_full_reduction_cardinality_lower_bound = CanApplyFullReductionCardinalityLowerBound(tree);
 	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	summary.full_reduction_cardinality_lower_bound_applied =
+	    full_reduction_cardinality_lower_bound_applied;
 	summary.chosen_real_join_cost = summary.candidate_join_breakdown.total_cost;
 	summary.has_complete_plan = true;
 	return summary;
