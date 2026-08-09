@@ -51,6 +51,7 @@ KERNEL_ORDER = ["bitmap", "mixed", "hash", "none"]
 KERNEL_COLOR = {"bitmap": "#55A868", "mixed": "#C44E52",
                 "hash": "#8172B3", "none": "#999999"}
 FAMILY_ORDER = ["graph", "TPC-H", "TPC-DS", "JOB"]
+TOPOLOGY_ORDER = ["line/left-deep", "right-deep", "bushy", "star", "agg", "real"]
 PHASES = [
     ("R1 semi-join", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
     ("R2 semi-join", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
@@ -135,10 +136,20 @@ def enrich(df, run):
         if "_real_" in q:
             return "real"
         core = re.sub(r"^oy_(th|ds|jb)_(th|ds|jb|real)_", "", q)
-        m = re.match(r"([A-Za-z]+)", core)
-        return m.group(1).lower() if m else "other"
+        core_lower = core.lower()
+        if core_lower.startswith("agg"):
+            return "agg"
+        if "_rd_" in core_lower or re.match(r"(?:rd|rdeep)(?:\d|_)", core_lower):
+            return "right-deep"
+        if core_lower.startswith("line"):
+            return "line/left-deep"
+        if core_lower.startswith(("bushy", "branch")):
+            return "bushy"
+        if core_lower.startswith("star"):
+            return "star"
+        return "other"
     df["topology"] = df["query"].map(topology)
-    df["right_deep"] = df["query"].str.contains("_rd_")
+    df["right_deep"] = df["topology"].eq("right-deep")
 
     def grab(pat, q, conv=str):
         m = re.search(pat, q)
@@ -472,9 +483,10 @@ def render_run(t, outdir, metric, runlabel):
     grouped_box(ax, t, "family", FAMILY_ORDER, "Speed-up by benchmark family")
     fig.tight_layout(); save(fig, outdir, "speedup_by_benchmark")
 
-    topo = sorted(t["topology"].dropna().unique())                 # labels ABOVE the boxes here
+    shape_rows = t[t["topology"].isin(TOPOLOGY_ORDER)]
+    topo = [shape for shape in TOPOLOGY_ORDER if shape in set(shape_rows["topology"])]
     fig, ax = plt.subplots(figsize=(max(9, 1.5 * len(topo)), 5))
-    grouped_box(ax, t, "topology", topo, "Speed-up by shape", label_pos="above")
+    grouped_box(ax, shape_rows, "topology", topo, "Speed-up by shape", label_pos="above")
     fig.tight_layout(); save(fig, outdir, "speedup_by_shape")
 
     # speed-up by relation count across every benchmark family

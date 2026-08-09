@@ -45,7 +45,7 @@ counted in its title; it is never rendered as zero work.
 | **kernel** | which semi-join filter ran: **bitmap** (cheap, integer keys) · **mixed** (≥1 expensive hash filter) · **none** = `b0h0` (no filter inserted → ON ≈ OFF) |
 | **reorder** | `Yes` = OuterYan changed the join order; `No` = filters applied but order unchanged |
 | **family** | `graph` (synthetic chains) · `TPC-H` · `TPC-DS` · `JOB` |
-| **topology** | join-graph shape: `line` · `bushy` · `bushyBal` · `rdeep` · `branch` · `star` · `agg` · `real` |
+| **topology** | normalized query shape: `line/left-deep` · `right-deep` · `bushy` · `star` · `agg` · `real` |
 | **T1 / TM** | single-thread / multi-thread speed-up |
 | **R1** | bottom-up semi-join native operator time (blue) |
 | **R2** | top-down semi-join native operator time (green) |
@@ -60,8 +60,9 @@ A query name encodes its shape and data, e.g. `rdeep_N4_mixB_s01` or
 `oy_th_th_bushy4a_v3`. The **topology** is the shape of the join tree (how the
 relations are nested). `⋈` below is a join node; `R1..Rn` are the base tables.
 
-**`line`** — *left-deep chain.* Each table joins onto the running result; the
-classic `R1→R2→R3→R4` pipeline. The build side keeps growing on the left.
+**`line/left-deep`** — *left-deep chain.* `line` and left-deep are the same
+shape in this corpus, so they share one category. Each table joins onto the
+running result; the classic `R1→R2→R3→R4` pipeline.
 ```
         ⋈            (((R1 ⋈ R2) ⋈ R3) ⋈ R4)
        / \
@@ -72,9 +73,9 @@ classic `R1→R2→R3→R4` pipeline. The build side keeps growing on the left.
   R1  R2
 ```
 
-**`rdeep`** — *right-deep chain.* Same chain, nested the other way: one table
-probes into a deep stack of pre-built joins. This is the shape predicate-transfer
-+ reorder helps most (a tiny driver can prune the whole stack).
+**`right-deep`** — *right-deep chain.* The former `rd`, `rdeep`, and `line*_rd_*`
+labels are normalized into this category. One table probes into a deep stack of
+pre-built joins.
 ```
   ⋈                 (R1 ⋈ (R2 ⋈ (R3 ⋈ R4)))
  / \
@@ -85,8 +86,9 @@ R1  ⋈
     R3  R4
 ```
 
-**`bushy`** — *unbalanced bushy tree.* Independent sub-trees are joined together
-rather than one long chain; one side is deeper than the other.
+**`bushy`** — *multi-branch binary tree.* The former `bushy`, `bushyBal`, and
+`branch` labels are normalized into this category. Independent subtrees are
+formed before being joined together; they may be balanced or unbalanced.
 ```
        ⋈           ((R1 ⋈ R2) ⋈ ((R3 ⋈ R4) ⋈ R5))
       /  \
@@ -97,32 +99,12 @@ rather than one long chain; one side is deeper than the other.
         R3 R4
 ```
 
-**`bushyBal`** — *balanced bushy tree.* Two roughly equal halves joined at the
-top — the most parallel-friendly shape.
-```
-          ⋈        (((R1 ⋈ R2) ⋈ R3) ⋈ ((R4 ⋈ R5) ⋈ R6))
-        /    \
-      ⋈        ⋈
-     / \      / \
-    ⋈   R3   ⋈   R6
-   / \      / \
-  R1 R2    R4 R5
-```
-
 **`star`** — *star schema.* One central fact table; every other relation joins
 directly to it (no chain). TPC-H/TPC-DS/JOB only — not in the graph corpus.
 ```
         fact          fact ⋈ D1, ⋈ D2, ⋈ D3, ⋈ D4
       / |  | \         (all dimensions key off the center)
     D1 D2 D3 D4
-```
-
-**`branch`** — *Y-shaped tree.* Two separate sub-chains that merge at a shared
-relation (a fork), e.g. two dimension paths meeting at a fact.
-```
-   R1-R2-R3   R4-R5      two chains feeding…
-        \      /
-         ⋈----⋈          …a common join node
 ```
 
 **`agg`** — **not a shape**: an *aggregation query* (`COUNT/SUM/MIN/MAX`, no AVG,
@@ -157,8 +139,9 @@ Same box format, grouped by **graph / TPC-H / TPC-DS / JOB**; diamond + number =
 - **Takeaway:** **graph** chains win big (TM geomean ~2×), **JOB** ~1.2×, **TPC-H/TPC-DS** mixed-to-negative.
 
 ### `speedup_by_shape.pdf` — speed-up by join-graph **shape** (a query variable)
-Same box format, grouped by topology (`line, bushy, bushyBal, rdeep, rd, branch, agg, real`); x-labels horizontal, geomean number placed **above** each box.
-- **Takeaway:** `line`/`rdeep`/`bushyBal` lean positive; `agg` carries most regressions.
+Same box format, grouped by normalized topology (`line/left-deep`, `right-deep`,
+`bushy`, `star`, `agg`, `real`); x-labels are horizontal and the geomean is
+placed **above** each box.
 
 ### `speedup_by_relations.pdf` — speed-up by number of relations, all families
 Single box panel grouped by **#relations** (`3, 4, …`); the geomean is printed
