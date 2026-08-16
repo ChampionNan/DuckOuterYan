@@ -1,0 +1,278 @@
+\section{Outer-Join Benchmark Design}
+\label{sec:outerjoin-benchmark}
+
+\subsection{Motivation and Scope}
+
+Existing analytical benchmarks are not designed to isolate outer-join
+optimization. TPC-H~\cite{tpch} and TPC-DS~\cite{tpcds} provide carefully
+specified schemas and business queries, but their fixed template sets contain
+comparatively few outer joins and do not systematically vary join direction,
+preservation semantics, join tree shape, or the fraction of unmatched tuples.
+JOB~\cite{job} stresses multiway join ordering on a real-world schema, but its
+workload is primarily an inner-join benchmark. SQLStorm~\cite{sqlstorm25}
+substantially broadens the diversity of SQL constructs and query shapes through
+large-scale query generation, but it does not provide a controlled experimental
+design in which the join graph is held fixed while outer-join semantics are
+varied. These workloads are therefore valuable sources of realistic schemas and
+join relationships, but none by itself constitutes a factorized outer-join
+benchmark.
+
+We introduce a benchmark that fills this gap by adapting join patterns from
+TPC-H, TPC-DS, JOB, and SQLStorm. The design has three goals. First, every query
+must have traceable provenance and an intelligible relational interpretation.
+Second, the workload must vary the properties that determine outer-join
+optimization difficulty without conflating them with unrelated query changes.
+Third, corpus membership must be independent of the performance of the system
+being evaluated.
+
+The benchmark evaluates a query under two optimizer configurations or two DBMSs
+using exactly the same SQL statement. An inner-join source query and its
+outer-join adaptation are not treated as equivalent performance alternatives,
+because changing the join type intentionally changes the query result. Instead,
+the source query supplies a realistic join skeleton, and every generated outer
+query is a new, independently specified benchmark query.
+
+\subsection{Source Workloads and Provenance}
+
+Each benchmark seed is associated with a source record
+
+\begin{equation}
+S=(b,v,i,h),
+\end{equation}
+
+where $b$ is the source benchmark, $v$ is its version or repository revision,
+$i$ is the source query identifier, and $h$ is a content hash. For repository
+sources, the manifest additionally records the source path or immutable URL.
+This information makes the derivation auditable and prevents a manually written
+query from being retrospectively attributed to an existing benchmark.
+
+The current core contains 34 source seeds: five from TPC-H, seven from TPC-DS,
+ten from JOB, and twelve from SQLStorm. Five transformations are generated for
+each seed, yielding 170 queries. Consequently, the four source strata contribute
+25, 35, 50, and 60 queries, respectively. SQLStorm seeds are drawn from its
+TPC-H, TPC-DS, and JOB query collections; the manifest records SQLStorm as the
+source benchmark and records the underlying schema as the execution family.
+This distinction prevents a SQLStorm-generated TPC-H query from being counted
+as an original TPC-H template.
+
+We use the term \emph{join-skeleton-derived} deliberately. Some source queries
+contain aggregates, subqueries, or presentation operators that are outside the
+optimizer's current applicability envelope. We extract a connected subgraph of
+their relation instances, aliases, and equality predicates, and normalize the
+surrounding query into a flat projection--selection--join form. The projection
+exposes attributes from multiple relations so that NULL-extended tuples are
+observable. Selections are written in a NULL-preserving form when necessary.
+The transformation therefore preserves a documented source join pattern and
+its entity relationships; it does not claim that replacing an inner join by an
+outer join preserves the result of the original source query.
+
+\subsection{Join-Skeleton Extraction}
+
+For a source query $q$, let its join graph be
+
+\begin{equation}
+G_q=(V_q,E_q),
+\end{equation}
+
+where $V_q$ contains relation instances and $E_q$ contains equality predicates.
+The generator selects a documented connected subgraph $G_s\subseteq G_q$ as the
+seed skeleton. Self-joins are represented by distinct relation instances. A
+core seed must contain at least three relations, form a connected acyclic
+skeleton, and admit an ordering in which every added relation is connected to
+the current subplan.
+Cross products, including artificial predicates such as \texttt{ON 1=1}, are
+excluded from the core workload.
+
+The join graph and join tree are recorded as separate properties. Chain, star,
+and branch describe graph topology, whereas left-deep and right-deep describe
+the binary expression tree used by a generated query. This distinction avoids
+the common ambiguity in which a star graph evaluated by a left-deep expression
+is simply called a ``left-deep query.''
+
+For each seed, the generator fixes a normalized binary tree $B_q$. A generated
+variant is
+
+\begin{equation}
+q_{\lambda}
+=
+\operatorname{Rewrite}(q,B_q,\lambda),
+\qquad
+\lambda:E_q\rightarrow
+\{\mathsf{I},\mathsf{L},\mathsf{R},\mathsf{F}\},
+\end{equation}
+
+where the labels denote inner, left, right, and full outer joins. Relation
+instances and equality predicates remain unchanged across variants. Explicit
+parentheses are emitted because outer joins are not freely associative or
+commutative; a join-type vector without a fixed binary tree is not a complete
+query specification.
+
+\subsection{Semantically Interpretable Variants}
+
+The benchmark uses deterministic join-type vectors whose preservation roles are
+declared in the manifest. The vectors are fixed before performance measurement.
+
+\paragraph{Primary mixed deep trees.}
+Mixed join types form the main workload. For every seed, \texttt{ldmx} assigns
+a documented mixture of inner, left, right, and full outer joins to a left-deep
+tree. An inner edge denotes a mandatory relationship, a one-sided outer edge
+denotes optional enrichment, and a full outer edge denotes reconciliation
+between independently valid streams. The \texttt{rdmx} variant recursively
+mirrors this expression: operands are exchanged, LEFT and RIGHT are exchanged,
+and INNER and FULL remain unchanged. The pair therefore has the same multiset
+semantics while exposing left- and right-deep expressions.
+
+\paragraph{Bushy mixed trees.}
+For every eligible skeleton, \texttt{bmx} recursively removes the edge whose
+removal gives the most balanced pair of connected components. The two
+components become the children of the current join, and the procedure recurses
+within each component. No cross product is introduced, and the documented
+mixed join-type vector is retained. A query is classified as bushy only when
+both root children contain at least two relations. Three-relation and pure star
+skeletons cannot satisfy this condition without joining disconnected leaves;
+for these seeds, \texttt{alt} supplies a deterministic mixed deep-tree variant
+instead. The resulting core contains 22 genuine bushy queries and 12
+structurally necessary \texttt{alt} queries.
+
+\paragraph{Uniform controls.}
+Each seed additionally contributes one left-deep and one right-deep
+single-kind control, denoted \texttt{lduX} and \texttt{rduX}, where
+$\mathsf{X}\in\{\mathsf{L},\mathsf{R},\mathsf{F}\}$. Assignment is rotated over
+the seeds rather than selected from measurements. Since 68 uniform-control
+slots are not divisible by three, the closest possible allocation is 23 LEFT,
+23 RIGHT, and 22 FULL. The controls are exactly balanced by tree shape: 34 are
+left-deep and 34 are right-deep.
+
+Overall, 102 of the 170 core queries mix join types, whereas 68 are uniform
+controls. The complete shape distribution is 80 left-deep, 68 right-deep, and
+22 bushy queries. Thus, uniform all-LEFT or all-RIGHT queries do not dominate
+the workload.
+
+Selections on nullable relations can inadvertently reject NULL-extended tuples
+and reduce an outer join to an inner join. The generator consequently places
+eligibility conditions on the appropriate join edge or adds an explicit
+\texttt{IS NULL} alternative. This makes the preservation semantics visible in
+the SQL rather than relying on optimizer-specific simplification behavior.
+
+\subsection{Coverage Dimensions}
+
+The benchmark is organized as a crossed design over the following dimensions:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Dimension & Levels \\
+\midrule
+Source & TPC-H, TPC-DS, JOB, SQLStorm \\
+Join-graph topology & chain, star, branch \\
+Join-tree shape & left-deep, right-deep, bushy \\
+Preservation pattern & mixed, mirrored mixed, uniform control \\
+Join kind & inner, left, right, full \\
+Query size & 3--6 relations in the initial core \\
+Match coverage & native and controlled unmatched cases \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The mixed left- and right-deep variants and the two uniform controls are emitted
+for every seed. Bushy variants are determined only by graph structure, not by
+observed optimizer performance. This is preferable to emitting more variants
+for a topology on which a particular optimizer is known to perform well.
+Larger relation-count and controlled-skew strata can be added without changing
+the generation rule.
+
+Outer joins become operationally interesting only when unmatched tuples exist.
+For an edge joining $R$ and $S$, the evaluation can report the empirical
+unmatched fractions
+
+\begin{equation}
+u_R=1-\frac{|\pi_R(R\bowtie S)|}{|R|},
+\qquad
+u_S=1-\frac{|\pi_S(R\bowtie S)|}{|S|}.
+\end{equation}
+
+Native benchmark data provide the default track. A complementary controlled
+track may use deterministic filters or views to create low, medium, and high
+unmatched fractions. Such controlled cases must be labeled explicitly and must
+not be presented as unmodified source queries.
+
+\subsection{Corpus Size and Timeout Policy}
+
+We use the complete development run
+\path{auto_test/results/experiment_onoff_20260810_084908.csv}, collected on
+August 10, 2026, to calibrate corpus size. The run contains 254 legacy queries:
+170 completed the correctness and timing protocol, whereas 84 were marked
+\texttt{TIMEOUT}. The timeout cases are removed from the active legacy corpus
+and listed individually in \path{timeout_exclusions.csv}; their SQL remains in
+a separate archive for reproducibility. The new benchmark-derived core is set
+to the comparable size of 170 queries.
+
+The reference run determines only the target population size and the legacy
+timeout list. It does not select the source seeds or transformations of the new
+core. In particular, a new core query is neither included nor excluded according
+to its speedup, chosen optimizer, or physical plan. This separation avoids
+constructing the paper workload from cases already known to favor OuterYan.
+
+\subsection{Corpus Curation and Validation}
+
+Core inclusion is determined before measuring the target optimizer. A query is
+included if it has complete provenance, parses against the intended schema,
+contains a connected equality-join skeleton, has at least one outer join, and
+belongs to a declared coverage cell. Invalid and duplicate queries are removed
+using syntax, binding, and normalized-tree checks. After the core is frozen,
+queries are not removed because they are too fast, produce a regression, fail
+to trigger the proposed optimizer, or select the baseline plan. Any timeout in
+a new core evaluation is reported as an outcome; the 84 exclusions above apply
+only to the explicitly identified legacy population used for size calibration.
+
+Validation has three layers. First, every generated query is parsed and bound
+with both optimizer configurations. Second, the enabled and disabled
+configurations execute the same bare query and their result multisets are
+compared. Third, each \texttt{ldmx}/\texttt{rdmx} pair is checked for result
+equivalence, providing a metamorphic test independent of the inner-join source.
+Performance is measured only after correctness succeeds.
+
+The benchmark manifest records the source identity, source hash, transformation
+class, relation count, graph topology, expression-tree shape, join-type vector,
+and semantic role of every query. This enables results to be reported by design
+dimension instead of only as one aggregate speedup.
+
+\subsection{Industry-Inspired and Optimizer-Stress Workloads}
+
+We retain 22 supplemental optimizer-stress queries because synthetic graph and
+bushy cases are useful for diagnosing predicate transfer, join reordering, and
+semi-join reduction. They are exactly the correct cases in the pinned reference
+run for which OuterYan was selected and the observed multi-thread speedup was at
+least 1.20. Because this criterion uses observed performance, these queries are
+reported separately and cannot contribute to the headline benchmark score.
+
+The industry-inspired component retains nine business-oriented queries from the
+legacy corpus. They model master records with optional dimensions, sparse
+profile enrichment, fact completeness, and right-preserved master data over the
+public TPC-H and TPC-DS schemas. Its manifest specifies the relation roles,
+preservation interpretation, pattern class, and content hash of every query.
+Two queries additionally test aggregation over NULL-preserving joins. This
+component is reported separately because it is motivated by common
+data-integration tasks rather than derived from a named benchmark template.
+Legacy queries without a documented business interpretation are excluded from
+this component; they remain only in the historical archive and do not
+participate in active benchmark reporting.
+
+These patterns have explainable relational semantics, but they remain synthetic
+unless a traceable production source exists. The supplemental stress cases are
+not relabeled as industry-inspired merely because they perform well.
+
+A query may be called \emph{industry-derived} only if it can be linked to an
+actual anonymized production template or workload trace. A DBMS-X-derived entry
+must record a stable internal template identifier, the original join graph and
+operator roles, the anonymization steps, and the transformations applied to
+produce distributable SQL. When such evidence cannot be released, the paper can
+describe the aggregate sampling procedure and provide a reproducible synthetic
+surrogate, subject to the venue's artifact policy. Without this provenance, the
+appropriate term is \emph{industry-inspired synthetic query}, not real industry
+case. Favorable performance alone is not evidence of an industrial origin.
+
+This separation strengthens the evaluation: the benchmark-derived core provides
+an unbiased and reproducible result, the industry-inspired component evaluates
+explainable business-role patterns, and the supplemental workload exposes
+optimizer-specific stress behavior without obscuring its origin.

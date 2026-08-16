@@ -13,13 +13,17 @@ synopsis.
 | Path | Purpose |
 |---|---|
 | `configs.sh` | Defaults shared by `build_db.sh` and `experiment_onoff.sh` |
-| `run_all.sh` | Release build, database preparation, then the full experiment |
+| `run_all.sh` | Release build, database preparation, benchmark generation, then separate core and industry experiments |
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
-| `gen_queries.py` | Generate and validate the SQL corpus |
+| `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
+| `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
 | `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
-| `outerjoin_query/` | SQL corpus, divided into `graph`, `tpch`, `tpcds`, and `job` |
+| `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
+| `outerjoin_benchmark/` | 170-query core, 9-query industry-inspired component, 22-query supplemental suite, manifests, and paper text |
+| `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
+| `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
 | `results/` | Generated text, CSV, profile, and trace output |
 
 `trace_outer_yan.sh` has its own command-line/environment defaults and does not
@@ -92,19 +96,71 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The checked-in corpus currently contains graph, TPC-H, TPC-DS, and JOB outer-join
-queries. Labels are SQL basenames without `.sql`; `--pattern` and `--exclude`
-match the entire label using shell-glob syntax.
+The default corpus is the provenance-backed TPC-H, TPC-DS, JOB, and SQLStorm-
+derived core under `outerjoin_benchmark/core/`. The `outerjoin_query` path is a
+compatibility link to this directory. Labels are SQL basenames without `.sql`;
+`--pattern` and `--exclude` match the entire label using shell-glob syntax.
 
 ```bash
-python3 auto_test/gen_queries.py graph
-python3 auto_test/gen_queries.py bench       # tpch + tpcds + job
-python3 auto_test/gen_queries.py validate
-python3 auto_test/gen_queries.py all
+python3 auto_test/gen_outerjoin_benchmark.py
+OY_CORPUS=auto_test/outerjoin_benchmark/core \
+  bash auto_test/experiment_onoff.sh --only bench
 ```
 
-Generation is deterministic. Validation executes `EXPLAIN` against the prepared
-databases and may remove generated queries that do not bind.
+Generation is deterministic and writes a query-level provenance manifest. The
+core has 170 queries (TPC-H 25, TPC-DS 35, JOB 50, and SQLStorm 60), including
+102 mixed-join queries, of which 34 are mixed right-deep and 22 are genuinely
+bushy. Nine explainable legacy business
+patterns are exposed separately under `outerjoin_benchmark/industry_inspired/`;
+unexplained legacy structural queries remain archive-only. Run that component
+with:
+
+```bash
+OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
+  bash auto_test/experiment_onoff.sh --only bench
+```
+
+The historical generator remains
+available as `gen_queries.py`; it writes to `outerjoin_query_old/` and applies
+the 84 timeout exclusions from
+`results/experiment_onoff_20260810_084908.csv`. Run the 22 result-selected
+synthetic stress cases separately with
+`OY_CORPUS=auto_test/outerjoin_benchmark/supplemental`; do not merge them into
+the core benchmark aggregate. See
+`outerjoin_benchmark/README.md` for the transformation and terminology rules.
+
+Query traversal is deterministic. Families are visited in the order selected by
+the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
+family, SQL basenames are ordered bytewise (`LC_ALL=C`). For a bushy-eligible
+seed, suffixes normally execute as `bmx`, `ldmx`, `lduX`, `rdmx`, and `rduX`;
+otherwise `alt` replaces `bmx`. Here `X` is `L`, `R`, or `F`. This is only
+filename order; it is not a semantic progression. A `--query-list` file
+overrides this order and is processed line by line.
+
+### Core query variants
+
+The suffix records both the binary join-tree shape and the assignment of join
+types to the fixed source skeleton:
+
+| Suffix | Tree and join labeling | Meaning |
+|---|---|---|
+| `ldmx` | Left-deep mixed tree | Primary left-deep query; every query combines at least two of `INNER`, `LEFT`, `RIGHT`, and `FULL`. |
+| `rdmx` | Right-deep mixed mirror of `ldmx` | Swaps operands and LEFT/RIGHT while retaining INNER/FULL, giving the same multiset semantics as `ldmx`. |
+| `bmx` | Connected bushy tree with the mixed vector | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
+| `alt` | Alternate left-deep mixed tree | Replaces `bmx` for a three-relation or star skeleton that cannot form a true cross-product-free bushy tree. |
+| `lduL`, `lduR`, `lduF` | Uniform left-deep control | Uses only LEFT, RIGHT, or FULL outer joins, respectively. |
+| `rduL`, `rduR`, `rduF` | Uniform right-deep control | Right-deep counterpart using one outer-join kind throughout. |
+
+Mixed queries are the majority: 102 of 170. Uniform controls account for the
+remaining 68 and are balanced as closely as possible across join kinds: 23
+all-LEFT, 23 all-RIGHT, and 22 all-FULL. They are also shape-balanced, with 34
+left-deep and 34 right-deep controls. Overall, the core contains 80 left-deep,
+68 right-deep, and 22 bushy queries. Only `ldmx`/`rdmx` is an equivalence pair;
+`bmx` is an independently specified query because outer joins are not generally
+associative.
+
+The schema-only legacy queries are not included in any active benchmark
+component. They remain in `outerjoin_query_old/` solely as historical inputs.
 
 ## Experiment pipeline
 
@@ -332,6 +388,7 @@ bash auto_test/experiment_onoff.sh \
 bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
 
 # P0/P1 representative run using existing databases
+OY_CORPUS=auto_test/outerjoin_query_old \
 SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
   --only all --query-list auto_test/representative_queries.txt --capture-plans
 ```
@@ -354,6 +411,10 @@ auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.attempts.csv
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.plans/
 ```
+
+`run_all.sh` supplies explicit stratum names and writes separate groups such as
+`experiment_onoff_core_YYYYMMDD_HHMMSS.*` and
+`experiment_onoff_industry_inspired_YYYYMMDD_HHMMSS.*`.
 
 With `--out path/name.txt`, the text path is exact and the CSV is
 `path/name.csv`. Each CSV contains exactly one row per query. The historical
@@ -422,10 +483,31 @@ counts for every relation depth present in the run.
 `plot_speedup.py` renders separate per-family phase figures named
 `phase_breakdown_<family>`. Each query has grouped R1, R2, R3, and residual
 `Other` elapsed-time bars on a base-10 logarithmic x-axis, plus a marker and
-label for its matched profiled total. This keeps small R1/R2 measurements
-visible beside much larger phases. DuckDB-selected queries are excluded because
-they only have the ordinary real-join phase; incomplete or internally
-inconsistent OuterYan profiles are omitted rather than converted to zero.
+label for its matched profiled total. The complete OuterYan time is a soft-gold
+bar, and the median single-thread DuckDB baseline (`t1_off`) is a light-pink
+bar.
+Neither color is reused by R1, R2, or R3. Alternating row shading and separators
+group all six bars belonging to one query. Within a group, the six bars have
+identical thickness and touch without vertical gaps; spacing is retained only
+between neighboring queries. Bar outlines, separator rules, and the top/right
+plot frame are omitted; the alternating background alone identifies query
+groups. Endpoint text is omitted to avoid clipping at the
+plot boundary; values are read from the shared logarithmic axis. The baseline
+is a comparison bar, not an OuterYan phase. DuckDB-selected queries are excluded
+because they only have the ordinary real-join phase; incomplete profiles or
+missing baselines are omitted rather than converted to zero. The plotter reports
+the omission reason when a family has no eligible phase figure.
+
+Result files are grouped by their filename timestamp before plotting. A paired
+`experiment_onoff_<timestamp>.csv` and
+`experiment_onoff_<timestamp>.attempts.csv` therefore produce one figure set,
+not two runs. Duplicate `(family, query)` rows use the final CSV value; an
+attempts row is retained only when the final CSV is missing, empty, or lacks
+that query. This preserves partial interrupted runs without double-counting the
+compatibility copy.
+When rerunning into an existing output directory, the plotter also clears PNG
+and PDF files from the corresponding legacy `<timestamp>.attempts/` directory;
+any non-figure files in that directory are preserved.
 
 ## Optimizer trace
 
@@ -487,19 +569,31 @@ SET disabled_optimizers TO 'outer_yan';
 ## One-command and manual workflows
 
 ```bash
-# Build release, prepare/reuse every database, run every family
+# Build release, prepare/reuse benchmark databases, regenerate queries, then
+# run the 170-query core followed by the 9-query industry-inspired component.
 bash auto_test/run_all.sh
 
-# Reuse an existing release binary and databases
+# Reuse an existing release binary and databases; run only TPC-H in each stratum
 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
+
+# Also run the performance-selected supplemental stress suite
+RUN_SUPPLEMENTAL=1 bash auto_test/run_all.sh
+
+# Run only one explicitly selected corpus (legacy single-corpus behavior)
+OY_CORPUS=auto_test/outerjoin_benchmark/core \
+  SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
 Manual equivalent:
 
 ```bash
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
-bash auto_test/build_db.sh all
-bash auto_test/experiment_onoff.sh
+bash auto_test/build_db.sh tpch tpcds job
+python3 auto_test/gen_outerjoin_benchmark.py
+OY_CORPUS=auto_test/outerjoin_benchmark/core \
+  bash auto_test/experiment_onoff.sh --only bench
+OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
+  bash auto_test/experiment_onoff.sh --only bench
 ```
 
 `run_all.sh` and `build_db.sh` reuse existing database files. If a requested

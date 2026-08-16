@@ -9,18 +9,22 @@ auto_test/experiment_onoff.sh) and renders a set of comparison figures:
                    family / topology
   * relations    : T1 & TM speed-up by relation count across every family
   * phase_breakdown_* : per-query native R1 / R2 / R3 / Other profile breakdown
+                        against the single-thread DuckDB baseline
   * sparsity     : TM speed-up vs sparsity (s01..s95) for the graph corpus
   * ratio        : median TM/T1  (multi-thread amplifies >1 / penalises <1)
   * winloss      : win / no-op / regress counts per kernel & family
   * geomean      : geomean T1 & TM speed-up per kernel & family
   * top_bottom   : best / worst queries by TM speed-up
-  * machine_cmp  : per-query TM speed-up across runs (when >1 csv is given)
+  * machine_cmp  : per-query TM speed-up across logical timestamp runs
   * dashboard    : the six most useful panels on one page
 
-Output layout: with a single CSV the figures land directly in the output dir.
-With several CSVs each source file gets its OWN subfolder `<outdir>/<run>/...`
-(run = the part of the filename after `experiment_onoff_`), and one shared
-`<outdir>/machine_cmp.png` compares them.
+Output layout: files with the same timestamp are one logical run. In particular,
+`experiment_onoff_<timestamp>.csv` and its `.attempts.csv` compatibility file
+are merged before plotting: the final CSV wins duplicate `(family, query)` rows,
+while attempts-only rows fill interrupted or incomplete final output. With one
+logical run the figures land directly in the output dir. With several runs each
+timestamp gets one subfolder `<outdir>/<run>/...`, and one shared
+`<outdir>/machine_cmp.*` compares them.
 
 Speed-up = time(OFF) / time(ON):  >1 means OuterYan ON is FASTER.
 
@@ -58,6 +62,11 @@ PHASES = [
     ("R3 real join", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
     ("Other", "profile_other_elapsed_s", "profile_other_ratio", "#B0B0B0"),
 ]
+BASELINE_SECONDS = "t1_off"
+OUTERYAN_TOTAL_LABEL = "OuterYan total (profiled)"
+OUTERYAN_TOTAL_COLOR = "#EFCB68"
+BASELINE_LABEL = "DuckDB total (T1 median)"
+BASELINE_COLOR = "#F4A6B7"
 
 # =============================== EDIT ME : defaults ==================================
 # Used when you run `python3 plot_speedup.py` with NO command-line arguments.
@@ -86,6 +95,14 @@ def gmean(x):
 
 def fmt(x):
     return f"{x:5.2f}" if np.isfinite(x) else "   - "
+
+
+def family_from_query(query):
+    query = str(query)
+    if query.startswith("oy_th"): return "TPC-H"
+    if query.startswith("oy_ds"): return "TPC-DS"
+    if query.startswith("oy_jb"): return "JOB"
+    return "graph"
 
 
 # ----------------------------------------------------------------------------- load
@@ -125,12 +142,16 @@ def enrich(df, run):
         return "none" if declared in ("-", "", "nan") else declared
     df["kernel_type"] = df.apply(ktype, axis=1)
 
-    def family(q):
-        if q.startswith("oy_th"): return "TPC-H"
-        if q.startswith("oy_ds"): return "TPC-DS"
-        if q.startswith("oy_jb"): return "JOB"
-        return "graph"
-    df["family"] = df["query"].map(family)
+    inferred_family = df["query"].map(family_from_query)
+    if "family" in df:
+        reported_family = df["family"].astype("string").str.strip().str.lower()
+        reported_family = reported_family.map({
+            "graph": "graph", "tpch": "TPC-H", "tpc-h": "TPC-H",
+            "tpcds": "TPC-DS", "tpc-ds": "TPC-DS", "job": "JOB",
+        })
+        df["family"] = reported_family.fillna(inferred_family)
+    else:
+        df["family"] = inferred_family
 
     def topology(q):
         if "_real_" in q:
@@ -206,20 +227,64 @@ def enrich(df, run):
     return df
 
 
+def result_source(path):
+    """Return the logical run name and source kind for one result CSV."""
+    name = os.path.basename(path)
+    stem = re.sub(r"\.csv$", "", name, flags=re.IGNORECASE)
+    is_attempts = stem.lower().endswith(".attempts")
+    if is_attempts:
+        stem = stem[:-len(".attempts")]
+    run = re.sub(r"^experiment_onoff_", "", stem) or stem
+    return run, ("attempts" if is_attempts else "final")
+
+
 def load(paths):
-    frames = []
-    for p in paths:
+    grouped = {}
+    for source_order, p in enumerate(paths):
         try:
             raw = pd.read_csv(p)
         except Exception as e:
             print(f"  ! skip {p}: {e}", file=sys.stderr); continue
         if "query" not in raw.columns:
             print(f"  ! skip {p}: no 'query' column", file=sys.stderr); continue
-        run = re.sub(r"^experiment_onoff_|\.csv$", "", os.path.basename(p)) or os.path.basename(p)
-        frames.append(enrich(raw, run))
-        print(f"  loaded {p}  ({len(raw)} rows, run='{run}')")
-    if not frames:
+        if raw.empty:
+            print(f"  ! skip {p}: no result rows", file=sys.stderr); continue
+        run, source_kind = result_source(p)
+        raw = raw.copy()
+        raw["__plot_source_priority"] = 0 if source_kind == "attempts" else 1
+        raw["__plot_source_order"] = source_order
+        raw["__plot_row_order"] = np.arange(len(raw))
+        grouped.setdefault(run, []).append(raw)
+        print(f"  loaded {p}  ({len(raw)} rows, run='{run}', source='{source_kind}')")
+    if not grouped:
         sys.exit("No usable CSV files.")
+
+    frames = []
+    order_columns = ["__plot_source_priority", "__plot_source_order", "__plot_row_order"]
+    for run, sources in grouped.items():
+        combined = pd.concat(sources, ignore_index=True, sort=False)
+        if "family" in combined.columns:
+            merge_family = combined["family"].astype("string").str.strip().str.lower()
+        else:
+            merge_family = pd.Series(pd.NA, index=combined.index, dtype="string")
+        inferred_family = combined["query"].map(family_from_query).str.lower()
+        merge_family = merge_family.mask(merge_family.isna() | merge_family.eq(""), inferred_family)
+        merge_family = merge_family.replace({"tpch": "tpc-h", "tpcds": "tpc-ds"})
+        combined["__plot_merge_family"] = merge_family
+        merge_keys = ["__plot_merge_family", "query"]
+        combined = combined.sort_values(order_columns, kind="stable")
+        duplicate_rows = int(combined.duplicated(merge_keys, keep="last").sum())
+        merged = combined.drop_duplicates(merge_keys, keep="last")
+        # Restore corpus order after the priority sort. A final row wins a
+        # conflict; an attempts row remains when the final CSV lacks that query.
+        merged = merged.sort_values(
+            ["__plot_row_order", "__plot_source_priority", "__plot_source_order"],
+            kind="stable",
+        ).drop(columns=order_columns + ["__plot_merge_family"])
+        frames.append(enrich(merged, run))
+        if len(sources) > 1 or duplicate_rows:
+            print(f"  merged run '{run}': {len(combined)} source rows -> "
+                  f"{len(merged)} queries ({duplicate_rows} duplicate rows removed)")
     return pd.concat(frames, ignore_index=True)
 
 
@@ -325,17 +390,18 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
 
 
 def fig_phase_by_family(t, outdir):
-    """Plot per-phase native operator time for complete OuterYan profiles.
+    """Compare complete OuterYan phase profiles with DuckDB baseline time.
 
     The four phase bars are grouped rather than stacked and their endpoints use
     a base-10 logarithmic x-axis. This keeps small R1/R2 measurements visible
-    beside much larger R3/Other values. DuckDB-selected queries only have the
-    ordinary real-join phase and are excluded from this OuterYan breakdown.
-    Missing or inconsistent OuterYan profiles are omitted.
+    beside much larger R3/Other values. The single-thread OFF median is shown as
+    a separate reference and is not treated as an OuterYan execution phase.
+    DuckDB-selected queries only have the ordinary real-join phase and are
+    excluded. Missing or inconsistent profiles or baselines are omitted.
     """
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
     ratio_columns = [ratio for _, _, ratio, _ in PHASES]
-    required = seconds_columns + ratio_columns + ["profile_total_time_s"]
+    required = seconds_columns + ratio_columns + ["profile_total_time_s", BASELINE_SECONDS]
     if not set(required).issubset(t.columns):
         return
 
@@ -349,6 +415,7 @@ def fig_phase_by_family(t, outdir):
         ).astype(str).str.upper()
         family_rows = family_rows.loc[plans.eq("OUTERYAN")].copy()
         if family_rows.empty:
+            print(f"    phase breakdown {fam}: omitted (no OuterYan-selected rows)")
             continue
 
         for column in required:
@@ -359,6 +426,7 @@ def fig_phase_by_family(t, outdir):
         seconds_total = seconds.sum(axis=1, min_count=len(seconds_columns))
         ratio_total = ratios.sum(axis=1, min_count=len(ratio_columns))
         total_time = family_rows["profile_total_time_s"]
+        baseline_time = family_rows[BASELINE_SECONDS]
         finite_seconds = np.isfinite(seconds).all(axis=1)
         nonnegative_seconds = seconds.ge(0).all(axis=1)
         finite_ratios = np.isfinite(ratios).all(axis=1)
@@ -371,24 +439,42 @@ def fig_phase_by_family(t, outdir):
         ).all(axis=1)
         complete = (finite_seconds & nonnegative_seconds & finite_ratios & bounded_ratios
                     & np.isfinite(total_time) & total_time.gt(0)
+                    & np.isfinite(baseline_time) & baseline_time.gt(0)
                     & seconds_close & ratios_close & paired_ratios_close)
         sub = family_rows.loc[complete].copy()
         if sub.empty:
+            print(f"    phase breakdown {fam}: omitted "
+                  f"(no complete OuterYan profile with T1 baseline)")
             continue
 
         sub["_plan_label"] = "OY"
         sub = sub.sort_values(["profile_total_time_s", "query"], kind="stable")
         n = len(sub)
         skipped = len(family_rows) - n
-        height = min(50, max(3.2, 0.42 * n + 1.4))
+        height = min(50, max(3.6, 0.52 * n + 1.6))
         fig, ax = plt.subplots(figsize=(11.0, height))
-        y = np.arange(n)
+        row_step = 1.05
+        bar_height = 0.12
+        y = np.arange(n) * row_step
+        for row_index, center in enumerate(y):
+            if row_index % 2 == 0:
+                ax.axhspan(center - 0.44, center + 0.44,
+                           color="#F7F8FA", zorder=-2)
         positive_phase_times = sub[seconds_columns].to_numpy(float)
         positive_phase_times = positive_phase_times[positive_phase_times > 0]
         if positive_phase_times.size == 0:
             continue
-        axis_floor = 10 ** np.floor(np.log10(positive_phase_times.min()))
-        phase_offsets = np.linspace(-0.27, 0.27, len(PHASES))
+        baselines = sub[BASELINE_SECONDS].to_numpy(float)
+        totals = sub["profile_total_time_s"].to_numpy(float)
+        axis_floor = 10 ** np.floor(np.log10(min(
+            positive_phase_times.min(), baselines.min(), totals.min()
+        )))
+        # Six equal-height bars touch within a query group. From bottom to top:
+        # OuterYan total, R1, R2, R3, Other, and DuckDB total.
+        all_offsets = (np.arange(len(PHASES) + 2) - (len(PHASES) + 1) / 2) * bar_height
+        total_offset = all_offsets[0]
+        phase_offsets = all_offsets[1:-1]
+        baseline_offset = all_offsets[-1]
         for offset, (label, seconds, _, color) in zip(phase_offsets, PHASES):
             values = sub[seconds].to_numpy(float)
             positive = values > 0
@@ -396,40 +482,44 @@ def fig_phase_by_family(t, outdir):
             # common decade floor makes the endpoint (the encoded value) exact
             # while keeping structural zero phases absent.
             ax.barh(y[positive] + offset, values[positive] - axis_floor,
-                    left=axis_floor, height=0.16, color=color,
-                    edgecolor="white", linewidth=0.25, label=label)
+                    left=axis_floor, height=bar_height, color=color,
+                    edgecolor=color, linewidth=0, label=label)
 
-        # Mark and label the matched total without treating it as another phase.
-        totals = sub["profile_total_time_s"].to_numpy(float)
-        ax.scatter(totals, y, marker="|", s=42, linewidths=0.8,
-                   color="black", zorder=4, label="Total-Time")
-        for yi, total in zip(y, sub["profile_total_time_s"].to_numpy(float)):
-            ax.annotate(f"{total:.3g} s", xy=(total, yi), xytext=(4, 0),
-                        textcoords="offset points", ha="left", va="center",
-                        fontsize=6, color="0.2", clip_on=False)
+        # Whole-query totals use the same bar encoding as the phases. Distinct
+        # colors and vertical positions keep them separate from R1--R3.
+        ax.barh(y + total_offset, totals - axis_floor, left=axis_floor,
+                height=bar_height, color=OUTERYAN_TOTAL_COLOR,
+                edgecolor="none", linewidth=0,
+                zorder=2, label=OUTERYAN_TOTAL_LABEL)
+        ax.barh(y + baseline_offset, baselines - axis_floor, left=axis_floor,
+                height=bar_height, color=BASELINE_COLOR, edgecolor="none",
+                linewidth=0, zorder=2, label=BASELINE_LABEL)
 
         query_labels = [
             f"{query} [{plan}]" for query, plan in zip(sub["query"], sub["_plan_label"])
         ]
         ax.set_yticks(y)
         ax.set_yticklabels(query_labels, fontsize=7)
-        ax.set_ylim(-0.8, n - 0.2)
+        ax.set_ylim(y[0] - 0.60, y[-1] + 0.60)
         ax.set_xscale("log", base=10)
-        ax.set_xlim(axis_floor, totals.max() * 1.55)
+        ax.set_xlim(axis_floor, max(totals.max(), baselines.max()) * 1.10)
         ax.grid(axis="x", which="major", color="0.84", linewidth=0.65)
         ax.grid(axis="x", which="minor", color="0.92", linewidth=0.4)
         ax.set_axisbelow(True)
-        ax.set_xlabel("native operator time (seconds, base-10 log scale)")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.set_xlabel("single-thread time (seconds, base-10 log scale)")
         omission = f"; {skipped} incomplete omitted" if skipped else ""
-        title = f"{fam}: OuterYan native phase breakdown ({n} queries{omission})"
+        title = f"{fam}: OuterYan phase breakdown vs DuckDB baseline ({n} queries{omission})"
         top = 1.0 - min(0.20, 0.55 / height)
         fig.tight_layout(rect=(0, 0, 1, top))
         fig.suptitle(title, y=0.995)
         fig.legend(
             handles=[Patch(facecolor=color, label=label) for label, _, _, color in PHASES]
-                    + [plt.Line2D([], [], color="black", marker="|", linestyle="None",
-                                  markersize=8, label="Total-Time")],
-            ncol=5, fontsize=7, loc="upper center",
+                    + [Patch(facecolor=OUTERYAN_TOTAL_COLOR,
+                             label=OUTERYAN_TOTAL_LABEL),
+                       Patch(facecolor=BASELINE_COLOR, label=BASELINE_LABEL)],
+            ncol=3, fontsize=7, loc="upper center",
             bbox_to_anchor=(0.5, 0.995 - 0.25 / height), frameon=False,
         )
         save(fig, outdir, f"phase_breakdown_{fam.replace('-', '').lower()}")
@@ -463,13 +553,21 @@ def save(fig, outdir, name):
     print(f"  wrote {os.path.join(outdir, name)}.{{{','.join(OUT_FORMATS)}}}")
 
 
+def clear_generated_figures(directory):
+    """Remove only plot files generated by this script from one directory."""
+    removed = 0
+    for old in glob.glob(os.path.join(directory, "*.png")) + glob.glob(os.path.join(directory, "*.pdf")):
+        os.remove(old)
+        removed += 1
+    return removed
+
+
 def render_run(t, outdir, metric, runlabel):
     """Render the full single-run figure set for dataframe `t` into `outdir`."""
     os.makedirs(outdir, exist_ok=True)
     # Clear stale PNGs so a family/figure absent in the new data does not linger
     # (e.g. a run with no JOB results must not keep a previous per_query_job.png).
-    for old in glob.glob(os.path.join(outdir, "*.png")) + glob.glob(os.path.join(outdir, "*.pdf")):
-        os.remove(old)
+    clear_generated_figures(outdir)
     fams = sorted(set(t["family"]))
     print(f"    families present: {', '.join(fams)}")
 
@@ -577,8 +675,21 @@ def main():
         print(f"\nexcluding {len(t_full) - len(t_all)} no-op (kernel=none) queries")
     print(f"\n{len(t_all)} plotted rows of {len(df)} total")
 
-    runs = list(dict.fromkeys(df["run"]))         # source files, in load order
+    runs = list(dict.fromkeys(df["run"]))         # logical timestamps, in load order
     multi = len(runs) > 1
+    for run in runs:
+        # Older plotter versions treated `.attempts.csv` as a separate run.
+        # Remove only their generated figures so stale compatibility folders do
+        # not look like newly rendered logical runs. Preserve any other files.
+        legacy_dir = os.path.join(args.outdir, f"{run}.attempts")
+        removed = clear_generated_figures(legacy_dir)
+        if removed:
+            try:
+                os.rmdir(legacy_dir)
+                suffix = " and removed the empty directory"
+            except OSError:
+                suffix = "; preserved the directory's non-figure files"
+            print(f"  cleared {removed} stale figures from {legacy_dir}{suffix}")
     for run in runs:
         sub = t_all[t_all["run"] == run]
         timed_run = int((t_full["run"] == run).sum())             # correct & timed
@@ -589,9 +700,10 @@ def main():
 
     if multi:
         fig_machine_cmp(t_all, args.outdir)        # cross-run comparison at the root
-        print(f"\nCross-run comparison -> {args.outdir}/machine_cmp.png")
+        print(f"\nCross-run comparison -> {args.outdir}/machine_cmp."
+              f"{{{','.join(OUT_FORMATS)}}}")
 
-    layout = ("one subfolder per source file + machine_cmp.*"
+    layout = ("one subfolder per timestamp + machine_cmp.*"
               if multi else "open dashboard.pdf first")
     print(f"\nDone -> {args.outdir}/   ({layout})")
 

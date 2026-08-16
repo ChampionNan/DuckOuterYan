@@ -13,9 +13,14 @@ For speed-up figures, **speed-up = time(OFF) / time(ON).**
 
 A dashed/grey line at **1.0** marks break-even on speed-up charts. `T1` is
 single-thread and `TM` is multi-thread. Phase-breakdown figures instead show
-native elapsed seconds on a base-10 logarithmic axis; the matched total is
-marked and printed beside every query. Only **correct & timed** queries are
-plotted; `TIMEOUT`/`ERROR` rows are dropped.
+native elapsed seconds on a base-10 logarithmic axis. The matched OuterYan
+profile total is a soft-gold bar, and the median single-thread DuckDB baseline
+is a light-pink bar. Alternating background bands group the six bars for each
+query. All six bars have equal thickness and no vertical gaps within the query
+group. Bars have no outlines, and the alternating background replaces explicit
+separator rules. Endpoint text is intentionally omitted. Only **correct & timed** queries
+are plotted;
+`TIMEOUT`/`ERROR` rows are dropped.
 
 ---
 
@@ -23,13 +28,13 @@ plotted; `TIMEOUT`/`ERROR` rows are dropped.
 
 ```
 plots/
-├── <run>/                 # one sub-folder per source CSV (e.g. 20260622_081932/)
+├── <run>/                 # one sub-folder per logical timestamp
 │   ├── speedup_by_kernel_joinorder.pdf  speedup_by_benchmark.pdf  speedup_by_shape.pdf
 │   ├── speedup_by_relations.pdf
 │   ├── per_query_graph.pdf  per_query_tpch.pdf  per_query_tpcds.pdf  per_query_job.pdf
 │   └── phase_breakdown_graph.pdf  phase_breakdown_tpch.pdf
 │       phase_breakdown_tpcds.pdf  phase_breakdown_job.pdf
-└── machine_cmp.pdf        # only when ≥2 CSVs: run-vs-run comparison
+└── machine_cmp.pdf        # only when at least two logical runs can be compared
 ```
 A family figure (for example, `phase_breakdown_job.png`) **only exists if that
 run has valid OuterYan-selected rows for that family**. DuckDB-selected rows are
@@ -51,6 +56,7 @@ counted in its title; it is never rendered as zero work.
 | **R2** | top-down semi-join native operator time (green) |
 | **R3** | real-join native operator time (orange) |
 | **Other** | residual needed to close the matched profiled `Total-Time` (grey) |
+| **DuckDB baseline** | median single-thread OFF time (`t1_off`), shown as a purple reference endpoint rather than an OuterYan phase |
 
 ---
 
@@ -159,11 +165,12 @@ that historical SQL file is no longer present.
 
 ### `phase_breakdown_graph.pdf` · `phase_breakdown_tpch.pdf` · `phase_breakdown_tpcds.pdf` · `phase_breakdown_job.pdf`
 
-- Four grouped elapsed-time bars per complete OuterYan query profile: **blue R1**, **green R2**, **orange R3**, and **grey Other**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The matched `Total-Time` is marked and labelled separately.
+- Six contiguous, equal-thickness elapsed-time bars appear in each shaded query band: **blue R1**, **green R2**, **orange R3**, **grey Other**, **soft-gold OuterYan total**, and **light-pink DuckDB total**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The two total colors are not reused by any execution phase.
 - Only `[OY]` rows are included. DuckDB-selected queries are excluded because they only execute the ordinary real-join phase. Missing OuterYan phases or inconsistent profiles are omitted and counted in the title.
 - `Other` is not a fourth optimizer round. It includes unmatched operators and work outside native operator timing, and is retained so every bar truthfully closes `Total-Time`.
+- The DuckDB value is a whole-query comparison reference, not an additional phase. `t1_off` is used because the OuterYan phase profile is collected with one execution thread.
 
-### `machine_cmp.png` — run-vs-run (root folder, only with ≥2 CSVs)
+### `machine_cmp.pdf` — run-vs-run (root folder, only with at least two logical runs)
 - **x = TM speed-up on run A, y = TM speed-up on run B**, one dot per query common to both; log-log with the y=x diagonal.
 - **How to read:** dots on the diagonal = the two runs/machines agree; off-diagonal = a query that behaved differently between runs.
 - **Takeaway:** confirms results are consistent across machines (points hug the diagonal) and flags any per-query divergence.
@@ -178,5 +185,5 @@ that historical SQL file is no longer present.
 | Which kernel wins / regresses? | `speedup_by_kernel_joinorder.pdf` (left) |
 | Does join order matter? | `speedup_by_kernel_joinorder.pdf` (right) |
 | Which exact queries are best/worst? | `per_query_<family>.pdf` |
-| Which round consumes each query's profiled time? | `phase_breakdown_<family>.pdf` |
+| Which round consumes each query's profiled time, and how does its total compare with DuckDB? | `phase_breakdown_<family>.pdf` |
 | Are the two machines consistent? | `machine_cmp.pdf` |

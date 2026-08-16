@@ -11,10 +11,10 @@
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. TIMING — oy_time_median off vs on (threads=1 + OY_THREADS, median of 3 runs).
-#   5. PHASE PROFILE — one profiled warm-up plus N profiled ON runs at threads=1.
+#   4. PHASE PROFILE — one profiled warm-up plus N profiled ON runs at threads=1.
 #      The median native OPERATOR_TIMING profile supplies Total-Time and its
 #      matched R1/R2/R3 active-operator times; Other closes that latency.
+#   5. TIMING — oy_time_median off vs on (OY_THREADS, then threads=1).
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
@@ -744,7 +744,13 @@ runs = int(runs_text)
 failure = "NA " * 13 + "NA"
 
 def normalize_query(value):
-    return " ".join(value.strip().rstrip(";").split())
+    # DuckDB's QUERY_NAME metric omits leading SQL comments. Generated core
+    # queries carry provenance comments, so remove only the leading comment
+    # block before comparing the profiled statement with the requested query.
+    lines = value.strip().splitlines()
+    while lines and (not lines[0].strip() or lines[0].lstrip().startswith("--")):
+        lines.pop(0)
+    return " ".join("\n".join(lines).strip().rstrip(";").split())
 
 try:
     with open(raw_path, encoding="utf-8", errors="replace") as f:
@@ -1045,7 +1051,9 @@ else
             job)    [ "$need_job"   = 1 ] || continue; dir="$CORPUS/job";;
         esac
         [ -d "$dir" ] || continue
-        for f in "$dir"/*.sql; do
+        # Use a locale-independent filename order so repeated corpus runs visit
+        # queries in exactly the same sequence on Linux and macOS.
+        while IFS= read -r f; do
             case "$f" in *_off.sql) continue;; esac
             lbl="$(basename "$f" .sql)"
             case "$lbl" in $PATTERN) ;; *) continue;; esac
@@ -1056,7 +1064,7 @@ else
             fi
             append_query "$fam" "$fam/$(basename "$f")"
             [ "$LIMIT" -gt 0 ] && [ "${#LABELS[@]}" -ge "$LIMIT" ] && break
-        done
+        done < <(find "$dir" -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort)
         [ "$LIMIT" -gt 0 ] && [ "${#LABELS[@]}" -ge "$LIMIT" ] && break
     done
 fi
@@ -1176,7 +1184,7 @@ QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FIL
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
 # process_one <i> — run the full pipeline for query i (gate -> decision -> kernel
-# -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# -> profile -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
