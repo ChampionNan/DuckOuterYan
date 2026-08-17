@@ -51,20 +51,27 @@ public:
 	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
-	//! it to the OuterYan candidate's real-join cost.
-	static constexpr double SEMIJOIN_COST_RATIO = 0.35;
+	//! it to the OuterYan candidate's real-join cost. V5 recalibrates this work
+	//! using the forced-candidate audit while retaining every reducer that is not
+	//! proven redundant by the constraint-aware elimination pass.
+	static constexpr double SEMIJOIN_COST_RATIO = 0.50;
 	//! GATED-mode selection threshold. A value of 1.0 selects OuterYan only
 	//! when its limiting estimated total cost does not exceed DuckDB's baseline
 	//! cost. Uncertain table filters are checked under both their estimated and
 	//! unfiltered-cardinality scenarios.
 	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
-	//! A changed candidate may use this relaxed ceiling only when the V4
+	//! A changed candidate may use this relaxed ceiling only when the V5
 	//! confidence predicate succeeds. It is deliberately not a global
 	//! multiplier.
-	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
+	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.35;
 	//! Require a material real-join build/probe input reduction before allowing
 	//! the stretch tier.
 	static constexpr double STRETCH_MAX_JOIN_INPUT_RATIO = 0.75;
+	//! The stretch tier is intended for reorder-dominated candidates: reducer
+	//! rounds retain nearly all estimated rows, while the changed grouping still
+	//! lowers real-join work. Lower-retention candidates must win the strict gate
+	//! because their performance depends more heavily on reduction estimates.
+	static constexpr double STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO = 0.95;
 	//! A generic-selectivity filter on a tiny relation is too uncertain to drive
 	//! a large reorder when the two reducer rounds retain essentially all rows.
 	static constexpr double MAX_UNCERTAIN_FILTER_RETAINED_CARDINALITY_RATIO = 0.99;

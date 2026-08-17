@@ -1367,6 +1367,34 @@ TEST_CASE("outer_yan passes: DP — cost model restructures the join order",
 	REQUIRE(OuterYanDP::JoinGroupingSignature(*tree) != input_signature);
 }
 
+TEST_CASE("outer_yan passes: DP — estimated no-op reducers remain correctness guards",
+          "[outer_yan][passes][dp][cost]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE p AS SELECT i::INTEGER AS id FROM range(100) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE q AS SELECT i::INTEGER AS id FROM range(100) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE r AS SELECT i::INTEGER AS id FROM range(100) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE"));
+
+	auto tree = BuildPreIRFor(
+	    con, "SELECT * FROM p LEFT JOIN q ON p.id=q.id LEFT JOIN r ON q.id=r.id");
+	REQUIRE(tree->HasOT());
+	const auto original_bottom_up_count = tree->bottom_up_pairs.size();
+	const auto original_top_down_count = tree->top_down_pairs.size();
+	const auto original_pair_count = tree->bottom_up_pairs.size() + tree->top_down_pairs.size();
+	REQUIRE(original_pair_count > 0);
+
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	auto summary = OuterYanDP(ctx).Optimize(*tree);
+	ctx.transaction.Commit();
+	REQUIRE(summary.has_complete_plan);
+	REQUIRE(summary.semijoin_steps.size() == original_pair_count);
+	REQUIRE(summary.SemijoinRawCost() > 0.0);
+	REQUIRE(tree->bottom_up_pairs.size() == original_bottom_up_count);
+	REQUIRE(tree->top_down_pairs.size() == original_top_down_count);
+}
+
 TEST_CASE("outer_yan passes: DP — full inner reduction bounds every intermediate",
           "[outer_yan][passes][dp][cost]") {
 	DuckDB db(nullptr);
@@ -1421,13 +1449,16 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		result.candidate_join_input_rows = 700.0;
 		result.candidate_to_baseline_join_input_ratio = 0.70;
 		result.candidate_to_baseline_join_input_ratio_available = true;
+		result.semijoin_retained_cardinality_ratio = 0.98;
 		return result;
 	};
 
 	REQUIRE(OuterYanOptimizer::MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.0));
-	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
+	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(0.50));
+	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.35));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.75));
-	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V4");
+	REQUIRE(OuterYanOptimizer::STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.95));
+	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V5");
 
 	SECTION("strict boundary remains inclusive") {
 		auto result = OuterYanOptimizer::EvaluateCostGate(costs());
@@ -1441,15 +1472,15 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 
 	SECTION("stretch boundary is inclusive") {
 		auto input = costs();
-		input.candidate_total = 120.0;
+		input.candidate_total = 135.0;
 		auto result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE(result.stretch_eligible);
 		REQUIRE(result.pass);
 		REQUIRE(result.stretch_selected);
-		REQUIRE(result.cost_ratio_limit == Approx(1.20));
-		REQUIRE(result.baseline_threshold == Approx(120.0));
+		REQUIRE(result.cost_ratio_limit == Approx(1.35));
+		REQUIRE(result.baseline_threshold == Approx(135.0));
 
-		input.candidate_total = 120.0001;
+		input.candidate_total = 135.0001;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.pass);
 		REQUIRE_FALSE(result.stretch_selected);
@@ -1493,6 +1524,21 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		input = costs();
 		input.candidate_total = 110.0;
 		input.candidate_join_cost = input.baseline_cost;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("stretch requires reorder-dominated semi-join retention") {
+		auto input = costs();
+		input.candidate_total = 110.0;
+		input.semijoin_retained_cardinality_ratio = 0.95;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.stretch_eligible);
+		REQUIRE(result.pass);
+		REQUIRE(result.stretch_selected);
+
+		input.semijoin_retained_cardinality_ratio = 0.949999;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.stretch_eligible);
 		REQUIRE_FALSE(result.pass);

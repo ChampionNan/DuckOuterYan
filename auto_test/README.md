@@ -18,6 +18,7 @@ synopsis.
 | `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
 | `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
 | `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
+| `audit_cost_gate.py` | Extract changed-grouping candidates and classify normal gate decisions against forced-candidate timings |
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
@@ -314,6 +315,70 @@ decision=[mode=FORCE_OUTERYAN_DIAGNOSTIC
           reason=FORCE_OUTERYAN_DIAGNOSTIC
           ... gate=SKIPPED ... outer_yan_selected=1 ...]
 ```
+
+#### Audit every changed-grouping candidate
+
+Cost-gate evaluation is an offline two-run procedure. First run the corpus in
+normal `GATED` mode. Extract forceable queries for which `outer_reordered=1`:
+
+```bash
+python3 auto_test/audit_cost_gate.py \
+  --normal-csv auto_test/results/experiment_onoff_core_TIMESTAMP.csv \
+  --write-query-list /tmp/outeryan_changed_queries.txt
+```
+
+Run that list again with the diagnostic candidate override. Both sides still
+execute the bare query, and an incorrect candidate is never considered a
+performance win:
+
+```bash
+DUCKDB_OY_FORCE_CANDIDATE=1 \
+OY_CORPUS=auto_test/outerjoin_benchmark/core \
+bash auto_test/experiment_onoff.sh \
+  --only all \
+  --query-list /tmp/outeryan_changed_queries.txt \
+  --runs 3 \
+  --capture-plans \
+  --out auto_test/results/experiment_onoff_forced_TIMESTAMP.txt
+```
+
+Finally, join the normal and forced results:
+
+```bash
+python3 auto_test/audit_cost_gate.py \
+  --normal-csv auto_test/results/experiment_onoff_core_TIMESTAMP.csv \
+  --forced-csv auto_test/results/experiment_onoff_forced_TIMESTAMP.csv \
+  --output auto_test/results/cost_gate_audit_TIMESTAMP.csv
+```
+
+The default symmetric materiality band treats a speedup of at least `1.10` as
+faster, a speedup of at most `1/1.10` as slower, and values between those
+bounds as neutral. It can be changed with `--material-speedup`. The report
+derives speedup from the precise OFF and ON times rather than the rounded
+speedup column, and classifies multi-thread (`tm`) and single-thread (`t1`)
+measurements
+separately. A selected faster plan is a true positive; a rejected faster plan
+is a false negative; a selected slower plan is a false positive; and a rejected
+slower plan is a true negative. A disagreement between `tm` and `t1` is marked
+as thread-sensitive rather than collapsed into a single winner. Multi-thread
+timing is the default primary metric and can be changed with
+`--primary-metric t1`.
+
+The audit also requires the normal row to be a consistent `GATED` decision,
+the forced row to report a changed grouping under
+`FORCE_OUTERYAN_DIAGNOSTIC`, and the effective pass, query identity, result
+cardinality, formula, weights, and candidate cost inputs to agree. These checks
+are a deterministic-rerun proxy; the current trace does not export a grouping
+signature for direct comparison. Non-matching or incorrect rows are reported
+as non-comparable rather than scored. A changed candidate whose DuckDB
+baseline is proven empty cannot be diagnostic-forced, so it is excluded from
+the query list and counted as `proven_empty_excluded`.
+
+Normal and forced runs must use the same binary, corpus, database snapshot,
+thread count, and run count. Because the result CSV currently stores medians
+rather than confidence intervals over raw samples, these labels are
+provisional; repeat apparent wins and regressions independently before tuning
+the source-level gate constants.
 
 `reorder=0` means that the two candidates have the same base-relation grouping;
 it does not contradict `selected=OUTERYAN`. Use `kernel=bitmap(...)`,

@@ -144,6 +144,8 @@ string FormatSemijoinCostBreakdown(const OuterYanDPCostSummary &summary) {
 		    << " filter_build_cost=" << step.filter_build_cost << " replay_cost=" << step.replay_cost
 		    << " lookup_cost=" << step.lookup_cost << " emit_cost=" << step.emit_cost << "\n";
 	}
+	out << "[OY_SJ_COST_TOTAL] active_pairs=" << summary.semijoin_steps.size()
+	    << " raw_cost=" << summary.SemijoinRawCost() << "\n";
 	return out.str();
 }
 
@@ -248,7 +250,9 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	    !costs.full_reduction_cardinality_lower_bound_applied &&
 	    costs.candidate_to_baseline_join_input_ratio_available &&
 	    costs.candidate_join_cost < costs.baseline_cost &&
-	    costs.candidate_to_baseline_join_input_ratio <= STRETCH_MAX_JOIN_INPUT_RATIO;
+	    costs.candidate_to_baseline_join_input_ratio <= STRETCH_MAX_JOIN_INPUT_RATIO &&
+	    costs.semijoin_retained_cardinality_ratio >=
+	        STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO;
 	result.available = true;
 	result.cost_ratio_limit = MAX_CANDIDATE_TO_BASELINE_RATIO;
 	result.baseline_threshold = strict_threshold;
@@ -654,7 +658,9 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		         "no_full_reduction_lower_bound && candidate_join_cost < baseline_cost && "
 		         "candidate_join_input_rows <= "
 		      << std::setprecision(6) << STRETCH_MAX_JOIN_INPUT_RATIO << std::setprecision(17)
-		      << " * baseline_join_input_rows\n"
+		      << " * baseline_join_input_rows && semijoin_retained_cardinality_ratio >= "
+		      << std::setprecision(6) << STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO
+		      << std::setprecision(17) << "\n"
 		      << "cost_gate_result=";
 		if (trace_costs.uncertain_filter_amplification_guard) {
 			costs << "uncertain_filter_amplification_guard => ";

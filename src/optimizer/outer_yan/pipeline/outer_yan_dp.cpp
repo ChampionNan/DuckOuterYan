@@ -350,7 +350,7 @@ void OuterYanDP::BuildEdgesFromOT(OuterYanTree &tree) {
 }
 
 void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummary &summary,
-                                        const vector<double> *base_cardinality_override) {
+	                                    const vector<double> *base_cardinality_override) {
 	semijoin_cardinality.resize(num_relations);
 	vector<double> base_cardinality(num_relations);
 	if (base_cardinality_override && base_cardinality_override->size() != num_relations) {
@@ -462,10 +462,10 @@ void OuterYanDP::BuildSemijoinCostModel(OuterYanTree &tree, OuterYanDPCostSummar
 		summary.semijoin_steps.push_back(std::move(detail));
 	};
 
-	for (auto &pair : tree.bottom_up_pairs) {
+	for (const auto &pair : tree.bottom_up_pairs) {
 		process_pair(pair, false);
 	}
-	for (auto &pair : tree.top_down_pairs) {
+	for (const auto &pair : tree.top_down_pairs) {
 		process_pair(pair, true);
 	}
 	summary.reduced_cardinalities = semijoin_cardinality;
