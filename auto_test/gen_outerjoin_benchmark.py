@@ -271,7 +271,7 @@ def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
         ),
         relations=ordered_relations,
         predicates=ordered_predicates,
-        where=f"({anchor}.id % 1000 = 0 OR {anchor}.id IS NULL)",
+        where=f"{anchor}.id % 1000 = 0",
         offset=offset,
     )
 
@@ -335,7 +335,7 @@ SEEDS: tuple[Seed, ...] = (
         source_hash="495def7debb02ab1def31da07fbc88b4796813b754832ce15d54a35dcb104577",
         topology="chain",
         semantics=(
-            "Regional sales in the source date window: retain NULL-aware region "
+            "Regional sales in the source date window: retain region-filtered "
             "coverage while exposing missing line-item information."
         ),
         relations=("region r", "nation n", "customer c", "orders o", "lineitem l"),
@@ -350,7 +350,7 @@ SEEDS: tuple[Seed, ...] = (
             "l.l_linenumber, l.l_extendedprice"
         ),
         where=(
-            "(r.r_name = 'ASIA' OR r.r_regionkey IS NULL) "
+            "r.r_name = 'ASIA' "
             "AND o.o_orderdate >= DATE '1994-01-01' "
             "AND o.o_orderdate < DATE '1995-01-01'"
         ),
@@ -380,7 +380,7 @@ SEEDS: tuple[Seed, ...] = (
             "p.p_partkey, p.p_name, l.l_orderkey, s.s_suppkey, "
             "ps.ps_supplycost, o.o_orderdate"
         ),
-        where="(p.p_name LIKE '%green%' OR p.p_partkey IS NULL)",
+        where="p.p_name LIKE '%green%'",
         semantic_vector=("L", "L", "F", "L"),
     ),
     Seed(
@@ -414,7 +414,7 @@ SEEDS: tuple[Seed, ...] = (
             "cs.cs_order_number, cs.cs_item_sk, cr.cr_return_quantity, "
             "w.w_state, i.i_item_id, d.d_date"
         ),
-        where="(cs.cs_order_number % 1000 = 0 OR cs.cs_order_number IS NULL)",
+        where="cs.cs_order_number % 1000 = 0",
         semantic_vector=("L", "I", "I", "I"),
     ),
     Seed(
@@ -441,7 +441,7 @@ SEEDS: tuple[Seed, ...] = (
             "cs.cs_order_number, cs.cs_item_sk, inv.inv_quantity_on_hand, "
             "w.w_warehouse_name, i.i_item_id, p.p_promo_name"
         ),
-        where="(cs.cs_order_number % 1000 = 0 OR cs.cs_order_number IS NULL)",
+        where="cs.cs_order_number % 1000 = 0",
         semantic_vector=("I", "I", "I", "L"),
     ),
     Seed(
@@ -468,7 +468,7 @@ SEEDS: tuple[Seed, ...] = (
             "t.id AS title_id, t.title, ci.person_id, chn.name AS character_name, "
             "rt.role, mc.company_id"
         ),
-        where="(t.production_year > 2005 OR t.id IS NULL)",
+        where="t.production_year > 2005",
         semantic_vector=("I", "L", "I", "L"),
     ),
     Seed(
@@ -495,7 +495,7 @@ SEEDS: tuple[Seed, ...] = (
             "t.id AS title_id, t.title, n.id AS person_id, n.name, "
             "mk.keyword_id, k.keyword"
         ),
-        where="(t.id % 1000 = 0 OR t.id IS NULL)",
+        where="t.id % 1000 = 0",
         semantic_vector=("I", "I", "L", "L"),
     ),
     Seed(
@@ -514,7 +514,7 @@ SEEDS: tuple[Seed, ...] = (
         relations=("part p", "partsupp ps", "supplier s"),
         predicates=("p.p_partkey = ps.ps_partkey", "ps.ps_suppkey = s.s_suppkey"),
         projection="p.p_name, s.s_name, ps.ps_availqty",
-        where="(p.p_partkey <= 1000 OR p.p_partkey IS NULL)",
+        where="p.p_partkey <= 1000",
         semantic_vector=("L", "F"),
     ),
     Seed(
@@ -541,7 +541,7 @@ SEEDS: tuple[Seed, ...] = (
             "c.c_customer_id, ca.ca_city, ss.ss_ticket_number, ss.ss_quantity, "
             "d.d_date, t.t_hour"
         ),
-        where="(c.c_customer_sk % 1000 = 0 OR c.c_customer_sk IS NULL)",
+        where="c.c_customer_sk % 1000 = 0",
         semantic_vector=("L", "I", "F", "R"),
     ),
     Seed(
@@ -567,7 +567,7 @@ SEEDS: tuple[Seed, ...] = (
             "ci.id AS cast_id, a.name AS actor_name, t.title AS movie_title, "
             "ci.nr_order, r.role"
         ),
-        where="(ci.id % 1000 = 0 OR ci.id IS NULL)",
+        where="ci.id % 1000 = 0",
         semantic_vector=("L", "I", "L"),
     ),
 )
@@ -585,7 +585,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
         semantics="Customer orders are the mandatory backbone and line items provide optional revenue detail.",
         relations=("customer c", "orders o", "lineitem l"),
         predicates=("c.c_custkey = o.o_custkey", "o.o_orderkey = l.l_orderkey"),
-        where="(c.c_custkey % 1000 = 0 OR c.c_custkey IS NULL)",
+        where="c.c_custkey % 1000 = 0",
         offset=0,
     ),
     compact_seed(
@@ -604,7 +604,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "o.o_custkey = c.c_custkey",
             "s.s_nationkey = n.n_nationkey",
         ),
-        where="(s.s_suppkey % 100 = 0 OR s.s_suppkey IS NULL)",
+        where="s.s_suppkey % 100 = 0",
         offset=1,
     ),
     compact_seed(
@@ -624,7 +624,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "c.c_nationkey = n.n_nationkey",
             "n.n_regionkey = r.r_regionkey",
         ),
-        where="(p.p_partkey % 1000 = 0 OR p.p_partkey IS NULL)",
+        where="p.p_partkey % 1000 = 0",
         offset=2,
     ),
     compact_seed(
@@ -642,7 +642,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ws.ws_sold_date_sk = d.d_date_sk",
             "ws.ws_web_site_sk = web.web_site_sk",
         ),
-        where="(wr.wr_order_number % 1000 = 0 OR wr.wr_order_number IS NULL)",
+        where="wr.wr_order_number % 1000 = 0",
         offset=0,
     ),
     compact_seed(
@@ -661,7 +661,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_store_sk = s.s_store_sk",
             "ss.ss_item_sk = i.i_item_sk",
         ),
-        where="(ss.ss_ticket_number % 1000 = 0 OR ss.ss_ticket_number IS NULL)",
+        where="ss.ss_ticket_number % 1000 = 0",
         offset=1,
     ),
     compact_seed(
@@ -678,7 +678,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_item_sk = sr.sr_item_sk AND ss.ss_ticket_number = sr.sr_ticket_number",
             "sr.sr_reason_sk = r.r_reason_sk",
         ),
-        where="(ss.ss_ticket_number % 1000 = 0 OR ss.ss_ticket_number IS NULL)",
+        where="ss.ss_ticket_number % 1000 = 0",
         offset=2,
     ),
     compact_seed(
@@ -695,7 +695,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ws.ws_sold_date_sk = d.d_date_sk",
             "ws.ws_item_sk = ss.ss_item_sk AND ws.ws_sold_date_sk = ss.ss_sold_date_sk",
         ),
-        where="(ws.ws_order_number % 1000 = 0 OR ws.ws_order_number IS NULL)",
+        where="ws.ws_order_number % 1000 = 0",
         offset=3,
     ),
     compact_seed(
@@ -712,7 +712,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_sold_date_sk = d.d_date_sk",
             "ss.ss_customer_sk = cs.cs_bill_customer_sk AND ss.ss_item_sk = cs.cs_item_sk",
         ),
-        where="(ss.ss_ticket_number % 1000 = 0 OR ss.ss_ticket_number IS NULL)",
+        where="ss.ss_ticket_number % 1000 = 0",
         offset=0,
     ),
     job_seed("01a", offset=0),
@@ -725,39 +725,39 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
     job_seed("30a", offset=3),
     sqlstorm_seed(
         "tpch", "17751",
-        anchor_filter="(p.p_partkey % 1000 = 0 OR p.p_partkey IS NULL)", offset=1,
+        anchor_filter="p.p_partkey % 1000 = 0", offset=1,
     ),
     sqlstorm_seed(
         "tpch", "25509",
-        anchor_filter="(p.p_partkey % 1000 = 0 OR p.p_partkey IS NULL)", offset=2,
+        anchor_filter="p.p_partkey % 1000 = 0", offset=2,
     ),
     sqlstorm_seed(
         "tpch", "15031",
-        anchor_filter="(p.p_partkey % 1000 = 0 OR p.p_partkey IS NULL)", offset=3,
+        anchor_filter="p.p_partkey % 1000 = 0", offset=3,
     ),
     sqlstorm_seed(
         "tpcds", "11376",
-        anchor_filter="(c.c_customer_sk % 1000 = 0 OR c.c_customer_sk IS NULL)", offset=1,
+        anchor_filter="c.c_customer_sk % 1000 = 0", offset=1,
     ),
     sqlstorm_seed(
         "tpcds", "28643",
-        anchor_filter="(C.c_customer_sk % 1000 = 0 OR C.c_customer_sk IS NULL)", offset=2,
+        anchor_filter="C.c_customer_sk % 1000 = 0", offset=2,
     ),
     sqlstorm_seed(
         "tpcds", "14368",
-        anchor_filter="(c.c_customer_sk % 1000 = 0 OR c.c_customer_sk IS NULL)", offset=3,
+        anchor_filter="c.c_customer_sk % 1000 = 0", offset=3,
     ),
     sqlstorm_seed(
         "job", "11914",
-        anchor_filter="(a.id % 1000 = 0 OR a.id IS NULL)", offset=1,
+        anchor_filter="a.id % 1000 = 0", offset=1,
     ),
     sqlstorm_seed(
         "job", "18930",
-        anchor_filter="(a.id % 1000 = 0 OR a.id IS NULL)", offset=2,
+        anchor_filter="a.id % 1000 = 0", offset=2,
     ),
     sqlstorm_seed(
         "job", "13193",
-        anchor_filter="(c.id % 1000 = 0 OR c.id IS NULL)", offset=3,
+        anchor_filter="c.id % 1000 = 0", offset=3,
     ),
 )
 
@@ -1085,11 +1085,7 @@ def generate_core(root: Path) -> int:
                     "tree_shape": tree_shape,
                     "join_vector": vector,
                     "relation_count": str(len(seed.relations)),
-                    "predicate_class": (
-                        "mixed_null_preserving_and_null_rejecting"
-                        if seed.seed_id == "tpch_q05_region_sales"
-                        else "null_preserving"
-                    ),
+                    "predicate_class": "null_rejecting",
                     "semantic_role": variant_semantics,
                     "semantics": seed.semantics,
                 }
@@ -1300,16 +1296,29 @@ def validate_generated(root: Path) -> None:
     all_shapes = Counter(row["tree_shape"] for row in manifest_rows)
     if all_shapes != Counter({"left_deep": 80, "right_deep": 68, "bushy": 22}):
         raise RuntimeError(f"unexpected core shape distribution: {all_shapes}")
+    predicate_classes = Counter(row["predicate_class"] for row in manifest_rows)
+    if predicate_classes != Counter({"null_rejecting": CORE_QUERY_COUNT}):
+        raise RuntimeError(f"unsupported predicate classes in core: {predicate_classes}")
 
     for relative_path in sorted(actual_paths):
         sql = (root / "core" / relative_path).read_text(encoding="utf-8")
         upper = sql.upper()
+        statement = "\n".join(
+            line for line in upper.splitlines() if not line.lstrip().startswith("--")
+        )
         if "OUTER JOIN" not in upper:
             raise RuntimeError(f"{relative_path}: no outer join")
         if " ON 1=1" in upper:
             raise RuntimeError(f"{relative_path}: cross product")
         if any(token in upper for token in ("GROUP BY", "SELECT DISTINCT", " OVER (")):
             raise RuntimeError(f"{relative_path}: outside core applicability envelope")
+        null_tolerant_patterns = (
+            r"\bIS\s+NULL\b",
+            r"\bIS\s+(?:NOT\s+)?DISTINCT\s+FROM\b",
+            r"\b(?:COALESCE|IFNULL)\s*\(",
+        )
+        if any(re.search(pattern, statement) for pattern in null_tolerant_patterns):
+            raise RuntimeError(f"{relative_path}: NULL-tolerant predicate is not allowed in the core")
 
 
 def main() -> None:

@@ -3,4 +3,4 @@
 -- business_semantics: Part-supplier coverage adapted from SQLStorm: selected parts remain visible when a supply or supplier record is missing.
 SELECT p.p_name, s.s_name, ps.ps_availqty
 FROM (supplier s RIGHT OUTER JOIN (partsupp ps RIGHT OUTER JOIN part p ON p.p_partkey = ps.ps_partkey) ON ps.ps_suppkey = s.s_suppkey)
-WHERE (p.p_partkey <= 1000 OR p.p_partkey IS NULL);
+WHERE p.p_partkey <= 1000;

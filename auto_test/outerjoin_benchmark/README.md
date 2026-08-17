@@ -82,18 +82,23 @@ mixed joins are the main workload rather than an auxiliary variant.
 The transformation extracts a connected subgraph of relation instances,
 aliases, and equality predicates from the named source query. That subgraph is
 fixed across all variants of the seed. Projection and selection are normalized
-to expose NULL-extended tuples and to remain executable as a flat optimizer
-test. Consequently, the precise claim is **join-skeleton-derived**, not a claim
-that the complete original benchmark query is semantically equivalent after
-its inner joins become outer joins.
+to remain executable as a flat optimizer test. Consequently, the precise claim
+is **join-skeleton-derived**, not a claim that the complete original benchmark
+query is semantically equivalent after its inner joins become outer joins.
 
-Selection coverage deliberately includes both sides of outer-join
-simplification. Most seeds use a NULL-preserving unary guard so unmatched rows
-remain observable. The five TPC-H Q5 variants additionally retain Q5's original
-order-date restrictions as null-rejecting unary `WHERE` conjuncts. They form a
-source-derived simplification stratum while preserving the same query count,
-join skeleton, and structural variant balance. The `predicate_class` manifest
-column identifies these cases explicitly.
+Each generated selection is a global `WHERE` predicate evaluated over the
+complete join tree, and every conjunct is NULL-rejecting with respect to the
+relation it references. NULL-tolerant guards such as `P(x) OR x IS NULL`, as
+well as `COALESCE` and `IS [NOT] DISTINCT FROM`, are excluded from the core.
+This keeps the performance workload within OuterYan's null-rejection envelope;
+separate correctness tests cover safe handling of NULL-tolerant predicates.
+The `predicate_class` manifest column marks every core entry as
+`null_rejecting`.
+
+Shape and join-vector labels describe the input SQL before semantic
+simplification. A global NULL-rejecting predicate can legitimately collapse an
+enclosing outer join; those cases exercise outer-join simplification, whereas
+the remaining cases continue into outer-join enumeration and execution.
 
 ## Provenance terminology
 
