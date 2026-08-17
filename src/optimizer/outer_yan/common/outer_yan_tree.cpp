@@ -123,6 +123,16 @@ private:
 	OuterYanTree &tree;
 
 	idx_t next_relation_id = 0;
+	idx_t join_depth = 0;
+
+	static void CollectRelationIds(const OTNode &node, unordered_set<idx_t> &out) {
+		if (node.kind == OTNode::Kind::RELATION) {
+			out.insert(node.relation_id);
+			return;
+		}
+		CollectRelationIds(*node.children[0], out);
+		CollectRelationIds(*node.children[1], out);
+	}
 
 	unique_ptr<OTNode> BuildNode(LogicalOperator &op) {
 		if (IsBaseRelationSubtree(op)) {
@@ -177,8 +187,10 @@ private:
 		}
 		node->info = std::move(info);
 
+		join_depth++;
 		node->children[0] = BuildNode(*op.children[0]);
 		node->children[1] = BuildNode(*op.children[1]);
+		join_depth--;
 		return node;
 	}
 
@@ -186,7 +198,17 @@ private:
 		if (op.children.size() != 1) {
 			throw InternalException("LogicalFilter with %llu children", op.children.size());
 		}
+		const bool root_cap_filter = join_depth == 0;
+		// A root predicate stays in `source_plan`; its record is an analysis copy.
+		// Applicability permits an intermediate predicate only when it is
+		// NULL-rejecting, in which case scope-aware Simplification makes leaf
+		// placement semantics-preserving before DP runs.
+		if (root_cap_filter) {
+			tree.root_skeleton_parent = &op;
+		}
 		auto child_node = BuildNode(*op.children[0]);
+		unordered_set<idx_t> evaluation_relations;
+		CollectRelationIds(*child_node, evaluation_relations);
 		auto &filter = op.Cast<LogicalFilter>();
 		for (auto &expr : filter.expressions) {
 			unordered_set<idx_t> refs;
@@ -197,12 +219,17 @@ private:
 				    "relation (likely a projection-introduced table_index above the join "
 				    "tree); not yet supported");
 			}
-			auto rec = make_uniq<OuterYanFilterRecord>(std::move(expr), std::move(refs),
+			auto record_expr = root_cap_filter ? expr->Copy() : std::move(expr);
+			auto rec = make_uniq<OuterYanFilterRecord>(std::move(record_expr), std::move(refs),
 			                                           tree.filter_records.size());
+			rec->evaluation_relations = evaluation_relations;
 			rec->from_residual_predicate = true;
+			rec->retained_at_original_scope = root_cap_filter;
 			tree.filter_records.push_back(std::move(rec));
 		}
-		filter.expressions.clear();
+		if (!root_cap_filter) {
+			filter.expressions.clear();
+		}
 		return child_node;
 	}
 
@@ -438,8 +465,9 @@ void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 //! wrappers that choose where to store the result.
 // True iff the base-relation subtree at `base_op` carries a predicate that
 // reduces its row set before an SJBuild sitting above it can materialise:
-// either a LOGICAL_FILTER wrapper in the original plan, or any entry in
-// `filter_records` that references only `relation_id`.
+// either a LOGICAL_FILTER wrapper in the original plan, or a relocatable entry
+// in `filter_records` that references only `relation_id`. A retained root
+// predicate is deliberately not a base predicate.
 static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
                                const vector<unique_ptr<OuterYanFilterRecord>> &filter_records) {
 	// A base subtree may contain an arbitrary Filter/Projection wrapper chain.
@@ -474,7 +502,8 @@ static bool HasBasePredicates(const LogicalOperator *base_op, idx_t relation_id,
 		return true;
 	}
 	for (const auto &rec : filter_records) {
-		if (rec && rec->filter && rec->referenced_relations.size() == 1 &&
+		if (rec && rec->filter && !rec->retained_at_original_scope &&
+		    rec->referenced_relations.size() == 1 &&
 		    *rec->referenced_relations.begin() == relation_id) {
 			return true;
 		}
@@ -1167,7 +1196,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 				continue;
 			}
 			auto &rec = filter_records[i];
-			if (!rec || !rec->filter) {
+			if (!rec || !rec->filter || rec->retained_at_original_scope) {
 				continue;
 			}
 			if (rec->referenced_relations.size() == 1 &&
@@ -1218,7 +1247,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 				continue;
 			}
 			auto &rec = filter_records[i];
-			if (!rec || !rec->filter) {
+			if (!rec || !rec->filter || rec->retained_at_original_scope) {
 				continue;
 			}
 			bool covered = true;
@@ -1249,7 +1278,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 			continue;
 		}
 		auto &rec = filter_records[i];
-		if (!rec || !rec->filter) {
+		if (!rec || !rec->filter || rec->retained_at_original_scope) {
 			continue;
 		}
 		TryPushFilter(plan, std::move(rec->filter));
@@ -1262,9 +1291,8 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	// — a root aggregate (COUNT/SUM/GROUP BY), a DISTINCT, the output
 	// projection — survives the roundtrip. The cap chain rode along intact on
 	// `source_plan`; only the skeleton-parent's child pointer is rewritten.
-	// (Peeled filters were emptied into residual records and re-pushed above,
-	// so the anchor is the nearest projection/aggregate/distinct, never a
-	// filter.)
+	// Root filters remain in this cap chain. Their analysis copies in
+	// `filter_records` are never emitted into the rebuilt skeleton.
 	if (root_skeleton_parent) {
 		root_skeleton_parent->children[0] = std::move(plan);
 		source_plan->ResolveOperatorTypes();

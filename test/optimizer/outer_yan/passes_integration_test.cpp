@@ -14,6 +14,7 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
@@ -271,6 +272,21 @@ void SeedNullable(Connection &con) {
 	                          "(5, 51000), (7, 70000), (NULL, 90000)"));
 }
 
+void SeedSQLStorm25509(Connection &con) {
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE p(partkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE ps(partkey INTEGER, suppkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE s(suppkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE l(partkey INTEGER, orderkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE o(orderkey INTEGER, custkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(custkey INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO p VALUES (1), (1000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO ps VALUES (1, 10), (1000, 20)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO s VALUES (10), (20)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO l VALUES (1, 100), (1000, 200)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO o VALUES (100, 1000), (200, 2000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO c VALUES (1000), (2000), (3000)"));
+}
+
 //! Render a result as a sorted vector of row strings (columns joined by '|',
 //! NULL via `Value::ToString`). Sorting makes the comparison independent of
 //! storage/row order, so the queries need no `ORDER BY`.
@@ -289,6 +305,34 @@ vector<string> CollectSortedRows(MaterializedQueryResult &result) {
 	}
 	std::sort(rows.begin(), rows.end());
 	return rows;
+}
+
+bool ContainsJoin(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return true;
+	}
+	for (const auto &child : op.children) {
+		if (child && ContainsJoin(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! True when a residual LogicalFilter still dominates a comparison-join
+//! subtree. This is the required placement for a root predicate that may
+//! observe NULLs introduced by an outer join.
+bool HasFilterAboveJoin(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER && !op.children.empty() &&
+	    op.children[0] && ContainsJoin(*op.children[0])) {
+		return true;
+	}
+	for (const auto &child : op.children) {
+		if (child && HasFilterAboveJoin(*child)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 //! Full-pipeline equivalence: run `sql` twice and assert identical row
@@ -463,6 +507,18 @@ TEST_CASE("outer_yan passes: no simplification when WHERE preserves NULLs",
 	};
 	walk(tree->OJT().Root());
 	REQUIRE(found_outer);
+	REQUIRE_FALSE(tree->filter_records.empty());
+	for (const auto &record : tree->filter_records) {
+		REQUIRE(record != nullptr);
+		REQUIRE(record->retained_at_original_scope);
+	}
+	// Lowering must rebuild the join below the original filter. Moving this
+	// predicate to b's leaf would turn rejected matches into surviving
+	// NULL-extended rows.
+	con.context->transaction.BeginTransaction();
+	auto rebuilt = tree->OJTToLogicalPlan(*con.context);
+	con.context->transaction.Commit();
+	REQUIRE(HasFilterAboveJoin(*rebuilt));
 }
 
 // ============================================================================
@@ -815,6 +871,62 @@ TEST_CASE("outer_yan passes: equivalence — LEFT join with preserved-side resid
 	                                     "WHERE na.v > 15");
 }
 
+TEST_CASE("outer_yan passes: equivalence — NULL-tolerant unary filter stays above LEFT join",
+          "[outer_yan][passes][equivalence][filter-placement]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedNullable(con);
+	// Both matching nb rows for k=2 fail this predicate. If it is moved to the
+	// nb leaf, the matches disappear and na(k=2) is incorrectly emitted as a
+	// NULL-extended row that satisfies `nb.v IS NULL`.
+	AssertOuterYanPreservesResults(con, "SELECT * "
+	                                     "FROM na LEFT JOIN nb ON na.k = nb.k "
+	                                     "WHERE nb.v IS NULL OR nb.v > 250");
+}
+
+TEST_CASE("outer_yan passes: equivalence — null-rejecting unary filter remains supported",
+          "[outer_yan][passes][equivalence][simplify][filter-placement]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedNullable(con);
+	AssertOuterYanPreservesResults(con, "SELECT * "
+	                                     "FROM na LEFT JOIN nb ON na.k = nb.k "
+	                                     "WHERE nb.v > 250");
+
+	// Disable DuckDB's corresponding native rules so the predicate reaches
+	// OuterYan and directly exercise OuterYan's own LEFT-to-INNER simplifier.
+	auto tree = BuildIRFor(con, "SELECT * "
+	                            "FROM na LEFT JOIN nb ON na.k = nb.k "
+	                            "WHERE nb.v > 250");
+	REQUIRE(tree->HasOJT());
+	REQUIRE(tree->stage_stats.simplify_collapses >= 1);
+}
+
+TEST_CASE("outer_yan passes: SQLStorm 25509 mixed deep mirrors retain root filter scope",
+          "[outer_yan][passes][equivalence][filter-placement][sqlstorm-25509]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedSQLStorm25509(con);
+
+	const string left_deep =
+	    "SELECT * FROM (((((p FULL OUTER JOIN ps ON p.partkey=ps.partkey) "
+	    "RIGHT OUTER JOIN s ON ps.suppkey=s.suppkey) "
+	    "INNER JOIN l ON p.partkey=l.partkey) "
+	    "LEFT OUTER JOIN o ON l.orderkey=o.orderkey) "
+	    "FULL OUTER JOIN c ON o.custkey=c.custkey) "
+	    "WHERE p.partkey%1000=0 OR p.partkey IS NULL";
+	const string right_deep =
+	    "SELECT * FROM (c FULL OUTER JOIN (o RIGHT OUTER JOIN "
+	    "(l INNER JOIN (s LEFT OUTER JOIN "
+	    "(ps FULL OUTER JOIN p ON p.partkey=ps.partkey) "
+	    "ON ps.suppkey=s.suppkey) ON p.partkey=l.partkey) "
+	    "ON l.orderkey=o.orderkey) ON o.custkey=c.custkey) "
+	    "WHERE p.partkey%1000=0 OR p.partkey IS NULL";
+
+	AssertOuterYanPreservesResults(con, left_deep);
+	AssertOuterYanPreservesResults(con, right_deep);
+}
+
 TEST_CASE("outer_yan passes: equivalence — compound equi-join condition on a LEFT edge",
           "[outer_yan][passes][equivalence]") {
 	DuckDB db(nullptr);
@@ -960,6 +1072,25 @@ TEST_CASE("outer_yan passes: applicability rejection short-circuits — no OT bu
 	REQUIRE_FALSE(tree->Applicability().applicable);
 	REQUIRE_FALSE(tree->HasOT());
 	REQUIRE_FALSE(tree->HasOJT());
+}
+
+TEST_CASE("outer_yan passes: NULL-tolerant intermediate filter falls back safely",
+          "[outer_yan][passes][applicability][filter-placement]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedNullable(con);
+	// Filter pushdown can place this predicate above the FULL JOIN inside the
+	// right branch of the top INNER JOIN. It cannot move to nc's leaf: doing so
+	// may create new NULL-extended rows. Until DP models exact filter boundaries,
+	// the applicability gate must leave this plan to DuckDB.
+	auto tree = BuildPreIRFor(
+	    con, "SELECT * FROM na INNER JOIN "
+	         "(nb FULL OUTER JOIN nc ON nb.k=nc.k) ON na.k=nb.k "
+	         "WHERE nc.v IS NULL OR nc.v>0");
+	REQUIRE_FALSE(tree->Applicability().applicable);
+	REQUIRE(tree->Applicability().reason.find("NULL-tolerant filter inside join skeleton") !=
+	        string::npos);
+	REQUIRE_FALSE(tree->HasOT());
 }
 
 // ============================================================================

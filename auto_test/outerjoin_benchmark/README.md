@@ -87,6 +87,14 @@ test. Consequently, the precise claim is **join-skeleton-derived**, not a claim
 that the complete original benchmark query is semantically equivalent after
 its inner joins become outer joins.
 
+Selection coverage deliberately includes both sides of outer-join
+simplification. Most seeds use a NULL-preserving unary guard so unmatched rows
+remain observable. The five TPC-H Q5 variants additionally retain Q5's original
+order-date restrictions as null-rejecting unary `WHERE` conjuncts. They form a
+source-derived simplification stratum while preserving the same query count,
+join skeleton, and structural variant balance. The `predicate_class` manifest
+column identifies these cases explicitly.
+
 ## Provenance terminology
 
 Use the following descriptions consistently:

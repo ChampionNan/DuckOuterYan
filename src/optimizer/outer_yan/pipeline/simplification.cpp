@@ -3,6 +3,7 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -68,15 +69,49 @@ static bool TableFilterRejectsNulls(const TableFilter &filter) {
 	}
 }
 
+//! Conservative proof that `expr` evaluates to NULL when the referenced
+//! relation is NULL-extended. Returning false means "not proven", not that the
+//! expression is necessarily non-NULL.
+static bool BecomesNullOnNullExtendedInput(const Expression &expr) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_COLUMN_REF:
+		return true;
+	case ExpressionClass::BOUND_CAST:
+		return BecomesNullOnNullExtendedInput(*expr.Cast<BoundCastExpression>().child);
+	case ExpressionClass::BOUND_FUNCTION: {
+		auto &func = expr.Cast<BoundFunctionExpression>();
+		if (func.function.GetNullHandling() != FunctionNullHandling::DEFAULT_NULL_HANDLING) {
+			return false;
+		}
+		for (const auto &child : func.children) {
+			if (BecomesNullOnNullExtendedInput(*child)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	case ExpressionClass::BOUND_COMPARISON: {
+		if (expr.GetExpressionType() == ExpressionType::COMPARE_DISTINCT_FROM ||
+		    expr.GetExpressionType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			return false;
+		}
+		auto &comparison = expr.Cast<BoundComparisonExpression>();
+		return BecomesNullOnNullExtendedInput(*comparison.left) ||
+		       BecomesNullOnNullExtendedInput(*comparison.right);
+	}
+	case ExpressionClass::BOUND_BETWEEN:
+		return BecomesNullOnNullExtendedInput(*expr.Cast<BoundBetweenExpression>().input);
+	default:
+		return false;
+	}
+}
+
 // NOTE: Implementation strategy
 // -----------------------------
-// 1. Seed `null_rej` once, from every null-rejecting record in
-//    `tree.filter_records`. The filter's physical position in the input plan
-//    is intentionally ignored — a filter that constrains a relation's column
-//    is taken to constrain that relation in the final result, so any join
-//    above the filter that would null-pad those columns must be rewritten.
-//    `DominatesJoin`-style structural checks belong to filter-pushdown
-//    placement, not to this pass.
+// 1. At each OT node, activate null-rejecting filter records whose original
+//    evaluation scope is exactly that subtree. This makes root predicates
+//    active at the root while preventing an intermediate predicate from
+//    simplifying joins above its source location.
 // 2. Walk the OT top-down. At each JOIN node:
 //      (a) Look at which child subtree (left / right / both) contains a
 //          relation in `null_rej`. Collapse the join kind accordingly:
@@ -116,20 +151,7 @@ void Simplification::Apply(OuterYanTree &tree) {
 	subtree_relations.clear();
 	ComputeSubtreeRelations(tree.OT().Root());
 
-	// Seed: every null-rejecting filter contributes its relations.
 	unordered_set<idx_t> null_rej;
-	for (auto &rec : tree.filter_records) {
-		if (!rec || !rec->filter) {
-			continue;
-		}
-		if (!FilterRejectsNulls(*rec->filter)) {
-			continue;
-		}
-		for (auto rel : rec->referenced_relations) {
-			null_rej.insert(rel);
-		}
-	}
-
 	// Experimental (env-gated, OFF by default): also seed from predicates that
 	// filter-pushdown folded into table scans. UNSOUND in general — see
 	// ScanFilterSimplifyEnabled. Provided so the effect can be benchmarked.
@@ -177,51 +199,47 @@ bool Simplification::FilterRejectsNulls(const Expression &expr) {
 	case ExpressionClass::BOUND_OPERATOR: {
 		const auto t = expr.GetExpressionType();
 		if (t == ExpressionType::OPERATOR_IS_NOT_NULL) {
-			return true;
+			auto &op = expr.Cast<BoundOperatorExpression>();
+			return op.children.size() == 1 && BecomesNullOnNullExtendedInput(*op.children[0]);
 		}
 		// `x IN (...)` / `x NOT IN (...)`: a NULL `x` yields NULL, so the row is
-		// rejected. Require `x` to be a direct column ref (mirrors DuckDB's
-		// HandleExpression discipline — keeps it sound for e.g. coalesce(x,0) IN …).
+		// rejected. The recursive proof accepts NULL-propagating wrappers and
+		// excludes forms such as coalesce(x, 0).
 		if (t == ExpressionType::COMPARE_IN || t == ExpressionType::COMPARE_NOT_IN) {
 			auto &op = expr.Cast<BoundOperatorExpression>();
-			return !op.children.empty() &&
-			       op.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+			return !op.children.empty() && BecomesNullOnNullExtendedInput(*op.children[0]);
 		}
 		return false;
 	}
 	case ExpressionClass::BOUND_COMPARISON: {
 		const auto t = expr.GetExpressionType();
 		// NULL-tolerant comparisons (`IS [NOT] DISTINCT FROM`) do not reject NULL.
-		return t != ExpressionType::COMPARE_DISTINCT_FROM && t != ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+		if (t == ExpressionType::COMPARE_DISTINCT_FROM ||
+		    t == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			return false;
+		}
+		return BecomesNullOnNullExtendedInput(expr);
 	}
 	case ExpressionClass::BOUND_BETWEEN: {
 		// `input BETWEEN lo AND hi` ≡ `input >= lo AND input <= hi`: a NULL `input`
 		// yields NULL ⇒ the row is rejected. DuckDB's optimizer normalises a
 		// `col >= a AND col <= b` WHERE clause into a single BoundBetweenExpression,
 		// so without this case the null-rejection (and the outer→inner collapse it
-		// licenses) is silently lost. Require `input` to be a direct column ref
-		// (mirrors the IN discipline) so a non-NULL-propagating wrapper such as
-		// `coalesce(x,0) BETWEEN …` is not mistaken for null-rejecting.
+		// licenses) is silently lost. The recursive proof excludes
+		// non-NULL-propagating wrappers such as coalesce(x, 0).
 		auto &bet = expr.Cast<BoundBetweenExpression>();
-		return bet.input &&
-		       bet.input->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+		return bet.input && BecomesNullOnNullExtendedInput(*bet.input);
 	}
 	case ExpressionClass::BOUND_FUNCTION: {
 		// A NULL-propagating scalar function used as a boolean filter (LIKE `~~`,
-		// NOT LIKE, GLOB, …) rejects NULL on a column it takes directly: NULL in ⇒
-		// NULL out ⇒ row rejected. coalesce/ifnull use SPECIAL null handling and
-		// are excluded; requiring a direct column-ref argument keeps it sound when
-		// the column is buried under a non-propagating sub-expression.
+		// NOT LIKE, GLOB, …) rejects NULL when a NULL-propagating argument is
+		// derived from the referenced relation. coalesce/ifnull use SPECIAL null
+		// handling and are excluded.
 		auto &func = expr.Cast<BoundFunctionExpression>();
 		if (func.function.GetNullHandling() != FunctionNullHandling::DEFAULT_NULL_HANDLING) {
 			return false;
 		}
-		for (auto &child : func.children) {
-			if (child->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-				return true;
-			}
-		}
-		return false;
+		return BecomesNullOnNullExtendedInput(expr);
 	}
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		auto &conj = expr.Cast<BoundConjunctionExpression>();
@@ -267,6 +285,16 @@ bool Simplification::SubtreeIntersectsNullRejection(OTNode &node,
 
 void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
                                unordered_set<idx_t> null_rej) {
+	const auto &node_relations = subtree_relations[&node];
+	for (const auto &rec : tree.filter_records) {
+		if (!rec || !rec->filter || rec->evaluation_relations != node_relations ||
+		    !FilterRejectsNulls(*rec->filter)) {
+			continue;
+		}
+		for (auto rel : rec->referenced_relations) {
+			null_rej.insert(rel);
+		}
+	}
 	if (node.kind == OTNode::Kind::RELATION) {
 		return;
 	}

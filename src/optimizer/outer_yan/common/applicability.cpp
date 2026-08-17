@@ -1,5 +1,8 @@
 #include "duckdb/optimizer/outer_yan/common/applicability.hpp"
 
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
+
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -105,6 +108,24 @@ void OuterYanApplicability::VisitOperator(LogicalOperator &op) {
 		return;
 
 	case LogicalOperatorType::LOGICAL_FILTER:
+		// Root-cap filters were peeled by SkeletonRoot. A Filter/Projection/Get
+		// chain is an opaque base relation and is safe to retain as-is. Any
+		// remaining filter sits between joins. Such a predicate can move to its
+		// referenced leaf only when it is provably NULL-rejecting: Simplification
+		// then lowers every affected outer join inside the recorded scope before
+		// DP reorders it. A NULL-tolerant intermediate predicate must retain an
+		// exact evaluation boundary that DP does not currently model.
+		if (IsBaseRelationSubtree(op)) {
+			VisitOperatorChildren(op);
+			return;
+		}
+		for (const auto &expr : op.expressions) {
+			if (!Simplification::FilterRejectsNulls(*expr)) {
+				Reject("NULL-tolerant filter inside join skeleton not supported "
+				       "(filter scope may not survive reordering)");
+				return;
+			}
+		}
 		VisitOperatorChildren(op);
 		return;
 

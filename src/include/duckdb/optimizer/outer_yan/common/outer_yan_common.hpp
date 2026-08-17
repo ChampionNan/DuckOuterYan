@@ -112,10 +112,10 @@ inline bool Fail(string *reason, const string &msg) {
 }
 
 //! Filter record shared by OperatorTree and OrderedJoinTree. Populated in
-//! `LogicalPlanToOT`, carried through OT-stage transforms unchanged, then
-//! handed to OJT via `OTToOJT`, and finally consumed during
-//! `OJTToLogicalPlan` where each filter is emitted into a fresh
-//! `LogicalFilter` at the lowest covering subtree.
+//! `LogicalPlanToOT` and carried through the OT/OJT stages for semantic
+//! analysis. A root residual remains in its original LogicalFilter and its
+//! record owns only an analysis copy. A provably NULL-rejecting intermediate
+//! residual can be relocated after scope-aware simplification.
 class OuterYanFilterRecord {
 public:
 	OuterYanFilterRecord(unique_ptr<Expression> filter_p,
@@ -130,6 +130,9 @@ public:
 
 	unique_ptr<Expression> filter;
 	unordered_set<idx_t> referenced_relations;
+	//! Relations in the input subtree directly below the source LogicalFilter.
+	//! Simplification activates the predicate only within this scope.
+	unordered_set<idx_t> evaluation_relations;
 	idx_t filter_index;
 	JoinType join_type;
 	optional<idx_t> left_relation;
@@ -137,6 +140,9 @@ public:
 	ColumnBinding left_binding;
 	ColumnBinding right_binding;
 	bool from_residual_predicate = false;
+	//! The source LogicalFilter still owns and evaluates the original
+	//! expression. `filter` is an analysis copy, not a predicate to relocate.
+	bool retained_at_original_scope = false;
 };
 
 //! Classification of a root LogicalAggregate sitting above the OuterYan join

@@ -58,9 +58,9 @@ public:
 	//! Stage 2: lift LogicalPlan into `ot`. Pre-condition: applicable.
 	//! Walks the plan, builds a binary OT skeleton (JOIN + RELATION
 	//! OTNodes), attributes each join's `conditions[0]` to its left/right
-	//! relation ids, extracts residual filters into `filter_records`, and
-	//! assigns per-join `order` (deepest = 1, root = N). Takes ownership
-	//! of `plan` into `source_plan`.
+	//! relation ids, records residual filter scope (retaining root filters and
+	//! extracting safe intermediate filters), and assigns per-join `order`
+	//! (deepest = 1, root = N). Takes ownership of `plan` into `source_plan`.
 	void BuildOT(unique_ptr<LogicalOperator> plan);
 
 	//! Stage 3: build `ojt` from `ot`. Pre-condition: `ot` populated.
@@ -74,8 +74,8 @@ public:
 	//! OJT snapshot whose lifetime ends with the local `unique_ptr`).
 	unique_ptr<OrderedJoinTree> ConstructOJT();
 
-	//! Stage 4: realise `ojt` (and `filter_records`) back to a
-	//! LogicalPlan. Pre-condition: `ojt` populated. Releases
+	//! Stage 4: realise `ojt` back to a LogicalPlan and splice it beneath the
+	//! retained root cap. Pre-condition: `ojt` populated. Releases
 	//! `source_plan` and `ojt` since the rebuilt plan is structurally
 	//! independent (base-relation subtrees are deep-copied via
 	//! `LogicalOperator::Copy`).
@@ -111,8 +111,8 @@ public:
 	vector<OTNode *> ot_relations_by_id;
 	//! OT JOIN nodes sorted by `order` ascending (deepest first).
 	vector<OTNode *> ot_joins_by_order;
-	//! Centralised filter store. Owned here through OT and OJT phases;
-	//! consumed by `OJTToLogicalPlan`.
+	//! Centralised filter-analysis store. Root predicates remain owned by their
+	//! original LogicalFilters; records carry expression copies through OT/OJT.
 	vector<unique_ptr<OuterYanFilterRecord>> filter_records;
 	//! Root-aggregation classification, populated by `BuildOT` while peeling
 	//! the projection/aggregate chain above the join skeleton. Consumed by
@@ -149,7 +149,7 @@ public:
 	//! `LogicalOperatorVisitor::VisitOperator`.
 	vector<OuterYanAggPushdownDecision> agg_pushdown_decisions;
 	//! Non-owning pointer into `source_plan` to the DEEPEST peeled cap operator
-	//! — the operator (projection / aggregate / distinct / emptied filter) whose
+	//! — the operator (projection / aggregate / distinct / retained filter) whose
 	//! `children[0]` held the join-skeleton root. `OJTToLogicalPlan` splices the
 	//! rebuilt skeleton back into that slot, so every cap above it (e.g. a root
 	//! aggregate, or a DISTINCT over a projection) survives the roundtrip. Using

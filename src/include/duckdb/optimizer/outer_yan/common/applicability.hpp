@@ -47,11 +47,13 @@ struct ApplicabilityResult {
 
 //! Applicability gate for OuterYan. Accepts iff:
 //!   - all joins are inner or LEFT/RIGHT/FULL outer (and at least one outer),
-//!   - join predicates may be equi or theta, but must be null-rejecting
-//!     and reference exactly two base relations,
+//!   - join predicates are null-rejecting equi-comparisons between two base
+//!     relations,
 //!   - no semi/anti/mark joins, set ops, correlated subqueries, or window
 //!     operators appear inside the skeleton,
 //!   - aggregation, if present, sits only at the root above the joins,
+//!   - residual filters are unary; root and base-local predicates are retained,
+//!     while an intermediate post-join predicate must be NULL-rejecting,
 //!   - the join graph (relations as nodes, conditions as edges) is acyclic.
 //!
 //! Implemented as a LogicalOperatorVisitor that walks the skeleton top-down,
@@ -80,11 +82,9 @@ private:
 	LogicalOperator &SkeletonRoot(LogicalOperator &plan);
 
 	// True iff every LOGICAL_FILTER expression in `op`'s subtree references at
-	// most ONE base relation. OuterYan pushes each residual predicate onto a
-	// single relation's leaf in OJTToLogicalPlan, so a residual spanning >1
-	// relation has no leaf to land on and would be mis-placed — such queries are
-	// rejected (deferred to DuckDB). Only unary "column OP constant"-style
-	// residuals are supported.
+	// most ONE base relation. Root residuals remain in their original logical
+	// position, but the current null-rejection analysis is relation-granular and
+	// therefore supports only unary predicates.
 	bool ResidualsAreUnary(LogicalOperator &op);
 
 	// Union-find helpers for graph-cycle detection.

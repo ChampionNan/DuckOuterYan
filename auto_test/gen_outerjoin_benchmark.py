@@ -335,23 +335,25 @@ SEEDS: tuple[Seed, ...] = (
         source_hash="495def7debb02ab1def31da07fbc88b4796813b754832ce15d54a35dcb104577",
         topology="chain",
         semantics=(
-            "Regional sales coverage: retain the selected region hierarchy and "
-            "represent missing customers, orders, or line items by NULLs."
+            "Regional sales in the source date window: retain NULL-aware region "
+            "coverage while exposing missing line-item information."
         ),
         relations=("region r", "nation n", "customer c", "orders o", "lineitem l"),
         predicates=(
             "r.r_regionkey = n.n_regionkey",
             "n.n_nationkey = c.c_nationkey",
-            "c.c_custkey = o.o_custkey "
-            "AND o.o_orderdate >= DATE '1994-01-01' "
-            "AND o.o_orderdate < DATE '1995-01-01'",
+            "c.c_custkey = o.o_custkey",
             "o.o_orderkey = l.l_orderkey",
         ),
         projection=(
             "r.r_name, n.n_name, c.c_custkey, o.o_orderkey, "
             "l.l_linenumber, l.l_extendedprice"
         ),
-        where="(r.r_name = 'ASIA' OR r.r_regionkey IS NULL)",
+        where=(
+            "(r.r_name = 'ASIA' OR r.r_regionkey IS NULL) "
+            "AND o.o_orderdate >= DATE '1994-01-01' "
+            "AND o.o_orderdate < DATE '1995-01-01'"
+        ),
         semantic_vector=("I", "L", "L", "L"),
     ),
     Seed(
@@ -1083,6 +1085,11 @@ def generate_core(root: Path) -> int:
                     "tree_shape": tree_shape,
                     "join_vector": vector,
                     "relation_count": str(len(seed.relations)),
+                    "predicate_class": (
+                        "mixed_null_preserving_and_null_rejecting"
+                        if seed.seed_id == "tpch_q05_region_sales"
+                        else "null_preserving"
+                    ),
                     "semantic_role": variant_semantics,
                     "semantics": seed.semantics,
                 }
@@ -1090,7 +1097,7 @@ def generate_core(root: Path) -> int:
 
     fields = list(manifest_rows[0])
     with (root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(manifest_rows)
     if len(manifest_rows) != CORE_QUERY_COUNT:

@@ -22,17 +22,20 @@ namespace duckdb {
 //! anywhere in `filter_records` references it, or an enclosing join's
 //! condition forbids NULLs in any of its columns.
 //!
-//! NOTE: filters in `tree.filter_records` are treated as if they constrain
-//! the FINAL result — every null-rejecting filter contributes its
-//! `referenced_relations` to the initial null-rejection set, regardless of
-//! where the filter physically sat in the input plan. Any outer join that
-//! would introduce NULLs into one of those relations is therefore rewritten
-//! to a kind that does not. `DominatesJoin`-style position checks are
-//! deliberately not used here; that orthogonal concern belongs to
-//! filter-pushdown placement (`OJTToLogicalPlan`), not to this pass.
+//! NOTE: every record stores the relation set below its source filter. A
+//! null-rejecting record becomes active only at that exact OT subtree and is
+//! propagated downward; it never simplifies an ancestor outside its original
+//! evaluation scope. Root predicates therefore cover the complete skeleton.
+//! Applicability rejects NULL-tolerant intermediate filters whose boundary may
+//! not survive DP reordering.
 class Simplification {
 public:
 	void Apply(OuterYanTree &tree);
+
+	//! Conservative structural test used both by applicability and this pass.
+	//! True only when replacing every referenced column by NULL cannot make the
+	//! predicate TRUE.
+	static bool FilterRejectsNulls(const Expression &expr);
 
 private:
 	//! Top-down walk. RELATION nodes are no-ops. JOIN nodes:
@@ -47,11 +50,6 @@ private:
 
 	//! Memoised set of relation_ids covered by `node`'s subtree.
 	const unordered_set<idx_t> &ComputeSubtreeRelations(OTNode &node);
-
-	//! Structural null-rejection test on a single conjunct: IS NOT NULL on a
-	//! column ref, or any BOUND_COMPARISON other than IS [NOT] DISTINCT FROM.
-	//! No recursion into AND/OR — conjuncts are pre-split by BuildOT.
-	static bool FilterRejectsNulls(const Expression &expr);
 
 	//! True iff `subtree_relations[&node]` ∩ `null_rej` ≠ ∅.
 	bool SubtreeIntersectsNullRejection(OTNode &node,
