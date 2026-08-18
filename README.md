@@ -226,10 +226,10 @@ The live log and reports distinguish:
 - baseline, candidate-join, raw/weighted semi-join, and total estimated costs;
 - the full cost formula and all join/SJ coefficient values;
 - bitmap/hash kernel use; and
-- a matched, median profiled single-thread query-latency sample (`Total-Time`)
-  decomposed into native active-operator time for round-1 semi-joins, round-2
-  semi-joins, real joins (`R3`), and the residual `Other`, with planned
-  pair/new-filter counts and observed operator counts per round.
+- a matched, median profiled multi-thread query-latency sample (`Total-Time`)
+  plus native active-operator work for round-1 semi-joins, round-2 semi-joins,
+  real joins (`R3`), and the residual `OtherCPU`, with planned pair/new-filter
+  counts and observed operator counts per round.
 
 Every query is printed as a separate block beginning with a full-width
 separator followed by exactly two lines. The first line contains correctness,
@@ -240,15 +240,16 @@ queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
 R1, R2, and R3 are sums from DuckDB's native `OPERATOR_TIMING` tree, not
 contiguous phase wall timers. R1 matches `SJ_BUILD_ROUND_1` and
 `SJ_PROBE_ROUND_1`; R2 matches the corresponding round-2 names; R3 matches
-physical join operator types. `Other` contains every unmatched operator plus
-planning, scheduling, state setup, waits, profiler overhead, and other work not
-represented by those operator timings. Integer-nanosecond arithmetic makes
-`R1 + R2 + R3 + Other = Total-Time` exact. The log renders ratios as
+physical join operator types. Because worker intervals overlap, these values
+are aggregate work-seconds and can exceed wall latency. `CPU-Time` is DuckDB's
+recursive sum of all native operator timings; `OtherCPU` is its unclassified
+residual. Integer-nanosecond arithmetic makes
+`R1 + R2 + R3 + OtherCPU = CPU-Time` exact. The log renders CPU-work shares as
 percentages and reports matched physical-operator counts; the CSV retains
 ratios in `[0,1]`.
-Total-Time is DuckDB's high-resolution JSON query latency from a separate
-profiled median sample, so instrumentation can make it differ from the
-unprofiled `T1:on` median. T1/TM use fresh `-no-init` CLI processes, explicitly
+Total-Time is DuckDB's high-resolution JSON wall latency from a separate
+profiled multi-thread median sample, so instrumentation can make it differ from
+the unprofiled `TM:on` median. T1/TM use fresh `-no-init` CLI processes, explicitly
 disable profiling before the timer starts, and do not run the native profile
 batch.
 A zero-pair round is printed as

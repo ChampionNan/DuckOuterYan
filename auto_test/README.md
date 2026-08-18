@@ -41,7 +41,7 @@ corresponding environment values.
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
-| `OY_THREADS` | `48` | Multi-thread timing and equivalence-check threads |
+| `OY_THREADS` | `48` | Multi-thread profiling, timing, and equivalence-check threads |
 | `OY_TIMEOUT_SECS` | `900` | Per-statement timeout; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
@@ -174,7 +174,7 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
 4. Run one profiled warm-up followed by `--runs N` profiled OuterYan-ON
-   executions at `threads=1` using `.mode trash`. Keep the complete tuple
+   executions at `threads=$OY_THREADS` using `.mode trash`. Keep the complete tuple
    associated with the median high-resolution JSON query latency. Sum native
    `OPERATOR_TIMING` values for round-1 semi-join operators, round-2 semi-join
    operators, and real-join operators. The traced plan supplies planned pair
@@ -182,18 +182,19 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-The profile denominator is labeled `Total-Time`: the median JSON query latency
-from that profiled single-thread batch. Each numerator and `Total-Time`
-therefore come from a matched execution. `Other = Total-Time - R1 - R2 - R3`,
-so the four components close the same sample. They are active operator times,
-not contiguous phase wall times. R1 matches `SJ_BUILD_ROUND_1` and
+The profiled wall time is labeled `Total-Time`: the median JSON query latency
+from that profiled multi-thread batch. `CPU-Time` is DuckDB's recursive sum of
+native `OPERATOR_TIMING` across workers. `OtherCPU = CPU-Time - R1 - R2 - R3`,
+so the four active-work components close the same sample. They are aggregate
+operator work-seconds, not contiguous phase wall times, and can exceed
+Total-Time when worker intervals overlap. R1 matches `SJ_BUILD_ROUND_1` and
 `SJ_PROBE_ROUND_1`; R2 matches the round-2 names. R3 matches DuckDB's physical
 join types (`HASH_JOIN`, nested-loop, merge, IE, delim, positional, ASOF, and
-cross-product variants). `Other` includes unmatched operators and work outside
-native operator timing, such as planning, scheduling, state setup, waits, and
-profiler overhead. Times are converted to integer nanoseconds before
-subtraction. The log renders ratios as percentages; the CSV retains ratios in
-`[0,1]`.
+cross-product variants). `OtherCPU` contains unmatched native operator work;
+planning, scheduling, waits, serialization, and profiler overhead are not
+assigned to a phase. Times are converted to integer nanoseconds before
+subtraction. The log renders CPU-work shares as percentages; the CSV retains
+ratios in `[0,1]`.
 Profiling serialization and CLI output are outside Total-Time. Total-Time is
 labeled separately because profiling instrumentation can change its measured
 time. T1/TM run in fresh `-no-init` CLI processes and explicitly disable
@@ -490,7 +491,7 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[ 63/265] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[Total-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) Other=32.458486000s(71.03%)] TM:... T1:...
+[ 63/265] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[threads=48 Total-Time=12.000000000s CPU-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) OtherCPU=32.458486000s(71.03%)] TM:... T1:...
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
@@ -514,7 +515,7 @@ Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query/result, selected plan, kernel counts, profiled Total-Time decomposition, and OFF/ON speed-up for TM and T1 |
+| Line 1 | Query/result, selected plan, kernel counts, profiled TM wall time and CPU-work decomposition, and OFF/ON speed-up for TM and T1 |
 | Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
@@ -547,10 +548,10 @@ counts for every relation depth present in the run.
 
 `plot_speedup.py` renders separate per-family phase figures named
 `phase_breakdown_<family>`. Each query has grouped R1, R2, R3, and residual
-`Other` elapsed-time bars on a base-10 logarithmic x-axis, plus a marker and
-label for its matched profiled total. The complete OuterYan time is a soft-gold
-bar, and the median single-thread DuckDB baseline (`t1_off`) is a light-pink
-bar.
+`OtherCPU` active-work bars on a base-10 logarithmic x-axis, plus matching-thread
+wall-time bars. The complete profiled OuterYan wall time is soft gold, and the
+multi-thread DuckDB baseline (`tm_off`) is light pink. Legacy single-thread
+result rows without `profile_threads` continue to use `t1_off`.
 Neither color is reused by R1, R2, or R3. Alternating row shading and separators
 group all six bars belonging to one query. Within a group, the six bars have
 identical thickness and touch without vertical gaps; spacing is retained only

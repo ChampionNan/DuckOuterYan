@@ -15,7 +15,7 @@
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 100)
 #   TPCDS_SF         TPC-DS scale factor (default 100)
-#   OY_THREADS       Multi-thread count (default 48)
+#   OY_THREADS       Multi-thread profile/timing count (default 48)
 #   OY_RUNS          Timed iterations per config (default 3, median taken)
 #   JOBS             Make parallelism (default: nproc)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)

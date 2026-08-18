@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -120,12 +121,15 @@ class PlotSpeedupLoadTest(unittest.TestCase):
             "profile_round2_operator_s": 2.0,
             "profile_round3_operator_s": 3.0,
             "profile_other_elapsed_s": 4.0,
-            "profile_total_time_s": 10.0,
+            "profile_threads": 8,
+            "profile_total_time_s": 2.0,
+            "profile_cpu_time_s": 10.0,
             "profile_round1_ratio": 0.1,
             "profile_round2_ratio": 0.2,
             "profile_round3_ratio": 0.3,
             "profile_other_ratio": 0.4,
-            "t1_off": 12.0,
+            "tm_off": 3.0,
+            "t1_off": 99.0,
         }])
 
         captured = []
@@ -139,8 +143,39 @@ class PlotSpeedupLoadTest(unittest.TestCase):
         annotation_text = [text.get_text() for text in captured[0].axes[0].texts]
         self.assertFalse(any("OuterYan" in text or "DuckDB" in text
                              for text in annotation_text))
+        baseline_bar = captured[0].axes[0].patches[-1]
+        baseline_endpoint = baseline_bar.get_x() + baseline_bar.get_width()
+        self.assertTrue(math.isclose(baseline_endpoint, 3.0))
         self.assertFalse(captured[0].axes[0].spines["top"].get_visible())
         self.assertFalse(captured[0].axes[0].spines["right"].get_visible())
+        plt.close(captured[0])
+
+    def test_phase_breakdown_legacy_row_uses_t1_baseline(self):
+        frame = pd.DataFrame([{
+            "query": "ojb_tpch_q5_ldmx",
+            "family": "TPC-H",
+            "selected_plan": "OUTERYAN",
+            "profile_round1_operator_s": 1.0,
+            "profile_round2_operator_s": 2.0,
+            "profile_round3_operator_s": 3.0,
+            "profile_other_elapsed_s": 4.0,
+            "profile_total_time_s": 10.0,
+            "profile_round1_ratio": 0.1,
+            "profile_round2_ratio": 0.2,
+            "profile_round3_ratio": 0.3,
+            "profile_other_ratio": 0.4,
+            "t1_off": 12.0,
+            "tm_off": 99.0,
+        }])
+
+        captured = []
+        with mock.patch.object(PLOT, "save", side_effect=lambda fig, *_: captured.append(fig)):
+            PLOT.fig_phase_by_family(frame, "unused")
+
+        self.assertEqual(len(captured), 1)
+        baseline_bar = captured[0].axes[0].patches[-1]
+        baseline_endpoint = baseline_bar.get_x() + baseline_bar.get_width()
+        self.assertTrue(math.isclose(baseline_endpoint, 12.0))
         plt.close(captured[0])
 
 

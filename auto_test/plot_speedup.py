@@ -8,8 +8,8 @@ auto_test/experiment_onoff.sh) and renders a set of comparison figures:
   * box_*        : T1 & TM speed-up distributions grouped by kernel / reorder /
                    family / topology
   * relations    : T1 & TM speed-up by relation count across every family
-  * phase_breakdown_* : per-query native R1 / R2 / R3 / Other profile breakdown
-                        against the single-thread DuckDB baseline
+  * phase_breakdown_* : per-query native R1 / R2 / R3 / OtherCPU work profile
+                        against matching-thread wall-time totals
   * sparsity     : TM speed-up vs sparsity (s01..s95) for the graph corpus
   * ratio        : median TM/T1  (multi-thread amplifies >1 / penalises <1)
   * winloss      : win / no-op / regress counts per kernel & family
@@ -60,12 +60,11 @@ PHASES = [
     ("R1 semi-join", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
     ("R2 semi-join", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
     ("R3 real join", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
-    ("Other", "profile_other_elapsed_s", "profile_other_ratio", "#B0B0B0"),
+    ("OtherCPU", "profile_other_elapsed_s", "profile_other_ratio", "#B0B0B0"),
 ]
-BASELINE_SECONDS = "t1_off"
-OUTERYAN_TOTAL_LABEL = "OuterYan total (profiled)"
+OUTERYAN_TOTAL_LABEL = "OuterYan wall total (profiled)"
 OUTERYAN_TOTAL_COLOR = "#EFCB68"
-BASELINE_LABEL = "DuckDB total (T1 median)"
+BASELINE_LABEL = "DuckDB wall total (matching-thread median)"
 BASELINE_COLOR = "#F4A6B7"
 
 # =============================== EDIT ME : defaults ==================================
@@ -111,7 +110,7 @@ def enrich(df, run):
     df["run"] = run
     numeric_columns = [
         "t1_off", "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup", "rows",
-        "profile_total_time_s",
+        "profile_threads", "profile_total_time_s", "profile_cpu_time_s",
         *(seconds for _, seconds, _, _ in PHASES),
         *(ratio for _, _, ratio, _ in PHASES),
     ]
@@ -390,19 +389,22 @@ def fig_per_query_by_family(t, outdir, metric="tm"):
 
 
 def fig_phase_by_family(t, outdir):
-    """Compare complete OuterYan phase profiles with DuckDB baseline time.
+    """Compare OuterYan operator work with matching-thread wall totals.
 
     The four phase bars are grouped rather than stacked and their endpoints use
     a base-10 logarithmic x-axis. This keeps small R1/R2 measurements visible
-    beside much larger R3/Other values. The single-thread OFF median is shown as
-    a separate reference and is not treated as an OuterYan execution phase.
-    DuckDB-selected queries only have the ordinary real-join phase and are
-    excluded. Missing or inconsistent profiles or baselines are omitted.
+    beside much larger R3/OtherCPU values. Phase bars are aggregate active work
+    across workers and close CPU-Time; the OuterYan and DuckDB totals are wall
+    time at the profile thread count. DuckDB-selected queries are excluded.
+    Legacy rows without profile_threads/profile_cpu_time_s retain their original
+    single-thread interpretation.
     """
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
     ratio_columns = [ratio for _, _, ratio, _ in PHASES]
-    required = seconds_columns + ratio_columns + ["profile_total_time_s", BASELINE_SECONDS]
+    required = seconds_columns + ratio_columns + ["profile_total_time_s"]
     if not set(required).issubset(t.columns):
+        return
+    if "t1_off" not in t.columns and "tm_off" not in t.columns:
         return
 
     for fam in FAMILY_ORDER:
@@ -418,7 +420,8 @@ def fig_phase_by_family(t, outdir):
             print(f"    phase breakdown {fam}: omitted (no OuterYan-selected rows)")
             continue
 
-        for column in required:
+        optional_numeric = ["profile_threads", "profile_cpu_time_s", "t1_off", "tm_off"]
+        for column in required + [column for column in optional_numeric if column in family_rows]:
             family_rows[column] = pd.to_numeric(family_rows[column], errors="coerce")
 
         seconds = family_rows[seconds_columns]
@@ -426,25 +429,36 @@ def fig_phase_by_family(t, outdir):
         seconds_total = seconds.sum(axis=1, min_count=len(seconds_columns))
         ratio_total = ratios.sum(axis=1, min_count=len(ratio_columns))
         total_time = family_rows["profile_total_time_s"]
-        baseline_time = family_rows[BASELINE_SECONDS]
+        profile_threads = family_rows.get(
+            "profile_threads", pd.Series(np.nan, index=family_rows.index)
+        )
+        cpu_time = family_rows.get(
+            "profile_cpu_time_s", pd.Series(np.nan, index=family_rows.index)
+        ).where(lambda values: np.isfinite(values) & values.gt(0), total_time)
+        t1_baseline = family_rows.get("t1_off", pd.Series(np.nan, index=family_rows.index))
+        tm_baseline = family_rows.get("tm_off", pd.Series(np.nan, index=family_rows.index))
+        baseline_time = t1_baseline.where(~profile_threads.gt(1), tm_baseline)
         finite_seconds = np.isfinite(seconds).all(axis=1)
         nonnegative_seconds = seconds.ge(0).all(axis=1)
         finite_ratios = np.isfinite(ratios).all(axis=1)
         bounded_ratios = ratios.ge(0).all(axis=1) & ratios.le(1).all(axis=1)
-        seconds_close = np.isclose(seconds_total, total_time, rtol=1e-6, atol=1e-9)
+        seconds_close = np.isclose(seconds_total, cpu_time, rtol=1e-6, atol=1e-9)
         ratios_close = (ratio_total - 1.0).abs().le(1e-6)
         paired_ratios_close = np.isclose(
-            ratios.to_numpy(float), seconds.div(total_time, axis=0).to_numpy(float),
+            ratios.to_numpy(float), seconds.div(cpu_time, axis=0).to_numpy(float),
             rtol=0, atol=1e-6,
         ).all(axis=1)
         complete = (finite_seconds & nonnegative_seconds & finite_ratios & bounded_ratios
                     & np.isfinite(total_time) & total_time.gt(0)
+                    & np.isfinite(cpu_time) & cpu_time.gt(0)
                     & np.isfinite(baseline_time) & baseline_time.gt(0)
                     & seconds_close & ratios_close & paired_ratios_close)
+        family_rows["_profile_cpu_time"] = cpu_time
+        family_rows["_baseline_time"] = baseline_time
         sub = family_rows.loc[complete].copy()
         if sub.empty:
             print(f"    phase breakdown {fam}: omitted "
-                  f"(no complete OuterYan profile with T1 baseline)")
+                  f"(no complete OuterYan profile with matching-thread baseline)")
             continue
 
         sub["_plan_label"] = "OY"
@@ -464,13 +478,13 @@ def fig_phase_by_family(t, outdir):
         positive_phase_times = positive_phase_times[positive_phase_times > 0]
         if positive_phase_times.size == 0:
             continue
-        baselines = sub[BASELINE_SECONDS].to_numpy(float)
+        baselines = sub["_baseline_time"].to_numpy(float)
         totals = sub["profile_total_time_s"].to_numpy(float)
         axis_floor = 10 ** np.floor(np.log10(min(
             positive_phase_times.min(), baselines.min(), totals.min()
         )))
         # Six equal-height bars touch within a query group. From bottom to top:
-        # OuterYan total, R1, R2, R3, Other, and DuckDB total.
+        # OuterYan total, R1, R2, R3, OtherCPU, and DuckDB total.
         all_offsets = (np.arange(len(PHASES) + 2) - (len(PHASES) + 1) / 2) * bar_height
         total_offset = all_offsets[0]
         phase_offsets = all_offsets[1:-1]
@@ -502,13 +516,18 @@ def fig_phase_by_family(t, outdir):
         ax.set_yticklabels(query_labels, fontsize=7)
         ax.set_ylim(y[0] - 0.60, y[-1] + 0.60)
         ax.set_xscale("log", base=10)
-        ax.set_xlim(axis_floor, max(totals.max(), baselines.max()) * 1.10)
+        ax.set_xlim(
+            axis_floor,
+            max(positive_phase_times.max(), totals.max(), baselines.max()) * 1.10,
+        )
         ax.grid(axis="x", which="major", color="0.84", linewidth=0.65)
         ax.grid(axis="x", which="minor", color="0.92", linewidth=0.4)
         ax.set_axisbelow(True)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
-        ax.set_xlabel("single-thread time (seconds, base-10 log scale)")
+        ax.set_xlabel(
+            "seconds (phase bars = active operator work; totals = matching-thread wall time)"
+        )
         omission = f"; {skipped} incomplete omitted" if skipped else ""
         title = f"{fam}: OuterYan phase breakdown vs DuckDB baseline ({n} queries{omission})"
         top = 1.0 - min(0.20, 0.55 / height)

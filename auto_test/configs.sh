@@ -64,9 +64,9 @@ export TPCDS_SF="${TPCDS_SF:-100}"
 # ===========================================================================
 # 4) Threading
 # ===========================================================================
-# Multi-thread count for performance timing in experiment_onoff.sh.
-# Each query is timed at BOTH threads=1 (single-thread) and threads=OY_THREADS.
-# Valid choices: 1, 4, 8, 16, 32, 64.
+# Multi-thread count for profiling and performance timing in experiment_onoff.sh.
+# Each query is profiled at OY_THREADS and timed at both 1 and OY_THREADS.
+# Must be a positive DuckDB thread count.
 export OY_THREADS="${OY_THREADS:-48}"
 
 # ===========================================================================
