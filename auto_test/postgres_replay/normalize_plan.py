@@ -249,11 +249,18 @@ def validate_plan_provenance(plan_schema, plan_data):
 
 
 def render_explain_sql(query_bytes, plan_schema=DEFAULT_PLAN_SCHEMA):
-    validate_plan_provenance(
-        plan_schema,
-        DEFAULT_PLAN_DATA if plan_schema == DEFAULT_PLAN_SCHEMA else
-        "{}-duckdb-sample-1".format(plan_schema.removeprefix("pgplan_")),
+    sample_prefix = "pgplan_"
+    sample_family = (
+        plan_schema[len(sample_prefix) :]
+        if plan_schema.startswith(sample_prefix)
+        else plan_schema
     )
+    plan_data = (
+        DEFAULT_PLAN_DATA
+        if plan_schema == DEFAULT_PLAN_SCHEMA
+        else "{}-duckdb-sample-1".format(sample_family)
+    )
+    validate_plan_provenance(plan_schema, plan_data)
     query = canonicalize_query(query_bytes).decode("utf-8")
     setup = ""
     if plan_schema != DEFAULT_PLAN_SCHEMA:

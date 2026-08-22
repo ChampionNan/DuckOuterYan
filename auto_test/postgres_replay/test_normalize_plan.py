@@ -275,6 +275,11 @@ class QueryValidationTest(unittest.TestCase):
         )
         self.assertIn("SET LOCAL search_path = pgplan_job, pg_catalog;", sql)
 
+    def test_capture_normalizer_avoids_python_39_string_removal_apis(self):
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertNotIn(".removeprefix(", source)
+        self.assertNotIn(".removesuffix(", source)
+
 
 if __name__ == "__main__":
     unittest.main()
