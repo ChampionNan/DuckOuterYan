@@ -12,6 +12,8 @@ add_library_unity(
   common/ordered_join_tree.cpp
   common/outer_yan_trace.cpp
   common/outer_yan_tree.cpp
+  # PostgreSQL typed logical join-tree replay
+  postgres_plan_replay.cpp
   # main OuterYan algorithm pipeline phases
   pipeline/agg_pushdown.cpp
   pipeline/aggregate_pushdown_outer.cpp

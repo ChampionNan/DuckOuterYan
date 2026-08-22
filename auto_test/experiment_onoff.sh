@@ -963,7 +963,8 @@ for fam in $FAMS; do case "$fam" in
     graph) need_graph=1;; tpch) need_tpch=1;; tpcds) need_tpcds=1;;
     job) need_job=1;; esac; done
 
-GRAPH_DB=""; TPCH_DB="$REPO_ROOT/tpch_db"; TPCDS_DB="$REPO_ROOT/tpcds_db"
+GRAPH_DB="${GRAPH_DB:-}"; TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}"
+TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"
 JOB_DB="${JOB_DB:-$REPO_ROOT/job_db}"
 
 # Delegate DB builds to build_db.sh
@@ -977,8 +978,8 @@ if [ "$need_graph" = 1 ]; then
     # Reuse an existing small graph DB by default. Set
     # OY_FORCE_GRAPH_REBUILD=1 when a fresh dataset build is intentional.
     FORCE="${OY_FORCE_GRAPH_REBUILD:-0}" bash "$BUILD_DB" graph 2>/dev/null || true
-    if [ -f "$REPO_ROOT/graph_db" ]; then
-        GRAPH_DB="$REPO_ROOT/graph_db"
+    if [ -f "$GRAPH_DB" ]; then
+        :
     else
         echo "ERROR: graph_db not found. Run: bash auto_test/build_db.sh graph" >&2; exit 1
     fi

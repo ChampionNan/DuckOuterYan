@@ -267,10 +267,13 @@ void OperatorTree::CanonicaliseConditions(OTNode &node) {
 		if (info.conditions.empty()) {
 			throw InternalException("OperatorTree::Finalize: JOIN node has no conditions");
 		}
-		// Swap every condition (keeps cond_left_relation_id meaningful for
-		// the entire vector) and swap the side-id labels in lock-step.
+		// Comparison conditions encode a left/right expression orientation;
+		// non-comparison residuals are absolute bound expressions and must not
+		// be swapped (JoinCondition::Swap rejects them).
 		for (auto &cond : info.conditions) {
-			cond.Swap();
+			if (cond.IsComparison()) {
+				cond.Swap();
+			}
 		}
 		std::swap(info.cond_left_relation_id, info.cond_right_relation_id);
 	}

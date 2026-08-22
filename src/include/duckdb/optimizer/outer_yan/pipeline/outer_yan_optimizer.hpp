@@ -51,10 +51,11 @@ public:
 	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
-	//! it to the OuterYan candidate's real-join cost. V5 recalibrates this work
-	//! using the forced-candidate audit while retaining every reducer that is not
-	//! proven redundant by the constraint-aware elimination pass.
-	static constexpr double SEMIJOIN_COST_RATIO = 0.50;
+	//! it to the OuterYan candidate's real-join cost. V6 uses the full modeled
+	//! row-work instead of the former 0.50 discount: the 2026-08-18 benchmark
+	//! showed that discount admitted candidates whose reducer work dominated the
+	//! realized execution time.
+	static constexpr double SEMIJOIN_COST_RATIO = 1.0;
 	//! GATED-mode selection threshold. A value of 1.0 selects OuterYan only
 	//! when its limiting estimated total cost does not exceed DuckDB's baseline
 	//! cost. Uncertain table filters are checked under both their estimated and
@@ -63,7 +64,7 @@ public:
 	//! A changed candidate may use this relaxed ceiling only when the V5
 	//! confidence predicate succeeds. It is deliberately not a global
 	//! multiplier.
-	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.35;
+	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
 	//! Require a material real-join build/probe input reduction before allowing
 	//! the stretch tier.
 	static constexpr double STRETCH_MAX_JOIN_INPUT_RATIO = 0.75;

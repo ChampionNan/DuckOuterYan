@@ -26,6 +26,7 @@
 #include "duckdb/main/relation.hpp"
 #include "duckdb/main/stream_query_result.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/optimizer/outer_yan/postgres_plan_replay.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/parameter_expression.hpp"
 #include "duckdb/parser/parsed_data/create_function_info.hpp"
@@ -463,7 +464,15 @@ shared_ptr<PreparedStatementData> ClientContext::CreatePreparedStatementInternal
 		}
 	}
 
-	if (config.enable_optimizer && logical_plan->RequireOptimizer()) {
+	const bool optimizer_required = logical_plan->RequireOptimizer();
+	if (statement_type != StatementType::SET_STATEMENT &&
+	    PostgresPlanReplay::ConfiguredPlanPath(*this) &&
+	    (!config.enable_optimizer || !optimizer_required)) {
+		throw InvalidInputException(
+		    "[PGPLAN] PGPlan is configured but the optimizer is disabled or unavailable; "
+		    "RESET VARIABLE pgplan (or compatibility alias outer_yan_pg_replay_plan) before running this statement");
+	}
+	if (config.enable_optimizer && optimizer_required) {
 		profiler.StartPhase(MetricType::ALL_OPTIMIZERS);
 		Optimizer optimizer(*logical_planner.binder, *this);
 		logical_plan = optimizer.Optimize(std::move(logical_plan));
@@ -642,6 +651,10 @@ ClientContext::PendingPreparedStatementInternal(ClientContextLock &lock,
 unique_ptr<PendingQueryResult> ClientContext::PendingPreparedStatement(ClientContextLock &lock, const string &query,
                                                                        shared_ptr<PreparedStatementData> prepared,
                                                                        const PendingQueryParameters &parameters) {
+	if (PostgresPlanReplay::ConfiguredPlanPath(*this)) {
+		throw InvalidInputException(
+		    "[PGPLAN] explicit prepared-statement execution is unsupported; execute the captured bare query directly");
+	}
 	CheckIfPreparedStatementIsExecutable(*prepared);
 
 	RebindQueryInfo rebind = RebindQueryInfo::DO_NOT_REBIND;
@@ -767,6 +780,7 @@ unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query, bool
 	if (statements.size() != 1) {
 		throw InvalidInputException("ExtractPlan can only prepare a single statement");
 	}
+	auto statement_type = statements[0]->type;
 
 	unique_ptr<LogicalOperator> plan;
 	RunFunctionInTransactionInternal(*lock, [&]() {
@@ -776,6 +790,11 @@ unique_ptr<LogicalOperator> ClientContext::ExtractPlan(const string &query, bool
 
 		plan = std::move(planner.plan);
 
+		if (!config.enable_optimizer && statement_type != StatementType::SET_STATEMENT &&
+		    PostgresPlanReplay::ConfiguredPlanPath(*this)) {
+			throw InvalidInputException(
+			    "[PGPLAN] PGPlan is configured but ExtractPlan has optimization disabled");
+		}
 		if (config.enable_optimizer) {
 			Optimizer optimizer(*planner.binder, *this);
 			plan = optimizer.Optimize(std::move(plan));

@@ -43,6 +43,7 @@
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp"
+#include "duckdb/optimizer/outer_yan/postgres_plan_replay.hpp"
 #include "duckdb/optimizer/projection_pullup.hpp"
 #include "duckdb/optimizer/rule/predicate_factoring.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -146,6 +147,7 @@ void Optimizer::RunBuiltInOptimizers() {
 	case LogicalOperatorType::LOGICAL_TRANSACTION:
 	case LogicalOperatorType::LOGICAL_PRAGMA:
 	case LogicalOperatorType::LOGICAL_SET:
+	case LogicalOperatorType::LOGICAL_RESET:
 	case LogicalOperatorType::LOGICAL_ATTACH:
 	case LogicalOperatorType::LOGICAL_UPDATE_EXTENSIONS:
 	case LogicalOperatorType::LOGICAL_CREATE_SECRET:
@@ -234,20 +236,39 @@ void Optimizer::RunBuiltInOptimizers() {
 		projection_pullup.Optimize(plan);
 	});
 
+	// PostgreSQL replay owns the typed logical join skeleton when explicitly
+	// configured. It runs on DuckDB's already-bound predicates after filter
+	// pushdown/projection pullup, and before any pass that could independently
+	// change outer-join kinds or grouping.
+	bool postgres_replay_applied = false;
+	if (plan->type != LogicalOperatorType::LOGICAL_SET &&
+	    plan->type != LogicalOperatorType::LOGICAL_RESET &&
+	    PostgresPlanReplay::ConfiguredPlanPath(context)) {
+		PostgresPlanReplay replay(context);
+		auto replay_result = replay.Apply(std::move(plan));
+		plan = std::move(replay_result.plan);
+		postgres_replay_applied = true;
+		postgres_replay_active = true;
+		postgres_replay_expected_signature = std::move(replay_result.expected_semantic_signature);
+		postgres_replay_artifact_path = std::move(replay_result.artifact_path);
+		postgres_replay_occurrence_by_table_index = std::move(replay_result.occurrence_by_table_index);
+		Verify(*plan);
+	}
+
 	// OuterYan owns both candidate construction and the final policy decision.
 	// When it handles an applicable query it also builds DuckDB's normal plan,
 	// selects one, and lowers the winner. Aggregate and DISTINCT queries bypass
 	// OuterYan entirely, as do inapplicable/disabled queries, and continue
 	// through the unchanged normal path below.
 	bool outer_yan_applied = false;
-	if (!OptimizerDisabled(OptimizerType::OUTER_YAN)) {
+	if (!postgres_replay_applied && !OptimizerDisabled(OptimizerType::OUTER_YAN)) {
 		OuterYanOptimizer outer_yan_optimizer(*this);
 		auto result = outer_yan_optimizer.Optimize(std::move(plan));
 		plan = std::move(result.plan);
 		outer_yan_applied = result.outer_yan_applied;
 	}
 
-	if (!outer_yan_applied) {
+	if (!postgres_replay_applied && !outer_yan_applied) {
 		// Simplifies FULL OUTER -> LEFT/RIGHT OUTER -> INNER if NULLs are filtered anyway
 		RunOptimizer(OptimizerType::OUTER_JOIN_SIMPLIFICATION, [&]() {
 			OuterJoinSimplification outer_join_simplification;
@@ -260,10 +281,12 @@ void Optimizer::RunBuiltInOptimizers() {
 		});
 	}
 
-	RunOptimizer(OptimizerType::JOIN_ELIMINATION, [&]() {
-		JoinElimination join_elimination;
-		plan = join_elimination.Optimize(std::move(plan));
-	});
+	if (!postgres_replay_applied) {
+		RunOptimizer(OptimizerType::JOIN_ELIMINATION, [&]() {
+			JoinElimination join_elimination;
+			plan = join_elimination.Optimize(std::move(plan));
+		});
+	}
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
@@ -347,7 +370,13 @@ void Optimizer::RunBuiltInOptimizers() {
 	// can cause filters or scans to be incorrectly eliminated (e.g. replaced with
 	// EMPTY_RESULT because an empty table has no statistics for a given predicate).
 	column_binding_map_t<unique_ptr<BaseStatistics>> statistics_map;
-	if (!CTEContainsDML(*plan)) {
+	// Statistics propagation can replace a join or one of its scans with an
+	// EMPTY_RESULT when min/max ranges prove the condition unsatisfiable. That
+	// is normally desirable, but it destroys the typed leaf/grouping signature
+	// that replay promises to preserve and verify. Replay retains the estimates
+	// already attached to the copied operators and leaves physical planning to
+	// DuckDB, while keeping the imported logical skeleton intact.
+	if (!postgres_replay_applied && !CTEContainsDML(*plan)) {
 		RunOptimizer(OptimizerType::STATISTICS_PROPAGATION, [&]() {
 			StatisticsPropagator propagator(*this, *plan);
 			propagator.PropagateStatistics(plan);
@@ -390,6 +419,7 @@ void Optimizer::RunBuiltInOptimizers() {
 		RowNumberRewriter window_rewriter;
 		plan = window_rewriter.Optimize(std::move(plan));
 	});
+
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
@@ -415,6 +445,11 @@ unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan
 				optimizer_extension.optimize_function(input, plan);
 			}
 		});
+	}
+	if (postgres_replay_active) {
+		PostgresPlanReplay::VerifyFinalPlan(*plan, postgres_replay_expected_signature,
+		                                    postgres_replay_artifact_path,
+		                                    postgres_replay_occurrence_by_table_index);
 	}
 
 	Planner::VerifyPlan(context, plan);

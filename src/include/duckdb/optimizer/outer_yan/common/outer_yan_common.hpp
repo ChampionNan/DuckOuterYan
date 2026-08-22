@@ -143,6 +143,10 @@ public:
 	//! The source LogicalFilter still owns and evaluates the original
 	//! expression. `filter` is an analysis copy, not a predicate to relocate.
 	bool retained_at_original_scope = false;
+	//! PGPlan-only: volatile or not-independently-proven-nonthrowing filters may
+	//! move only to an imported subtree with exactly `evaluation_relations`.
+	//! This preserves their input multiset and therefore their evaluation scope.
+	bool requires_original_scope = false;
 };
 
 //! Classification of a root LogicalAggregate sitting above the OuterYan join

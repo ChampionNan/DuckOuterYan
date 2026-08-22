@@ -63,7 +63,14 @@ public:
 	OuterYanApplicability();
 
 	//! Entry point. Runs the visitor and returns the populated result.
-	static ApplicabilityResult Check(LogicalOperator &plan);
+	//! `require_outer=false` is used only by PostgreSQL replay after DuckDB's
+	//! filter pushdown may already have safely reduced every syntactic outer join
+	//! to INNER. Replay also requires stable intermediate filters because its
+	//! imported regrouping may change their evaluation count/scope. OuterYan
+	//! itself keeps both defaults.
+	static ApplicabilityResult Check(LogicalOperator &plan, bool require_outer = true,
+	                                 bool require_stable_intermediate_filters = false,
+	                                 bool allow_anchored_join_residuals = false);
 
 	void VisitOperator(LogicalOperator &op) override;
 
@@ -72,7 +79,19 @@ public:
 	//! translation step through `table_to_relation` to produce RelationIds.
 	static void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables);
 
+	//! True when changing the input relation set at which a filter is evaluated
+	//! can observably change its behavior. Volatile expressions always require
+	//! their original scope. Potentially throwing expressions do as well, except
+	//! for the narrow, independently-proven `% positive-integral-constant` form.
+	//! The latter cannot divide by zero or hit signed MIN % -1.
+	static bool FilterRequiresOriginalScope(const Expression &expr);
+
 private:
+	bool require_stable_intermediate_filters = false;
+	//! PGPlan preserves the exact imported split and all bound ON predicates. It
+	//! can therefore retain stable residuals anchored by one ordinary equality;
+	//! normal OuterYan keeps this false and remains strict equi-only.
+	bool allow_anchored_join_residuals = false;
 	void VisitComparisonJoin(LogicalComparisonJoin &join);
 	void RegisterLeaf(LogicalOperator &leaf);
 	void Reject(string reason);

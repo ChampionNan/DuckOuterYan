@@ -1454,11 +1454,11 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 	};
 
 	REQUIRE(OuterYanOptimizer::MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.0));
-	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(0.50));
-	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.35));
+	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(1.0));
+	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.75));
 	REQUIRE(OuterYanOptimizer::STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.95));
-	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V5");
+	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V6");
 
 	SECTION("strict boundary remains inclusive") {
 		auto result = OuterYanOptimizer::EvaluateCostGate(costs());
@@ -1472,15 +1472,15 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 
 	SECTION("stretch boundary is inclusive") {
 		auto input = costs();
-		input.candidate_total = 135.0;
+		input.candidate_total = 120.0;
 		auto result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE(result.stretch_eligible);
 		REQUIRE(result.pass);
 		REQUIRE(result.stretch_selected);
-		REQUIRE(result.cost_ratio_limit == Approx(1.35));
-		REQUIRE(result.baseline_threshold == Approx(135.0));
+		REQUIRE(result.cost_ratio_limit == Approx(1.20));
+		REQUIRE(result.baseline_threshold == Approx(120.0));
 
-		input.candidate_total = 135.0001;
+		input.candidate_total = 120.0001;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.pass);
 		REQUIRE_FALSE(result.stretch_selected);

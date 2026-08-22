@@ -2,6 +2,7 @@
 #include "test_helpers.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/optimizer/outer_yan/common/applicability.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
@@ -48,6 +49,18 @@ ApplicabilityResult ApplicabilityOf(Connection &con, const string &sql) {
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
 	REQUIRE(plan);
 	return OuterYanApplicability::Check(*plan);
+}
+
+ApplicabilityResult ReplayApplicabilityOf(Connection &con, const string &sql) {
+	REQUIRE_NO_FAIL(con.Query(
+	    "SET disabled_optimizers TO "
+	    "'outer_yan_pre,outer_yan_dp,outer_yan_post,join_order,column_lifetime,"
+	    "statistics_propagation,outer_join_simplification'"));
+	auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	REQUIRE(plan);
+	return OuterYanApplicability::Check(*plan, /*require_outer=*/false,
+	                                    /*require_stable_intermediate_filters=*/true);
 }
 
 //! Same extraction discipline as ApplicabilityOf, but drives the integration
@@ -146,6 +159,33 @@ TEST_CASE("outer_yan applicability: accepts FULL OUTER in chain",
 	    "LEFT JOIN c ON a.id = c.id");
 	INFO("reason: " << result.reason);
 	REQUIRE(result.applicable);
+}
+
+TEST_CASE("PGPlan strict filter gate distinguishes safe modulo from sensitive expressions",
+	          "[outer_yan][pgplan][applicability]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedApplicability(con);
+	const string prefix =
+	    "SELECT t.id,t.bx,t.cx,a.ax FROM a INNER JOIN "
+	    "(SELECT b.id,b.bx,c.cx FROM b FULL JOIN c ON b.id=c.id WHERE ";
+	const string suffix = ") t ON a.id=t.id";
+
+	SECTION("volatile") {
+		auto result = ReplayApplicabilityOf(con, prefix + "random()+c.cx>0" + suffix);
+		REQUIRE_FALSE(result.applicable);
+		REQUIRE(StringUtil::Contains(result.reason, "volatile or throwing filter"));
+	}
+	SECTION("can throw") {
+		auto result = ReplayApplicabilityOf(con, prefix + "CAST(c.cx || '' AS INTEGER)>0" + suffix);
+		REQUIRE_FALSE(result.applicable);
+		REQUIRE(StringUtil::Contains(result.reason, "volatile or throwing filter"));
+	}
+	SECTION("positive constant modulo is independently nonthrowing") {
+		auto result = ReplayApplicabilityOf(con, prefix + "c.cx % 100 = 0" + suffix);
+		INFO("reason: " << result.reason);
+		REQUIRE(result.applicable);
+	}
 }
 
 TEST_CASE("outer_yan applicability: rejects theta predicate",

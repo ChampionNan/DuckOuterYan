@@ -24,6 +24,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 #include <algorithm>
+#include <functional>
 
 namespace duckdb {
 
@@ -62,29 +63,30 @@ void OuterYanTree::CollectReferencedRelations(const Expression &expr,
 
 optional<idx_t> OuterYanTree::LookupSingleRelation(const Expression &expr,
                                                    const unordered_map<idx_t, RelationId> &table_to_relation) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		auto &cref = expr.Cast<BoundColumnRefExpression>();
-		auto it = table_to_relation.find(cref.binding.table_index.index);
-		if (it != table_to_relation.end()) {
-			return it->second;
-		}
+	unordered_set<idx_t> relations;
+	CollectReferencedRelations(expr, table_to_relation, relations);
+	if (relations.size() != 1) {
 		return optional<idx_t>();
 	}
-	optional<idx_t> result;
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		if (!result) {
-			result = LookupSingleRelation(child, table_to_relation);
-		}
-	});
-	return result;
+	return *relations.begin();
 }
 
 // ============================================================================
 // CheckApplicability
 // ============================================================================
 
-bool OuterYanTree::CheckApplicability(LogicalOperator &plan) {
-	applicability = OuterYanApplicability::Check(plan);
+bool OuterYanTree::CheckApplicability(LogicalOperator &plan, bool require_outer,
+                                      bool require_stable_intermediate_filters) {
+	pgplan_filter_scope_mode = false;
+	applicability = OuterYanApplicability::Check(plan, require_outer, require_stable_intermediate_filters);
+	return applicability.applicable;
+}
+
+bool OuterYanTree::CheckPGPlanApplicability(LogicalOperator &plan) {
+	pgplan_filter_scope_mode = true;
+	applicability = OuterYanApplicability::Check(plan, /*require_outer=*/false,
+	                                            /*require_stable_intermediate_filters=*/false,
+	                                            /*allow_anchored_join_residuals=*/true);
 	return applicability.applicable;
 }
 
@@ -225,6 +227,9 @@ private:
 			rec->evaluation_relations = evaluation_relations;
 			rec->from_residual_predicate = true;
 			rec->retained_at_original_scope = root_cap_filter;
+			rec->requires_original_scope =
+			    tree.pgplan_filter_scope_mode && !root_cap_filter &&
+			    OuterYanApplicability::FilterRequiresOriginalScope(*rec->filter);
 			tree.filter_records.push_back(std::move(rec));
 		}
 		if (!root_cap_filter) {
@@ -431,6 +436,38 @@ private:
 				throw NotImplementedException(
 				    "LogicalPlanToOT: cross product (join with no conditions)");
 			}
+			unordered_set<idx_t> left_relations;
+			unordered_set<idx_t> right_relations;
+			CollectRelationIds(*node->children[0], left_relations);
+			CollectRelationIds(*node->children[1], right_relations);
+			optional_idx anchor_index;
+			for (idx_t condition_index = 0; condition_index < info.conditions.size(); condition_index++) {
+				auto &candidate = info.conditions[condition_index];
+				if (!candidate.IsComparison() ||
+				    candidate.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+					continue;
+				}
+				auto candidate_left = LookupSingleRelation(candidate.GetLHS(), tree.table_to_relation);
+				auto candidate_right = LookupSingleRelation(candidate.GetRHS(), tree.table_to_relation);
+				if (!candidate_left || !candidate_right || *candidate_left == *candidate_right) {
+					continue;
+				}
+				const bool aligned = left_relations.count(*candidate_left) != 0 &&
+				                     right_relations.count(*candidate_right) != 0;
+				const bool reversed = right_relations.count(*candidate_left) != 0 &&
+				                      left_relations.count(*candidate_right) != 0;
+				if (aligned || reversed) {
+					anchor_index = optional_idx(condition_index);
+					break;
+				}
+			}
+			if (!anchor_index.IsValid()) {
+				throw NotImplementedException(
+				    "LogicalPlanToOT: could not find a safe two-relation equality anchor");
+			}
+			if (anchor_index.GetIndex() != 0) {
+				std::swap(info.conditions[0], info.conditions[anchor_index.GetIndex()]);
+			}
 			auto &cond = info.conditions[0];
 			auto left = LookupSingleRelation(cond.GetLHS(), tree.table_to_relation);
 			auto right = LookupSingleRelation(cond.GetRHS(), tree.table_to_relation);
@@ -623,6 +660,9 @@ static bool JoinSideIsUnique(LogicalOperator *origin, const vector<JoinCondition
 	vector<idx_t> key_cols;
 	key_cols.reserve(conditions.size());
 	for (const auto &cond : conditions) {
+		if (!cond.IsComparison() || cond.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+			continue;
+		}
 		for (const Expression *side : {&cond.GetLHS(), &cond.GetRHS()}) {
 			if (side->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 				continue;
@@ -1300,6 +1340,131 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	}
 	source_plan.reset();
 	return plan;
+}
+
+unique_ptr<LogicalOperator> OuterYanTree::OTToLogicalPlanPreservingShape(ClientContext &context) {
+	if (!ot || !source_plan) {
+		throw InternalException("OuterYanTree::OTToLogicalPlanPreservingShape: tree is not built");
+	}
+
+	vector<bool> filter_records_status(filter_records.size(), false);
+	std::function<unique_ptr<LogicalOperator>(const OTNode &)> lower = [&](const OTNode &node) {
+		unique_ptr<LogicalOperator> result;
+		if (node.kind == OTNode::Kind::RELATION) {
+			if (!node.origin) {
+				throw InternalException(
+				    "OuterYanTree::OTToLogicalPlanPreservingShape: relation has no source operator");
+			}
+			result = node.origin->Copy(context);
+			if (!result) {
+				throw InternalException(
+				    "OuterYanTree::OTToLogicalPlanPreservingShape: source operator copy failed");
+			}
+			for (idx_t i = 0; i < filter_records.size(); i++) {
+				if (filter_records_status[i]) {
+					continue;
+				}
+				auto &record = filter_records[i];
+				if (!record || !record->filter || record->retained_at_original_scope) {
+					continue;
+				}
+				const bool at_target_scope =
+				    record->requires_original_scope
+				        ? record->evaluation_relations.size() == 1 &&
+				              record->evaluation_relations.count(node.relation_id) != 0
+				        : record->referenced_relations.size() == 1 &&
+				              *record->referenced_relations.begin() == node.relation_id;
+				if (!at_target_scope) {
+					continue;
+				}
+				TryPushFilter(result, std::move(record->filter));
+				filter_records_status[i] = true;
+			}
+			return result;
+		}
+
+		if (!node.info || !node.children[0] || !node.children[1]) {
+			throw InternalException(
+			    "OuterYanTree::OTToLogicalPlanPreservingShape: malformed JOIN node");
+		}
+		auto left = lower(*node.children[0]);
+		auto right = lower(*node.children[1]);
+		auto join = make_uniq<LogicalComparisonJoin>(node.info->join_kind);
+		join->conditions.reserve(node.info->conditions.size());
+		const bool condition_aligned =
+		    node.children[0]->subtree_relations.count(node.info->cond_left_relation_id) != 0 &&
+		    node.children[1]->subtree_relations.count(node.info->cond_right_relation_id) != 0;
+		const bool condition_reversed =
+		    node.children[1]->subtree_relations.count(node.info->cond_left_relation_id) != 0 &&
+		    node.children[0]->subtree_relations.count(node.info->cond_right_relation_id) != 0;
+		if (!condition_aligned && !condition_reversed) {
+			throw InternalException(
+			    "OuterYanTree::OTToLogicalPlanPreservingShape: join condition does not span its children");
+		}
+		for (const auto &condition : node.info->conditions) {
+			auto copy = condition.Copy();
+			if (condition_reversed && copy.IsComparison()) {
+				copy.Swap();
+			}
+			join->conditions.push_back(std::move(copy));
+		}
+		join->children.push_back(std::move(left));
+		join->children.push_back(std::move(right));
+		join->ResolveOperatorTypes();
+		result = std::move(join);
+
+		for (idx_t i = 0; i < filter_records.size(); i++) {
+			if (filter_records_status[i]) {
+				continue;
+			}
+			auto &record = filter_records[i];
+			if (!record || !record->filter || record->retained_at_original_scope) {
+				continue;
+			}
+			bool covered = record->requires_original_scope
+			                   ? node.subtree_relations == record->evaluation_relations
+			                   : true;
+			if (!record->requires_original_scope) {
+				for (auto relation_id : record->referenced_relations) {
+					if (node.subtree_relations.count(relation_id) == 0) {
+						covered = false;
+						break;
+					}
+				}
+			}
+			if (covered) {
+				TryPushFilter(result, std::move(record->filter));
+				filter_records_status[i] = true;
+			}
+		}
+		return result;
+	};
+
+	auto result = lower(ot->Root());
+	for (idx_t i = 0; i < filter_records.size(); i++) {
+		if (filter_records_status[i]) {
+			continue;
+		}
+		auto &record = filter_records[i];
+		if (!record || !record->filter || record->retained_at_original_scope) {
+			continue;
+		}
+		if (record->requires_original_scope) {
+			throw InternalException(
+			    "PGPlan lowering could not restore a sensitive filter at its validated input scope");
+		}
+		TryPushFilter(result, std::move(record->filter));
+		filter_records_status[i] = true;
+	}
+
+	ojt.reset();
+	if (root_skeleton_parent) {
+		root_skeleton_parent->children[0] = std::move(result);
+		source_plan->ResolveOperatorTypes();
+		return std::move(source_plan);
+	}
+	source_plan.reset();
+	return result;
 }
 
 } // namespace duckdb

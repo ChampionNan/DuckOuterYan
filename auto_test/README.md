@@ -12,8 +12,9 @@ synopsis.
 
 | Path | Purpose |
 |---|---|
-| `configs.sh` | Defaults shared by `build_db.sh` and `experiment_onoff.sh` |
-| `run_all.sh` | Release build, database preparation, benchmark generation, then separate core and industry experiments |
+| `configs.sh` | Shared DuckDB, corpus, timing, and PGPlan defaults |
+| `run_all.sh` | Build/data orchestration followed by corpus-wide DuckDB/PGPlan/OuterYan comparison |
+| `pgplan/` | PostgreSQL 16.2 setup, logical-tree capture/import, three-way PGPlan experiment, and documentation |
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
 | `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
@@ -22,7 +23,7 @@ synopsis.
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
-| `outerjoin_benchmark/` | 170-query core, 9-query industry-inspired component, 22-query supplemental suite, manifests, and paper text |
+| `outerjoin_benchmark/` | 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
 | `results/` | Generated text, CSV, profile, and trace output |
@@ -42,11 +43,19 @@ corresponding environment values.
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREADS` | `48` | Multi-thread profiling, timing, and equivalence-check threads |
-| `OY_TIMEOUT_SECS` | `900` | Per-statement timeout; `0` disables it |
+| `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
+| `RUN_PGPLAN` | `1` | Run the three-way PGPlan comparison for the selected corpus |
+| `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
+| `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
+| `PGPLAN_INSTALL_DIR` | `postgres/postgresql` | Repo-local PostgreSQL installation prefix used by `source` mode |
+| `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
+| `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive fresh PGPlan artifacts |
+| `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
+| `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
 | `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
 
 Always inspect `configs.sh` before a server run because these experiment defaults
@@ -97,37 +106,46 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is the provenance-backed TPC-H, TPC-DS, JOB, and SQLStorm-
-derived core under `outerjoin_benchmark/core/`. The `outerjoin_query` path is a
-compatibility link to this directory. Labels are SQL basenames without `.sql`;
-`--pattern` and `--exclude` match the entire label using shell-glob syntax.
+The default corpus is the unified 206-query workload under
+`outerjoin_benchmark/benchmark/`. The `outerjoin_query` compatibility link
+points there. It contains the 170 benchmark-derived queries, nine
+industry-inspired patterns, and all 28 pinned legacy OuterYan wins; one pattern
+is also a legacy win, so the latter two sets contribute 36 unique queries.
+Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
+entire label using shell-glob syntax.
 
 ```bash
 python3 auto_test/gen_outerjoin_benchmark.py
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
-  bash auto_test/experiment_onoff.sh --only bench
+OY_CORPUS=auto_test/outerjoin_query \
+  bash auto_test/experiment_onoff.sh --only all
 ```
 
-Generation is deterministic and writes a query-level provenance manifest. The
-core has 170 queries (TPC-H 25, TPC-DS 35, JOB 50, and SQLStorm 60), including
+Generation is deterministic and writes query-level provenance manifests. Active
+query names use only `derived__` and `industry__`. The 170 benchmark-derived
+queries and 27 legacy synthetic performance guards use `derived__`; the nine
+business-role patterns use `industry__`, including the one that is also a
+pinned legacy win. Exact roles remain in the manifest rather than being encoded
+as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
+TPC-DS 35, JOB 50, and SQLStorm 60), including
 102 mixed-join queries, of which 34 are mixed right-deep and 22 are genuinely
-bushy. Nine explainable legacy business
-patterns are exposed separately under `outerjoin_benchmark/industry_inspired/`;
-unexplained legacy structural queries remain archive-only. Run that component
-with:
+bushy. The evaluation under `outerjoin_benchmark/industry_inspired/` is the
+union of nine explainable legacy business patterns and all 28 correct queries
+where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
+query belongs to both groups, so the corpus contains 36 unique queries. Its
+manifest labels the two roles separately; performance-selected entries are not
+claimed to be industry-derived. Run the complete component with:
 
 ```bash
 OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
-  bash auto_test/experiment_onoff.sh --only bench
+  bash auto_test/experiment_onoff.sh --only all
 ```
 
 The historical generator remains
 available as `gen_queries.py`; it writes to `outerjoin_query_old/` and applies
 the 84 timeout exclusions from
-`results/experiment_onoff_20260810_084908.csv`. Run the 22 result-selected
-synthetic stress cases separately with
-`OY_CORPUS=auto_test/outerjoin_benchmark/supplemental`; do not merge them into
-the core benchmark aggregate. See
+`results/experiment_onoff_20260810_084908.csv`. The same 28
+performance-selected synthetic stress cases are also available as a focused
+component view under `outerjoin_benchmark/supplemental`. See
 `outerjoin_benchmark/README.md` for the transformation and terminology rules.
 
 Query traversal is deterministic. Families are visited in the order selected by
@@ -245,8 +263,10 @@ largest input is at least `1000x` the uncertain filtered relation and the two
 reducer rounds retain at least `99%` of estimated input cardinality. The trace
 records the retention ratio, amplification, and guard result explicitly.
 
-Cost formula V4 adds a confidence-aware stretch tier without changing DP
-enumeration. The relaxed ceiling is `1.20`, but it is available only when all
+Cost formula V6 uses the full modeled semi-join row-work (`1.0 *
+semijoin_raw_cost`) and a confidence-aware stretch tier without changing DP
+enumeration. The earlier `0.50` semi-join discount admitted regressions in the
+August 18 unified audit. The relaxed ceiling is `1.20`, but it is available only when all
 of the following planner-visible checks pass:
 
 ```text
@@ -255,6 +275,7 @@ no uncertain-filter amplification guard
 no active full-reduction cardinality lower-bound correction
 candidate_join_cost < baseline_cost
 candidate_join_input_rows <= 0.75 * baseline_join_input_rows
+semijoin_retained_cardinality_ratio >= 0.95
 ```
 
 `candidate_join_input_rows` and `baseline_join_input_rows` sum the left and
@@ -274,7 +295,7 @@ policy decisions.
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
-`GATED`, uses a semi-join ratio of `0.35`, and keeps a baseline limit
+`GATED`, uses a semi-join ratio of `1.0`, and keeps a baseline limit
 of `1.0`, plus the confidence-gated `1.20` stretch ceiling described above.
 Rebuild the CLI after changing these source-level settings.
 
@@ -546,23 +567,21 @@ counts.
 `outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
 counts for every relation depth present in the run.
 
-`plot_speedup.py` renders separate per-family phase figures named
-`phase_breakdown_<family>`. Each query has grouped R1, R2, R3, and residual
-`OtherCPU` active-work bars on a base-10 logarithmic x-axis, plus matching-thread
-wall-time bars. The complete profiled OuterYan wall time is soft gold, and the
-multi-thread DuckDB baseline (`tm_off`) is light pink. Legacy single-thread
-result rows without `profile_threads` continue to use `t1_off`.
-Neither color is reused by R1, R2, or R3. Alternating row shading and separators
-group all six bars belonging to one query. Within a group, the six bars have
-identical thickness and touch without vertical gaps; spacing is retained only
-between neighboring queries. Bar outlines, separator rules, and the top/right
-plot frame are omitted; the alternating background alone identifies query
-groups. Endpoint text is omitted to avoid clipping at the
-plot boundary; values are read from the shared logarithmic axis. The baseline
-is a comparison bar, not an OuterYan phase. DuckDB-selected queries are excluded
-because they only have the ordinary real-join phase; incomplete profiles or
-missing baselines are omitted rather than converted to zero. The plotter reports
-the omission reason when a family has no eligible phase figure.
+`plot_speedup.py` writes one multi-page `outeryan_benchmark_figures.pdf`; it
+does not create separate PDF files. Files with the same timestamp are merged
+into one logical run, including older `core` and `industry_inspired` CSV pairs.
+Each benchmark family has its own per-query speed-up page; derived and industry
+queries remain together on that family's page and use `[D]` and `[I]`
+provenance tags. Boxes and bars use flat colors without shadows or hatch
+patterns; box-plot median lines are omitted so they do not obscure the points.
+The shape parser recognizes the generated `bmx`,
+`ldmx`, `lduX`, `rdmx`, `rduX`, and `alt` suffixes. There is intentionally no
+speed-up-by-kernel page.
+
+The single phase page contains every eligible benchmark query in one figure.
+Each query has grouped R1, R2, R3, and residual `OtherCPU` active-work bars on a
+base-10 logarithmic x-axis, plus matching-thread wall-time bars. DuckDB-selected
+queries and incomplete profiles are omitted rather than represented as zero.
 
 Result files are grouped by their filename timestamp before plotting. A paired
 `experiment_onoff_<timestamp>.csv` and
@@ -570,10 +589,8 @@ Result files are grouped by their filename timestamp before plotting. A paired
 not two runs. Duplicate `(family, query)` rows use the final CSV value; an
 attempts row is retained only when the final CSV is missing, empty, or lacks
 that query. This preserves partial interrupted runs without double-counting the
-compatibility copy.
-When rerunning into an existing output directory, the plotter also clears PNG
-and PDF files from the corresponding legacy `<timestamp>.attempts/` directory;
-any non-figure files in that directory are preserved.
+compatibility copy. Component names do not create separate logical runs when
+their timestamps match.
 
 ## Optimizer trace
 
@@ -635,31 +652,76 @@ SET disabled_optimizers TO 'outer_yan';
 ## One-command and manual workflows
 
 ```bash
-# Build release, prepare/reuse benchmark databases, regenerate queries, then
-# run the 170-query core followed by the 9-query industry-inspired component.
+# Build release and data, regenerate queries, then compare DuckDB, PGPlan, and
+# OuterYan for every query in auto_test/outerjoin_query.
 bash auto_test/run_all.sh
 
-# Reuse an existing release binary and databases; run only TPC-H in each stratum
+# Optionally use the pinned postgres:16.2 image instead of the default
+# repo-local source build.
+PGPLAN_SETUP=docker bash auto_test/run_all.sh
+
+# Use an existing PostgreSQL 16.2 instance. Its public schema must contain
+# exact TPC-H SF0.01, and the role must be able to create sampled schemas.
+PGPLAN_SETUP=external \
+PG_DSN='host=127.0.0.1 port=5432 dbname=duckyan_tpch user=postgres' \
+PSQL_BIN=/absolute/path/to/psql \
+bash auto_test/run_all.sh
+
+# Reuse existing DuckDB data; setup still verifies or prepares PostgreSQL's
+# independent minimal plan-selection data. Run only the TPC-H family.
 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
 
-# Also run the performance-selected supplemental stress suite
-RUN_SUPPLEMENTAL=1 bash auto_test/run_all.sh
+# Keep the historical DuckDB-vs-OuterYan corpus workflow without PGPlan
+RUN_PGPLAN=0 bash auto_test/run_all.sh
 
-# Run only one explicitly selected corpus (legacy single-corpus behavior)
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
+# Run PGPlan on another family-structured corpus root.
+PGPLAN_CORPUS=auto_test/outerjoin_benchmark/core \
+  SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
+
+# Run one custom corpus through the historical two-way harness.
+RUN_PGPLAN=0 OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-Manual equivalent:
+The default three-way stage walks all 206 SQL files under `outerjoin_query`:
+7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It captures a fresh
+PostgreSQL artifact for each query, executes the same bare query as native
+DuckDB, PGPlan, and normal OuterYan, compares complete result multisets, and
+only then records timings.
+`--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
+attempt is recorded in `status.tsv`; there is no native-plan fallback when
+capture or PGPlan application fails.
+
+TPC-H uses the exact SF0.01 PostgreSQL dataset. Graph, TPC-DS, and JOB use
+isolated schemas with at most `PGPLAN_SAMPLE_ROWS` rows per table (1000 by
+default), followed by `ANALYZE`. These rows select the PostgreSQL tree only;
+all three configurations execute on the configured target-scale DuckDB files.
+
+`PGPLAN_SETUP=source` follows the repo-local paths in `configs.sh` and pins
+PostgreSQL 16.2. If the managed binary is absent, it downloads the verified
+official source, builds and installs it, initializes a repo-local cluster, and
+starts it on the configured loopback endpoint. It deliberately does not depend
+on detecting a system PostgreSQL installation. Docker is optional; `docker`
+uses the pinned container, while `external` requires the caller's `PG_DSN` and
+`PSQL_BIN`. Both managed modes generate and reuse a private mode-`0600` secret
+unless a password is explicitly provided. An older Docker container with a
+different credential fails with instructions to recreate it or provide its
+current password. See
+[`pgplan/README.md`](pgplan/README.md) for the manual capture
+and PGPlan experiment workflow. External mode requires
+`PGPLAN_FORCE_SAMPLED_DATA=1` before replacing an existing graph, TPC-DS, or JOB
+sample schema. Existing `PG_REPLAY_*` environment names remain
+accepted only as compatibility aliases, but new commands and result labels use
+`PGPLAN_*` and `pgplan`.
+
+Manual equivalent for the unified two-way benchmark stage:
 
 ```bash
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
-bash auto_test/build_db.sh tpch tpcds job
+bash auto_test/build_db.sh all
 python3 auto_test/gen_outerjoin_benchmark.py
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
-  bash auto_test/experiment_onoff.sh --only bench
-OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
-  bash auto_test/experiment_onoff.sh --only bench
+OY_CORPUS=auto_test/outerjoin_query \
+  bash auto_test/experiment_onoff.sh --only all
 ```
 
 `run_all.sh` and `build_db.sh` reuse existing database files. If a requested

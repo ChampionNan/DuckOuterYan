@@ -118,7 +118,7 @@ _add_pk() {
 #    meaningful multi-hop join results).
 # ============================================================================
 if want graph; then
-    GRAPH_DB="$REPO_ROOT/graph_db"
+    GRAPH_DB="${GRAPH_DB:-$REPO_ROOT/graph_db}"
     if [ -f "$GRAPH_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[graph_db] already exists ($GRAPH_DB). Set FORCE=1 to rebuild."
     else
@@ -172,7 +172,7 @@ _need_rebuild
 # 3. tpch_db — TPC-H via dbgen extension
 # ============================================================================
 if want tpch; then
-    TPCH_DB="$REPO_ROOT/tpch_db"
+    TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}"
     if [ -f "$TPCH_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[tpch_db] already exists ($TPCH_DB, sf=$(echo "SELECT count(*) FROM lineitem;" | "$DUCKDB_BIN" "$TPCH_DB" -csv -noheader 2>/dev/null || echo '?') rows lineitem). Set FORCE=1 to rebuild."
     else
@@ -199,7 +199,7 @@ fi
 # 4. tpcds_db — TPC-DS via dsdgen extension
 # ============================================================================
 if want tpcds; then
-    TPCDS_DB="$REPO_ROOT/tpcds_db"
+    TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"
     if [ -f "$TPCDS_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[tpcds_db] already exists ($TPCDS_DB). Set FORCE=1 to rebuild."
     else

@@ -30,7 +30,10 @@ namespace duckdb {
 //! not survive DP reordering.
 class Simplification {
 public:
-	void Apply(OuterYanTree &tree);
+	//! `allow_scan_filter_seeding` exists only for OuterYan's explicitly
+	//! unsound measurement mode. Replay always passes false so an inherited
+	//! environment variable can never weaken its null-rejection proof.
+	void Apply(OuterYanTree &tree, bool allow_scan_filter_seeding = true);
 
 	//! Conservative structural test used both by applicability and this pass.
 	//! True only when replacing every referenced column by NULL cannot make the

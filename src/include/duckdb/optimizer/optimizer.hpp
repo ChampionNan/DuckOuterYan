@@ -52,6 +52,10 @@ public:
 
 private:
 	unique_ptr<LogicalOperator> plan;
+	bool postgres_replay_active = false;
+	string postgres_replay_expected_signature;
+	string postgres_replay_artifact_path;
+	unordered_map<idx_t, idx_t> postgres_replay_occurrence_by_table_index;
 
 private:
 	unique_ptr<Expression> BindScalarFunction(const string &name, vector<unique_ptr<Expression>> children);

@@ -156,16 +156,16 @@ known relation count participates. New CSVs provide `relation_count` directly;
 older CSVs recover it from the corpus SQL path, with a query-label fallback when
 that historical SQL file is no longer present.
 
-### `per_query_graph.pdf` · `per_query_tpch.pdf` · `per_query_tpcds.pdf` · `per_query_job.pdf`
-- **Every timed query in that family**, one horizontal row, sorted by speed-up. Each row has an **orange bar = TM** and a **grey bar = T1** beneath it — one consistent colour (kernel is **not** colour-coded); log x; reference line at 1.
+### Per-benchmark speed-up pages in `outeryan_benchmark_figures.pdf`
+- Graph, TPC-H, TPC-DS, and JOB each have a separate page. **Every timed query in that family** appears as one horizontal row, sorted by speed-up. Derived and industry queries are kept together and distinguished by their provenance tags. Each row has an **orange bar = TM** and a **grey bar = T1** beneath it; log x; reference line at 1. Bars use flat colors without shadows, hatches, or black outlines.
 - `[OY]` identifies an executed OuterYan candidate; `[D]` identifies a DuckDB-selected row, where an ON/OFF deviation is benchmark variance rather than candidate runtime.
 - **Bar thickness is fixed**, so the figure height grows with the query count — it adapts to any corpus size without crowding. Exact values are labelled only when a family has ≤ 24 rows (else too dense).
 - **How to read:** scan top→bottom; where the orange (TM) bar is shorter than the grey (T1) bar, multi-thread helped less than single-thread.
 - **Takeaway:** the full per-query detail for one family.
 
-### `phase_breakdown_graph.pdf` · `phase_breakdown_tpch.pdf` · `phase_breakdown_tpcds.pdf` · `phase_breakdown_job.pdf`
+### One merged phase-breakdown page in `outeryan_benchmark_figures.pdf`
 
-- Six contiguous, equal-thickness elapsed-time bars appear in each shaded query band: **blue R1**, **green R2**, **orange R3**, **grey Other**, **soft-gold OuterYan total**, and **light-pink DuckDB total**. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The two total colors are not reused by any execution phase.
+- All eligible Graph, TPC-H, TPC-DS, and JOB profiles share this page. Six equal-thickness elapsed-time bars appear for each query: **blue R1**, **green R2**, **orange R3**, **grey Other**, **soft-gold OuterYan total**, and **light-pink DuckDB total**. Bars use flat, unobstructed colors. Bar endpoints use a base-10 logarithmic seconds axis so small R1/R2 values remain visible. The x-axis label is simply **seconds**.
 - Only `[OY]` rows are included. DuckDB-selected queries are excluded because they only execute the ordinary real-join phase. Missing OuterYan phases or inconsistent profiles are omitted and counted in the title.
 - `Other` is not a fourth optimizer round. It includes unmatched operators and work outside native operator timing, and is retained so every bar truthfully closes `Total-Time`.
 - The DuckDB value is a whole-query comparison reference, not an additional phase. `t1_off` is used because the OuterYan phase profile is collected with one execution thread.

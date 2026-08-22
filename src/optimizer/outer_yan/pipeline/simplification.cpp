@@ -144,7 +144,7 @@ static void RebaseOriginalKinds(OTNode &node) {
 	RebaseOriginalKinds(*node.children[1]);
 }
 
-void Simplification::Apply(OuterYanTree &tree) {
+void Simplification::Apply(OuterYanTree &tree, bool allow_scan_filter_seeding) {
 	if (!tree.HasOT()) {
 		return;
 	}
@@ -155,7 +155,7 @@ void Simplification::Apply(OuterYanTree &tree) {
 	// Experimental (env-gated, OFF by default): also seed from predicates that
 	// filter-pushdown folded into table scans. UNSOUND in general — see
 	// ScanFilterSimplifyEnabled. Provided so the effect can be benchmarked.
-	if (ScanFilterSimplifyEnabled()) {
+	if (allow_scan_filter_seeding && ScanFilterSimplifyEnabled()) {
 		for (auto *rel : tree.ot_relations_by_id) {
 			if (!rel) {
 				continue;

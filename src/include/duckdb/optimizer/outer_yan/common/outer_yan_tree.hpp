@@ -53,7 +53,13 @@ public:
 
 	//! Stage 1: applicability gate. Stores the result internally and
 	//! returns `applicable`.
-	bool CheckApplicability(LogicalOperator &plan);
+	bool CheckApplicability(LogicalOperator &plan, bool require_outer = true,
+	                        bool require_stable_intermediate_filters = false);
+	//! PGPlan-only gate: retains the normal structural restrictions but permits
+	//! stable ON residuals when each join has a safe equality anchor whose two
+	//! expression sides each reference exactly one base relation. This does not
+	//! relax normal OuterYan applicability.
+	bool CheckPGPlanApplicability(LogicalOperator &plan);
 
 	//! Stage 2: lift LogicalPlan into `ot`. Pre-condition: applicable.
 	//! Walks the plan, builds a binary OT skeleton (JOIN + RELATION
@@ -80,6 +86,14 @@ public:
 	//! independent (base-relation subtrees are deep-copied via
 	//! `LogicalOperator::Copy`).
 	unique_ptr<LogicalOperator> OJTToLogicalPlan(ClientContext &context);
+
+	//! Replay-only lowering path that rebuilds the logical plan directly from
+	//! the current OT. Unlike OJT lowering, this preserves every JOIN node's
+	//! exact children[0]/children[1] orientation in addition to its grouping and
+	//! join kind. Non-retained filter records are placed at their first covering
+	//! subtree using the same policy as OJTToLogicalPlan, and the retained root
+	//! cap is reattached unchanged.
+	unique_ptr<LogicalOperator> OTToLogicalPlanPreservingShape(ClientContext &context);
 
 	// ----------------------------------------------------------------------
 	// Accessors for passes.
@@ -184,6 +198,9 @@ public:
 	StageStats stage_stats;
 
 private:
+	//! Set only by CheckPGPlanApplicability. It makes BuildOT annotate sensitive
+	//! intermediate filters for exact-scope placement during PGPlan lowering.
+	bool pgplan_filter_scope_mode = false;
 	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can
 	//! reach the static BuildOT helpers below without exposing them.
 	class OTBuilder;

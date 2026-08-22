@@ -4,6 +4,8 @@
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 
@@ -21,8 +23,58 @@ void OuterYanApplicability::CollectColumnTables(const Expression &expr,
 	    expr, [&](const Expression &child) { CollectColumnTables(child, tables); });
 }
 
-ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
+static bool IsPositiveIntegralModuloDivisor(const BoundFunctionExpression &function) {
+	if (function.function.name != "%" || function.children.size() != 2 ||
+	    function.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return false;
+	}
+	auto &divisor = function.children[1]->Cast<BoundConstantExpression>().value;
+	if (divisor.IsNull() || !divisor.type().IsIntegral()) {
+		return false;
+	}
+	// A strictly positive integral divisor excludes both runtime hazards of
+	// DuckDB's fallible integral modulo implementation: zero and signed -1.
+	return divisor > Value::Numeric(divisor.type(), int64_t(0));
+}
+
+static bool IsProvablyNonThrowingForPGPlan(const Expression &expr) {
+	if (!expr.CanThrow()) {
+		return true;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		// BoundCastExpression::CanThrow includes conversion failures which cannot
+		// be discharged from type information alone.
+		return false;
+	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &function = expr.Cast<BoundFunctionExpression>();
+		if (function.function.GetErrorMode() == FunctionErrors::CAN_THROW_RUNTIME_ERROR &&
+		    !IsPositiveIntegralModuloDivisor(function)) {
+			return false;
+		}
+	}
+	bool children_safe = true;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		if (!IsProvablyNonThrowingForPGPlan(child)) {
+			children_safe = false;
+		}
+	});
+	return children_safe;
+}
+
+bool OuterYanApplicability::FilterRequiresOriginalScope(const Expression &expr) {
+	if (expr.IsVolatile()) {
+		return true;
+	}
+	return !IsProvablyNonThrowingForPGPlan(expr);
+}
+
+ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan, bool require_outer,
+                                                 bool require_stable_intermediate_filters,
+                                                 bool allow_anchored_join_residuals) {
 	OuterYanApplicability v;
+	v.require_stable_intermediate_filters = require_stable_intermediate_filters;
+	v.allow_anchored_join_residuals = allow_anchored_join_residuals;
 	auto &entry = v.SkeletonRoot(plan);
 
 	if (entry.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
@@ -36,7 +88,7 @@ ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {
 		v.result.applicable = false;
 		return std::move(v.result);
 	}
-	if (!v.has_outer) {
+	if (require_outer && !v.has_outer) {
 		v.result.applicable = false;
 		v.result.reason = "pure inner-join query — defer to JoinOrderOptimizer";
 		return std::move(v.result);
@@ -120,6 +172,11 @@ void OuterYanApplicability::VisitOperator(LogicalOperator &op) {
 			return;
 		}
 		for (const auto &expr : op.expressions) {
+			if (require_stable_intermediate_filters && FilterRequiresOriginalScope(*expr)) {
+				Reject("volatile or throwing filter inside join skeleton not supported by PGPlan "
+				       "(evaluation count/scope may change)");
+				return;
+			}
 			if (!Simplification::FilterRejectsNulls(*expr)) {
 				Reject("NULL-tolerant filter inside join skeleton not supported "
 				       "(filter scope may not survive reordering)");
@@ -175,12 +232,120 @@ void OuterYanApplicability::VisitComparisonJoin(LogicalComparisonJoin &join) {
 		return;
 	}
 
+	const auto left_begin = result.relations.size();
 	VisitOperator(*join.children[0]);
 	if (rejected) {
 		return;
 	}
+	const auto left_end = result.relations.size();
+	const auto right_begin = left_end;
 	VisitOperator(*join.children[1]);
 	if (rejected) {
+		return;
+	}
+	const auto right_end = result.relations.size();
+
+	if (allow_anchored_join_residuals) {
+		optional_idx anchor_index;
+		RelationId anchor_left = DConstants::INVALID_INDEX;
+		RelationId anchor_right = DConstants::INVALID_INDEX;
+
+		for (idx_t cond_idx = 0; cond_idx < join.conditions.size(); cond_idx++) {
+			const auto &cond = join.conditions[cond_idx];
+			unordered_set<idx_t> tables;
+			unordered_set<idx_t> lhs_tables;
+			unordered_set<idx_t> rhs_tables;
+			if (cond.IsComparison()) {
+				const auto comparison = cond.GetComparisonType();
+				if (comparison == ExpressionType::COMPARE_DISTINCT_FROM ||
+				    comparison == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+					Reject("NULL-tolerant join condition (IS [NOT] DISTINCT FROM) not supported");
+					return;
+				}
+				if (cond.GetLHS().IsVolatile() || cond.GetLHS().CanThrow() ||
+				    cond.GetRHS().IsVolatile() || cond.GetRHS().CanThrow()) {
+					Reject("volatile or throwing PGPlan join condition not supported");
+					return;
+				}
+				CollectColumnTables(cond.GetLHS(), lhs_tables);
+				CollectColumnTables(cond.GetRHS(), rhs_tables);
+				tables.insert(lhs_tables.begin(), lhs_tables.end());
+				tables.insert(rhs_tables.begin(), rhs_tables.end());
+			} else {
+				const auto &expression = cond.GetJoinExpression();
+				if (expression.IsVolatile() || expression.CanThrow()) {
+					Reject("volatile or throwing PGPlan join condition not supported");
+					return;
+				}
+				CollectColumnTables(expression, tables);
+			}
+
+			unordered_set<RelationId> relations;
+			for (auto table_index : tables) {
+				auto entry = result.table_index_to_relation.find(table_index);
+				if (entry == result.table_index_to_relation.end()) {
+					Reject("join condition references a column outside the join skeleton");
+					return;
+				}
+				relations.insert(entry->second);
+			}
+			if (relations.empty()) {
+				Reject("PGPlan join residual must reference at least one anchor relation");
+				return;
+			}
+			for (auto relation : relations) {
+				if (relation < left_begin || relation >= right_end) {
+					Reject("PGPlan join condition references a relation outside its bound join subtree");
+					return;
+				}
+			}
+
+			if (!anchor_index.IsValid() && cond.IsComparison() &&
+			    cond.GetComparisonType() == ExpressionType::COMPARE_EQUAL) {
+				unordered_set<RelationId> lhs_relations;
+				unordered_set<RelationId> rhs_relations;
+				for (auto table_index : lhs_tables) {
+					auto entry = result.table_index_to_relation.find(table_index);
+					if (entry != result.table_index_to_relation.end()) {
+						lhs_relations.insert(entry->second);
+					}
+				}
+				for (auto table_index : rhs_tables) {
+					auto entry = result.table_index_to_relation.find(table_index);
+					if (entry != result.table_index_to_relation.end()) {
+						rhs_relations.insert(entry->second);
+					}
+				}
+				if (lhs_relations.size() == 1 && rhs_relations.size() == 1 &&
+				    *lhs_relations.begin() != *rhs_relations.begin()) {
+					auto lhs_relation = *lhs_relations.begin();
+					auto rhs_relation = *rhs_relations.begin();
+					const bool lhs_left = lhs_relation >= left_begin && lhs_relation < left_end;
+					const bool lhs_right = lhs_relation >= right_begin && lhs_relation < right_end;
+					const bool rhs_left = rhs_relation >= left_begin && rhs_relation < left_end;
+					const bool rhs_right = rhs_relation >= right_begin && rhs_relation < right_end;
+					if (!((lhs_left && rhs_right) || (lhs_right && rhs_left))) {
+						continue;
+					}
+					anchor_index = optional_idx(cond_idx);
+					anchor_left = lhs_left ? lhs_relation : rhs_relation;
+					anchor_right = lhs_left ? rhs_relation : lhs_relation;
+				}
+			}
+		}
+
+		if (!anchor_index.IsValid()) {
+			Reject("each PGPlan join requires a safe two-relation equality anchor");
+			return;
+		}
+		RelationId low = anchor_left < anchor_right ? anchor_left : anchor_right;
+		RelationId high = anchor_left < anchor_right ? anchor_right : anchor_left;
+		uint64_t key = (uint64_t(low) << 32) | uint64_t(high);
+		if (!seen_pairs.insert(key).second || !UnionRelations(anchor_left, anchor_right)) {
+			Reject("join graph has a cycle");
+			return;
+		}
+		result.edges.push_back({anchor_left, anchor_right, &join, anchor_index.GetIndex()});
 		return;
 	}
 

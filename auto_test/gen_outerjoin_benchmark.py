@@ -7,9 +7,14 @@ relation instances and join predicates.  The SQL is normalized to a flat
 projection/filter/join skeleton so that it remains inside the optimizer's
 current applicability envelope.
 
-The supplemental corpus is deliberately separate.  It contains legacy stress
-queries that were useful during OuterYan development, but it is not part of the
-benchmark-derived core and must not be described as industry-derived.
+The active ``benchmark`` corpus is the union used by the harness. Query names
+use only two reporting prefixes: ``derived__`` for generated/legacy synthetic
+queries and ``industry__`` for business-role patterns. The manifest preserves
+the more specific evaluation role, including whether a query was retained as
+a pinned legacy performance guard.
+
+The ``core``, ``industry_inspired``, and ``supplemental`` directories remain as
+auditable component views of that one active benchmark.
 """
 
 from __future__ import annotations
@@ -17,8 +22,10 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import re
 import shutil
+import stat
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +42,13 @@ REFERENCE_RESULT_SHA256 = "b27bbde2ca0e5ca2a63df07a62637220765ef48042eaca7ca4110
 REFERENCE_ROW_COUNT = 254
 REFERENCE_TIMEOUT_COUNT = 84
 CORE_QUERY_COUNT = REFERENCE_ROW_COUNT - REFERENCE_TIMEOUT_COUNT
+REFERENCE_OUTERYAN_WIN_COUNT = 28
+INDUSTRY_EVALUATION_QUERY_COUNT = 36
+ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
+LEGACY_WIN_SELECTION_POLICY = (
+    "experiment_onoff_20260810_084908.csv: correct=TRUE; "
+    "selected_plan=OUTERYAN; tm_speedup>1.0"
+)
 
 INDUSTRY_INSPIRED_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
     (
@@ -139,8 +153,37 @@ class Seed:
             )
 
 
+def is_dataless(path: Path) -> bool:
+    """Return whether macOS File Provider has evicted this file's contents."""
+    dataless_flag = getattr(stat, "SF_DATALESS", 0)
+    return bool(dataless_flag and path.stat().st_flags & dataless_flag)
+
+
+def pinned_source_hashes() -> dict[str, str]:
+    """Read source pins from the checked-in manifest without hydrating sources."""
+    manifest = DEFAULT_ROOT / "manifest.csv"
+    if not manifest.is_file() or is_dataless(manifest):
+        return {}
+    with manifest.open(newline="", encoding="utf-8") as handle:
+        return {
+            row["source_location"]: row["source_sha256"]
+            for row in csv.DictReader(handle)
+        }
+
+
+PINNED_SOURCE_HASHES = pinned_source_hashes()
+
+
 def file_sha256(relative_path: str) -> str:
-    return hashlib.sha256((REPO_ROOT / relative_path).read_bytes()).hexdigest()
+    source = REPO_ROOT / relative_path
+    if is_dataless(source):
+        pinned = PINNED_SOURCE_HASHES.get(relative_path)
+        if pinned:
+            return pinned
+        raise RuntimeError(
+            f"source is an iCloud placeholder and has no manifest pin: {source}"
+        )
+    return hashlib.sha256(source.read_bytes()).hexdigest()
 
 
 def mixed_vector(edge_count: int, offset: int = 0) -> tuple[str, ...]:
@@ -202,9 +245,66 @@ def classify_topology(predicates: Sequence[str]) -> str:
     return "branch" if maximum >= 3 else "chain"
 
 
+def generated_seed_skeleton(family: str, seed_id: str) -> tuple[list[str], list[str], str]:
+    """Recover a checked-in seed skeleton without hydrating its source file."""
+    generated = DEFAULT_ROOT / "core" / family / f"ojb_{seed_id}_ldmx.sql"
+    if not generated.is_file() or is_dataless(generated):
+        raise RuntimeError(
+            f"source and generated fallback are both iCloud placeholders: {generated}"
+        )
+    text = generated.read_text(encoding="utf-8")
+    first = re.search(
+        r"\bFROM\s+\(*\s*([A-Za-z_][A-Za-z0-9_]*)\s+(?:AS\s+)?"
+        r"([A-Za-z_][A-Za-z0-9_]*)",
+        text,
+        re.IGNORECASE,
+    )
+    if not first:
+        raise ValueError(f"{generated}: first generated relation not found")
+    relations = [f"{first.group(1)} {first.group(2)}"]
+    predicates: list[str] = []
+    join_pattern = re.compile(
+        r"\b(?:INNER\s+JOIN|LEFT\s+OUTER\s+JOIN|RIGHT\s+OUTER\s+JOIN|"
+        r"FULL\s+OUTER\s+JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:AS\s+)?"
+        r"([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=\s*"
+        r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)",
+        re.IGNORECASE,
+    )
+    for match in join_pattern.finditer(text):
+        relations.append(f"{match.group(1)} {match.group(2)}")
+        predicates.append(" ".join(match.group(3).split()))
+    where_match = re.search(r"\bWHERE\s+(.*?);\s*$", text, re.IGNORECASE | re.DOTALL)
+    if len(relations) < 3 or len(predicates) != len(relations) - 1 or not where_match:
+        raise ValueError(f"{generated}: incomplete generated seed skeleton")
+    return relations, predicates, " ".join(where_match.group(1).split())
+
+
 def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
     source_location = f"benchmark/imdb_plan_cost/queries/{query_id}.sql"
-    text = (REPO_ROOT / source_location).read_text(encoding="utf-8")
+    source = REPO_ROOT / source_location
+    if is_dataless(source):
+        relations, ordered_predicates, where = generated_seed_skeleton(
+            "job", f"job_{query_id}_skeleton"
+        )
+        return compact_seed(
+            family="job",
+            seed_id=f"job_{query_id}_skeleton",
+            source_benchmark="JOB",
+            source_version="DuckDB-vendored JOB query set",
+            source_query=query_id,
+            source_location=source_location,
+            topology=classify_topology(ordered_predicates),
+            semantics=(
+                f"A movie-metadata coverage pattern extracted from JOB {query_id}; "
+                "the source equality graph is retained while optionality is varied systematically."
+            ),
+            relations=relations[:max_relations],
+            predicates=ordered_predicates[: max_relations - 1],
+            where=where,
+            offset=offset,
+        )
+    text = source.read_text(encoding="utf-8")
     from_match = re.search(r"\bFROM\b(.*?)\bWHERE\b", text, re.IGNORECASE | re.DOTALL)
     if not from_match:
         raise ValueError(f"JOB {query_id}: FROM/WHERE block not found")
@@ -284,7 +384,29 @@ def sqlstorm_seed(
     offset: int = 0,
 ) -> Seed:
     source_location = f"auto_test/outerjoin_benchmark/sources/sqlstorm/{dataset}/{query_id}.sql"
-    text = (REPO_ROOT / source_location).read_text(encoding="utf-8")
+    source = REPO_ROOT / source_location
+    if is_dataless(source):
+        relations, predicates, _ = generated_seed_skeleton(
+            dataset, f"sqlstorm_{dataset}_{query_id}"
+        )
+        return compact_seed(
+            family=dataset,
+            seed_id=f"sqlstorm_{dataset}_{query_id}",
+            source_benchmark="SQLStorm",
+            source_version=f"v1.0@{SQLSTORM_COMMIT}",
+            source_query=f"v1.0/{dataset}/queries/{query_id}.sql",
+            source_location=source_location,
+            topology=classify_topology(predicates),
+            semantics=(
+                f"A SQLStorm {dataset} query pattern whose source relation graph is retained; "
+                "the anchor sample is enriched under controlled preservation semantics."
+            ),
+            relations=relations,
+            predicates=predicates,
+            where=anchor_filter,
+            offset=offset,
+        )
+    text = source.read_text(encoding="utf-8")
     first = re.search(
         r"\bFROM\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:AS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
         text,
@@ -788,7 +910,7 @@ def load_reference_rows() -> list[dict[str, str]]:
     return rows
 
 
-def supplemental_stress() -> tuple[tuple[str, str, str], ...]:
+def legacy_outeryan_wins() -> tuple[tuple[str, str, str], ...]:
     """Return correct, selected OuterYan wins from the pinned reference run."""
     selected: list[tuple[str, str, str]] = []
     for row in load_reference_rows():
@@ -797,9 +919,14 @@ def supplemental_stress() -> tuple[tuple[str, str, str], ...]:
             row["correct"] == "TRUE"
             and row["selected_plan"] == "OUTERYAN"
             and speedup not in ("", "-")
-            and float(speedup) >= 1.20
+            and float(speedup) > 1.0
         ):
             selected.append((row["family"], Path(row["sql_path"]).name, speedup))
+    if len(selected) != REFERENCE_OUTERYAN_WIN_COUNT:
+        raise RuntimeError(
+            "unexpected legacy OuterYan win population: "
+            f"expected {REFERENCE_OUTERYAN_WIN_COUNT}, got {len(selected)}"
+        )
     return tuple(selected)
 
 
@@ -1040,6 +1167,23 @@ def reset_generated_dir(root: Path) -> None:
     root.mkdir(parents=True)
 
 
+def regenerate_legacy_sources() -> None:
+    """Reproduce legacy SQL before selecting pinned wins and business patterns."""
+    cached = Path(importlib.util.cache_from_source(str(SCRIPT_DIR / "gen_queries.py")))
+    if cached.is_file() and is_dataless(cached):
+        cached.unlink()
+    import gen_queries
+
+    for generator in gen_queries.TARGETS["all"]:
+        generator()
+    expected = {
+        row["sql_path"] for row in load_reference_rows() if row["correct"] == "TRUE"
+    }
+    for source in LEGACY_ROOT.glob("*/*.sql"):
+        if str(source.relative_to(LEGACY_ROOT)) not in expected:
+            source.unlink()
+
+
 def verify_source(seed: Seed) -> None:
     if seed.source_location.startswith(("http://", "https://")):
         # Remote artifacts are pinned by immutable URL and recorded hash.  The
@@ -1048,6 +1192,10 @@ def verify_source(seed: Seed) -> None:
     source = REPO_ROOT / seed.source_location
     if not source.is_file():
         raise FileNotFoundError(f"{seed.seed_id}: source query not found: {source}")
+    if is_dataless(source):
+        # compact_seed already recovered the checked-in hash for this exact
+        # source location. Avoid triggering an unbounded iCloud download.
+        return
     actual = hashlib.sha256(source.read_bytes()).hexdigest()
     if actual != seed.source_hash:
         raise RuntimeError(
@@ -1108,7 +1256,7 @@ def generate_supplemental(root: Path) -> int:
     supplemental = root / "supplemental"
     reset_generated_dir(supplemental)
     rows: list[dict[str, str]] = []
-    for family, filename, speedup in supplemental_stress():
+    for family, filename, speedup in legacy_outeryan_wins():
         source = LEGACY_ROOT / family / filename
         if not source.is_file():
             raise FileNotFoundError(f"legacy stress query not found: {source}")
@@ -1123,10 +1271,7 @@ def generate_supplemental(root: Path) -> int:
                 "family": family,
                 "provenance": "DuckOuterYan legacy generator",
                 "industry_status": "not_industry_derived",
-                "selection_policy": (
-                    "experiment_onoff_20260810_084908.csv: correct=TRUE; "
-                    "selected_plan=OUTERYAN; tm_speedup>=1.20"
-                ),
+                "selection_policy": LEGACY_WIN_SELECTION_POLICY,
                 "observed_tm_speedup": speedup,
                 "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
             }
@@ -1141,10 +1286,19 @@ def generate_supplemental(root: Path) -> int:
 
 
 def generate_industry_inspired(root: Path) -> int:
-    """Materialize legacy business patterns as a non-production-derived stratum."""
+    """Materialize business patterns plus legacy OuterYan regression wins."""
     destination_root = root / "industry_inspired"
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
+    wins = {
+        (family, filename): speedup
+        for family, filename, speedup in legacy_outeryan_wins()
+    }
+    pattern_keys = {
+        (family, filename)
+        for family, filename, _, _ in INDUSTRY_INSPIRED_PATTERNS
+    }
+
     for family, filename, pattern_class, semantics in INDUSTRY_INSPIRED_PATTERNS:
         source = LEGACY_ROOT / family / filename
         if not source.is_file():
@@ -1152,10 +1306,16 @@ def generate_industry_inspired(root: Path) -> int:
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
+        observed_speedup = wins.get((family, filename), "")
         rows.append(
             {
                 "query_id": source.stem,
                 "path": f"{family}/{filename}",
+                "evaluation_role": (
+                    "industry_pattern_and_legacy_performance_win"
+                    if observed_speedup
+                    else "industry_pattern"
+                ),
                 "stratum": "industry_inspired_synthetic",
                 "family": family,
                 "source": f"outerjoin_query_old/{family}/{filename}",
@@ -1163,13 +1323,142 @@ def generate_industry_inspired(root: Path) -> int:
                 "semantics": semantics,
                 "industry_status": "industry_inspired_not_industry_derived",
                 "production_source_id": "none",
+                "selection_policy": LEGACY_WIN_SELECTION_POLICY if observed_speedup else "",
+                "observed_tm_speedup": observed_speedup,
                 "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
             }
+        )
+
+    for family, filename, speedup in legacy_outeryan_wins():
+        if (family, filename) in pattern_keys:
+            continue
+        source = LEGACY_ROOT / family / filename
+        if not source.is_file():
+            raise FileNotFoundError(f"legacy performance-win query not found: {source}")
+        destination = destination_root / family / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        rows.append(
+            {
+                "query_id": source.stem,
+                "path": f"{family}/{filename}",
+                "evaluation_role": "legacy_performance_win",
+                "stratum": "synthetic_optimizer_stress",
+                "family": family,
+                "source": f"outerjoin_query_old/{family}/{filename}",
+                "pattern_class": "observed_outeryan_speedup",
+                "semantics": (
+                    "Legacy synthetic query retained as a regression guard for a "
+                    "previously observed OuterYan speedup."
+                ),
+                "industry_status": "not_industry_derived",
+                "production_source_id": "none",
+                "selection_policy": LEGACY_WIN_SELECTION_POLICY,
+                "observed_tm_speedup": speedup,
+                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        )
+
+    expected_paths = {
+        f"{family}/{filename}" for family, filename in pattern_keys | set(wins)
+    }
+    actual_paths = {row["path"] for row in rows}
+    if (
+        actual_paths != expected_paths
+        or len(actual_paths) != len(rows)
+        or len(rows) != INDUSTRY_EVALUATION_QUERY_COUNT
+    ):
+        raise RuntimeError(
+            "industry evaluation membership mismatch: "
+            f"expected_count={INDUSTRY_EVALUATION_QUERY_COUNT}, actual_count={len(rows)}, "
+            f"missing={sorted(expected_paths - actual_paths)}, "
+            f"unexpected={sorted(actual_paths - expected_paths)}"
         )
 
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
+    """Materialize the single harness corpus with provenance in query names."""
+    destination_root = root / "benchmark"
+    reset_generated_dir(destination_root)
+    rows: list[dict[str, str]] = []
+
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    for row in core_rows:
+        family = row["family"]
+        source = root / "core" / row["path"]
+        query_id = f"derived__{row['query_id']}"
+        destination = destination_root / family / f"{query_id}.sql"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        rows.append(
+            {
+                "query_id": query_id,
+                "path": f"{family}/{query_id}.sql",
+                "query_class": "derived",
+                "evaluation_role": "benchmark_derived",
+                "family": family,
+                "source_component": "core",
+                "source_path": f"core/{row['path']}",
+                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        )
+
+    if include_industry:
+        with (root / "industry_inspired" / "manifest.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            industry_rows = list(csv.DictReader(handle))
+        role_prefix = {
+            "industry_pattern": ("industry", "industry"),
+            "industry_pattern_and_legacy_performance_win": (
+                "industry",
+                "industry",
+            ),
+            "legacy_performance_win": ("derived", "derived"),
+        }
+        for row in industry_rows:
+            role = row["evaluation_role"]
+            if role not in role_prefix:
+                raise RuntimeError(f"unknown industry evaluation role: {role}")
+            prefix, query_class = role_prefix[role]
+            family = row["family"]
+            source = root / "industry_inspired" / row["path"]
+            query_id = f"{prefix}__{row['query_id']}"
+            destination = destination_root / family / f"{query_id}.sql"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            rows.append(
+                {
+                    "query_id": query_id,
+                    "path": f"{family}/{query_id}.sql",
+                    "query_class": query_class,
+                    "evaluation_role": role,
+                    "family": family,
+                    "source_component": "industry_inspired",
+                    "source_path": f"industry_inspired/{row['path']}",
+                    "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            )
+
+    expected_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else CORE_QUERY_COUNT
+    paths = {row["path"] for row in rows}
+    if len(rows) != expected_count or len(paths) != expected_count:
+        raise RuntimeError(
+            "active benchmark membership mismatch: "
+            f"expected={expected_count}, rows={len(rows)}, unique_paths={len(paths)}"
+        )
+
+    fields = list(rows[0])
+    with (destination_root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     return len(rows)
@@ -1198,33 +1487,49 @@ def generate_timeout_manifest(root: Path) -> int:
 
 
 def classify_legacy(root: Path) -> int:
-    retained = {f"{family}/{filename}" for family, filename, _ in supplemental_stress()}
+    retained = {f"{family}/{filename}" for family, filename, _ in legacy_outeryan_wins()}
     industry_inspired = {
         f"{family}/{filename}"
         for family, filename, _, _ in INDUSTRY_INSPIRED_PATTERNS
     }
     timeouts = reference_timeouts()
     rows: list[dict[str, str]] = []
-    sources = [
-        (source, LEGACY_ROOT)
-        for source in sorted(LEGACY_ROOT.glob("*/*.sql"))
-    ] + [
-        (source, TIMEOUT_ROOT)
-        for source in sorted(TIMEOUT_ROOT.glob("*/*.sql"))
-    ]
+    sources: list[tuple[Path, Path]] = []
+    for reference_row in load_reference_rows():
+        source_root = TIMEOUT_ROOT if reference_row["note"] == "TIMEOUT" else LEGACY_ROOT
+        source = source_root / reference_row["sql_path"]
+        if not source.is_file():
+            raise FileNotFoundError(f"classified legacy query not found: {source}")
+        sources.append((source, source_root))
     for source, source_root in sources:
         relative = str(source.relative_to(source_root))
         family = source.parent.name
+        if is_dataless(source):
+            content_sha256 = ""
+            content_status = "icloud_dataless_not_read"
+        else:
+            content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            content_status = "verified"
         if relative in timeouts:
             disposition = "excluded_timeout"
             provenance = "legacy_timeout"
             reason = f"excluded by {REFERENCE_RESULT.name}"
+        elif relative in retained and relative in industry_inspired:
+            disposition = "retain_industry_pattern_and_performance_win"
+            provenance = "industry_inspired_synthetic+synthetic_optimizer_stress"
+            reason = (
+                "business-role pattern and pinned legacy OuterYan performance win; "
+                "no production source is claimed"
+            )
         elif relative in retained:
-            disposition = "retain_supplemental"
+            disposition = "retain_performance_win"
             provenance = "synthetic_optimizer_stress"
-            reason = "retained for optimizer characterization; selected after observed performance"
+            reason = (
+                "retained in supplemental and industry evaluation corpora as a "
+                "pinned legacy OuterYan performance win"
+            )
         elif relative in industry_inspired:
-            disposition = "retain_industry_inspired"
+            disposition = "retain_industry_pattern"
             provenance = "industry_inspired_synthetic"
             reason = "business-role pattern retained separately; no production source is claimed"
         elif "_real_" in source.stem:
@@ -1242,7 +1547,8 @@ def classify_legacy(root: Path) -> int:
                 "disposition": disposition,
                 "provenance_class": provenance,
                 "reason": reason,
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "content_sha256": content_sha256,
+                "content_status": content_status,
             }
         )
 
@@ -1254,7 +1560,7 @@ def classify_legacy(root: Path) -> int:
     return len(rows)
 
 
-def validate_generated(root: Path) -> None:
+def validate_generated(root: Path, include_industry: bool = True) -> None:
     manifest_rows: list[dict[str, str]] = []
     manifest_paths: set[str] = set()
     with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
@@ -1320,6 +1626,21 @@ def validate_generated(root: Path) -> None:
         if any(re.search(pattern, statement) for pattern in null_tolerant_patterns):
             raise RuntimeError(f"{relative_path}: NULL-tolerant predicate is not allowed in the core")
 
+    active_root = root / "benchmark"
+    with (active_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        active_rows = list(csv.DictReader(handle))
+    active_paths = {
+        str(path.relative_to(active_root)) for path in active_root.glob("*/*.sql")
+    }
+    expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else CORE_QUERY_COUNT
+    if len(active_rows) != expected_active_count or {
+        row["path"] for row in active_rows
+    } != active_paths:
+        raise RuntimeError("active benchmark manifest does not match generated SQL")
+    valid_prefixes = ("derived__", "industry__")
+    if any(not row["query_id"].startswith(valid_prefixes) for row in active_rows):
+        raise RuntimeError("active benchmark query is missing its provenance prefix")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -1329,14 +1650,17 @@ def main() -> None:
 
     args.root.mkdir(parents=True, exist_ok=True)
     core_count = generate_core(args.root)
+    if not args.core_only:
+        regenerate_legacy_sources()
     supplemental_count = 0 if args.core_only else generate_supplemental(args.root)
     industry_count = 0 if args.core_only else generate_industry_inspired(args.root)
+    benchmark_count = generate_active_benchmark(args.root, include_industry=not args.core_only)
     timeout_count = generate_timeout_manifest(args.root)
     legacy_count = classify_legacy(args.root)
-    validate_generated(args.root)
+    validate_generated(args.root, include_industry=not args.core_only)
     print(
-        f"generated {core_count} core, {industry_count} industry-inspired, and "
-        f"{supplemental_count} supplemental queries; "
+        f"generated {benchmark_count} active benchmark, {core_count} derived core, "
+        f"{industry_count} industry-evaluation, and {supplemental_count} supplemental queries; "
         f"excluded {timeout_count} timeouts and classified {legacy_count} legacy queries "
         f"under {args.root}"
     )

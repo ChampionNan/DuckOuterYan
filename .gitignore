@@ -37,6 +37,9 @@ outerjoin_test/*/*.txt
 # Core files
 #core
 
+# Runtime and experiment logs.
+*.log
+
 #==============================================================================#
 # Explicit files to ignore (only matches one).
 #==============================================================================#
@@ -89,6 +92,7 @@ m4/lt~obsolete.m4
 #==============================================================================#
 #m4/
 build/
+/output/
 duckdb_benchmark_data/
 #*.m4
 *.o
@@ -400,5 +404,6 @@ run_perf_chain.log
 run_all_chain.log
 watchdog.log
 test/sql/optimizer/outer_yan/data/*.csv
-auto_test/results/*
+/auto_test/results/
+/postgres/
 OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md

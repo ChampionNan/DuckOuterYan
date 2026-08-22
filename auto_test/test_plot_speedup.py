@@ -2,13 +2,12 @@
 
 import importlib.util
 import math
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 PLOT_PATH = Path(__file__).with_name("plot_speedup.py")
@@ -25,157 +24,211 @@ def result_frame(rows):
 
 
 class PlotSpeedupLoadTest(unittest.TestCase):
-    def test_result_source_normalizes_attempts_suffix(self):
-        final = "experiment_onoff_20260810_120000.csv"
-        attempts = "experiment_onoff_20260810_120000.attempts.csv"
-        self.assertEqual(PLOT.result_source(final), ("20260810_120000", "final"))
-        self.assertEqual(PLOT.result_source(attempts), ("20260810_120000", "attempts"))
+    def test_result_source_groups_components_by_timestamp(self):
+        self.assertEqual(
+            PLOT.result_source("experiment_onoff_core_20260818_011114.csv"),
+            ("20260818_011114", "final", "core"),
+        )
+        self.assertEqual(
+            PLOT.result_source(
+                "experiment_onoff_industry_inspired_20260818_011114.attempts.csv"
+            ),
+            ("20260818_011114", "attempts", "industry_inspired"),
+        )
+        self.assertEqual(
+            PLOT.result_source("experiment_onoff_20260810_120000.csv"),
+            ("20260810_120000", "final", "legacy"),
+        )
 
-    def test_same_timestamp_merges_with_final_precedence(self):
-        attempts_path = "experiment_onoff_20260810_120000.attempts.csv"
-        final_path = "experiment_onoff_20260810_120000.csv"
+    def test_same_timestamp_unifies_core_and_industry(self):
+        core_path = "experiment_onoff_core_20260818_011114.csv"
+        industry_path = "experiment_onoff_industry_inspired_20260818_011114.csv"
+        sources = {
+            core_path: result_frame([
+                ("ojb_tpch_q08_market_share_ldmx", "tpch", 1.1, 1.2, "derived"),
+            ]),
+            industry_path: result_frame([
+                ("oy_th_real_supplier_right", "tpch", 1.3, 1.4, "industry"),
+            ]),
+        }
+        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
+            loaded = PLOT.load([core_path, industry_path])
+
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded["run"].unique().tolist(), ["20260818_011114"])
+        classes = loaded.set_index("query")["query_class"].to_dict()
+        self.assertEqual(classes["ojb_tpch_q08_market_share_ldmx"], "derived")
+        self.assertEqual(classes["oy_th_real_supplier_right"], "industry")
+
+    def test_final_row_wins_attempt_duplicate(self):
+        attempts_path = "experiment_onoff_benchmark_20260818_120000.attempts.csv"
+        final_path = "experiment_onoff_benchmark_20260818_120000.csv"
         sources = {
             attempts_path: result_frame([
-                ("oy_th_th_line3_v0", "tpch", 1.1, 1.2, "attempt"),
-                ("oy_th_th_line3_v1", "tpch", 1.3, 1.4, "attempt-only"),
+                ("derived__ojb_job_21a_skeleton_ldmx", "job", 1.1, 1.2, "attempt"),
             ]),
             final_path: result_frame([
-                ("oy_th_th_line3_v0", "tpch", 2.1, 2.2, "final"),
+                ("derived__ojb_job_21a_skeleton_ldmx", "job", 2.1, 2.2, "final"),
             ]),
         }
-
         with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
-            # Final precedence must not depend on argument order.
             loaded = PLOT.load([final_path, attempts_path])
-
-        self.assertEqual(set(loaded["query"]), {"oy_th_th_line3_v0", "oy_th_th_line3_v1"})
-        self.assertEqual(loaded["run"].unique().tolist(), ["20260810_120000"])
-        by_query = loaded.set_index("query")
-        self.assertEqual(by_query.loc["oy_th_th_line3_v0", "marker"], "final")
-        self.assertEqual(by_query.loc["oy_th_th_line3_v1", "marker"], "attempt-only")
-
-    def test_empty_final_keeps_attempt_rows(self):
-        attempts_path = "experiment_onoff_20260810_130000.attempts.csv"
-        final_path = "experiment_onoff_20260810_130000.csv"
-        attempts = result_frame([
-            ("oy_ds_ds_line3_v0", "tpcds", 0.9, 1.0, "attempt-only"),
-        ])
-
-        def read_csv(path):
-            if path == final_path:
-                raise pd.errors.EmptyDataError("No columns to parse from file")
-            return attempts.copy()
-
-        with mock.patch.object(PLOT.pd, "read_csv", side_effect=read_csv):
-            loaded = PLOT.load([attempts_path, final_path])
-
         self.assertEqual(len(loaded), 1)
-        self.assertEqual(loaded.iloc[0]["run"], "20260810_130000")
-        self.assertEqual(loaded.iloc[0]["marker"], "attempt-only")
-
-    def test_historical_rows_without_family_still_merge(self):
-        attempts_path = "experiment_onoff_20260810_140000.attempts.csv"
-        final_path = "experiment_onoff_20260810_140000.csv"
-        columns = ["query", "t1_speedup", "tm_speedup", "marker"]
-        sources = {
-            attempts_path: pd.DataFrame([
-                ("oy_jb_jb_line3_v0", 1.0, 1.1, "attempt"),
-            ], columns=columns),
-            final_path: pd.DataFrame([
-                ("oy_jb_jb_line3_v0", 1.2, 1.3, "final"),
-            ], columns=columns),
-        }
-
-        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
-            loaded = PLOT.load([attempts_path, final_path])
-
-        self.assertEqual(len(loaded), 1)
-        self.assertEqual(loaded.iloc[0]["family"], "JOB")
         self.assertEqual(loaded.iloc[0]["marker"], "final")
+        self.assertEqual(loaded.iloc[0]["query_class"], "derived")
 
-    def test_reported_family_is_used_for_new_benchmark_names(self):
-        frame = result_frame([
-            ("ojb_sqlstorm_tpch_15031_ldmx", "tpch", 1.1, 1.2, "final"),
-        ])
-        loaded = PLOT.enrich(frame, "20260816_120000")
-        self.assertEqual(loaded.iloc[0]["family"], "TPC-H")
+    def test_new_shape_suffixes_are_recognized(self):
+        cases = {
+            "derived__ojb_job_21a_skeleton_ldmx": "left-deep",
+            "derived__ojb_job_21a_skeleton_lduF": "left-deep",
+            "derived__ojb_job_21a_skeleton_alt": "left-deep",
+            "derived__ojb_job_21a_skeleton_rdmx": "right-deep",
+            "derived__ojb_job_21a_skeleton_rduL": "right-deep",
+            "derived__ojb_job_21a_skeleton_bmx": "bushy",
+            "industry__oy_th_real_supplier_right": "industry",
+        }
+        self.assertEqual(
+            {query: PLOT.topology_from_query(query) for query in cases}, cases
+        )
 
-    def test_legacy_cleanup_preserves_non_figure_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            directory = Path(directory)
-            (directory / "old.pdf").write_text("generated")
-            (directory / "old.png").write_text("generated")
-            (directory / "notes.txt").write_text("keep")
+    def test_old_win_prefixes_collapse_to_two_reporting_classes(self):
+        self.assertEqual(PLOT.class_from_query("industrywin__old_query"), "industry")
+        self.assertEqual(PLOT.class_from_query("legacywin__old_query"), "derived")
 
-            self.assertEqual(PLOT.clear_generated_figures(directory), 2)
-            self.assertFalse((directory / "old.pdf").exists())
-            self.assertFalse((directory / "old.png").exists())
-            self.assertTrue((directory / "notes.txt").exists())
 
-    def test_phase_breakdown_includes_duckdb_baseline(self):
-        frame = pd.DataFrame([{
-            "query": "ojb_tpch_q5_ldmx",
-            "family": "TPC-H",
+class PlotSpeedupPhaseTest(unittest.TestCase):
+    @staticmethod
+    def phase_row(query, family, total, baseline):
+        return {
+            "query": query,
+            "display_query": f"[D] {query}",
+            "family": family,
             "selected_plan": "OUTERYAN",
             "profile_round1_operator_s": 1.0,
             "profile_round2_operator_s": 2.0,
             "profile_round3_operator_s": 3.0,
             "profile_other_elapsed_s": 4.0,
             "profile_threads": 8,
-            "profile_total_time_s": 2.0,
+            "profile_total_time_s": total,
             "profile_cpu_time_s": 10.0,
             "profile_round1_ratio": 0.1,
             "profile_round2_ratio": 0.2,
             "profile_round3_ratio": 0.3,
             "profile_other_ratio": 0.4,
-            "tm_off": 3.0,
+            "tm_off": baseline,
             "t1_off": 99.0,
-        }])
+        }
 
+    def test_all_families_share_one_phase_figure(self):
+        frame = pd.DataFrame([
+            self.phase_row("derived__ojb_tpch_q08_ldmx", "TPC-H", 2.0, 3.0),
+            self.phase_row("derived__ojb_job_21a_rdmx", "JOB", 2.5, 4.0),
+        ])
         captured = []
-        with mock.patch.object(PLOT, "save", side_effect=lambda fig, *_: captured.append(fig)):
-            PLOT.fig_phase_by_family(frame, "unused")
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_phase(object(), frame, "20260818_011114")
 
         self.assertEqual(len(captured), 1)
-        labels = [text.get_text() for text in captured[0].legends[0].get_texts()]
-        self.assertIn(PLOT.OUTERYAN_TOTAL_LABEL, labels)
-        self.assertIn(PLOT.BASELINE_LABEL, labels)
-        annotation_text = [text.get_text() for text in captured[0].axes[0].texts]
-        self.assertFalse(any("OuterYan" in text or "DuckDB" in text
-                             for text in annotation_text))
-        baseline_bar = captured[0].axes[0].patches[-1]
-        baseline_endpoint = baseline_bar.get_x() + baseline_bar.get_width()
-        self.assertTrue(math.isclose(baseline_endpoint, 3.0))
-        self.assertFalse(captured[0].axes[0].spines["top"].get_visible())
-        self.assertFalse(captured[0].axes[0].spines["right"].get_visible())
+        labels = [label.get_text() for label in captured[0].axes[0].get_yticklabels()]
+        self.assertTrue(any(label.startswith("TPC-H |") for label in labels))
+        self.assertTrue(any(label.startswith("JOB |") for label in labels))
+        legend = [text.get_text() for text in captured[0].axes[0].get_legend().get_texts()]
+        self.assertIn(PLOT.OUTERYAN_TOTAL_LABEL, legend)
+        self.assertIn(PLOT.BASELINE_LABEL, legend)
+        self.assertEqual(captured[0].axes[0].get_xlabel(), "seconds")
+        self.assertTrue(all(patch.get_hatch() is None for patch in captured[0].axes[0].patches))
+        self.assertTrue(all(not patch.get_path_effects() for patch in captured[0].axes[0].patches))
+        self.assertNotIn("20260818_011114", captured[0].axes[0].get_title())
         plt.close(captured[0])
 
-    def test_phase_breakdown_legacy_row_uses_t1_baseline(self):
-        frame = pd.DataFrame([{
-            "query": "ojb_tpch_q5_ldmx",
-            "family": "TPC-H",
-            "selected_plan": "OUTERYAN",
-            "profile_round1_operator_s": 1.0,
-            "profile_round2_operator_s": 2.0,
-            "profile_round3_operator_s": 3.0,
-            "profile_other_elapsed_s": 4.0,
-            "profile_total_time_s": 10.0,
-            "profile_round1_ratio": 0.1,
-            "profile_round2_ratio": 0.2,
-            "profile_round3_ratio": 0.3,
-            "profile_other_ratio": 0.4,
-            "t1_off": 12.0,
-            "tm_off": 99.0,
-        }])
-
+    def test_phase_uses_matching_thread_baseline(self):
+        frame = pd.DataFrame([
+            self.phase_row("derived__ojb_tpch_q08_ldmx", "TPC-H", 2.0, 3.0),
+        ])
         captured = []
-        with mock.patch.object(PLOT, "save", side_effect=lambda fig, *_: captured.append(fig)):
-            PLOT.fig_phase_by_family(frame, "unused")
-
-        self.assertEqual(len(captured), 1)
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_phase(object(), frame, "20260818_011114")
         baseline_bar = captured[0].axes[0].patches[-1]
-        baseline_endpoint = baseline_bar.get_x() + baseline_bar.get_width()
-        self.assertTrue(math.isclose(baseline_endpoint, 12.0))
+        endpoint = baseline_bar.get_x() + baseline_bar.get_width()
+        self.assertTrue(math.isclose(endpoint, 3.0))
+        plt.close(captured[0])
+
+
+class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
+    def test_speedup_pages_are_separate_by_family(self):
+        frame = pd.DataFrame([
+            {
+                "query": "derived__ojb_tpch_q08_ldmx",
+                "display_query": "[D] derived__ojb_tpch_q08_ldmx",
+                "family": "TPC-H",
+                "selected_plan": "OUTERYAN",
+                "t1_speedup": 1.1,
+                "tm_speedup": 1.2,
+            },
+            {
+                "query": "industry__oy_th_real_supplier_right",
+                "display_query": "[I] industry__oy_th_real_supplier_right",
+                "family": "TPC-H",
+                "selected_plan": "DUCKDB",
+                "t1_speedup": 0.9,
+                "tm_speedup": 1.0,
+            },
+            {
+                "query": "derived__ojb_job_21a_rdmx",
+                "display_query": "[D] derived__ojb_job_21a_rdmx",
+                "family": "JOB",
+                "selected_plan": "OUTERYAN",
+                "t1_speedup": 1.3,
+                "tm_speedup": 1.4,
+            },
+        ])
+        captured = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.pages_per_benchmark(object(), frame, "20260818_011114", "tm")
+
+        self.assertEqual(len(captured), 2)
+        titles = [figure.axes[0].get_title() for figure in captured]
+        self.assertTrue(titles[0].startswith("TPC-H benchmark speed-up"))
+        self.assertTrue(titles[1].startswith("JOB benchmark speed-up"))
+        tpc_h_labels = [label.get_text() for label in captured[0].axes[0].get_yticklabels()]
+        self.assertTrue(any(label.startswith("[D]") for label in tpc_h_labels))
+        self.assertTrue(any(label.startswith("[I]") for label in tpc_h_labels))
+        self.assertFalse(any("JOB" in label for label in tpc_h_labels))
+        patches = [patch for figure in captured for patch in figure.axes[0].patches]
+        self.assertTrue(all(patch.get_hatch() is None for patch in patches))
+        self.assertTrue(all(not patch.get_path_effects() for patch in patches))
+        self.assertTrue(all("20260818_011114" not in title for title in titles))
+        for figure in captured:
+            plt.close(figure)
+
+    def test_summary_uses_short_titles_without_timestamp(self):
+        frame = pd.DataFrame([
+            {
+                "query": "derived__ojb_tpch_q08_ldmx",
+                "family": "TPC-H",
+                "query_class": "derived",
+                "reorder": 1,
+                "t1_speedup": 1.1,
+                "tm_speedup": 1.2,
+            },
+            {
+                "query": "industry__oy_th_real_supplier_right",
+                "family": "TPC-H",
+                "query_class": "industry",
+                "reorder": 0,
+                "t1_speedup": 0.9,
+                "tm_speedup": 1.0,
+            },
+        ])
+        captured = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_summary(object(), frame, "20260818_011114")
+
+        self.assertEqual([axis.get_title() for axis in captured[0].axes], [
+            "Benchmark", "Query Category", "Join Order"
+        ])
+        self.assertEqual(captured[0]._suptitle.get_text(), "OuterYan benchmark speed-up summary")
+        self.assertNotIn("20260818_011114", captured[0]._suptitle.get_text())
         plt.close(captured[0])
 
 

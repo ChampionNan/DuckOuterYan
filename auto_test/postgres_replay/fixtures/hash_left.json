@@ -1,0 +1,52 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Hash Join",
+      "Join Type": "Left",
+      "Startup Cost": 1.20,
+      "Total Cost": 3.50,
+      "Plan Rows": 25,
+      "Plan Width": 48,
+      "Output": ["n.n_name", "s.s_name"],
+      "Hash Cond": "(n.n_nationkey = s.s_nationkey)",
+      "Plans": [
+        {
+          "Node Type": "Seq Scan",
+          "Parent Relationship": "Outer",
+          "Schema": "public",
+          "Relation Name": "nation",
+          "Alias": "n",
+          "Startup Cost": 0.00,
+          "Total Cost": 1.25,
+          "Plan Rows": 25,
+          "Plan Width": 36
+        },
+        {
+          "Node Type": "Hash",
+          "Parent Relationship": "Inner",
+          "Startup Cost": 1.10,
+          "Total Cost": 1.10,
+          "Plan Rows": 10,
+          "Plan Width": 20,
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Schema": "public",
+              "Relation Name": "supplier",
+              "Alias": "s",
+              "Startup Cost": 0.00,
+              "Total Cost": 1.10,
+              "Plan Rows": 10,
+              "Plan Width": 20,
+              "Filter": "(s.s_acctbal > '500'::numeric)"
+            }
+          ]
+        }
+      ]
+    },
+    "Settings": {
+      "max_parallel_workers_per_gather": "0"
+    }
+  }
+]

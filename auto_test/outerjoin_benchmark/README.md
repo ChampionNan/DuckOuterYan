@@ -1,23 +1,27 @@
 # OuterJoin benchmark design
 
-This directory contains a provenance-backed benchmark for outer-join query
-optimization. It deliberately separates three workloads:
+This directory contains one provenance-backed benchmark for outer-join query
+optimization plus three auditable component views:
+
+- `benchmark/` is the active 206-query union used by `../outerjoin_query` and
+  the default harness. Query names use only `derived__` and `industry__`.
+  Specific evaluation roles remain available in the manifest.
 
 - `core/` is the 170-query paper benchmark. Every query is derived from a named
   TPC-H, TPC-DS, JOB, or SQLStorm query skeleton and has a row in
   `manifest.csv`.
-- `supplemental/` contains synthetic optimizer stress cases retained from the
-  earlier DuckOuterYan corpus. Its 22 cases were selected using the pinned
-  August 10 performance result and therefore must not be included in an
-  unbiased headline benchmark score. They are also not industry-derived.
-- `industry_inspired/` contains nine business-role patterns retained from the
-  old corpus. They model optional enrichment, sparse dimensions, completeness
-  aggregation, and right-preserved master data. They are labeled
-  industry-inspired synthetic because no production trace is recorded.
+- `supplemental/` contains all 28 correct legacy queries for which the pinned
+  August 10 result selected OuterYan and measured `tm_speedup > 1.0`. They must
+  not be included in an unbiased headline benchmark score and are not
+  industry-derived.
+- `industry_inspired/` is a 36-query evaluation corpus: the union of nine
+  business-role patterns and those 28 legacy performance wins, with one query
+  in both groups. Manifest roles keep industry-inspired synthetic patterns
+  distinct from performance-selected optimizer stress cases.
 
-The active historical corpus is preserved in `../outerjoin_query_old/`.
-`../outerjoin_query` is a compatibility link to `core/`, so the existing harness
-uses the provenance-backed workload by default. `legacy_classification.csv`
+The historical corpus is preserved in `../outerjoin_query_old/`.
+`../outerjoin_query` is a compatibility link to `benchmark/`.
+`legacy_classification.csv`
 records the disposition of all 254 historical queries. The newest complete run,
 `../results/experiment_onoff_20260810_084908.csv`, contains 170 completed cases
 and 84 timeouts. The timeouts are removed from the active historical corpus,
@@ -125,30 +129,25 @@ cases.
 
 ## Running
 
-The core retains the harness's `tpch/`, `tpcds/`, and `job/` family layout:
+The active benchmark retains the harness's `graph/`, `tpch/`, `tpcds/`, and
+`job/` family layout and runs once:
 
 ```bash
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
-  bash auto_test/experiment_onoff.sh --only bench
+OY_CORPUS=auto_test/outerjoin_query \
+  bash auto_test/experiment_onoff.sh --only all
 ```
 
-Run the supplemental workload separately:
+The following component command is for focused diagnostics, not the default
+workflow:
 
 ```bash
 OY_CORPUS=auto_test/outerjoin_benchmark/supplemental \
   bash auto_test/experiment_onoff.sh --only all
 ```
 
-Do not merge core and supplemental results into one benchmark aggregate. Report
-the core by source, topology, join labeling, and relation count; report the
-supplemental suite as optimizer characterization.
-
-Run the industry-inspired component separately:
-
-```bash
-OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
-  bash auto_test/experiment_onoff.sh --only bench
-```
-
-Report this component as industry-inspired synthetic testing, separately from
-both the benchmark-derived core and the performance-selected stress suite.
+When reporting the unified result, preserve the two query-name classes. The
+nine `industry__` roles are industry-inspired synthetic tests, not production
+traces. The 27 legacy performance guards use `derived__`, while their manifest
+roles continue to identify them as performance-selected optimizer regression
+tests. The union is one benchmark execution, but it must not be described as
+wholly industry-derived.
