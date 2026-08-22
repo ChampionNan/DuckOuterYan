@@ -61,6 +61,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             export PGPLAN_EXECUTION_DB="${{PGPLAN_EXECUTION_DB:-$TPCH_DB}}"
             export PGPLAN_RUNS="${{PGPLAN_RUNS:-$OY_RUNS}}"
             export PGPLAN_THREADS="${{PGPLAN_THREADS:-$OY_THREADS}}"
+            export PGPLAN_CAPTURE_TIMEOUT_SECS="${{PGPLAN_CAPTURE_TIMEOUT_SECS:-60}}"
             export PGPLAN_TIMEOUT_SECS="${{PGPLAN_TIMEOUT_SECS:-$OY_TIMEOUT_SECS}}"
             export PGPLAN_TIMEOUT_GRACE="${{PGPLAN_TIMEOUT_GRACE:-$OY_BATCH_GRACE_SECS}}"
             export PGPLAN_TMPDIR="${{PGPLAN_TMPDIR:-$OY_TMPDIR}}"
@@ -115,6 +116,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "PGPLAN_EXECUTION_DB",
             "PGPLAN_RUNS",
             "PGPLAN_THREADS",
+            "PGPLAN_CAPTURE_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_GRACE",
             "PGPLAN_TMPDIR",
@@ -124,6 +126,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "PG_REPLAY_EXECUTION_DB",
             "PG_REPLAY_RUNS",
             "PG_REPLAY_THREADS",
+            "PG_REPLAY_CAPTURE_TIMEOUT_SECS",
             "PG_REPLAY_TIMEOUT_SECS",
             "PG_REPLAY_TIMEOUT_GRACE",
             "PG_REPLAY_TMPDIR",
@@ -161,6 +164,8 @@ class RunAllPGPlanTests(unittest.TestCase):
             "5",
             "--timeout",
             "12",
+            "--capture-timeout",
+            "23",
             "--only",
             "tpch",
         )
@@ -180,6 +185,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         self.assertIn(f"--bin {cli_duckdb}", corpus_args)
         self.assertIn("--runs 5", corpus_args)
         self.assertIn("--timeout 12", corpus_args)
+        self.assertIn("--capture-timeout 23", corpus_args)
         self.assertIn("--only tpch", corpus_args)
         self.assertIn("Three-way status summary:", result.stdout)
 

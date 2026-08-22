@@ -30,6 +30,14 @@ schemas sampled from their DuckDB databases, with at most 1000 rows per table
 by default. Those datasets select PostgreSQL's typed logical join tree only;
 all three configurations execute on the target DuckDB databases.
 
+Plan capture always uses plain PostgreSQL `EXPLAIN`, never `EXPLAIN ANALYZE`.
+Its default 60-second optimizer limit is controlled by
+`PGPLAN_CAPTURE_TIMEOUT_SECS`/`--capture-timeout`. DuckDB's separate
+three-way execution limit is controlled by `PGPLAN_TIMEOUT_SECS`/`--timeout`.
+That limit also covers complete-result CSV framing, sorting, comparison, and
+hashing. Either timeout records that query as `SKIP` and continues with the
+corpus; non-timeout errors remain `FAIL`.
+
 The [complete PGPlan guide](../postgres_replay/README.md) documents setup,
 artifacts, semantic scope, strict validation, and result files. Its directory
 name is retained for internal compatibility; commands, settings, diagnostics,

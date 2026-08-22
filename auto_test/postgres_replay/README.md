@@ -64,8 +64,19 @@ deterministic. `--limit` is global. Each selected query receives one row in
 `status.tsv`. A row is `PASS` only after capture, PGPlan application, complete
 multiset comparison, and timing succeed. Setup, family preparation, capture,
 and execution failures are recorded with their phase; remaining queries
-continue, and any failure makes the corpus command return nonzero. PGPlan never
-falls back to DuckDB's native tree.
+continue. A PostgreSQL plain-`EXPLAIN` timeout or a DuckDB execution timeout is
+`SKIP`, while every other failure is `FAIL` and makes the corpus command return
+nonzero. PGPlan never falls back to DuckDB's native tree.
+
+PostgreSQL plan capture defaults to 60 seconds
+(`PGPLAN_CAPTURE_TIMEOUT_SECS` or `--capture-timeout`). DuckDB execution uses a
+separate limit (`PGPLAN_TIMEOUT_SECS` or `--timeout`), which is applied to each
+DuckDB statement and each potentially large correctness step (CSV framing,
+sorting, counting, comparison, and hashing) and defaults to the main harness's
+1800 seconds. Set either limit to `0` to disable it. A capture timeout writes no
+artifact and never starts the three-way experiment; an execution or
+post-processing timeout stops that query's remaining configurations and
+timing, retains its diagnostic directory, and moves to the next query.
 
 ### PostgreSQL providers
 
@@ -181,7 +192,9 @@ EXPLAIN (FORMAT JSON, VERBOSE, COSTS TRUE, SETTINGS TRUE)
 ```
 
 without `ANALYZE`, inside a read-only transaction. A dependency-free SQL
-scanner rejects multiple statements before invoking `psql`.
+scanner rejects multiple statements before invoking `psql`. Capture also sets
+a transaction-local `statement_timeout` (60 seconds by default); this only
+bounds PostgreSQL optimizer wall time and is not a physical-plan execution.
 
 The normalized artifact has this stable shape:
 
@@ -334,6 +347,13 @@ auto_test/pgplan/experiment.sh \
   --plan /absolute/path/to/query.pg.json \
   --runs 3 --threads 16 \
   --out /absolute/path/to/results
+```
+
+For a bounded corpus run where both planning and each DuckDB statement may use
+at most 60 seconds:
+
+```sh
+bash auto_test/run_all.sh --capture-timeout 60 --timeout 60
 ```
 
 The harness executes the bare query as native DuckDB, PGPlan, and normal

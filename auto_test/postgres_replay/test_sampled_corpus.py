@@ -7,7 +7,9 @@ import csv
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -17,6 +19,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 SCHEMA_TOOL = SCRIPT_DIR / "schema_from_duckdb.py"
 SAMPLED_LOADER = SCRIPT_DIR / "prepare_sampled_pg.sh"
 CORPUS_RUNNER = SCRIPT_DIR / "corpus_experiment.sh"
+EXPERIMENT = SCRIPT_DIR / "experiment.sh"
 
 
 class SchemaConversionTest(unittest.TestCase):
@@ -464,6 +467,7 @@ class CorpusRunnerTest(unittest.TestCase):
                 export PGPLAN_VERSION_NUM=160002
                 export PGPLAN_RUNS=1
                 export PGPLAN_THREADS=2
+                export PGPLAN_CAPTURE_TIMEOUT_SECS=60
                 export PGPLAN_TIMEOUT_SECS=0
                 export OY_TMPDIR="{self.root / 'tmp'}"
                 """
@@ -505,6 +509,10 @@ class CorpusRunnerTest(unittest.TestCase):
                 esac
             done
             case "$query" in
+                *capture_timeout.sql)
+                    echo '[PGPLAN] SKIP capture_timeout seconds=13' >&2
+                    exit 124
+                    ;;
                 *bad.sql) echo 'intentional capture failure' >&2; exit 9 ;;
             esac
             printf '{"tree":{}}\n' > "$out"
@@ -515,12 +523,20 @@ class CorpusRunnerTest(unittest.TestCase):
             r"""
             printf 'experiment %s\n' "$*" >> "$FAKE_CALL_LOG"
             out=''
+            query=''
             while [ "$#" -gt 0 ]; do
                 case "$1" in
                     --out) out="$2"; shift 2 ;;
+                    --query) query="$2"; shift 2 ;;
                     *) shift ;;
                 esac
             done
+            case "$query" in
+                *execute_timeout.sql)
+                    echo '[PGPLAN] TIMEOUT phase=correctness config=native limit_seconds=5' >&2
+                    exit 124
+                    ;;
+            esac
             mkdir -p "$out"
             """,
         )
@@ -589,6 +605,378 @@ class CorpusRunnerTest(unittest.TestCase):
         self.assertEqual(status[0]["phase"], "capture")
         self.assertIn("intentional capture failure", status[0]["detail"])
         self.assertEqual(self.log.read_text(encoding="utf-8").count("experiment "), 1)
+
+    def test_capture_timeout_is_skipped_without_running_the_experiment(self) -> None:
+        (self.corpus / "graph" / "a_capture_timeout.sql").write_text(
+            "SELECT 1;\n", encoding="utf-8"
+        )
+        (self.corpus / "graph" / "b_good.sql").write_text(
+            "SELECT 2;\n", encoding="utf-8"
+        )
+        out = self.root / "capture-timeout-results"
+        result = self.run_runner(
+            "--only", "graph", "--capture-timeout", "13", "--runs", "1",
+            "--out", str(out),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual([row["status"] for row in status], ["SKIP", "PASS"])
+        self.assertEqual(status[0]["phase"], "capture_timeout")
+        self.assertIn("seconds=13", status[0]["detail"])
+        calls = self.log.read_text(encoding="utf-8")
+        self.assertIn("--capture-timeout 13", calls)
+        self.assertEqual(calls.count("experiment "), 1)
+
+    def test_execution_timeout_is_skipped_and_later_query_continues(self) -> None:
+        (self.corpus / "graph" / "a_execute_timeout.sql").write_text(
+            "SELECT 1;\n", encoding="utf-8"
+        )
+        (self.corpus / "graph" / "b_good.sql").write_text(
+            "SELECT 2;\n", encoding="utf-8"
+        )
+        out = self.root / "execute-timeout-results"
+        result = self.run_runner(
+            "--only", "graph", "--timeout", "5", "--runs", "1",
+            "--out", str(out),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual([row["status"] for row in status], ["SKIP", "PASS"])
+        self.assertEqual(status[0]["phase"], "execute_timeout")
+        self.assertIn("phase=correctness", status[0]["detail"])
+        self.assertEqual(self.log.read_text(encoding="utf-8").count("experiment "), 2)
+
+
+class ExperimentTimeoutTest(unittest.TestCase):
+    def run_experiment_with_duck_exit(self, duck_exit: int, duck_stderr=""):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        duckdb = root / "duckdb"
+        stderr_command = ""
+        if duck_stderr:
+            stderr_command = "printf '%s\\n' {} >&2\n".format(
+                shlex.quote(duck_stderr)
+            )
+        duckdb.write_text(
+            "#!/usr/bin/env bash\n{}exit {}\n".format(
+                stderr_command, duck_exit
+            ),
+            encoding="utf-8",
+        )
+        duckdb.chmod(0o755)
+        database = root / "execution.db"
+        database.touch()
+        query = root / "query.sql"
+        query.write_text("SELECT 1;\n", encoding="utf-8")
+        plan = root / "plan.json"
+        plan.write_text(
+            '{"postgres":{"plan_data":"tpch-sf0.01","plan_schema":"public"}}\n',
+            encoding="utf-8",
+        )
+        out = root / "out"
+        env = os.environ.copy()
+        env.update(
+            {
+                "PYTHON_BIN": sys.executable,
+                "PGPLAN_TIMEOUT_SECS": "1",
+                "PGPLAN_TIMEOUT_GRACE": "0",
+                "PGPLAN_TMPDIR": str(root / "tmp"),
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash", str(EXPERIMENT),
+                "--duckdb-bin", str(duckdb),
+                "--execution-db", str(database),
+                "--query", str(query),
+                "--plan", str(plan),
+                "--runs", "1",
+                "--threads", "1",
+                "--out", str(out),
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, out
+
+    def test_reserved_timeout_exit_has_stable_marker(self) -> None:
+        result, out = self.run_experiment_with_duck_exit(124)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn(
+            "[PGPLAN] TIMEOUT phase=version config=metadata limit_seconds=1",
+            result.stderr,
+        )
+        self.assertIn(
+            "status=SKIP",
+            (out / "provenance/manifest.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_non_timeout_duck_failure_remains_failure(self) -> None:
+        result, _out = self.run_experiment_with_duck_exit(9)
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("[PGPLAN] TIMEOUT", result.stderr)
+
+    def test_timeout_setting_error_is_not_misclassified_as_timeout(self) -> None:
+        result, _out = self.run_experiment_with_duck_exit(
+            9,
+            "Catalog Error: unrecognized configuration parameter max_execution_time",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("[PGPLAN] TIMEOUT", result.stderr)
+
+
+class ExperimentPostprocessTimeoutTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.tools = self.root / "tools"
+        self.tools.mkdir()
+        self.duckdb = self.root / "duckdb"
+        self.duckdb.write_text(
+            textwrap.dedent(
+                r"""
+                #!/usr/bin/env python3
+                import os
+                from pathlib import Path
+                import sys
+
+                sql = sys.stdin.read()
+                trace = os.environ.get("DUCKDB_OYTRACE")
+                if trace:
+                    Path(trace).write_text(
+                        "[OY_DECISION] selected_plan=DUCKDB\n", encoding="utf-8"
+                    )
+
+                if "pragma_version()" in sql:
+                    print("vtest")
+                elif "duckdb_settings()" in sql:
+                    if "SET disabled_optimizers TO ''" in sql:
+                        print("disabled_optimizers,")
+                    else:
+                        print("disabled_optimizers,outer_yan")
+                elif "EXPLAIN " in sql:
+                    if "SET VARIABLE pgplan = '" in sql:
+                        print('[PGPLAN] {"event":"verified"}', file=sys.stderr)
+                    print("logical_plan")
+                elif ".mode csv" in sql:
+                    if (
+                        os.environ.get("FAKE_DUCK_MISMATCH_PGPLAN") == "1"
+                        and "SET VARIABLE pgplan = '" in sql
+                    ):
+                        print("2")
+                    else:
+                        print("1")
+                elif ".timer on" in sql:
+                    print("Run Time (s): real 0.001 user 0.000 sys 0.000")
+                    print("Run Time (s): real 0.001 user 0.000 sys 0.000")
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        self.duckdb.chmod(0o755)
+        self.database = self.root / "execution.db"
+        self.database.touch()
+        self.query = self.root / "query.sql"
+        self.query.write_text("SELECT 1;\n", encoding="utf-8")
+        self.plan = self.root / "plan.json"
+        self.plan.write_text(
+            '{"postgres":{"plan_data":"tpch-sf0.01","plan_schema":"public"}}\n',
+            encoding="utf-8",
+        )
+
+    def write_tool(self, name: str, source: str) -> Path:
+        path = self.tools / name
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def run_experiment(self, **overrides: str):
+        out = self.root / "out"
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": str(self.tools) + os.pathsep + env.get("PATH", ""),
+                "PYTHON_BIN": sys.executable,
+                "PGPLAN_TIMEOUT_SECS": "1",
+                "PGPLAN_TIMEOUT_GRACE": "0",
+                "PGPLAN_TMPDIR": str(self.root / "tmp"),
+            }
+        )
+        env.update(overrides)
+        result = subprocess.run(
+            [
+                "bash",
+                str(EXPERIMENT),
+                "--duckdb-bin",
+                str(self.duckdb),
+                "--execution-db",
+                str(self.database),
+                "--query",
+                str(self.query),
+                "--plan",
+                str(self.plan),
+                "--runs",
+                "1",
+                "--threads",
+                "1",
+                "--out",
+                str(out),
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result, out
+
+    @staticmethod
+    def assert_postprocess_timeout(result, out: Path, phase: str, config: str):
+        marker = (
+            "[PGPLAN] TIMEOUT phase={} config={} limit_seconds=1".format(
+                phase, config
+            )
+        )
+        if result.returncode != 124:
+            raise AssertionError(result.stderr)
+        if marker not in result.stderr:
+            raise AssertionError(result.stderr)
+        manifest = (out / "provenance/manifest.txt").read_text(encoding="utf-8")
+        if "status=SKIP" not in manifest:
+            raise AssertionError(manifest)
+        if "skip_reason=postprocess_timeout" not in manifest:
+            raise AssertionError(manifest)
+
+    def test_csv_framing_timeout_is_skipped(self) -> None:
+        python_wrapper = self.write_tool(
+            "python-wrapper",
+            r"""
+            #!/usr/bin/env python3
+            import os
+            from pathlib import Path
+            import sys
+            import time
+
+            if len(sys.argv) > 1 and Path(sys.argv[1]).name == "csv_records.py":
+                time.sleep(5)
+                raise SystemExit(0)
+            os.execv(sys.executable, [sys.executable] + sys.argv[1:])
+            """,
+        )
+        result, out = self.run_experiment(PYTHON_BIN=str(python_wrapper))
+        self.assert_postprocess_timeout(
+            result, out, "correctness_frame", "native"
+        )
+
+    def test_external_sort_timeout_is_skipped(self) -> None:
+        self.write_tool(
+            "sort",
+            """
+            #!/usr/bin/env python3
+            import time
+            time.sleep(5)
+            """,
+        )
+        result, out = self.run_experiment()
+        self.assert_postprocess_timeout(
+            result, out, "correctness_sort", "native"
+        )
+
+    def test_row_count_timeout_is_skipped(self) -> None:
+        self.write_tool(
+            "wc",
+            """
+            #!/usr/bin/env python3
+            import time
+            time.sleep(5)
+            """,
+        )
+        result, out = self.run_experiment()
+        self.assert_postprocess_timeout(
+            result, out, "correctness_count", "native"
+        )
+
+    def test_comparison_timeout_is_skipped(self) -> None:
+        self.write_tool(
+            "cmp",
+            """
+            #!/usr/bin/env python3
+            import time
+            time.sleep(5)
+            """,
+        )
+        result, out = self.run_experiment()
+        self.assert_postprocess_timeout(
+            result, out, "correctness_compare", "pgplan"
+        )
+
+    def test_multiset_hash_timeout_is_skipped(self) -> None:
+        count_file = self.root / "hash-count"
+        self.write_tool(
+            "sha256sum",
+            r"""
+            #!/usr/bin/env python3
+            import hashlib
+            import os
+            from pathlib import Path
+            import sys
+            import time
+
+            count_file = Path(os.environ["FAKE_HASH_COUNT"])
+            count = int(count_file.read_text() if count_file.exists() else "0") + 1
+            count_file.write_text(str(count), encoding="utf-8")
+            if count >= 3:
+                time.sleep(5)
+                raise SystemExit(0)
+            path = Path(sys.argv[-1])
+            print("{}  {}".format(hashlib.sha256(path.read_bytes()).hexdigest(), path))
+            """,
+        )
+        result, out = self.run_experiment(FAKE_HASH_COUNT=str(count_file))
+        self.assert_postprocess_timeout(
+            result, out, "correctness_hash", "native"
+        )
+
+    def test_non_timeout_sort_failure_remains_failure(self) -> None:
+        self.write_tool(
+            "sort",
+            """
+            #!/usr/bin/env python3
+            raise SystemExit(9)
+            """,
+        )
+        result, _out = self.run_experiment()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("[PGPLAN] TIMEOUT", result.stderr)
+        self.assertIn("external sort failed", result.stderr)
+
+    def test_mismatch_diagnostic_is_bounded_but_remains_failure(self) -> None:
+        self.write_tool(
+            "cmp",
+            r"""
+            #!/usr/bin/env python3
+            from pathlib import Path
+            import sys
+            import time
+
+            if "-s" in sys.argv[1:]:
+                left = Path(sys.argv[-2]).read_bytes()
+                right = Path(sys.argv[-1]).read_bytes()
+                raise SystemExit(0 if left == right else 1)
+            time.sleep(5)
+            """,
+        )
+        result, out = self.run_experiment(FAKE_DUCK_MISMATCH_PGPLAN="1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("[PGPLAN] TIMEOUT", result.stderr)
+        self.assertIn("result multiset mismatch", result.stderr)
+        status = out / "correctness/pgplan.diff.status.txt"
+        self.assertIn("exceeded 1s", status.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ class PGPlanConfigTest(unittest.TestCase):
             "PGPLAN_EXECUTION_DB",
             "PGPLAN_RUNS",
             "PGPLAN_THREADS",
+            "PGPLAN_CAPTURE_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_GRACE",
             "PGPLAN_TMPDIR",
@@ -64,6 +65,7 @@ class PGPlanConfigTest(unittest.TestCase):
             "PG_REPLAY_EXECUTION_DB",
             "PG_REPLAY_RUNS",
             "PG_REPLAY_THREADS",
+            "PG_REPLAY_CAPTURE_TIMEOUT_SECS",
             "PG_REPLAY_TIMEOUT_SECS",
             "PG_REPLAY_TIMEOUT_GRACE",
             "PG_REPLAY_TMPDIR",
@@ -83,7 +85,8 @@ for name in RUN_PGPLAN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM \
     PGPLAN_HOST PGPLAN_PORT PGPLAN_DATABASE PGPLAN_USER PGPLAN_PASSWORD PGPLAN_PASSWORD_FILE \
     PGPLAN_CONTAINER_PASSWORD PG_REPLAY_PASSWORD PG_REPLAY_CONTAINER_PASSWORD PG_DSN PSQL_BIN \
     PGPASSWORD PGPLAN_QUERY PGPLAN_EXECUTION_DB PGPLAN_RUNS PGPLAN_THREADS \
-    PGPLAN_TIMEOUT_SECS PGPLAN_TIMEOUT_GRACE PGPLAN_TMPDIR PGPLAN_FORCE_DATA \
+    PGPLAN_CAPTURE_TIMEOUT_SECS PGPLAN_TIMEOUT_SECS PGPLAN_TIMEOUT_GRACE \
+    PGPLAN_TMPDIR PGPLAN_FORCE_DATA PG_REPLAY_CAPTURE_TIMEOUT_SECS \
     RUN_PG_REPLAY PG_REPLAY_SETUP PG_REPLAY_QUERY PG_REPLAY_FORCE_DATA; do
     printf '%s=%s\n' "$name" "${!name-}"
 done
@@ -124,6 +127,11 @@ done
             ),
         )
         self.assertEqual(values["PGPLAN_EXECUTION_DB"], str(REPO_ROOT / "tpch_db"))
+        self.assertEqual(values["PGPLAN_CAPTURE_TIMEOUT_SECS"], "60")
+        self.assertEqual(
+            values["PG_REPLAY_CAPTURE_TIMEOUT_SECS"],
+            values["PGPLAN_CAPTURE_TIMEOUT_SECS"],
+        )
         self.assertEqual(values["PGPLAN_FORCE_DATA"], "0")
         self.assertEqual(values["RUN_PG_REPLAY"], values["RUN_PGPLAN"])
         self.assertEqual(values["PG_REPLAY_SETUP"], values["PGPLAN_SETUP"])
@@ -137,9 +145,11 @@ done
             OY_TIMEOUT_SECS=99,
             OY_BATCH_GRACE_SECS=7,
             OY_TMPDIR="/tmp/duckyan-test",
+            PGPLAN_CAPTURE_TIMEOUT_SECS=17,
         )
         self.assertEqual(values["PGPLAN_RUNS"], "5")
         self.assertEqual(values["PGPLAN_THREADS"], "12")
+        self.assertEqual(values["PGPLAN_CAPTURE_TIMEOUT_SECS"], "17")
         self.assertEqual(values["PGPLAN_TIMEOUT_SECS"], "99")
         self.assertEqual(values["PGPLAN_TIMEOUT_GRACE"], "7")
         self.assertEqual(values["PGPLAN_TMPDIR"], "/tmp/duckyan-test")

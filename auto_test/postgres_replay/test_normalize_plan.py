@@ -259,14 +259,23 @@ class QueryValidationTest(unittest.TestCase):
             NORMALIZER.canonicalize_query(b"WITH q AS (SELECT 1) SELECT * FROM q")
 
     def test_render_uses_explain_without_analyze_in_read_only_transaction(self):
-        sql = NORMALIZER.render_explain_sql(b"SELECT 1;")
+        sql = NORMALIZER.render_explain_sql(
+            b"SELECT 1;", capture_timeout_seconds=17
+        )
         self.assertIn("BEGIN READ ONLY;", sql)
         self.assertIn("SET LOCAL max_parallel_workers_per_gather = 0;", sql)
+        self.assertIn("SET LOCAL statement_timeout = '17s';", sql)
         self.assertIn(
             "EXPLAIN (FORMAT JSON, VERBOSE, COSTS TRUE, SETTINGS TRUE)", sql
         )
         self.assertNotIn("ANALYZE", sql)
         self.assertTrue(sql.endswith("ROLLBACK;\n"))
+
+    def test_render_rejects_invalid_capture_timeout(self):
+        with self.assertRaisesRegex(NORMALIZER.PlanError, "capture timeout"):
+            NORMALIZER.render_explain_sql(
+                b"SELECT 1", capture_timeout_seconds=-1
+            )
 
     def test_render_sets_nonpublic_search_path(self):
         sql = NORMALIZER.render_explain_sql(

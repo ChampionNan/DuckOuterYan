@@ -30,7 +30,9 @@ Optional:
   -h, --help          Show this help
 
 Optional environment controls:
-  PGPLAN_TIMEOUT_SECS  Per-query timeout in seconds; 0 disables (default: 0)
+  PGPLAN_TIMEOUT_SECS  Per-DuckDB-statement and per-correctness-postprocessing
+                       step timeout in seconds; 0 disables (direct-script
+                       default: 0)
   PGPLAN_TIMEOUT_GRACE Extra timing-batch watchdog grace (default: 30)
   PGPLAN_TMPDIR        Parent directory for temporary files (default: TMPDIR)
   PGPLAN_KEEP_CORRECTNESS_FILES
@@ -235,16 +237,78 @@ run_duck() {
 	fi
 }
 
+is_duck_timeout() {
+	local rc="$1" stderr_file="$2"
+	[ "$TIMEOUT_SECS" -gt 0 ] || return 1
+	[ "$rc" -eq 124 ] && return 0
+	# This fork reports a max_execution_time cancellation with this exact
+	# diagnostic. Do not classify arbitrary errors that merely mention the
+	# timeout setting as SKIP.
+	grep -Fqx 'INTERRUPT Error: Interrupted!' "$stderr_file" 2>/dev/null
+}
+
+handle_duck_failure() {
+	local rc="$1" stderr_file="$2" phase="$3" config="$4" diagnostic="$5"
+	if is_duck_timeout "$rc" "$stderr_file"; then
+		local message="[PGPLAN] TIMEOUT phase=$phase config=$config limit_seconds=$TIMEOUT_SECS"
+		printf '%s\n' "$message" > "$OUT_DIR/checks/timeout.txt"
+		printf 'finished_utc=%s\nstatus=SKIP\nskip_reason=execution_timeout\n' \
+			"$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$OUT_DIR/provenance/manifest.txt"
+		printf '%s\n' "$message" >&2
+		exit 124
+	fi
+	die "$diagnostic (exit=$rc; see $stderr_file)"
+}
+
+# Bound result framing, sorting, comparison, counting, and hashing just like a
+# DuckDB statement. A fast engine query can still emit a very large multiset,
+# so leaving these steps unbounded would make --timeout ineffective for the
+# overall correctness phase.
+run_postprocess() {
+	local stdout_file="$1" stderr_file="$2"
+	shift 2
+	local -a command=("$@")
+	if [ "$TIMEOUT_SECS" -gt 0 ]; then
+		command=("$TIMEOUT_BIN" "$TIMEOUT_SECS" "${command[@]}")
+	fi
+	"${command[@]}" > "$stdout_file" 2> "$stderr_file"
+}
+
+handle_postprocess_failure() {
+	local rc="$1" stderr_file="$2" phase="$3" config="$4" diagnostic="$5"
+	if [ "$TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
+		local message="[PGPLAN] TIMEOUT phase=$phase config=$config limit_seconds=$TIMEOUT_SECS"
+		printf '%s\n' "$message" > "$OUT_DIR/checks/timeout.txt"
+		printf 'finished_utc=%s\nstatus=SKIP\nskip_reason=postprocess_timeout\n' \
+			"$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$OUT_DIR/provenance/manifest.txt"
+		printf '%s\n' "$message" >&2
+		exit 124
+	fi
+	die "$diagnostic (exit=$rc; see $stderr_file)"
+}
+
 sha256_file() {
 	local path="$1"
+	local bounded="${2:-0}"
+	local -a command
+	local digest_field=1
 	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum -- "$path" | awk '{print $1}'
+		command=(sha256sum -- "$path")
 	elif command -v shasum >/dev/null 2>&1; then
-		shasum -a 256 -- "$path" | awk '{print $1}'
+		command=(shasum -a 256 -- "$path")
 	elif command -v openssl >/dev/null 2>&1; then
-		openssl dgst -sha256 "$path" | awk '{print $NF}'
+		command=(openssl dgst -sha256 "$path")
+		digest_field=0
 	else
 		die "sha256sum, shasum, or openssl is required for provenance"
+	fi
+	if [ "$bounded" = "1" ] && [ "$TIMEOUT_SECS" -gt 0 ]; then
+		command=("$TIMEOUT_BIN" "$TIMEOUT_SECS" "${command[@]}")
+	fi
+	if [ "$digest_field" -eq 1 ]; then
+		"${command[@]}" | awk '{print $1}'
+	else
+		"${command[@]}" | awk '{print $NF}'
 	fi
 }
 
@@ -287,8 +351,14 @@ VERSION_SQL="$WORK_DIR/version.sql"
 	printf '.headers on\n.mode csv\n'
 	printf 'SELECT * FROM pragma_version();\n'
 } > "$VERSION_SQL"
-run_duck "$VERSION_SQL" "$OUT_DIR/settings/version.csv" "$OUT_DIR/settings/version.stderr" 1 || \
-	die "failed to capture DuckDB version (see $OUT_DIR/settings/version.stderr)"
+if run_duck "$VERSION_SQL" "$OUT_DIR/settings/version.csv" \
+		"$OUT_DIR/settings/version.stderr" 1; then
+	:
+else
+	rc=$?
+	handle_duck_failure "$rc" "$OUT_DIR/settings/version.stderr" version metadata \
+		"failed to capture DuckDB version"
+fi
 
 printf 'Capturing settings and EXPLAIN plans...\n'
 for config in native pgplan outer_yan; do
@@ -311,8 +381,14 @@ for config in native pgplan outer_yan; do
 			printf "SELECT name, value, type FROM duckdb_variables() WHERE name = 'pgplan';\n"
 		fi
 	} > "$SETTINGS_SQL"
-	run_duck "$SETTINGS_SQL" "$OUT_DIR/settings/${config}.csv" "$OUT_DIR/settings/${config}.stderr" 1 || \
-		die "failed to capture $config settings (see $OUT_DIR/settings/${config}.stderr)"
+	if run_duck "$SETTINGS_SQL" "$OUT_DIR/settings/${config}.csv" \
+			"$OUT_DIR/settings/${config}.stderr" 1; then
+		:
+	else
+		rc=$?
+		handle_duck_failure "$rc" "$OUT_DIR/settings/${config}.stderr" \
+			settings "$config" "failed to capture $config settings"
+	fi
 
 	EXPLAIN_SQL="$WORK_DIR/explain_${config}.sql"
 	{
@@ -324,8 +400,14 @@ for config in native pgplan outer_yan; do
 	} > "$EXPLAIN_SQL"
 	OY_TRACE=""
 	[ "$config" != outer_yan ] || OY_TRACE="$OUT_DIR/traces/outer_yan_explain.trace"
-	run_duck "$EXPLAIN_SQL" "$OUT_DIR/plans/${config}.txt" "$OUT_DIR/plans/${config}.stderr" 1 "$OY_TRACE" || \
-		die "failed to capture $config EXPLAIN (see $OUT_DIR/plans/${config}.stderr)"
+	if run_duck "$EXPLAIN_SQL" "$OUT_DIR/plans/${config}.txt" \
+			"$OUT_DIR/plans/${config}.stderr" 1 "$OY_TRACE"; then
+		:
+	else
+		rc=$?
+		handle_duck_failure "$rc" "$OUT_DIR/plans/${config}.stderr" \
+			explain "$config" "failed to capture $config EXPLAIN"
+	fi
 done
 
 if ! tr -d '\r' < "$OUT_DIR/settings/native.csv" | grep -qx 'disabled_optimizers,outer_yan' ||
@@ -378,38 +460,105 @@ for config in native pgplan outer_yan; do
 	} > "$RESULT_SQL"
 	OY_TRACE=""
 	[ "$config" != outer_yan ] || OY_TRACE="$OUT_DIR/traces/outer_yan_correctness.trace"
-	if ! run_duck "$RESULT_SQL" "$OUT_DIR/correctness/${config}.csv" \
-		"$OUT_DIR/correctness/${config}.stderr" 1 "$OY_TRACE"; then
-		die "$config correctness query failed (see $OUT_DIR/correctness/${config}.stderr)"
+	if run_duck "$RESULT_SQL" "$OUT_DIR/correctness/${config}.csv" \
+			"$OUT_DIR/correctness/${config}.stderr" 1 "$OY_TRACE"; then
+		:
+	else
+		rc=$?
+		handle_duck_failure "$rc" "$OUT_DIR/correctness/${config}.stderr" \
+			correctness "$config" "$config correctness query failed"
 	fi
-	if ! "$PYTHON_BIN" "$CSV_RECORDS" "$OUT_DIR/correctness/${config}.csv" \
-		> "$OUT_DIR/correctness/${config}.records.jsonl"; then
-		die "CSV record framing failed for $config results"
+	if run_postprocess "$OUT_DIR/correctness/${config}.records.jsonl" \
+			"$OUT_DIR/correctness/${config}.frame.stderr" \
+			"$PYTHON_BIN" "$CSV_RECORDS" "$OUT_DIR/correctness/${config}.csv"; then
+		:
+	else
+		rc=$?
+		handle_postprocess_failure "$rc" \
+			"$OUT_DIR/correctness/${config}.frame.stderr" \
+			correctness_frame "$config" "CSV record framing failed for $config results"
 	fi
-	if ! LC_ALL=C sort "$OUT_DIR/correctness/${config}.records.jsonl" \
-		> "$OUT_DIR/correctness/${config}.sorted.records.jsonl"; then
-		die "external sort failed for $config results"
+	if LC_ALL=C run_postprocess \
+			"$OUT_DIR/correctness/${config}.sorted.records.jsonl" \
+			"$OUT_DIR/correctness/${config}.sort.stderr" \
+			sort "$OUT_DIR/correctness/${config}.records.jsonl"; then
+		:
+	else
+		rc=$?
+		handle_postprocess_failure "$rc" \
+			"$OUT_DIR/correctness/${config}.sort.stderr" \
+			correctness_sort "$config" "external sort failed for $config results"
 	fi
-	ROWS="$(wc -l < "$OUT_DIR/correctness/${config}.records.jsonl" | tr -d '[:space:]')"
+	if run_postprocess "$OUT_DIR/correctness/${config}.row_count" \
+			"$OUT_DIR/correctness/${config}.count.stderr" \
+			wc -l "$OUT_DIR/correctness/${config}.records.jsonl"; then
+		:
+	else
+		rc=$?
+		handle_postprocess_failure "$rc" \
+			"$OUT_DIR/correctness/${config}.count.stderr" \
+			correctness_count "$config" "row counting failed for $config results"
+	fi
+	ROWS="$(awk '{print $1}' "$OUT_DIR/correctness/${config}.row_count")"
+	case "$ROWS" in ''|*[!0-9]*) die "invalid row count for $config results: $ROWS" ;; esac
 	printf '%s\t%s\n' "$config" "$ROWS" >> "$OUT_DIR/correctness/row_counts.tsv"
 done
 
 CORRECTNESS_OK=1
 for config in pgplan outer_yan; do
-	if cmp -s "$OUT_DIR/correctness/native.sorted.records.jsonl" \
-		"$OUT_DIR/correctness/${config}.sorted.records.jsonl"; then
+	if run_postprocess "$OUT_DIR/correctness/${config}.compare.stdout" \
+			"$OUT_DIR/correctness/${config}.compare.stderr" \
+			cmp -s "$OUT_DIR/correctness/native.sorted.records.jsonl" \
+			"$OUT_DIR/correctness/${config}.sorted.records.jsonl"; then
 		printf 'PASS native == %s\n' "$config" > "$OUT_DIR/correctness/${config}.comparison.txt"
 	else
+		rc=$?
+		if [ "$rc" -ne 1 ]; then
+			handle_postprocess_failure "$rc" \
+				"$OUT_DIR/correctness/${config}.compare.stderr" \
+				correctness_compare "$config" \
+				"result multiset comparison failed for $config"
+		fi
 		CORRECTNESS_OK=0
 		printf 'FAIL native != %s\n' "$config" > "$OUT_DIR/correctness/${config}.comparison.txt"
-		diff -u "$OUT_DIR/correctness/native.sorted.records.jsonl" \
-			"$OUT_DIR/correctness/${config}.sorted.records.jsonl" \
-			> "$OUT_DIR/correctness/${config}.diff" || true
+		# The complete sorted files are retained on a mismatch. Record only the
+		# first differing byte/line instead of materializing an unbounded unified
+		# diff that can be substantially larger than both inputs.
+		if run_postprocess "$OUT_DIR/correctness/${config}.diff" \
+				"$OUT_DIR/correctness/${config}.diff.stderr" \
+				cmp "$OUT_DIR/correctness/native.sorted.records.jsonl" \
+				"$OUT_DIR/correctness/${config}.sorted.records.jsonl"; then
+			die "internal error: silent cmp reported a mismatch but diagnostic cmp did not"
+		else
+			diff_rc=$?
+			case "$diff_rc" in
+				1) ;;
+				124)
+					if [ "$TIMEOUT_SECS" -gt 0 ]; then
+						printf 'First-difference diagnostic exceeded %ss.\n' \
+							"$TIMEOUT_SECS" > "$OUT_DIR/correctness/${config}.diff.status.txt"
+					else
+						die "first-difference diagnostic failed for $config (exit=124)"
+					fi
+					;;
+				*) die "first-difference diagnostic failed for $config (exit=$diff_rc)" ;;
+			esac
+		fi
 	fi
 done
 [ "$CORRECTNESS_OK" -eq 1 ] || die "result multiset mismatch; timing was not run"
 printf 'PASS: native, PGPlan, and OuterYan complete multisets are identical\n' > "$OUT_DIR/correctness/status.txt"
-MULTISET_SHA256="$(sha256_file "$OUT_DIR/correctness/native.sorted.records.jsonl")"
+if MULTISET_SHA256="$(sha256_file \
+		"$OUT_DIR/correctness/native.sorted.records.jsonl" 1 \
+		2> "$OUT_DIR/correctness/multiset_hash.stderr")"; then
+	:
+else
+	rc=$?
+	handle_postprocess_failure "$rc" \
+		"$OUT_DIR/correctness/multiset_hash.stderr" \
+		correctness_hash native "multiset hashing failed"
+fi
+[ -n "$MULTISET_SHA256" ] || die "multiset hashing returned an empty digest"
 printf 'sha256\trows\n%s\t%s\n' "$MULTISET_SHA256" \
 	"$(awk -F '\t' '$1 == "native" {print $2}' "$OUT_DIR/correctness/row_counts.tsv")" \
 	> "$OUT_DIR/correctness/multiset_sha256.tsv"
@@ -464,9 +613,13 @@ for config in native pgplan outer_yan; do
 			i=$((i + 1))
 		done
 	} > "$TIMING_SQL"
-	if ! run_duck "$TIMING_SQL" "$OUT_DIR/timing/${config}.stdout" \
-		"$OUT_DIR/timing/${config}.stderr" "$((RUNS + 1))"; then
-		die "$config timing batch failed (see $OUT_DIR/timing/${config}.stderr)"
+	if run_duck "$TIMING_SQL" "$OUT_DIR/timing/${config}.stdout" \
+			"$OUT_DIR/timing/${config}.stderr" "$((RUNS + 1))"; then
+		:
+	else
+		rc=$?
+		handle_duck_failure "$rc" "$OUT_DIR/timing/${config}.stderr" \
+			timing "$config" "$config timing batch failed"
 	fi
 	cat "$OUT_DIR/timing/${config}.stdout" "$OUT_DIR/timing/${config}.stderr" > "$OUT_DIR/timing/${config}.log"
 	if ! MEDIAN="$(extract_median "$OUT_DIR/timing/${config}.log" "$RUNS")"; then

@@ -248,7 +248,11 @@ def validate_plan_provenance(plan_schema, plan_data):
         )
 
 
-def render_explain_sql(query_bytes, plan_schema=DEFAULT_PLAN_SCHEMA):
+def render_explain_sql(
+    query_bytes, plan_schema=DEFAULT_PLAN_SCHEMA, capture_timeout_seconds=0
+):
+    if not isinstance(capture_timeout_seconds, int) or capture_timeout_seconds < 0:
+        raise PlanError("capture timeout must be a non-negative integer")
     sample_prefix = "pgplan_"
     sample_family = (
         plan_schema[len(sample_prefix) :]
@@ -265,9 +269,15 @@ def render_explain_sql(query_bytes, plan_schema=DEFAULT_PLAN_SCHEMA):
     setup = ""
     if plan_schema != DEFAULT_PLAN_SCHEMA:
         setup = "SET LOCAL search_path = {}, pg_catalog;\n".format(plan_schema)
+    timeout = ""
+    if capture_timeout_seconds:
+        timeout = "SET LOCAL statement_timeout = '{}s';\n".format(
+            capture_timeout_seconds
+        )
     return (
         "BEGIN READ ONLY;\n"
         "SET LOCAL max_parallel_workers_per_gather = 0;\n"
+        + timeout
         + setup
         + "EXPLAIN (FORMAT JSON, VERBOSE, COSTS TRUE, SETTINGS TRUE)\n"
         + query
@@ -752,6 +762,7 @@ def _parse_args(argv):
     parser.add_argument("--query", required=True)
     parser.add_argument("--pg-schema", default=DEFAULT_PLAN_SCHEMA)
     parser.add_argument("--plan-data", default=DEFAULT_PLAN_DATA)
+    parser.add_argument("--capture-timeout-seconds", type=int, default=0)
     parser.add_argument("--explain-json")
     parser.add_argument("--version-num", type=int)
     parser.add_argument("--out")
@@ -770,7 +781,11 @@ def main(argv=None):
             return 0
         if args.emit_explain_sql:
             validate_plan_provenance(args.pg_schema, args.plan_data)
-            sys.stdout.write(render_explain_sql(query_bytes, args.pg_schema))
+            sys.stdout.write(
+                render_explain_sql(
+                    query_bytes, args.pg_schema, args.capture_timeout_seconds
+                )
+            )
             return 0
         artifact = normalize_explain(
             _load_json(args.explain_json),

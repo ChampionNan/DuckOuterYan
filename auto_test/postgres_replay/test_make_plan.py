@@ -34,6 +34,16 @@ elif sql_file:
     assert "EXPLAIN (FORMAT JSON, VERBOSE, COSTS TRUE, SETTINGS TRUE)" in capture
     assert "EXPLAIN (ANALYZE" not in capture
     assert capture.startswith("BEGIN READ ONLY;")
+    if os.environ.get("FAKE_CAPTURE_TIMEOUT"):
+        assert "SET LOCAL statement_timeout = '7s';" in capture
+        print(
+            "ERROR:  57014: canceling statement due to statement timeout",
+            file=sys.stderr,
+        )
+        raise SystemExit(3)
+    if os.environ.get("FAKE_CAPTURE_ERROR"):
+        print("ERROR:  XX000: unrelated capture failure", file=sys.stderr)
+        raise SystemExit(9)
     sys.stdout.write(pathlib.Path(os.environ["FAKE_EXPLAIN_JSON"]).read_text(encoding="utf-8"))
 else:
     raise SystemExit("unexpected fake psql invocation: " + repr(sys.argv))
@@ -42,7 +52,8 @@ else:
 
 class MakePlanIntegrationTest(unittest.TestCase):
     def run_capture(self, version="160002", nondefaults="", mutate_query=False,
-                    out_is_query=False):
+                    out_is_query=False, capture_timeout=False,
+                    capture_error=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name) / "path with spaces"
@@ -68,6 +79,11 @@ class MakePlanIntegrationTest(unittest.TestCase):
         )
         if mutate_query:
             env["FAKE_MUTATE_QUERY"] = str(query)
+        if capture_timeout:
+            env["FAKE_CAPTURE_TIMEOUT"] = "1"
+            env["PGPLAN_CAPTURE_TIMEOUT_SECS"] = "7"
+        if capture_error:
+            env["FAKE_CAPTURE_ERROR"] = "1"
         result = subprocess.run(
             [
                 "bash",
@@ -129,6 +145,20 @@ class MakePlanIntegrationTest(unittest.TestCase):
             b"\r\n-- benchmark provenance;\r\n"
             b"/* outer /* nested */ comment */\r\n SELECT 1; \r\n",
         )
+
+    def test_plain_explain_timeout_writes_no_artifact_and_returns_124(self):
+        result, artifact_path = self.run_capture(capture_timeout=True)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("SKIP capture_timeout seconds=7", result.stderr)
+        self.assertNotIn("EXPLAIN ANALYZE", result.stderr)
+        self.assertFalse(artifact_path.exists())
+
+    def test_non_timeout_capture_error_remains_failure(self):
+        result, artifact_path = self.run_capture(capture_error=True)
+        self.assertEqual(result.returncode, 9, result.stderr)
+        self.assertIn("XX000: unrelated capture failure", result.stderr)
+        self.assertNotIn("SKIP capture_timeout", result.stderr)
+        self.assertFalse(artifact_path.exists())
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
 #   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
+#   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 60)
+#   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
 #   OY_CORPUS        Custom corpus for RUN_PGPLAN=0 legacy two-way mode
 #
 # Docker is optional. With no PostgreSQL override, source mode downloads,

@@ -14,6 +14,7 @@ ROW_CAP="${PGPLAN_SAMPLE_ROWS:-1000}"
 RUNS="${PGPLAN_RUNS:-${OY_RUNS:-3}}"
 THREADS="${PGPLAN_THREADS:-${OY_THREADS:-1}}"
 TIMEOUT_SECS="${PGPLAN_TIMEOUT_SECS:-${OY_TIMEOUT_SECS:-0}}"
+CAPTURE_TIMEOUT_SECS="${PGPLAN_CAPTURE_TIMEOUT_SECS:-${PG_REPLAY_CAPTURE_TIMEOUT_SECS:-60}}"
 DUCKDB_BIN="${DUCKDB_BIN:-}"
 PG_DSN="${PG_DSN:-}"
 OUT=""
@@ -24,7 +25,8 @@ Usage:
   corpus_experiment.sh [--only graph|tpch|tpcds|job|bench|all]
       [--pattern GLOB] [--limit N] [--rows N]
       [--corpus DIR] [--duckdb-bin PATH] [--pg-dsn DSN]
-      [--runs ODD_N] [--threads N] [--timeout SECONDS] [--out DIR]
+      [--runs ODD_N] [--threads N] [--timeout SECONDS]
+      [--capture-timeout SECONDS] [--out DIR]
 
 For each selected SQL file, capture a fresh PostgreSQL 16.2 typed join tree and
 run the complete three-configuration correctness/performance experiment:
@@ -40,10 +42,11 @@ data prepared by setup_pg.sh. Selection order is graph, tpch, tpcds, job and is
 locale independent; --limit is global. --pattern is a shell glob on the query
 filename without .sql.
 
-Every selected query gets one row in OUT/status.tsv. Failures are recorded and
-the remaining queries continue, but any failure makes the final exit status
-nonzero. There is no fallback to DuckDB when capture or PGPlan integration
-fails.
+Every selected query gets one row in OUT/status.tsv. PostgreSQL plain-EXPLAIN
+or DuckDB execution timeouts are recorded as SKIP, their remaining experiment
+is not run, and the next query continues. Other failures are recorded as FAIL
+and make the final exit status nonzero. There is no fallback to DuckDB when
+capture or PGPlan integration fails.
 USAGE
 }
 
@@ -104,6 +107,11 @@ while [ $# -gt 0 ]; do
             TIMEOUT_SECS="$2"
             shift 2
             ;;
+        --capture-timeout)
+            [ $# -ge 2 ] || die "$1 requires a value"
+            CAPTURE_TIMEOUT_SECS="$2"
+            shift 2
+            ;;
         --out)
             [ $# -ge 2 ] || die "$1 requires a value"
             OUT="$2"
@@ -134,6 +142,8 @@ esac
 [ $((RUNS % 2)) -eq 1 ] || die "--runs must be odd"
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
 [[ "$TIMEOUT_SECS" =~ ^[0-9]+$ ]] || die "--timeout must be a non-negative integer"
+[[ "$CAPTURE_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || \
+    die "--capture-timeout must be a non-negative integer"
 [ -d "$CORPUS" ] || die "corpus directory does not exist: $CORPUS"
 CORPUS="$(cd "$CORPUS" && pwd -P)"
 [ -x "$DUCKDB_BIN" ] || die "DuckDB binary is not executable: $DUCKDB_BIN"
@@ -349,15 +359,27 @@ for index in "${!QUERY_PATHS[@]}"; do
     capture_log="$OUT/logs/${family}__${label}__capture.log"
     experiment_log="$OUT/logs/${family}__${label}__experiment.log"
 
-    echo "[pgplan] capture $relative"
-    if ! bash "$SCRIPT_DIR/make_plan.sh" \
+    echo "[pgplan] capture $relative (plain EXPLAIN timeout=${CAPTURE_TIMEOUT_SECS}s)"
+    if bash "$SCRIPT_DIR/make_plan.sh" \
             --pg-dsn "$PG_DSN" \
             --pg-schema "$CURRENT_SCHEMA" \
             --plan-data "$CURRENT_PLAN_DATA" \
             --query "$query" \
             --out "$plan" \
             --expected-pg-version "${PGPLAN_VERSION_NUM:-160002}" \
+            --capture-timeout "$CAPTURE_TIMEOUT_SECS" \
             > "$capture_log" 2>&1; then
+        capture_rc=0
+    else
+        capture_rc=$?
+    fi
+    if [ "$capture_rc" -eq 124 ]; then
+        detail="$(sanitize_detail "$capture_log")"
+        append_status "$family" "$relative" SKIP capture_timeout "$detail" "" ""
+        echo "[pgplan] SKIP $relative (capture timeout: $detail)"
+        continue
+    fi
+    if [ "$capture_rc" -ne 0 ]; then
         detail="$(sanitize_detail "$capture_log")"
         append_status "$family" "$relative" FAIL capture "$detail" "$plan" ""
         echo "[pgplan] FAIL $relative (capture: $detail)" >&2
@@ -366,8 +388,8 @@ for index in "${!QUERY_PATHS[@]}"; do
     fi
 
     execution_db="$(db_for_family "$family")"
-    echo "[pgplan] execute $relative"
-    if ! PGPLAN_TIMEOUT_SECS="$TIMEOUT_SECS" \
+    echo "[pgplan] execute $relative (per-statement timeout=${TIMEOUT_SECS}s; log=$experiment_log)"
+    if PGPLAN_TIMEOUT_SECS="$TIMEOUT_SECS" \
             PGPLAN_TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${OY_BATCH_GRACE_SECS:-30}}" \
             PGPLAN_TMPDIR="${PGPLAN_TMPDIR:-${OY_TMPDIR:-$OUT/tmp}}" \
             PGPLAN_KEEP_CORRECTNESS_FILES="${PGPLAN_KEEP_CORRECTNESS_FILES:-0}" \
@@ -380,6 +402,17 @@ for index in "${!QUERY_PATHS[@]}"; do
                 --threads "$THREADS" \
                 --out "$result_dir" \
                 > "$experiment_log" 2>&1; then
+        experiment_rc=0
+    else
+        experiment_rc=$?
+    fi
+    if [ "$experiment_rc" -eq 124 ]; then
+        detail="$(sanitize_detail "$experiment_log")"
+        append_status "$family" "$relative" SKIP execute_timeout "$detail" "$plan" "$result_dir"
+        echo "[pgplan] SKIP $relative (execution timeout: $detail)"
+        continue
+    fi
+    if [ "$experiment_rc" -ne 0 ]; then
         detail="$(sanitize_detail "$experiment_log")"
         append_status "$family" "$relative" FAIL execute "$detail" "$plan" "$result_dir"
         echo "[pgplan] FAIL $relative (execute: $detail)" >&2
@@ -393,5 +426,6 @@ done
 
 PASS_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "PASS" {count++} END {print count + 0}' "$STATUS_TSV")"
 FAIL_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "FAIL" {count++} END {print count + 0}' "$STATUS_TSV")"
-echo "[pgplan] complete: pass=$PASS_COUNT fail=$FAIL_COUNT status=$STATUS_TSV"
+SKIP_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "SKIP" {count++} END {print count + 0}' "$STATUS_TSV")"
+echo "[pgplan] complete: pass=$PASS_COUNT skip=$SKIP_COUNT fail=$FAIL_COUNT status=$STATUS_TSV"
 [ "$FAILED" -eq 0 ]

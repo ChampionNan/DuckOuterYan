@@ -55,6 +55,8 @@ corresponding environment values.
 | `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
 | `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive fresh PGPlan artifacts |
 | `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
+| `PGPLAN_CAPTURE_TIMEOUT_SECS` | `60` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
+| `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and correctness post-processing step during the three-way experiment |
 | `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
 | `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
 
@@ -690,7 +692,11 @@ DuckDB, PGPlan, and normal OuterYan, compares complete result multisets, and
 only then records timings.
 `--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
 attempt is recorded in `status.tsv`; there is no native-plan fallback when
-capture or PGPlan application fails.
+capture or PGPlan application fails. A PostgreSQL planning, DuckDB execution,
+or correctness post-processing timeout is recorded as `SKIP` and the next
+query continues; every other failure remains `FAIL` and makes the corpus
+command return nonzero. For a quick bounded server run, pass
+`--capture-timeout 60 --timeout 60`.
 
 TPC-H uses the exact SF0.01 PostgreSQL dataset. Graph, TPC-DS, and JOB use
 isolated schemas with at most `PGPLAN_SAMPLE_ROWS` rows per table (1000 by

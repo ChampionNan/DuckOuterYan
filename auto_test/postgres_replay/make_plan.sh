@@ -14,13 +14,14 @@ OUT=""
 EXPECTED_PG_VERSION="${PGPLAN_VERSION_NUM:-160002}"
 PG_SCHEMA="public"
 PLAN_DATA="tpch-sf0.01"
+CAPTURE_TIMEOUT_SECS="${PGPLAN_CAPTURE_TIMEOUT_SECS:-${PG_REPLAY_CAPTURE_TIMEOUT_SECS:-60}}"
 
 usage() {
     cat <<'USAGE'
 Usage:
   make_plan.sh --pg-dsn DSN --query FILE --out FILE \
       [--pg-schema public] [--plan-data tpch-sf0.01] \
-      [--expected-pg-version 160002]
+      [--expected-pg-version 160002] [--capture-timeout SECONDS]
 
 Environment overrides:
   Defaults are sourced from auto_test/configs.sh. PG_DSN, PSQL_BIN,
@@ -29,7 +30,11 @@ Environment overrides:
 The query must be one SELECT statement. It is passed only to EXPLAIN (without
 ANALYZE) inside a read-only transaction. PostgreSQL planner settings must have
 their compiled defaults; max_parallel_workers_per_gather=0 and the requested
-non-public plan schema's deterministic search_path are the sole overrides.
+non-public plan schema's deterministic search_path are the sole plan-affecting
+overrides. statement_timeout only bounds planner wall time.
+The default plain-EXPLAIN optimizer timeout is PGPLAN_CAPTURE_TIMEOUT_SECS
+(60 seconds); 0 disables it. A timeout exits with status 124 and writes no
+artifact.
 USAGE
 }
 
@@ -70,6 +75,11 @@ while [ $# -gt 0 ]; do
             EXPECTED_PG_VERSION="$2"
             shift 2
             ;;
+        --timeout|--capture-timeout)
+            [ $# -ge 2 ] || die "$1 requires a value"
+            CAPTURE_TIMEOUT_SECS="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -86,6 +96,8 @@ done
 [ -n "$OUT" ] || die "--out is required"
 [ "$EXPECTED_PG_VERSION" = "160002" ] || \
     die "PGPlan v1 is pinned to expected server_version_num 160002"
+[[ "$CAPTURE_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || \
+    die "capture timeout must be a non-negative integer"
 
 if [[ "$PSQL_BIN" == */* ]]; then
     [ -x "$PSQL_BIN" ] || die "PSQL_BIN is not executable: $PSQL_BIN"
@@ -128,7 +140,8 @@ cp -- "$QUERY" "$QUERY_SNAPSHOT"
 # Python gives capture and artifact hashing exactly one canonicalization rule.
 "$PYTHON_BIN" "$SCRIPT_DIR/normalize_plan.py" \
     --emit-explain-sql --query "$QUERY_SNAPSHOT" \
-    --pg-schema "$PG_SCHEMA" --plan-data "$PLAN_DATA" > "$CAPTURE_SQL"
+    --pg-schema "$PG_SCHEMA" --plan-data "$PLAN_DATA" \
+    --capture-timeout-seconds "$CAPTURE_TIMEOUT_SECS" > "$CAPTURE_SQL"
 
 ACTUAL_VERSION="$({
     "$PSQL_BIN" -X -qAt --set=ON_ERROR_STOP=1 --dbname="$PG_DSN" \
@@ -157,8 +170,21 @@ if [ -n "$NONDEFAULT_SETTINGS" ]; then
     exit 2
 fi
 
-"$PSQL_BIN" -X -qAt --set=ON_ERROR_STOP=1 --dbname="$PG_DSN" \
-    --file="$CAPTURE_SQL" > "$RAW_PLAN"
+CAPTURE_STDERR="$TEMP_ROOT/capture.stderr"
+if "$PSQL_BIN" -X -qAt --set=ON_ERROR_STOP=1 --set=VERBOSITY=verbose \
+        --dbname="$PG_DSN" --file="$CAPTURE_SQL" \
+        > "$RAW_PLAN" 2> "$CAPTURE_STDERR"; then
+    [ ! -s "$CAPTURE_STDERR" ] || cat "$CAPTURE_STDERR" >&2
+else
+    capture_rc=$?
+    cat "$CAPTURE_STDERR" >&2
+    if [ "$CAPTURE_TIMEOUT_SECS" -gt 0 ] && \
+            grep -Eq '(^|[^0-9])57014([^0-9]|$)' "$CAPTURE_STDERR"; then
+        echo "[PGPLAN] SKIP capture_timeout seconds=$CAPTURE_TIMEOUT_SECS" >&2
+        exit 124
+    fi
+    exit "$capture_rc"
+fi
 [ -s "$RAW_PLAN" ] || die "psql returned an empty EXPLAIN document"
 
 "$PYTHON_BIN" "$SCRIPT_DIR/normalize_plan.py" --normalize \
