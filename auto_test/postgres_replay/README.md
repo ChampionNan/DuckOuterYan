@@ -5,10 +5,8 @@ PGPlan reports the target-data planning and timing result as:
 > PostgreSQL 16.2's plan-data-selected logical join tree, executed by DuckDB
 > on the target-scale dataset.
 
-That sentence does not describe the correctness dataset. Exact result equality
-is checked separately on a bounded small DuckDB database; target data is
-used for EXPLAIN, semantic-signature verification, and timing. PostgreSQL never
-executes the result query.
+By default, exact result equality is also checked on that target DuckDB
+database. PostgreSQL itself never executes the result query.
 
 Only PostgreSQL's base-table occurrences, exact binary grouping, child
 orientation, and `INNER`/`LEFT`/`RIGHT`/`FULL` semantics are transferred.
@@ -35,21 +33,19 @@ The default `RUN_PGPLAN=1` workflow:
 2. builds, installs, initializes, and starts the pinned PostgreSQL 16.2 source
    distribution under the repository if the managed binary is absent;
 3. prepares minimal PostgreSQL plan-selection data;
-4. builds one bounded DuckDB correctness database per selected
-   family from the target catalog;
-5. captures one fresh PGPlan artifact per selected SQL file with plain
+4. captures one fresh PGPlan artifact per selected SQL file with plain
    `EXPLAIN`; and
-6. compares native DuckDB, PGPlan, and normal OuterYan exactly on the small
-   correctness database, then verifies plans and times them on target data.
+5. compares native DuckDB, PGPlan, and normal OuterYan exactly on target data,
+   then records independent TM and T1 timing batches there.
 
 The default corpus is all 206 queries under `auto_test/outerjoin_query`:
 
 | Family | Queries | PostgreSQL plan-selection data | DuckDB exact-correctness data |
 |---|---:|---|---|
-| graph | 7 | `pgplan_graph`, at most 1000 rows per table | deterministic `ORDER BY rowid` prefix, 500 rows per table |
-| TPC-H | 54 | `public`, exact SF0.01 | `dbgen` SF0.01 |
-| TPC-DS | 63 | `pgplan_tpcds`, at most 1000 rows per table | `dsdgen` SF0.01, with bounded target-rowid witnesses |
-| JOB | 82 | `pgplan_job`, at most 1000 rows per table | deterministic `ORDER BY rowid` base prefix, 1000 rows per table, with bounded captured target-rowid witnesses |
+| graph | 7 | `pgplan_graph`, at most 1000 rows per table | configured target graph DB |
+| TPC-H | 54 | `public`, exact SF0.01 | configured target TPC-H DB |
+| TPC-DS | 63 | `pgplan_tpcds`, at most 1000 rows per table | configured target TPC-DS DB |
+| JOB | 82 | `pgplan_job`, at most 1000 rows per table | configured target JOB DB |
 
 Set `PGPLAN_SAMPLE_ROWS` to change the graph/TPC-DS/JOB row cap. The sampled
 schemas reproduce compatible DuckDB column types, nullability, and exposed
@@ -61,7 +57,8 @@ manifest records each such coercion. These small PostgreSQL datasets choose the
 tree only. PostgreSQL receives neither `EXPLAIN ANALYZE` nor any
 result-producing query.
 
-The correctness builder clones the target DuckDB table definitions,
+`PGPLAN_CORRECTNESS_MODE=bounded` is an explicit quicker diagnostic mode. In
+that mode, the correctness builder clones the target DuckDB table definitions,
 nullability, and primary/unique keys. It validates every table cardinality and
 each selected query against a bounded count before publishing the database and
 its TSV manifest. TPC-DS and JOB collect a configurable number of bounded
@@ -71,14 +68,14 @@ corpus result is nonempty.
 The rowid prefixes and SF0.01 generator bases are deterministic. Witness rows
 are captured from the current target execution, so a witness-enriched fixture
 is not claimed to be byte-identical across engines or runs.
-The corpus runner records SHA-256 fingerprints of the exact published database
+The bounded-mode corpus runner records SHA-256 fingerprints of the published database
 and builder manifest and copies both records into every query's provenance.
-The defaults are controlled by `PGPLAN_CORRECTNESS_GRAPH_ROWS=500`,
+The bounded-mode defaults are controlled by `PGPLAN_CORRECTNESS_GRAPH_ROWS=500`,
 `PGPLAN_CORRECTNESS_JOB_ROWS=1000`,
 `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS=2000000`, and
 `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS=30`.
 
-Use the corpus options to run a bounded subset:
+Use the corpus options to run a selected query subset:
 
 ```sh
 bash auto_test/run_all.sh --only tpcds --pattern '*q72*' --limit 1 --runs 1
@@ -87,12 +84,59 @@ bash auto_test/run_all.sh --only tpcds --pattern '*q72*' --limit 1 --runs 1
 Selection order is graph, TPC-H, TPC-DS, then JOB; file order is bytewise and
 deterministic. `--limit` is global. Each selected query receives one row in
 `status.tsv`. A row is `PASS` only after capture, PGPlan application, complete
-small-database multiset comparison, target-database plan verification, and
+target-database multiset comparison, target-database plan verification, and
 target-database timing succeed. Setup, family preparation, capture, and
 execution failures are recorded with their phase; remaining queries continue.
 A PostgreSQL plain-`EXPLAIN` timeout or a DuckDB execution timeout is `SKIP`,
-while every other failure is `FAIL` and makes the corpus command return
-nonzero. PGPlan never falls back to DuckDB's native tree.
+while every other failure is `FAIL`. Either status makes the corpus command
+return nonzero, so success requires every selected query to complete. PGPlan
+never falls back to DuckDB's native tree.
+
+Despite the historical PGPlan name, this corpus command performs all three
+DuckDB configurations for every successful query: Native, imported PGPlan,
+and normal OuterYan. Each successful run retains its three TM medians in
+`runs/<family>/<query>/timing/summary.tsv` and its three single-thread medians
+in `timing/t1_summary.tsv`. Before returning success or failure,
+the corpus runner produces `comparison.tsv` and `comparison.csv` with one row
+per selected query, a human-readable `comparison.log`, `summary.tsv` with
+overall and per-family aggregate speedups, and `failures.tsv` with all
+`FAIL`/`SKIP` rows. Every normal PASS/FAIL/SKIP is streamed immediately as a
+legacy-style, separator-delimited block and retained in `comparison.log`.
+Those blocks are rendered from the same ordered records as `comparison.tsv`
+and `comparison.csv`, keeping the detailed and tabular outputs in parity.
+Incomplete rows never inherit partial timing output.
+
+The CSV/TSV begins with the complete `experiment_onoff.sh` header in its
+original order and with its original meanings. Existing two-way analysis can
+therefore ignore every later column. PGPlan-specific columns are appended and
+include the artifact and verification signatures, `tm_pgplan`, `t1_pgplan`,
+and the Native/PGPlan and PGPlan/OuterYan speedups. Corpus status, correctness
+scope, hashes, and artifact paths are appended with a `three_way_` prefix.
+
+For a `PASS`, the original `TM:off/on` and `T1:off/on` fields retain their
+Native/OuterYan meanings. The appended PGPlan fields add the third target-data
+median and the Native/PGPlan and PGPlan/OuterYan speedups. Ratios are baseline
+time divided by candidate time, so values above one favor the named candidate.
+The corpus does not yet collect the legacy phase profile or semi-join kernel
+trace, so those remain explicitly not collected; no values are inferred from
+other timing runs. The original `rows` column is the complete target-database
+result count by default. TM and T1 use `.mode trash`: DuckDB executes and fully
+materializes the bare query, while CLI result serialization and filesystem
+output are excluded from the real DuckDB CLI wall-clock timing.
+The correctness-database selected-plan column is blank when summarizing a
+legacy result produced before that provenance field existed.
+
+Reports for an existing result directory can be generated without rerunning
+any query:
+
+```sh
+bash auto_test/pgplan/summarize_corpus.sh \
+  --result-dir /absolute/path/to/pgplan_corpus_YYYYMMDD_HHMMSS
+```
+
+This command regenerates `comparison.log` without recapturing plans or
+repeating correctness and timing executions; use `less` or `cat` to display
+the saved blocks.
 
 PostgreSQL plan capture defaults to 300 seconds
 (`PGPLAN_CAPTURE_TIMEOUT_SECS` or `--capture-timeout`). DuckDB execution uses a
@@ -102,9 +146,10 @@ sorting, counting, comparison, and hashing) and defaults to the main harness's
 1800 seconds. Set either limit to `0` to disable it. A capture timeout writes no
 artifact and never starts the three-way experiment; an execution or
 post-processing timeout stops that query's remaining configurations and
-timing, retains its diagnostic directory, and moves to the next query.
+timing, retains its diagnostic directory, and moves to the next query. The
+corpus still exits nonzero because at least one selected query was incomplete.
 
-Correctness-database construction has its own fail-closed preflight controls:
+Bounded correctness-database construction has its own fail-closed preflight controls:
 `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS` bounds every complete query result and
 `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS` bounds each validation query. These
 limits prevent an unexpectedly explosive fixture from reaching CSV
@@ -397,33 +442,39 @@ Run one prepared query manually:
 auto_test/pgplan/experiment.sh \
   --duckdb-bin /absolute/path/to/release/duckdb \
   --execution-db /absolute/path/to/tpch_db \
-  --correctness-db /absolute/path/to/tpch-correctness.duckdb \
   --query /absolute/path/to/query.sql \
   --plan /absolute/path/to/query.pg.json \
   --runs 3 --threads 16 \
   --out /absolute/path/to/results
 ```
 
+Add `--correctness-db /absolute/path/to/tpch-correctness.duckdb` only for an
+explicit manual bounded-data check.
+
 For a bounded corpus run where PostgreSQL planning may use five minutes and
 each DuckDB statement may use at most 60 seconds:
 
 ```sh
-bash auto_test/run_all.sh --capture-timeout 300 --timeout 60
+PGPLAN_CORRECTNESS_MODE=bounded \
+  bash auto_test/run_all.sh --capture-timeout 300 --timeout 60
 ```
 
 `--correctness-db` (or `PGPLAN_CORRECTNESS_DB`) selects the database used only
 for the three exact result checks. It defaults to `--execution-db` for manual
-backward compatibility; the corpus workflow always supplies its generated
-small database explicitly.
+and corpus runs. The corpus supplies a generated small database only when
+`PGPLAN_CORRECTNESS_MODE=bounded` is explicitly selected.
 
 The harness executes the bare query once as native DuckDB, PGPlan, and normal
 OuterYan on the correctness database. It externally sorts and compares those
 three complete result multisets. The execution database supplies all three
 EXPLAIN plans and semantic diagnostics; only after exact equality passes does
-the harness time one warm-up plus the requested odd number of measured
-release-build runs there in output-discarding mode. It saves plans, traces,
+the harness run independent timing batches. TM has one warm-up plus the
+requested odd number of measured release-build runs; T1 has one warm-up plus
+exactly one measured run for each configuration. `.mode trash` fully
+drains every bare query but excludes CLI result serialization and output I/O
+from DuckDB's real wall-clock samples. It saves plans, traces,
 settings, both database paths, artifact provenance, correctness row counts, and
-multiset hashes. Corpus runs also retain the correctness builder manifest and
+multiset hashes. Bounded corpus runs also retain the correctness builder manifest and
 database/manifest SHA-256 fingerprints per query. The corpus runner removes
 bulky correctness CSVs after a successful comparison by default while
 retaining those hashes.
@@ -439,16 +490,15 @@ used; `run_all.sh` validates that interpreter before starting setup.
 
 ### Claim boundary
 
-A successful run proves complete multiset equality among native DuckDB,
-PGPlan, and OuterYan on the captured small correctness database. The same
-immutable PGPlan artifact is applied there and to the target database. The
-target-data EXPLAIN and `[PGPLAN]` semantic signature prove that DuckDB accepted
-and preserved the imported typed grouping on target data, and target-data
-timings measure DuckDB's physical execution of that logical tree. The run does
-not compare complete target-scale result multisets, does not execute a
-PostgreSQL physical plan, and does not claim that PostgreSQL would choose the
-same tree with target-scale statistics. The artifact remains the tree
-PostgreSQL chose from its recorded minimal plan-selection data.
+A default successful run proves complete target-data multiset equality among
+native DuckDB, PGPlan, and OuterYan. The target-data EXPLAIN and `[PGPLAN]`
+semantic signature prove that DuckDB accepted and preserved the imported typed
+grouping, and the target-data timings measure DuckDB's physical execution of
+that logical tree. A bounded-mode PASS proves equality only on its recorded
+small database. Neither mode executes a PostgreSQL physical plan or claims
+that PostgreSQL would choose the same tree with target-scale statistics. The
+artifact remains the tree PostgreSQL chose from its recorded minimal
+plan-selection data.
 
 ## Compatibility and tests
 

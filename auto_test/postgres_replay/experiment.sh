@@ -26,8 +26,9 @@ Optional:
   --correctness-db PATH
                       DuckDB database used only for the three exact multiset
                       checks (PGPLAN_CORRECTNESS_DB; default: execution DB)
-  --runs N            Positive odd measured-run count after one warm-up
-                      (PGPLAN_RUNS, default: 3)
+  --runs N            Positive odd TM measured-run count after one warm-up
+                      (PGPLAN_RUNS, default: 3). T1 always runs one warm-up
+                      plus one measured execution.
   --threads N         Positive DuckDB thread count
                       (PGPLAN_THREADS, default: 1)
   -h, --help          Show this help
@@ -46,6 +47,9 @@ Optional environment controls:
 
 The output directory receives plans, complete sorted result multisets, traces,
 settings, timing logs, and copies/hashes of the query and PostgreSQL artifact.
+TM and T1 are DuckDB CLI `.timer` real wall-clock samples of the fully drained
+bare query in `.mode trash`; result serialization and filesystem output are not
+charged to the query-execution benchmark.
 EOF
 }
 
@@ -629,38 +633,56 @@ extract_median() {
 	' "$raw_file"
 }
 
-printf 'Timing one warm-up plus %s measured runs per configuration...\n' "$RUNS"
-printf 'configuration\tmedian_seconds\tmeasured_runs\tthreads\n' > "$OUT_DIR/timing/summary.tsv"
-for config in native pgplan outer_yan; do
-	TIMING_SQL="$WORK_DIR/timing_${config}.sql"
-	{
-		printf '.timer off\n.mode trash\nCALL disable_profiling();\nPRAGMA threads=%s;\n' "$THREADS"
-		statement_timeout_sql
-		config_sql "$config"
-		printf '.timer on\n'
-		emit_bare_query
-		i=0
-		while [ "$i" -lt "$RUNS" ]; do
+# Match experiment_onoff.sh's real timing atom exactly: each configuration runs
+# in a fresh CLI process, profiling is disabled before `.timer on`, `.mode
+# trash` fully drains the bare query without charging CSV rendering or output
+# I/O, and the first CLI wall-clock sample is excluded as the warm-up.
+run_timing_suite() {
+	local suite="$1" timing_threads="$2" measured_runs="$3"
+	local summary_file="$4" file_prefix="$5"
+	local config timing_sql timing_base i rc median
+	printf 'configuration\tmedian_seconds\tmeasured_runs\tthreads\n' > "$summary_file"
+	for config in native pgplan outer_yan; do
+		timing_base="${file_prefix}${config}"
+		timing_sql="$WORK_DIR/timing_${timing_base}.sql"
+		{
+			printf '.timer off\n.mode trash\nCALL disable_profiling();\nPRAGMA threads=%s;\n' "$timing_threads"
+			statement_timeout_sql
+			config_sql "$config"
+			printf '.timer on\n'
 			emit_bare_query
-			i=$((i + 1))
-		done
-	} > "$TIMING_SQL"
-	if run_duck "$TIMING_SQL" "$OUT_DIR/timing/${config}.stdout" \
-			"$OUT_DIR/timing/${config}.stderr" "$((RUNS + 1))"; then
-		:
-	else
-		rc=$?
-		handle_duck_failure "$rc" "$OUT_DIR/timing/${config}.stderr" \
-			timing "$config" "$config timing batch failed"
-	fi
-	cat "$OUT_DIR/timing/${config}.stdout" "$OUT_DIR/timing/${config}.stderr" > "$OUT_DIR/timing/${config}.log"
-	if ! MEDIAN="$(extract_median "$OUT_DIR/timing/${config}.log" "$RUNS")"; then
-		die "$config timing log did not contain exactly $((RUNS + 1)) samples"
-	fi
-	printf '%s\t%s\t%s\t%s\n' "$config" "$MEDIAN" "$RUNS" "$THREADS" >> "$OUT_DIR/timing/summary.tsv"
-done
+			i=0
+			while [ "$i" -lt "$measured_runs" ]; do
+				emit_bare_query
+				i=$((i + 1))
+			done
+		} > "$timing_sql"
+		if run_duck "$timing_sql" "$OUT_DIR/timing/${timing_base}.stdout" \
+				"$OUT_DIR/timing/${timing_base}.stderr" "$((measured_runs + 1))"; then
+			:
+		else
+			rc=$?
+			handle_duck_failure "$rc" "$OUT_DIR/timing/${timing_base}.stderr" \
+				"$suite" "$config" "$config $suite batch failed"
+		fi
+		cat "$OUT_DIR/timing/${timing_base}.stdout" \
+			"$OUT_DIR/timing/${timing_base}.stderr" > "$OUT_DIR/timing/${timing_base}.log"
+		if ! median="$(extract_median "$OUT_DIR/timing/${timing_base}.log" "$measured_runs")"; then
+			die "$config $suite log did not contain exactly $((measured_runs + 1)) samples"
+		fi
+		printf '%s\t%s\t%s\t%s\n' \
+			"$config" "$median" "$measured_runs" "$timing_threads" >> "$summary_file"
+	done
+}
+
+printf 'Timing one warm-up plus %s measured runs per configuration at threads=%s...\n' \
+	"$RUNS" "$THREADS"
+run_timing_suite timing "$THREADS" "$RUNS" "$OUT_DIR/timing/summary.tsv" ""
+printf 'Timing one warm-up plus one measured run per configuration at threads=1...\n'
+run_timing_suite timing_t1 1 1 "$OUT_DIR/timing/t1_summary.tsv" "t1_"
 
 FINISHED_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf 'finished_utc=%s\nstatus=PASS\n' "$FINISHED_UTC" >> "$OUT_DIR/provenance/manifest.txt"
 printf 'PASS. Artifacts: %s\n' "$OUT_DIR"
 cat "$OUT_DIR/timing/summary.tsv"
+cat "$OUT_DIR/timing/t1_summary.tsv"

@@ -261,8 +261,8 @@ oy_equiv_check() {
 oy_time_median() {
     local db="$1" set_sql="$2" query="$3" runs="$4" threads="$5"
     local script i
-    # Trash mode still executes and materializes the bare query, but avoids
-    # charging terminal/result formatting to the CLI timer.
+    # Trash mode still executes the bare query and fully drains its result, but
+    # avoids charging terminal/result formatting and output I/O to the CLI timer.
     # T1/TM use fresh CLI processes and explicitly keep DuckDB profiling off.
     # This setup runs before `.timer on`, so it is not part of the measurement.
     script=".timer off"$'\n'".mode trash"$'\n'"CALL disable_profiling();"$'\n'"PRAGMA threads=${threads};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"$'\n'"${set_sql}"$'\n'

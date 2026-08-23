@@ -83,7 +83,13 @@ class RunAllPGPlanTests(unittest.TestCase):
             [ -n "$out" ]
             mkdir -p "$out/artifacts"
             printf 'family\tquery\tstatus\n' > "$out/status.tsv"
+            : > "$out/comparison.tsv"
+            : > "$out/comparison.csv"
+            : > "$out/comparison.log"
+            : > "$out/summary.tsv"
+            : > "$out/failures.tsv"
             printf 'corpus\t%s\t%s\n' "${SKIP_PG_DATA:-unset}" "$args" >> "$HARNESS_LOG"
+            exit "${HARNESS_EXIT_CODE:-0}"
             """,
         )
         self._write_executable(
@@ -132,6 +138,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "PG_REPLAY_TMPDIR",
             "PG_REPLAY_OUT",
             "PG_REPLAY_PLAN_OUT",
+            "HARNESS_EXIT_CODE",
         ):
             env.pop(name, None)
         env.update(
@@ -157,6 +164,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         cli_duckdb = self.repo / "cli-duckdb"
         cli_duckdb.touch()
         cli_duckdb.chmod(0o755)
+        result_dir = self.repo / "threeway-results"
         result = self._run(
             "--bin",
             str(cli_duckdb),
@@ -168,6 +176,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "23",
             "--only",
             "tpch",
+            PGPLAN_OUT=str(result_dir),
         )
         self.assertEqual(result.returncode, 0, result.stdout)
 
@@ -187,7 +196,64 @@ class RunAllPGPlanTests(unittest.TestCase):
         self.assertIn("--timeout 12", corpus_args)
         self.assertIn("--capture-timeout 23", corpus_args)
         self.assertIn("--only tpch", corpus_args)
-        self.assertIn("Three-way status summary:", result.stdout)
+        self.assertIn(
+            "Preparing PostgreSQL 16.2 plan data (target-scale exact correctness)",
+            result.stdout,
+        )
+        self.assertIn(f"Three-way status TSV: {result_dir / 'status.tsv'}", result.stdout)
+        self.assertIn(
+            f"Three-way comparison TSV: {result_dir / 'comparison.tsv'}", result.stdout
+        )
+        self.assertIn(
+            f"Three-way comparison CSV: {result_dir / 'comparison.csv'}", result.stdout
+        )
+        self.assertIn(
+            f"Three-way detailed log: {result_dir / 'comparison.log'}", result.stdout
+        )
+        self.assertIn(f"Three-way summary TSV: {result_dir / 'summary.tsv'}", result.stdout)
+        self.assertIn(
+            f"Three-way failures TSV: {result_dir / 'failures.tsv'}", result.stdout
+        )
+
+    def test_corpus_failure_prints_handoff_then_preserves_exit_status(self) -> None:
+        result_dir = self.repo / "failed-threeway-results"
+        result = self._run(
+            PGPLAN_OUT=str(result_dir),
+            HARNESS_EXIT_CODE="23",
+        )
+
+        self.assertEqual(result.returncode, 23, result.stdout)
+        self.assertIn("Three-way corpus finished with failures (exit status 23", result.stdout)
+        self.assertNotIn("All done!", result.stdout)
+        for filename in (
+            "status.tsv",
+            "comparison.tsv",
+            "comparison.csv",
+            "comparison.log",
+            "summary.tsv",
+            "failures.tsv",
+        ):
+            self.assertIn(str(result_dir / filename), result.stdout)
+        self.assertIn(f"Three-way result directory: {result_dir}", result.stdout)
+
+    def test_forwarded_out_path_is_used_for_the_final_handoff(self) -> None:
+        environment_out = self.repo / "environment-results"
+        command_line_out = self.repo / "command-line-results"
+        result = self._run(
+            "--out",
+            str(command_line_out),
+            PGPLAN_OUT=str(environment_out),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((command_line_out / "status.tsv").is_file())
+        self.assertFalse(environment_out.exists())
+        self.assertIn(
+            f"Three-way result directory: {command_line_out}", result.stdout
+        )
+        self.assertNotIn(
+            f"Three-way result directory: {environment_out}", result.stdout
+        )
 
     def test_escape_hatch_preserves_legacy_corpus_run(self) -> None:
         result = self._run("--limit", "1", RUN_PGPLAN="0")

@@ -29,45 +29,46 @@ auto_test/pgplan/prepare_sampled_pg.sh --help
 auto_test/pgplan/corpus_experiment.sh --help
 ```
 
-The workflow keeps three data roles separate:
+The workflow separates PostgreSQL plan-selection data from DuckDB target data:
 
 1. PostgreSQL plan selection uses exact TPC-H SF0.01 or isolated graph,
    TPC-DS, and JOB schemas sampled at no more than 1000 rows per table by
    default. PostgreSQL only runs plain `EXPLAIN`; it never executes the result
    query.
-2. Exact Native/PGPlan/OuterYan result comparison uses a bounded small DuckDB
-   database: deterministic graph rowid-prefix 500, TPC-H `dbgen` SF0.01, TPC-DS
-   `dsdgen` SF0.01, or JOB rowid-prefix 1000. TPC-DS and JOB can include
-   bounded target-rowid witnesses captured from the current target execution.
-   Prefixes and generator bases are deterministic, but witness enrichment is
-   not a claim of byte-identical fixtures across engines or runs, and not every
-   query result is claimed to be nonempty. Row prefixes, the maximum allowed query-result
-   cardinality, and the validation timeout are configurable through
-   `PGPLAN_CORRECTNESS_GRAPH_ROWS`, `PGPLAN_CORRECTNESS_JOB_ROWS`,
-   `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS`, and
-   `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS`.
-3. The configured target DuckDB database supplies EXPLAIN, PGPlan semantic
-   verification, and output-discarding timing.
+2. The configured target DuckDB database supplies complete Native/PGPlan/
+   OuterYan multiset correctness, EXPLAIN, PGPlan semantic verification, and
+   timing by default.
 
-Corpus runs SHA-256 fingerprint the exact bounded correctness database and its
-builder manifest once per family, then copy those provenance records into every
-query result directory.
+Set `PGPLAN_CORRECTNESS_MODE=bounded` explicitly for a quicker diagnostic. It
+uses deterministic graph rowid-prefix 500, TPC-H `dbgen` SF0.01, TPC-DS
+`dsdgen` SF0.01, or JOB rowid-prefix 1000. TPC-DS and JOB can include bounded
+target-rowid witnesses. Its row prefixes, result cap, and validation timeout
+use `PGPLAN_CORRECTNESS_GRAPH_ROWS`, `PGPLAN_CORRECTNESS_JOB_ROWS`,
+`PGPLAN_CORRECTNESS_MAX_RESULT_ROWS`, and
+`PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS`.
 
-For a manual query, pass both databases explicitly:
+Bounded corpus runs SHA-256 fingerprint their correctness database and builder
+manifest once per family, then copy those provenance records into every query
+result directory.
+
+For a default manual query, pass the target database once; correctness defaults
+to that same file:
 
 ```sh
 auto_test/pgplan/experiment.sh \
   --execution-db /absolute/path/to/target.duckdb \
-  --correctness-db /absolute/path/to/small-correctness.duckdb \
   --duckdb-bin /absolute/path/to/duckdb \
   --query /absolute/path/to/query.sql \
   --plan /absolute/path/to/query.pg.json \
   --out /absolute/path/to/results
 ```
 
-Thus a successful run establishes complete three-way multiset equality on the
-small database and PGPlan tree adherence plus performance on target data. It
-does not establish target-scale result equality or execute PostgreSQL's
+Pass `--correctness-db /absolute/path/to/small-correctness.duckdb` only when an
+explicit bounded/manual correctness scope is intended.
+
+Thus a default successful run establishes complete three-way target-data
+multiset equality, PGPlan tree adherence, and performance. A bounded-mode PASS
+is scoped to its recorded small database. Neither executes PostgreSQL's
 physical plan.
 
 Plan capture always uses plain PostgreSQL `EXPLAIN`, never `EXPLAIN ANALYZE`.
@@ -76,7 +77,50 @@ Its default 300-second optimizer limit is controlled by
 three-way execution limit is controlled by `PGPLAN_TIMEOUT_SECS`/`--timeout`.
 That limit also covers complete-result CSV framing, sorting, comparison, and
 hashing. Either timeout records that query as `SKIP` and continues with the
-corpus; non-timeout errors remain `FAIL`.
+corpus, but the corpus exits nonzero because the query is incomplete;
+non-timeout errors remain `FAIL`.
+
+The corpus stage is the complete three-way benchmark; it is not a PG-only
+execution pass. Per-query medians are stored in
+`runs/<family>/<query>/timing/summary.tsv`. The result root contains
+`comparison.tsv`/`comparison.csv` for all selected queries, a human-readable
+`comparison.log`, `summary.tsv` for overall and per-family aggregate speedups,
+and `failures.tsv` for incomplete queries. Every normal PASS/FAIL/SKIP is
+streamed immediately as a legacy-style, separator-delimited block and retained
+in `comparison.log`, which contains the same ordered records and values as the
+machine-readable comparison files.
+
+The comparison CSV/TSV preserves the complete `experiment_onoff.sh` CSV header
+as its leading columns, in exactly the original order. PGPlan artifact,
+verification, TM/T1, and pairwise-speedup columns follow that prefix; corpus
+status and provenance fields use a `three_way_` prefix. The text log likewise
+keeps the original separator plus two-line query block and appends PGPlan
+timing and verification information.
+
+For every `PASS`, the original `TM:off/on` and `T1:off/on` columns remain the
+Native/OuterYan comparison. Appended `tm_pgplan` and `t1_pgplan` columns add the
+third target-data median and both PGPlan pairwise speedups. Ratios are baseline
+time divided by candidate time, so a value above one favors the named
+candidate. The three-way corpus runs independent timing batches for all three
+configurations: TM uses one warm-up plus the configured odd measured-run count,
+while T1 uses one warm-up plus exactly one measured run. It does not yet
+collect the legacy phase profile and semi-join kernel trace, so those remain
+explicitly not collected. The original
+`rows` column refers to the complete target result by default. Both timing
+suites use `.mode trash`, which executes and fully materializes the bare query
+while excluding CLI result serialization and filesystem output from the real
+DuckDB CLI wall-clock measurement. Only `PASS` rows have timing values.
+
+To build or rebuild those reports from an existing run without repeating
+PostgreSQL capture, correctness checks, or timing:
+
+```sh
+bash auto_test/pgplan/summarize_corpus.sh \
+  --result-dir /absolute/path/to/pgplan_corpus_YYYYMMDD_HHMMSS
+```
+
+This also regenerates `comparison.log`; use `less` or `cat` to display it. No
+PostgreSQL capture, correctness execution, or timing execution is repeated.
 
 The [complete PGPlan guide](../postgres_replay/README.md) documents setup,
 artifacts, semantic scope, strict validation, and result files. Its directory

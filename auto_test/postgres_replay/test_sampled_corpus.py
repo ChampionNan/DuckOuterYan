@@ -476,7 +476,13 @@ class CorpusRunnerTest(unittest.TestCase):
         )
         self._write_executable(
             self.tools / "setup_pg.sh",
-            'printf "setup\\n" >> "$FAKE_CALL_LOG"\n',
+            r"""
+            printf 'setup\n' >> "$FAKE_CALL_LOG"
+            if [ "${FAKE_SETUP_FAIL:-0}" = "1" ]; then
+                echo 'intentional PostgreSQL setup failure' >&2
+                exit 17
+            fi
+            """,
         )
         self._write_executable(
             self.tools / "prepare_sampled_pg.sh",
@@ -565,6 +571,73 @@ class CorpusRunnerTest(unittest.TestCase):
             printf 'description=fake experiment\n' > "$out/provenance/manifest.txt"
             """,
         )
+        self._write_executable(
+            self.tools / "summarize_corpus.sh",
+            r"""
+            printf 'summarize %s\n' "$*" >> "$FAKE_CALL_LOG"
+            out=''
+            print_row=''
+            total=''
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --result-dir) out="$2"; shift 2 ;;
+                    --print-row) print_row="$2"; shift 2 ;;
+                    --total) total="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            print_status_row() {
+                row="$(awk -F '\t' -v wanted="$print_row" 'NR == wanted + 1 {print; exit}' "$out/status.tsv")"
+                [ -n "$row" ] || {
+                    echo "missing status row $print_row" >&2
+                    return 2
+                }
+                IFS="$(printf '\t')" read -r family query status phase detail plan result_dir <<EOF
+$row
+EOF
+                label="$(basename "$query" .sql)"
+                case "$status" in
+                    PASS) correct=TRUE ;;
+                    FAIL) correct=FALSE ;;
+                    *) correct=NA ;;
+                esac
+                printf '%s\n' '===================================================================================================='
+                printf '[ %d/%d] %s status=%s correct=%s\n' \
+                    "$print_row" "$total" "$label" "$status" "$correct"
+                printf 'details: family=%s sql=%s status=%s phase=%s detail=%s\n' \
+                    "$family" "$query" "$status" "$phase" "$detail"
+            }
+            if [ -n "$print_row" ]; then
+                if [ "${FAKE_SUMMARIZE_ROW_FAIL:-0}" = "1" ]; then
+                    echo 'intentional live row formatter failure' >&2
+                    exit 14
+                fi
+                print_status_row
+                exit 0
+            fi
+            if [ "${FAKE_SUMMARIZE_FAIL:-0}" = "1" ]; then
+                echo 'intentional aggregate report failure' >&2
+                exit 13
+            fi
+            cp "$out/status.tsv" "$out/comparison.tsv"
+            tr '\t' ',' < "$out/status.tsv" > "$out/comparison.csv"
+            awk -F '\t' 'NR == 1 || $3 != "PASS"' "$out/status.tsv" > "$out/failures.tsv"
+            {
+                printf 'status\tcount\n'
+                for status in PASS SKIP FAIL; do
+                    count="$(awk -F '\t' -v wanted="$status" 'NR > 1 && $3 == wanted {count++} END {print count + 0}' "$out/status.tsv")"
+                    printf '%s\t%s\n' "$status" "$count"
+                done
+            } > "$out/summary.tsv"
+            : > "$out/comparison.log"
+            row_count="$(awk 'END {print NR - 1}' "$out/status.tsv")"
+            for print_row in $(seq 1 "$row_count"); do
+                total="$row_count"
+                print_status_row >> "$out/comparison.log"
+            done
+            printf '[three-way] fake report complete\n'
+            """,
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -609,29 +682,83 @@ class CorpusRunnerTest(unittest.TestCase):
             ["graph/a_keep.sql", "tpch/c_keep.sql"],
         )
         self.assertTrue(all(row["status"] == "PASS" for row in status))
-        self.assertIn("[pgplan] query 1/2: graph/a_keep.sql", result.stdout)
-        self.assertIn("[pgplan] query 2/2: tpch/c_keep.sql", result.stdout)
+        self.assertIn("[three-way] query 1/2: graph/a_keep.sql", result.stdout)
+        self.assertIn("[three-way] query 2/2: tpch/c_keep.sql", result.stdout)
+        self.assertIn("[pgplan] capture graph/a_keep.sql", result.stdout)
+        self.assertIn("[three-way] execute graph/a_keep.sql", result.stdout)
+        self.assertIn("[three-way] PASS graph/a_keep.sql", result.stdout)
+        self.assertIn("[ 1/2] a_keep status=PASS correct=TRUE", result.stdout)
+        self.assertIn("[ 2/2] c_keep status=PASS correct=TRUE", result.stdout)
+        self.assertIn(
+            "details: family=graph sql=graph/a_keep.sql status=PASS phase=complete",
+            result.stdout,
+        )
+        self.assertIn(
+            "[three-way] complete: selected=2 compared=2 skip=0 fail=0",
+            result.stdout,
+        )
+        self.assertIn(
+            "comparison_tsv={}/comparison.tsv".format(out.resolve()),
+            result.stdout,
+        )
         self.assertIn("----------------------------------------", result.stdout)
         calls = self.log.read_text(encoding="utf-8")
         self.assertEqual(calls.count("prepare "), 1)
-        self.assertEqual(calls.count("correctness "), 2)
+        self.assertEqual(calls.count("correctness "), 0)
         self.assertIn("--family graph", calls)
         self.assertIn("--rows 11", calls)
-        self.assertIn("--rows 500", calls)
+        self.assertNotIn("--rows 500", calls)
         self.assertIn("--correctness-db", calls)
         self.assertIn(
-            "--correctness-db {}/correctness_dbs/graph.duckdb".format(out.resolve()),
+            "--correctness-db {}".format(self.databases["graph"]),
             calls,
         )
         self.assertIn(
-            "--correctness-db {}/correctness_dbs/tpch.duckdb".format(out.resolve()),
+            "--correctness-db {}".format(self.databases["tpch"]),
             calls,
         )
         self.assertIn("--pg-schema pgplan_graph", calls)
         self.assertIn("--plan-data graph-duckdb-sample-11", calls)
         self.assertIn("--pg-schema public", calls)
         self.assertIn("--plan-data tpch-sf0.01", calls)
+        summarize_calls = [line for line in calls.splitlines() if line.startswith("summarize ")]
+        live_calls = [line for line in summarize_calls if "--print-row" in line]
+        final_calls = [line for line in summarize_calls if "--print-row" not in line]
+        self.assertEqual(len(live_calls), 2)
+        self.assertEqual(len(final_calls), 1)
+        self.assertIn("--print-row 1 --total 2", live_calls[0])
+        self.assertIn("--print-row 2 --total 2", live_calls[1])
+        self.assertIn("--result-dir {}".format(out.resolve()), calls)
+        reports = (
+            "comparison.tsv", "comparison.csv", "comparison.log",
+            "summary.tsv", "failures.tsv",
+        )
+        for report in reports:
+            self.assertTrue((out / report).is_file(), report)
+        self.assertIn(
+            "comparison_log={}/comparison.log".format(out.resolve()),
+            result.stdout,
+        )
         provenance = out / "runs" / "graph" / "a_keep" / "provenance"
+        self.assertFalse((provenance / "correctness_db_manifest.tsv").exists())
+        self.assertFalse((provenance / "correctness_db_fingerprints.tsv").exists())
+
+    def test_bounded_correctness_is_explicit_and_retains_provenance(self) -> None:
+        (self.corpus / "graph" / "a.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        out = self.root / "bounded-results"
+        result = self.run_runner(
+            "--only", "graph", "--correctness-mode", "bounded",
+            "--runs", "1", "--out", str(out),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text(encoding="utf-8")
+        self.assertEqual(calls.count("correctness "), 1)
+        self.assertIn("--rows 500", calls)
+        self.assertIn(
+            "--correctness-db {}/correctness_dbs/graph.duckdb".format(out.resolve()),
+            calls,
+        )
+        provenance = out / "runs" / "graph" / "a" / "provenance"
         self.assertTrue((provenance / "correctness_db_manifest.tsv").is_file())
         self.assertTrue((provenance / "correctness_db_fingerprints.tsv").is_file())
         run_manifest = (provenance / "manifest.txt").read_text(encoding="utf-8")
@@ -640,6 +767,33 @@ class CorpusRunnerTest(unittest.TestCase):
             run_manifest,
             r"correctness_db_manifest_sha256=[0-9a-f]{64}\n",
         )
+
+    def test_bounded_builder_failure_cannot_affect_target_mode(self) -> None:
+        (self.corpus / "tpcds" / "a.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        out = self.root / "target-ignores-bounded-builder"
+        env = os.environ.copy()
+        env.update(
+            {
+                "OY_CONFIG_LOADED": "",
+                "FAKE_CALL_LOG": str(self.log),
+                "FAKE_CORRECTNESS_FAIL_FAMILY": "tpcds",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash", str(self.tools / "corpus_experiment.sh"),
+                "--only", "tpcds", "--runs", "1", "--out", str(out),
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text(encoding="utf-8")
+        self.assertNotIn("correctness ", calls)
+        self.assertIn("--correctness-db {}".format(self.databases["tpcds"]), calls)
 
     def test_capture_failure_is_recorded_and_later_query_continues(self) -> None:
         (self.corpus / "graph" / "a_bad.sql").write_text("SELECT 1;\n", encoding="utf-8")
@@ -652,7 +806,180 @@ class CorpusRunnerTest(unittest.TestCase):
         self.assertEqual([row["status"] for row in status], ["FAIL", "PASS"])
         self.assertEqual(status[0]["phase"], "capture")
         self.assertIn("intentional capture failure", status[0]["detail"])
-        self.assertEqual(self.log.read_text(encoding="utf-8").count("experiment "), 1)
+        calls = self.log.read_text(encoding="utf-8")
+        self.assertEqual(calls.count("experiment "), 1)
+        summarize_calls = [line for line in calls.splitlines() if line.startswith("summarize ")]
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" in line]),
+            2,
+        )
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" not in line]),
+            1,
+        )
+        self.assertIn("[ 1/2] a_bad status=FAIL correct=FALSE", result.stdout)
+        self.assertIn(
+            "details: family=graph sql=graph/a_bad.sql status=FAIL phase=capture",
+            result.stdout,
+        )
+        self.assertIn("[ 2/2] b_good status=PASS correct=TRUE", result.stdout)
+        self.assertIn(
+            "[three-way] complete: selected=2 compared=1 skip=0 fail=1",
+            result.stdout,
+        )
+        reports = (
+            "comparison.tsv", "comparison.csv", "comparison.log",
+            "summary.tsv", "failures.tsv",
+        )
+        for report in reports:
+            self.assertTrue((out / report).is_file(), report)
+
+    def test_structural_report_failure_makes_a_passing_corpus_fail(self) -> None:
+        (self.corpus / "graph" / "a_good.sql").write_text(
+            "SELECT 1;\n", encoding="utf-8"
+        )
+        out = self.root / "report-failure-results"
+        env = os.environ.copy()
+        env.update(
+            {
+                "OY_CONFIG_LOADED": "",
+                "FAKE_CALL_LOG": str(self.log),
+                "FAKE_SUMMARIZE_FAIL": "1",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(self.tools / "corpus_experiment.sh"),
+                "--only",
+                "graph",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual([row["status"] for row in status], ["PASS"])
+        self.assertIn("three-way corpus report generation failed", result.stderr)
+        self.assertIn(
+            "[three-way] complete: selected=1 compared=1 skip=0 fail=0",
+            result.stdout,
+        )
+        summarize_calls = [
+            line for line in self.log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("summarize ")
+        ]
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" in line]),
+            1,
+        )
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" not in line]),
+            1,
+        )
+
+    def test_live_formatter_failure_fails_closed_without_duplicate_status(self) -> None:
+        (self.corpus / "graph" / "a_good.sql").write_text(
+            "SELECT 1;\n", encoding="utf-8"
+        )
+        out = self.root / "live-report-failure-results"
+        env = os.environ.copy()
+        env.update(
+            {
+                "OY_CONFIG_LOADED": "",
+                "FAKE_CALL_LOG": str(self.log),
+                "FAKE_SUMMARIZE_ROW_FAIL": "1",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(self.tools / "corpus_experiment.sh"),
+                "--only",
+                "graph",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["status"], "PASS")
+        self.assertIn("could not format three-way result row 1", result.stderr)
+        summarize_calls = [
+            line for line in self.log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("summarize ")
+        ]
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" in line]),
+            1,
+        )
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" not in line]),
+            1,
+        )
+        self.assertTrue((out / "comparison.log").is_file())
+
+    def test_setup_failure_uses_only_final_comparison_log(self) -> None:
+        (self.corpus / "graph" / "a.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (self.corpus / "graph" / "b.sql").write_text("SELECT 2;\n", encoding="utf-8")
+        out = self.root / "setup-failure-results"
+        env = os.environ.copy()
+        env.update(
+            {
+                "OY_CONFIG_LOADED": "",
+                "FAKE_CALL_LOG": str(self.log),
+                "FAKE_SETUP_FAIL": "1",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(self.tools / "corpus_experiment.sh"),
+                "--only",
+                "graph",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual([row["status"] for row in status], ["FAIL", "FAIL"])
+        self.assertTrue(all(row["phase"] == "setup" for row in status))
+        summarize_calls = [
+            line for line in self.log.read_text(encoding="utf-8").splitlines()
+            if line.startswith("summarize ")
+        ]
+        self.assertEqual(len(summarize_calls), 1)
+        self.assertNotIn("--print-row", summarize_calls[0])
+        comparison_log = (out / "comparison.log").read_text(encoding="utf-8")
+        self.assertIn("[ 1/2] a status=FAIL", comparison_log)
+        self.assertIn("[ 2/2] b status=FAIL", comparison_log)
+        self.assertNotIn("[ 1/2]", result.stdout)
 
     def test_capture_timeout_is_skipped_without_running_the_experiment(self) -> None:
         (self.corpus / "graph" / "a_capture_timeout.sql").write_text(
@@ -666,7 +993,7 @@ class CorpusRunnerTest(unittest.TestCase):
             "--only", "graph", "--capture-timeout", "13", "--runs", "1",
             "--out", str(out),
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
             status = list(csv.DictReader(source, delimiter="\t"))
         self.assertEqual([row["status"] for row in status], ["SKIP", "PASS"])
@@ -675,6 +1002,24 @@ class CorpusRunnerTest(unittest.TestCase):
         calls = self.log.read_text(encoding="utf-8")
         self.assertIn("--capture-timeout 13", calls)
         self.assertEqual(calls.count("experiment "), 1)
+        self.assertIn(
+            "[ 1/2] a_capture_timeout status=SKIP correct=NA",
+            result.stdout,
+        )
+        self.assertIn(
+            "details: family=graph sql=graph/a_capture_timeout.sql "
+            "status=SKIP phase=capture_timeout",
+            result.stdout,
+        )
+        summarize_calls = [line for line in calls.splitlines() if line.startswith("summarize ")]
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" in line]),
+            2,
+        )
+        self.assertEqual(
+            len([line for line in summarize_calls if "--print-row" not in line]),
+            1,
+        )
 
     def test_execution_timeout_is_skipped_and_later_query_continues(self) -> None:
         (self.corpus / "graph" / "a_execute_timeout.sql").write_text(
@@ -688,7 +1033,7 @@ class CorpusRunnerTest(unittest.TestCase):
             "--only", "graph", "--timeout", "5", "--runs", "1",
             "--out", str(out),
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1, result.stderr)
         with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
             status = list(csv.DictReader(source, delimiter="\t"))
         self.assertEqual([row["status"] for row in status], ["SKIP", "PASS"])
@@ -714,6 +1059,8 @@ class CorpusRunnerTest(unittest.TestCase):
                 str(self.tools / "corpus_experiment.sh"),
                 "--only",
                 "graph",
+                "--correctness-mode",
+                "bounded",
                 "--runs",
                 "1",
                 "--out",
@@ -881,8 +1228,8 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
                     else:
                         print("1")
                 elif ".timer on" in sql:
-                    print("Run Time (s): real 0.001 user 0.000 sys 0.000")
-                    print("Run Time (s): real 0.001 user 0.000 sys 0.000")
+                    for _index in range(sql.count("SELECT 1\n;\n")):
+                        print("Run Time (s): real 0.001 user 0.000 sys 0.000")
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -972,7 +1319,9 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertEqual(kinds.count("settings"), 3)
         self.assertEqual(kinds.count("explain"), 3)
         self.assertEqual(kinds.count("correctness"), 3)
-        self.assertEqual(kinds.count("timing"), 3)
+        # Multi-thread TM plus an independent single-thread T1 batch for all
+        # three configurations.
+        self.assertEqual(kinds.count("timing"), 6)
         self.assertNotIn("unknown", kinds)
         for kind, database in calls:
             expected = correctness_db if kind == "correctness" else self.database
@@ -1001,6 +1350,54 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         expected = str(self.database.resolve())
         self.assertIn("execution_db={}\n".format(expected), manifest)
         self.assertIn("correctness_db={}\n".format(expected), manifest)
+        with (out / "timing/t1_summary.tsv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            t1_rows = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual(
+            [row["configuration"] for row in t1_rows],
+            ["native", "pgplan", "outer_yan"],
+        )
+        self.assertTrue(all(row["threads"] == "1" for row in t1_rows))
+        self.assertTrue(all(row["measured_runs"] == "1" for row in t1_rows))
+
+    def test_t1_uses_one_measurement_when_tm_uses_three(self) -> None:
+        result, out = self.run_experiment(extra_args=("--runs", "3"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with (out / "timing/summary.tsv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            tm_rows = list(csv.DictReader(source, delimiter="\t"))
+        with (out / "timing/t1_summary.tsv").open(
+            newline="", encoding="utf-8"
+        ) as source:
+            t1_rows = list(csv.DictReader(source, delimiter="\t"))
+        self.assertTrue(all(row["measured_runs"] == "3" for row in tm_rows))
+        self.assertTrue(all(row["measured_runs"] == "1" for row in t1_rows))
+        self.assertEqual(
+            (out / "timing/native.log").read_text(encoding="utf-8").count(
+                "Run Time"
+            ),
+            4,
+        )
+        self.assertEqual(
+            (out / "timing/t1_native.log").read_text(encoding="utf-8").count(
+                "Run Time"
+            ),
+            2,
+        )
+
+    def test_three_way_timing_contract_matches_original_harness(self) -> None:
+        three_way = EXPERIMENT.read_text(encoding="utf-8")
+        original = (SCRIPT_DIR.parent / "experiment_onoff.sh").read_text(
+            encoding="utf-8"
+        )
+        for token in (".mode trash", "CALL disable_profiling();", ".timer on"):
+            self.assertIn(token, three_way)
+            self.assertIn(token, original)
+        self.assertIn("emit_bare_query", three_way)
+        self.assertIn('${query%;};', original)
+        self.assertIn('run_timing_suite timing_t1 1 1', three_way)
 
     def test_correctness_database_cli_overrides_environment(self) -> None:
         environment_db = self.root / "environment-correctness.db"

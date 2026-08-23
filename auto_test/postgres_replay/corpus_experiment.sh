@@ -11,6 +11,7 @@ ONLY="all"
 PATTERN="*"
 LIMIT=0
 ROW_CAP="${PGPLAN_SAMPLE_ROWS:-1000}"
+CORRECTNESS_MODE="${PGPLAN_CORRECTNESS_MODE:-${PG_REPLAY_CORRECTNESS_MODE:-target}}"
 RUNS="${PGPLAN_RUNS:-${OY_RUNS:-3}}"
 THREADS="${PGPLAN_THREADS:-${OY_THREADS:-1}}"
 TIMEOUT_SECS="${PGPLAN_TIMEOUT_SECS:-${OY_TIMEOUT_SECS:-0}}"
@@ -28,6 +29,7 @@ usage() {
 Usage:
   corpus_experiment.sh [--only graph|tpch|tpcds|job|bench|all]
       [--pattern GLOB] [--limit N] [--rows N]
+      [--correctness-mode target|bounded]
       [--corpus DIR] [--duckdb-bin PATH] [--pg-dsn DSN]
       [--runs ODD_N] [--threads N] [--timeout SECONDS]
       [--capture-timeout SECONDS] [--out DIR]
@@ -46,16 +48,19 @@ data prepared by setup_pg.sh. Selection order is graph, tpch, tpcds, job and is
 locale independent; --limit is global. --pattern is a shell glob on the query
 filename without .sql.
 
-Exact result comparison is separate from target-scale planning and timing. The
-runner builds one deterministic small DuckDB database per selected family and
-uses it only for the three bare-query multiset checks. EXPLAIN, PGPlan semantic
-verification, and timing continue to use the configured target database.
+Exact result comparison uses the configured target DuckDB database by default,
+so every emitted row is included in the three bare-query multiset checks.
+`--correctness-mode bounded` explicitly selects a quicker diagnostic mode that
+builds one deterministic small DuckDB correctness database per selected family.
+EXPLAIN, PGPlan semantic verification, and timing always use the target database.
+--runs controls the positive odd number of measured TM executions after one
+warm-up. Every T1 configuration uses exactly one warm-up and one measured run.
 
 Every selected query gets one row in OUT/status.tsv. PostgreSQL plain-EXPLAIN
 or DuckDB execution timeouts are recorded as SKIP, their remaining experiment
-is not run, and the next query continues. Other failures are recorded as FAIL
-and make the final exit status nonzero. There is no fallback to DuckDB when
-capture or PGPlan integration fails.
+is not run, and the next query continues. Both SKIP and FAIL make the corpus
+exit nonzero because a successful corpus must completely test every selected
+query. There is no fallback to DuckDB when capture or PGPlan integration fails.
 USAGE
 }
 
@@ -84,6 +89,11 @@ while [ $# -gt 0 ]; do
         --rows)
             [ $# -ge 2 ] || die "$1 requires a value"
             ROW_CAP="$2"
+            shift 2
+            ;;
+        --correctness-mode)
+            [ $# -ge 2 ] || die "$1 requires a value"
+            CORRECTNESS_MODE="$2"
             shift 2
             ;;
         --corpus)
@@ -147,28 +157,39 @@ case "$ONLY" in
 esac
 [[ "$LIMIT" =~ ^[0-9]+$ ]] || die "--limit must be a non-negative integer"
 [[ "$ROW_CAP" =~ ^[1-9][0-9]*$ ]] || die "--rows must be a positive integer"
+case "$CORRECTNESS_MODE" in
+    target|bounded) ;;
+    *) die "--correctness-mode must be target or bounded" ;;
+esac
 [[ "$RUNS" =~ ^[1-9][0-9]*$ ]] || die "--runs must be a positive integer"
 [ $((RUNS % 2)) -eq 1 ] || die "--runs must be odd"
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
 [[ "$TIMEOUT_SECS" =~ ^[0-9]+$ ]] || die "--timeout must be a non-negative integer"
 [[ "$CAPTURE_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || \
     die "--capture-timeout must be a non-negative integer"
-[[ "$CORRECTNESS_GRAPH_ROWS" =~ ^[1-9][0-9]*$ ]] || \
-    die "PGPLAN_CORRECTNESS_GRAPH_ROWS must be a positive integer"
-[[ "$CORRECTNESS_JOB_ROWS" =~ ^[1-9][0-9]*$ ]] || \
-    die "PGPLAN_CORRECTNESS_JOB_ROWS must be a positive integer"
-[[ "$CORRECTNESS_MAX_RESULT_ROWS" =~ ^[1-9][0-9]*$ ]] || \
-    die "PGPLAN_CORRECTNESS_MAX_RESULT_ROWS must be a positive integer"
-[[ "$CORRECTNESS_QUERY_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || \
-    die "PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS must be a positive integer"
+if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+    [[ "$CORRECTNESS_GRAPH_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+        die "PGPLAN_CORRECTNESS_GRAPH_ROWS must be a positive integer"
+    [[ "$CORRECTNESS_JOB_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+        die "PGPLAN_CORRECTNESS_JOB_ROWS must be a positive integer"
+    [[ "$CORRECTNESS_MAX_RESULT_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+        die "PGPLAN_CORRECTNESS_MAX_RESULT_ROWS must be a positive integer"
+    [[ "$CORRECTNESS_QUERY_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || \
+        die "PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS must be a positive integer"
+fi
 [ -d "$CORPUS" ] || die "corpus directory does not exist: $CORPUS"
 CORPUS="$(cd "$CORPUS" && pwd -P)"
 [ -x "$DUCKDB_BIN" ] || die "DuckDB binary is not executable: $DUCKDB_BIN"
 [ -n "$PG_DSN" ] || die "--pg-dsn is required (or set PG_DSN)"
 
-for helper in setup_pg.sh prepare_sampled_pg.sh prepare_correctness_db.sh make_plan.sh experiment.sh; do
+for helper in setup_pg.sh prepare_sampled_pg.sh make_plan.sh experiment.sh \
+        summarize_corpus.sh; do
     [ -x "$SCRIPT_DIR/$helper" ] || die "required helper is not executable: $SCRIPT_DIR/$helper"
 done
+if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+    [ -x "$SCRIPT_DIR/prepare_correctness_db.sh" ] || \
+        die "required helper is not executable: $SCRIPT_DIR/prepare_correctness_db.sh"
+fi
 
 if [ -z "$OUT" ]; then
     OUT="$SCRIPT_DIR/../results/pgplan_corpus_$(date '+%Y%m%d_%H%M%S')"
@@ -254,6 +275,28 @@ append_status() {
         >> "$STATUS_TSV"
 }
 
+# Append the query's terminal status before asking the report formatter to
+# render that exact row. A formatter problem must not add a second status row
+# or stop the remaining corpus queries, but it does make the corpus fail.
+record_query_status() {
+    local row_number="$1"
+    shift
+    local formatter_rc
+
+    append_status "$@"
+    if bash "$SCRIPT_DIR/summarize_corpus.sh" \
+            --result-dir "$OUT" \
+            --print-row "$row_number" \
+            --total "${#QUERY_PATHS[@]}"; then
+        return 0
+    else
+        formatter_rc=$?
+    fi
+    FAILED=1
+    echo "ERROR: could not format three-way result row $row_number (exit=$formatter_rc)" >&2
+    return 0
+}
+
 sha256_file() {
     local path="$1" digest
     if command -v sha256sum >/dev/null 2>&1; then
@@ -310,7 +353,33 @@ attach_correctness_provenance() {
     return 0
 }
 
-echo "[pgplan] selected ${#QUERY_PATHS[@]} query(s); status=$STATUS_TSV"
+FAILED=0
+QUERY_SEPARATOR="--------------------------------------------------------------------------------"
+
+finalize_corpus() {
+    local pass_count fail_count skip_count summary_rc
+    local summary_log="$OUT/logs/summarize_corpus.log"
+
+    printf '\n%s\n' "$QUERY_SEPARATOR"
+    pass_count="$(awk -F '\t' 'NR > 1 && $3 == "PASS" {count++} END {print count + 0}' "$STATUS_TSV")"
+    fail_count="$(awk -F '\t' 'NR > 1 && $3 == "FAIL" {count++} END {print count + 0}' "$STATUS_TSV")"
+    skip_count="$(awk -F '\t' 'NR > 1 && $3 == "SKIP" {count++} END {print count + 0}' "$STATUS_TSV")"
+
+    if bash "$SCRIPT_DIR/summarize_corpus.sh" --result-dir "$OUT" \
+            2>&1 | tee "$summary_log"; then
+        summary_rc=0
+    else
+        summary_rc=$?
+        FAILED=1
+        echo "ERROR: three-way corpus report generation failed (exit=$summary_rc; log=$summary_log)" >&2
+    fi
+
+    echo "[three-way] complete: selected=${#QUERY_PATHS[@]} compared=$pass_count skip=$skip_count fail=$fail_count status=$STATUS_TSV"
+    echo "[three-way] reports: comparison_tsv=$OUT/comparison.tsv comparison_csv=$OUT/comparison.csv comparison_log=$OUT/comparison.log summary_tsv=$OUT/summary.tsv failures_tsv=$OUT/failures.tsv"
+    [ "$FAILED" -eq 0 ]
+}
+
+echo "[three-way] selected ${#QUERY_PATHS[@]} query(s); status=$STATUS_TSV"
 SETUP_LOG="$OUT/logs/setup_pg.log"
 if ! bash "$SCRIPT_DIR/setup_pg.sh" > "$SETUP_LOG" 2>&1; then
     detail="$(sanitize_detail "$SETUP_LOG")"
@@ -319,8 +388,10 @@ if ! bash "$SCRIPT_DIR/setup_pg.sh" > "$SETUP_LOG" 2>&1; then
         append_status "${QUERY_FAMILIES[$index]}" "$relative" FAIL setup "$detail" "" ""
     done
     echo "ERROR: PostgreSQL setup failed: $detail" >&2
-    echo "[pgplan] status=$STATUS_TSV" >&2
-    exit 1
+    FAILED=1
+    finalize_rc=0
+    finalize_corpus || finalize_rc=$?
+    exit "$finalize_rc"
 fi
 
 PREPARED_GRAPH=0
@@ -364,42 +435,46 @@ prepare_family() {
     esac
 
     family_db="$(db_for_family "$family")" || return 2
-    correctness_db="$OUT/correctness_dbs/$family.duckdb"
-    correctness_log="$OUT/logs/prepare_correctness_$family.log"
-    CURRENT_CORRECTNESS_DB="$correctness_db"
-    correctness_args=(
-        --family "$family"
-        --source-db "$family_db"
-        --out "$correctness_db"
-        --query-dir "$OUT/query_snapshots/$family"
-        --max-result-rows "$CORRECTNESS_MAX_RESULT_ROWS"
-        --query-timeout "$CORRECTNESS_QUERY_TIMEOUT_SECS"
-        --duckdb-bin "$DUCKDB_BIN"
-        --manifest "$OUT/data_manifests/${family}_correctness.tsv"
-    )
-    if [ -n "$correctness_rows" ]; then
-        correctness_args+=(--rows "$correctness_rows")
-    fi
-    echo "[pgplan] prepare bounded $family correctness DB: $correctness_db"
-    if ! bash "$SCRIPT_DIR/prepare_correctness_db.sh" \
-            "${correctness_args[@]}" > "$correctness_log" 2>&1; then
-        PREPARE_FAILURE_DETAIL="$(sanitize_detail "$correctness_log")"
-        return 1
-    fi
-    correctness_manifest="$OUT/data_manifests/${family}_correctness.tsv"
-    correctness_fingerprints="$OUT/data_manifests/${family}_correctness.sha256.tsv"
-    if ! correctness_db_sha="$(sha256_file "$correctness_db")" || \
-            ! correctness_manifest_sha="$(sha256_file "$correctness_manifest")"; then
-        PREPARE_FAILURE_DETAIL="could not fingerprint the $family correctness database"
-        return 1
-    fi
-    if ! {
-        printf 'object\tsha256\tpath\n'
-        printf 'database\t%s\t%s\n' "$correctness_db_sha" "$correctness_db"
-        printf 'manifest\t%s\t%s\n' "$correctness_manifest_sha" "$correctness_manifest"
-    } > "$correctness_fingerprints"; then
-        PREPARE_FAILURE_DETAIL="could not write the $family correctness fingerprints"
-        return 1
+    if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+        correctness_db="$OUT/correctness_dbs/$family.duckdb"
+        correctness_log="$OUT/logs/prepare_correctness_$family.log"
+        CURRENT_CORRECTNESS_DB="$correctness_db"
+        correctness_args=(
+            --family "$family"
+            --source-db "$family_db"
+            --out "$correctness_db"
+            --query-dir "$OUT/query_snapshots/$family"
+            --max-result-rows "$CORRECTNESS_MAX_RESULT_ROWS"
+            --query-timeout "$CORRECTNESS_QUERY_TIMEOUT_SECS"
+            --duckdb-bin "$DUCKDB_BIN"
+            --manifest "$OUT/data_manifests/${family}_correctness.tsv"
+        )
+        if [ -n "$correctness_rows" ]; then
+            correctness_args+=(--rows "$correctness_rows")
+        fi
+        echo "[pgplan] prepare bounded $family correctness DB: $correctness_db"
+        if ! bash "$SCRIPT_DIR/prepare_correctness_db.sh" \
+                "${correctness_args[@]}" > "$correctness_log" 2>&1; then
+            PREPARE_FAILURE_DETAIL="$(sanitize_detail "$correctness_log")"
+            return 1
+        fi
+        correctness_manifest="$OUT/data_manifests/${family}_correctness.tsv"
+        correctness_fingerprints="$OUT/data_manifests/${family}_correctness.sha256.tsv"
+        if ! correctness_db_sha="$(sha256_file "$correctness_db")" || \
+                ! correctness_manifest_sha="$(sha256_file "$correctness_manifest")"; then
+            PREPARE_FAILURE_DETAIL="could not fingerprint the $family correctness database"
+            return 1
+        fi
+        if ! {
+            printf 'object\tsha256\tpath\n'
+            printf 'database\t%s\t%s\n' "$correctness_db_sha" "$correctness_db"
+            printf 'manifest\t%s\t%s\n' "$correctness_manifest_sha" "$correctness_manifest"
+        } > "$correctness_fingerprints"; then
+            PREPARE_FAILURE_DETAIL="could not write the $family correctness fingerprints"
+            return 1
+        fi
+    else
+        CURRENT_CORRECTNESS_DB="$family_db"
     fi
 
     # setup_pg.sh already prepared the exact SF0.01 PostgreSQL data. Other
@@ -434,19 +509,17 @@ prepare_family() {
     return 0
 }
 
-FAILED=0
 SKIP_GRAPH=0
 SKIP_TPCH=0
 SKIP_TPCDS=0
 SKIP_JOB=0
-QUERY_SEPARATOR="--------------------------------------------------------------------------------"
 for index in "${!QUERY_PATHS[@]}"; do
     family="${QUERY_FAMILIES[$index]}"
     query="${QUERY_PATHS[$index]}"
     label="${QUERY_LABELS[$index]}"
     relative="${QUERY_RELATIVES[$index]}"
     printf '\n%s\n' "$QUERY_SEPARATOR"
-    printf '[pgplan] query %d/%d: %s\n' \
+    printf '[three-way] query %d/%d: %s\n' \
         "$((index + 1))" "${#QUERY_PATHS[@]}" "$relative"
     printf '%s\n' "$QUERY_SEPARATOR"
     case "$family" in
@@ -456,7 +529,8 @@ for index in "${!QUERY_PATHS[@]}"; do
         job) family_skipped="$SKIP_JOB" ;;
     esac
     if [ "$family_skipped" -eq 1 ]; then
-        append_status "$family" "$relative" FAIL prepare "$PREPARE_FAILURE_DETAIL" "" ""
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" FAIL prepare "$PREPARE_FAILURE_DETAIL" "" ""
         FAILED=1
         continue
     fi
@@ -468,7 +542,8 @@ for index in "${!QUERY_PATHS[@]}"; do
             tpcds) SKIP_TPCDS=1 ;;
             job) SKIP_JOB=1 ;;
         esac
-        append_status "$family" "$relative" FAIL prepare "$PREPARE_FAILURE_DETAIL" "" ""
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" FAIL prepare "$PREPARE_FAILURE_DETAIL" "" ""
         echo "[pgplan] FAIL $relative (prepare: $PREPARE_FAILURE_DETAIL)" >&2
         FAILED=1
         continue
@@ -480,22 +555,38 @@ for index in "${!QUERY_PATHS[@]}"; do
         graph)
             CURRENT_SCHEMA="pgplan_graph"
             CURRENT_PLAN_DATA="graph-duckdb-sample-$ROW_CAP"
-            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/graph.duckdb"
+            if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+                CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/graph.duckdb"
+            else
+                CURRENT_CORRECTNESS_DB="$(db_for_family graph)"
+            fi
             ;;
         tpch)
             CURRENT_SCHEMA="public"
             CURRENT_PLAN_DATA="tpch-sf0.01"
-            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpch.duckdb"
+            if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+                CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpch.duckdb"
+            else
+                CURRENT_CORRECTNESS_DB="$(db_for_family tpch)"
+            fi
             ;;
         tpcds)
             CURRENT_SCHEMA="pgplan_tpcds"
             CURRENT_PLAN_DATA="tpcds-duckdb-sample-$ROW_CAP"
-            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpcds.duckdb"
+            if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+                CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpcds.duckdb"
+            else
+                CURRENT_CORRECTNESS_DB="$(db_for_family tpcds)"
+            fi
             ;;
         job)
             CURRENT_SCHEMA="pgplan_job"
             CURRENT_PLAN_DATA="job-duckdb-sample-$ROW_CAP"
-            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/job.duckdb"
+            if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+                CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/job.duckdb"
+            else
+                CURRENT_CORRECTNESS_DB="$(db_for_family job)"
+            fi
             ;;
     esac
 
@@ -522,20 +613,23 @@ for index in "${!QUERY_PATHS[@]}"; do
     fi
     if [ "$capture_rc" -eq 124 ]; then
         detail="$(sanitize_detail "$capture_log")"
-        append_status "$family" "$relative" SKIP capture_timeout "$detail" "" ""
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" SKIP capture_timeout "$detail" "" ""
         echo "[pgplan] SKIP $relative (capture timeout: $detail)"
+        FAILED=1
         continue
     fi
     if [ "$capture_rc" -ne 0 ]; then
         detail="$(sanitize_detail "$capture_log")"
-        append_status "$family" "$relative" FAIL capture "$detail" "$plan" ""
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" FAIL capture "$detail" "$plan" ""
         echo "[pgplan] FAIL $relative (capture: $detail)" >&2
         FAILED=1
         continue
     fi
 
     execution_db="$(db_for_family "$family")"
-    echo "[pgplan] execute $relative (correctness=small-$family; target EXPLAIN/timing; per-step timeout=${TIMEOUT_SECS}s; log=$experiment_log)"
+    echo "[three-way] execute $relative (correctness=$CORRECTNESS_MODE-$family; target EXPLAIN/timing; per-step timeout=${TIMEOUT_SECS}s; log=$experiment_log)"
     if PGPLAN_TIMEOUT_SECS="$TIMEOUT_SECS" \
             PGPLAN_TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${OY_BATCH_GRACE_SECS:-30}}" \
             PGPLAN_TMPDIR="${PGPLAN_TMPDIR:-${OY_TMPDIR:-$OUT/tmp}}" \
@@ -554,36 +648,40 @@ for index in "${!QUERY_PATHS[@]}"; do
     else
         experiment_rc=$?
     fi
-    provenance_log="$OUT/logs/${family}__${label}__correctness_provenance.log"
-    if ! attach_correctness_provenance "$family" "$result_dir" \
-            > "$provenance_log" 2>&1; then
-        detail="$(sanitize_detail "$provenance_log")"
-        append_status "$family" "$relative" FAIL provenance "$detail" "$plan" "$result_dir"
-        echo "[pgplan] FAIL $relative (provenance: $detail)" >&2
-        FAILED=1
-        continue
+    if [ "$CORRECTNESS_MODE" = "bounded" ]; then
+        provenance_log="$OUT/logs/${family}__${label}__correctness_provenance.log"
+        if ! attach_correctness_provenance "$family" "$result_dir" \
+                > "$provenance_log" 2>&1; then
+            detail="$(sanitize_detail "$provenance_log")"
+            record_query_status "$((index + 1))" \
+                "$family" "$relative" FAIL provenance "$detail" "$plan" "$result_dir"
+            echo "[three-way] FAIL $relative (provenance: $detail)" >&2
+            FAILED=1
+            continue
+        fi
     fi
     if [ "$experiment_rc" -eq 124 ]; then
         detail="$(sanitize_detail "$experiment_log")"
-        append_status "$family" "$relative" SKIP execute_timeout "$detail" "$plan" "$result_dir"
-        echo "[pgplan] SKIP $relative (execution timeout: $detail)"
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" SKIP execute_timeout "$detail" "$plan" "$result_dir"
+        echo "[three-way] SKIP $relative (execution timeout: $detail)"
+        FAILED=1
         continue
     fi
     if [ "$experiment_rc" -ne 0 ]; then
         detail="$(sanitize_detail "$experiment_log")"
-        append_status "$family" "$relative" FAIL execute "$detail" "$plan" "$result_dir"
-        echo "[pgplan] FAIL $relative (execute: $detail)" >&2
+        record_query_status "$((index + 1))" \
+            "$family" "$relative" FAIL execute "$detail" "$plan" "$result_dir"
+        echo "[three-way] FAIL $relative (execute: $detail)" >&2
         FAILED=1
         continue
     fi
 
-    append_status "$family" "$relative" PASS complete complete "$plan" "$result_dir"
-    echo "[pgplan] PASS $relative"
+    record_query_status "$((index + 1))" \
+        "$family" "$relative" PASS complete complete "$plan" "$result_dir"
+    echo "[three-way] PASS $relative"
 done
 
-printf '\n%s\n' "$QUERY_SEPARATOR"
-PASS_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "PASS" {count++} END {print count + 0}' "$STATUS_TSV")"
-FAIL_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "FAIL" {count++} END {print count + 0}' "$STATUS_TSV")"
-SKIP_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "SKIP" {count++} END {print count + 0}' "$STATUS_TSV")"
-echo "[pgplan] complete: pass=$PASS_COUNT skip=$SKIP_COUNT fail=$FAIL_COUNT status=$STATUS_TSV"
-[ "$FAILED" -eq 0 ]
+finalize_rc=0
+finalize_corpus || finalize_rc=$?
+exit "$finalize_rc"

@@ -260,8 +260,18 @@ export PSQL_BIN
 # families use isolated, row-capped schemas derived from their DuckDB schemas.
 export PGPLAN_CORPUS="${PGPLAN_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_query}"
 export PGPLAN_SAMPLE_ROWS="${PGPLAN_SAMPLE_ROWS:-1000}"
-# Exact result comparison runs on deterministic small DuckDB databases while
-# EXPLAIN/signature validation and timing stay on the target databases.
+# Exact result comparison defaults to the same target DuckDB database used for
+# EXPLAIN/signature validation and timing. Set this to `bounded` explicitly to
+# build deterministic small correctness databases for a quicker diagnostic
+# run; bounded mode is not the default correctness claim.
+export PGPLAN_CORRECTNESS_MODE="${PGPLAN_CORRECTNESS_MODE:-${PG_REPLAY_CORRECTNESS_MODE:-target}}"
+case "$PGPLAN_CORRECTNESS_MODE" in
+    target|bounded) ;;
+    *)
+        echo "ERROR: PGPLAN_CORRECTNESS_MODE must be target or bounded" >&2
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
 export PGPLAN_CORRECTNESS_GRAPH_ROWS="${PGPLAN_CORRECTNESS_GRAPH_ROWS:-500}"
 export PGPLAN_CORRECTNESS_JOB_ROWS="${PGPLAN_CORRECTNESS_JOB_ROWS:-1000}"
 export PGPLAN_CORRECTNESS_MAX_RESULT_ROWS="${PGPLAN_CORRECTNESS_MAX_RESULT_ROWS:-2000000}"
@@ -279,6 +289,7 @@ export PGPLAN_TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${PG_REPLAY_TIMEOUT_GRACE:-
 export PGPLAN_TMPDIR="${PGPLAN_TMPDIR:-${PG_REPLAY_TMPDIR:-$OY_TMPDIR}}"
 export PG_REPLAY_QUERY="$PGPLAN_QUERY"
 export PG_REPLAY_EXECUTION_DB="$PGPLAN_EXECUTION_DB"
+export PG_REPLAY_CORRECTNESS_MODE="$PGPLAN_CORRECTNESS_MODE"
 export PG_REPLAY_CORRECTNESS_GRAPH_ROWS="$PGPLAN_CORRECTNESS_GRAPH_ROWS"
 export PG_REPLAY_CORRECTNESS_JOB_ROWS="$PGPLAN_CORRECTNESS_JOB_ROWS"
 export PG_REPLAY_CORRECTNESS_MAX_RESULT_ROWS="$PGPLAN_CORRECTNESS_MAX_RESULT_ROWS"
@@ -310,6 +321,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  PGPLAN_PREFIX     = $PGPLAN_INSTALL_DIR"
         echo "  PGPLAN_CORPUS     = $PGPLAN_CORPUS"
         echo "  PGPLAN_SAMPLE_ROWS = $PGPLAN_SAMPLE_ROWS"
+        echo "  PGPLAN_CORRECTNESS_MODE = $PGPLAN_CORRECTNESS_MODE"
         echo "  PGPLAN_CORRECTNESS_ROWS = graph:$PGPLAN_CORRECTNESS_GRAPH_ROWS job:$PGPLAN_CORRECTNESS_JOB_ROWS"
         echo "  PGPLAN_CORRECTNESS_MAX_ROWS = $PGPLAN_CORRECTNESS_MAX_RESULT_ROWS"
         echo "  PGPLAN_CAPTURE_TIMEOUT = ${PGPLAN_CAPTURE_TIMEOUT_SECS}s"

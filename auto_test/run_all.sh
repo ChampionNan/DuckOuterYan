@@ -9,7 +9,7 @@
 #   1. Compile DuckDB release with required extensions (tpch, tpcds)
 #   2. Build the databases required by the selected benchmark strata
 #   3. Regenerate the benchmark and provenance manifests
-#   4. Prepare PostgreSQL plan-selection data and bounded correctness databases
+#   4. Prepare PostgreSQL plan-selection data
 #   5. Compare DuckDB/PGPlan/OuterYan for every selected corpus query
 #
 # Environment overrides (all optional):
@@ -17,7 +17,8 @@
 #   TPCH_SF          TPC-H scale factor (default 100)
 #   TPCDS_SF         TPC-DS scale factor (default 100)
 #   OY_THREADS       Multi-thread profile/timing count (default 48)
-#   OY_RUNS          Timed iterations per config (default 3, median taken)
+#   OY_RUNS          Legacy timed iterations and PGPLAN_RUNS fallback (default 3)
+#   PGPLAN_RUNS      PGPlan TM measured iterations (default OY_RUNS); T1 is fixed at 1
 #   JOBS             Make parallelism (default: nproc)
 #   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
@@ -28,10 +29,11 @@
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
 #   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
-#   PGPLAN_CORRECTNESS_GRAPH_ROWS  Small exact-check graph prefix (default 500)
-#   PGPLAN_CORRECTNESS_JOB_ROWS  Small exact-check JOB prefix (default 1000)
-#   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Small-result preflight cap (default 2000000)
-#   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Small-DB preflight limit (default 30)
+#   PGPLAN_CORRECTNESS_MODE  target (default, complete target results) | bounded
+#   PGPLAN_CORRECTNESS_GRAPH_ROWS  Bounded-mode graph prefix (default 500)
+#   PGPLAN_CORRECTNESS_JOB_ROWS  Bounded-mode JOB prefix (default 1000)
+#   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Bounded-mode result cap (default 2000000)
+#   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Bounded-mode preflight limit (default 30)
 #   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 300)
 #   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
 #   OY_CORPUS        Custom corpus for RUN_PGPLAN=0 legacy two-way mode
@@ -77,6 +79,7 @@ START_TIME=$SECONDS
 EXPERIMENT_ARGS=("$@")
 RESULT_TXTS=()
 PGPLAN_RESULT_DIRS=()
+RUN_STATUS=0
 RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-1}}"
 CUSTOM_CORPUS="$CALLER_OY_CORPUS"
 
@@ -125,24 +128,55 @@ fi
 
 # --- Step 4/5: PostgreSQL-backed three-way corpus ---------------------------
 run_pgplan_corpus() {
-    local corpus out_dir
+    local corpus out_dir corpus_status=0 argument_index=0
+    local -a corpus_command
     corpus="${PGPLAN_CORPUS:-${CUSTOM_CORPUS:-$SCRIPT_DIR/outerjoin_query}}"
     out_dir="${PGPLAN_OUT:-$SCRIPT_DIR/results/pgplan_corpus_${RUN_TS}}"
     [ -x "$SCRIPT_DIR/pgplan/corpus_experiment.sh" ] || \
         err "PGPlan corpus helper not found: $SCRIPT_DIR/pgplan/corpus_experiment.sh"
 
-    log "Step 4/5: Preparing PostgreSQL 16.2 plan data and bounded correctness databases"
-    log "Step 5/5: Comparing DuckDB, PGPlan, and OuterYan across $corpus"
-    bash "$SCRIPT_DIR/pgplan/corpus_experiment.sh" \
-        --corpus "$corpus" \
-        --duckdb-bin "$DUCKDB_BIN" \
-        --pg-dsn "$PG_DSN" \
-        --rows "${PGPLAN_SAMPLE_ROWS:-1000}" \
-        --threads "${PGPLAN_THREADS:-${OY_THREADS:-1}}" \
-        --out "$out_dir" \
-        "${EXPERIMENT_ARGS[@]}" \
-        2>&1 | tee -a "$RUN_LOG"
+    # Forwarded corpus arguments follow the defaults below, so their last
+    # --out value wins. Track that same location for the final handoff.
+    while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
+        if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--out" ] && \
+                [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+            out_dir="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+            argument_index=$((argument_index + 2))
+        else
+            argument_index=$((argument_index + 1))
+        fi
+    done
+
+    # Record the handoff location before running the corpus. The corpus returns
+    # nonzero when any query fails, but its status and aggregate reports are
+    # still the useful output of the completed three-way experiment.
     PGPLAN_RESULT_DIRS+=("$out_dir")
+
+    corpus_command=(
+        bash "$SCRIPT_DIR/pgplan/corpus_experiment.sh"
+        --corpus "$corpus"
+        --duckdb-bin "$DUCKDB_BIN"
+        --pg-dsn "$PG_DSN"
+        --rows "${PGPLAN_SAMPLE_ROWS:-1000}"
+        --threads "${PGPLAN_THREADS:-${OY_THREADS:-1}}"
+        --out "$out_dir"
+    )
+    if [ "${#EXPERIMENT_ARGS[@]}" -gt 0 ]; then
+        corpus_command+=("${EXPERIMENT_ARGS[@]}")
+    fi
+
+    if [ "${PGPLAN_CORRECTNESS_MODE:-target}" = "bounded" ]; then
+        log "Step 4/5: Preparing PostgreSQL 16.2 plan data and bounded correctness databases"
+    else
+        log "Step 4/5: Preparing PostgreSQL 16.2 plan data (target-scale exact correctness)"
+    fi
+    log "Step 5/5: Comparing DuckDB, PGPlan, and OuterYan across $corpus"
+    if "${corpus_command[@]}" 2>&1 | tee -a "$RUN_LOG"; then
+        corpus_status=0
+    else
+        corpus_status=$?
+    fi
+    return "$corpus_status"
 }
 
 # --- Step 5: Run corpus experiments -----------------------------------------
@@ -158,7 +192,11 @@ run_experiment() {
 
 STEP4_START=$SECONDS
 if [ "$RUN_PGPLAN" = "1" ]; then
-    run_pgplan_corpus
+    if run_pgplan_corpus; then
+        RUN_STATUS=0
+    else
+        RUN_STATUS=$?
+    fi
 elif [ -n "$CUSTOM_CORPUS" ]; then
     log "Step 4/5: PGPlan disabled (RUN_PGPLAN=0)"
     run_experiment "custom" "$CUSTOM_CORPUS" "all"
@@ -170,7 +208,11 @@ log "Experiments complete ($(elapsed $((SECONDS - STEP4_START))))"
 
 # --- Summary -----------------------------------------------------------------
 TOTAL=$((SECONDS - START_TIME))
-log "All done! Total time: $(elapsed $TOTAL)"
+if [ "$RUN_STATUS" -eq 0 ]; then
+    log "All done! Total time: $(elapsed $TOTAL)"
+else
+    log "Three-way corpus finished with failures (exit status $RUN_STATUS; total time: $(elapsed $TOTAL))"
+fi
 echo "Run log: $RUN_LOG"
 if [ "${#RESULT_TXTS[@]}" -gt 0 ]; then
     for result_txt in "${RESULT_TXTS[@]}"; do
@@ -186,8 +228,19 @@ if [ "$RUN_PGPLAN" = "1" ]; then
     if [ "${#PGPLAN_RESULT_DIRS[@]}" -gt 0 ]; then
         for result_dir in "${PGPLAN_RESULT_DIRS[@]}"; do
             echo "Three-way result directory: $result_dir"
-            echo "Three-way status summary: $result_dir/status.tsv"
+            echo "Three-way status TSV: $result_dir/status.tsv"
+            echo "Three-way comparison TSV: $result_dir/comparison.tsv"
+            echo "Three-way comparison CSV: $result_dir/comparison.csv"
+            echo "Three-way detailed log: $result_dir/comparison.log"
+            echo "Three-way summary TSV: $result_dir/summary.tsv"
+            echo "Three-way failures TSV: $result_dir/failures.tsv"
             echo "Three-way plan artifacts: $result_dir/artifacts"
         done
     fi
+fi
+
+# Preserve the corpus helper's failure status, but only after handing all
+# generated status, timing, and failure-report paths back to the caller.
+if [ "$RUN_STATUS" -ne 0 ]; then
+    exit "$RUN_STATUS"
 fi
