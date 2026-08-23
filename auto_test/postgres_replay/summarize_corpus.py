@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one strict, portable three-way report from a PGPlan corpus run."""
+"""Build one strict, portable PGPlan comparison report from a corpus run."""
 
 from __future__ import print_function
 
@@ -94,7 +94,7 @@ OY_KEYS = (
 
 # This prefix is the public CSV contract of experiment_onoff.sh.  Keep the
 # spelling and order byte-for-byte compatible so existing analysis scripts can
-# read a three-way result by ignoring the appended fields.
+# read a PGPlan comparison result by ignoring the appended fields.
 ORIGINAL_CSV_FIELDS = (
     "query", "family", "sql_path", "relation_count", "reorder",
     "outer_reordered", "cost_gate_applied", "outer_yan_selected",
@@ -135,49 +135,45 @@ PGPLAN_CSV_FIELDS = (
     "pgplan_plan",
     "pgplan_target_verification",
     "pgplan_correctness_verification",
-    "pgplan_artifact_raw_signature",
-    "pgplan_imported_raw_signature",
     "pgplan_expected_semantic_signature",
     "pgplan_final_semantic_signature",
     "pgplan_implied_equality_count",
-    "pgplan_correctness_artifact_raw_signature",
-    "pgplan_correctness_imported_raw_signature",
     "pgplan_correctness_expected_semantic_signature",
     "pgplan_correctness_final_semantic_signature",
     "pgplan_correctness_implied_equality_count",
     "tm_pgplan",
     "tm_native_vs_pgplan_speedup",
-    "tm_pgplan_vs_outer_yan_speedup",
     "t1_pgplan",
     "t1_native_vs_pgplan_speedup",
-    "t1_pgplan_vs_outer_yan_speedup",
-    "pgplan_target_trace_raw",
-    "pgplan_correctness_trace_raw",
 )
-THREE_WAY_CSV_FIELDS = (
-    "three_way_status",
-    "three_way_phase",
-    "three_way_detail",
-    "three_way_correctness_scope",
-    "three_way_correctness_status",
-    "three_way_correctness_sha256",
-    "three_way_correctness_hash_rows",
-    "three_way_correctness_outer_yan_selected_plan",
-    "three_way_measured_runs",
-    "three_way_threads",
-    "three_way_result_dir",
-    "three_way_status_plan",
-    "three_way_diagnostic_log",
-    "three_way_ordinal",
-    "three_way_total",
-    "three_way_relations",
-    "three_way_join_count",
-    "kernel_status",
-    "profile_status",
-    "t1_status",
-    "outer_yan_decision_raw",
+COMPARISON_CSV_FIELDS = (
+    "pgplan_comparison_mode",
+    "pgplan_correctness_comparison_set",
+    "pgplan_comparison_status",
+    "pgplan_comparison_phase",
+    "pgplan_comparison_detail",
+    "pgplan_correctness_scope",
+    "pgplan_correctness_status",
+    "pgplan_correctness_sha256",
+    "pgplan_correctness_hash_rows",
+    "pgplan_correctness_outer_yan_selected_plan",
+    "pgplan_comparison_measured_runs",
+    "pgplan_comparison_threads",
+    "pgplan_comparison_result_dir",
+    "pgplan_comparison_status_plan",
+    "pgplan_comparison_diagnostic_log",
+    "pgplan_comparison_ordinal",
+    "pgplan_comparison_total",
+    "pgplan_comparison_relations",
+    "pgplan_comparison_join_count",
+    "pgplan_correctness_origin",
+    "pgplan_correctness_comparison_executed",
+    "pgplan_correctness_reuse_source",
+    "pgplan_correctness_receipt_sha256",
+    "pgplan_correctness_reuse_source_receipt_sha256",
+    "pgplan_correctness_reuse_source_manifest_sha256",
 )
-COMPARISON_FIELDS = ORIGINAL_CSV_FIELDS + PGPLAN_CSV_FIELDS + THREE_WAY_CSV_FIELDS
+COMPARISON_FIELDS = ORIGINAL_CSV_FIELDS + PGPLAN_CSV_FIELDS + COMPARISON_CSV_FIELDS
 
 LEGACY_OY_FIELD_MAP = {
     "outer_reordered": "outer_reordered",
@@ -246,10 +242,8 @@ SUMMARY_FIELDS = (
     "timed_queries",
     "pgplan_speedup_vs_native_geomean",
     "outer_yan_speedup_vs_native_geomean",
-    "outer_yan_speedup_vs_pgplan_geomean",
     "pgplan_faster_than_native",
     "outer_yan_faster_than_native",
-    "outer_yan_faster_than_pgplan",
 )
 
 
@@ -353,11 +347,11 @@ def positive_decimal(value, path, line_number):
     return parsed
 
 
-def rows_by_configuration(rows, path):
+def rows_for_configurations(rows, path, expected):
     by_configuration = {}
     for row in rows:
         configuration = row["configuration"]
-        if configuration not in CONFIGURATIONS:
+        if configuration not in expected:
             raise ReportError(
                 "{0}:{1}: unsupported configuration {2!r}".format(
                     path, row["_line_number"], configuration
@@ -370,14 +364,19 @@ def rows_by_configuration(rows, path):
                 )
             )
         by_configuration[configuration] = row
-    missing = [name for name in CONFIGURATIONS if name not in by_configuration]
-    if missing or len(rows) != len(CONFIGURATIONS):
+    missing = [name for name in expected if name not in by_configuration]
+    if missing or len(rows) != len(expected):
         raise ReportError(
-            "{0}: expected exactly native, pgplan, and outer_yan; missing {1}".format(
-                path, ", ".join(missing) if missing else "none"
+            "{0}: expected exactly {1}; missing {2}".format(
+                path, ", ".join(expected),
+                ", ".join(missing) if missing else "none"
             )
         )
     return by_configuration
+
+
+def rows_by_configuration(rows, path):
+    return rows_for_configurations(rows, path, CONFIGURATIONS)
 
 
 def read_manifest(path):
@@ -435,7 +434,19 @@ def read_text(path):
 
 
 def correctness_scope_from_manifest(manifest):
-    """Classify where the exact multiset comparison was executed."""
+    """Classify the database scope covered by the correctness evidence."""
+    if manifest.get("correctness_origin") == "NOT_RUN":
+        return "not-run"
+    recorded_scope = manifest.get("correctness_scope", "")
+    if recorded_scope:
+        if recorded_scope not in ("target", "bounded", "not-run"):
+            raise ReportError(
+                "correctness_scope must be target, bounded, or not-run, "
+                "found {0!r}".format(
+                    recorded_scope
+                )
+            )
+        return recorded_scope
     correctness_db = manifest.get("correctness_db", "")
     execution_db = manifest.get("execution_db", "")
     # Before correctness_db was added, experiment.sh used execution_db for
@@ -445,6 +456,161 @@ def correctness_scope_from_manifest(manifest):
     if execution_db and os.path.normpath(correctness_db) == os.path.normpath(execution_db):
         return "target"
     return "bounded"
+
+
+def correctness_provenance_from_manifest(manifest):
+    """Read explicit fresh/reused correctness provenance when it exists.
+
+    Runs produced before sealed correctness receipts have none of these keys.
+    Keep those legacy artifacts reportable with empty additive columns instead
+    of guessing whether their comparison was executed in the reported run.
+    """
+    fields = {
+        "comparison_mode": "",
+        "correctness_comparison_set": "",
+        "correctness_origin": "",
+        "correctness_comparison_executed": "",
+        "correctness_reuse_source": "",
+        "correctness_receipt_sha256": "",
+        "correctness_reuse_source_receipt_sha256": "",
+        "correctness_reuse_source_manifest_sha256": "",
+    }
+    provenance_keys = tuple(fields)
+    if not any(key in manifest for key in provenance_keys):
+        return fields
+
+    comparison_mode = manifest.get("comparison_mode", "both")
+    if comparison_mode not in ("both", "pgplan-only", "none"):
+        raise ReportError(
+            "comparison_mode must be both, pgplan-only, or none, "
+            "found {0!r}".format(comparison_mode)
+        )
+    origin = manifest.get("correctness_origin", "")
+    if origin not in ("FRESH", "PARTIAL", "NOT_RUN", "REUSED"):
+        raise ReportError(
+            "correctness_origin must be FRESH, PARTIAL, NOT_RUN, or REUSED, "
+            "found {0!r}".format(origin)
+        )
+    comparison_executed = manifest.get(
+        "correctness_comparison_executed", ""
+    )
+    legacy_comparison_set = {
+        "FRESH": "both",
+        "REUSED": "none",
+    }.get(origin, "")
+    comparison_set = manifest.get(
+        "correctness_comparison_set", legacy_comparison_set
+    )
+    expected = {
+        "FRESH": ("1", "both", "PASS"),
+        "PARTIAL": ("1", "pgplan-only", "PARTIAL"),
+        "NOT_RUN": ("0", "none", "NOT_RUN"),
+        "REUSED": ("0", "none", "PASS"),
+    }
+    expected_comparison, expected_set, expected_status = expected[origin]
+    if comparison_executed != expected_comparison:
+        raise ReportError(
+            "correctness_comparison_executed must be {0} for {1}, found {2!r}".format(
+                expected_comparison, origin, comparison_executed
+            )
+        )
+    if comparison_set != expected_set:
+        raise ReportError(
+            "correctness_comparison_set must be {0} for {1}, found {2!r}".format(
+                expected_set, origin, comparison_set
+            )
+        )
+    legacy_status = "PASS" if origin in ("FRESH", "REUSED") else ""
+    manifest_status = manifest.get("correctness_status", legacy_status)
+    if manifest_status != expected_status:
+        raise ReportError(
+            "correctness_status must be {0} for {1}, found {2!r}".format(
+                expected_status, origin, manifest_status
+            )
+        )
+
+    receipt_sha = manifest.get("correctness_receipt_sha256", "")
+    sha_fields = []
+    reuse_source = manifest.get("correctness_reuse_source", "")
+    source_receipt_sha = manifest.get(
+        "correctness_reuse_source_receipt_sha256", ""
+    )
+    source_manifest_sha = manifest.get(
+        "correctness_reuse_source_manifest_sha256", ""
+    )
+    if origin == "REUSED":
+        if not reuse_source:
+            raise ReportError(
+                "correctness_reuse_source is required for REUSED correctness"
+            )
+        sha_fields.extend(
+            (
+                ("correctness_receipt_sha256", receipt_sha),
+                (
+                    "correctness_reuse_source_receipt_sha256",
+                    source_receipt_sha,
+                ),
+                (
+                    "correctness_reuse_source_manifest_sha256",
+                    source_manifest_sha,
+                ),
+            )
+        )
+    else:
+        unexpected_reuse = [
+            key
+            for key, value in (
+                ("correctness_reuse_source", reuse_source),
+                (
+                    "correctness_reuse_source_receipt_sha256",
+                    source_receipt_sha,
+                ),
+                (
+                    "correctness_reuse_source_manifest_sha256",
+                    source_manifest_sha,
+                ),
+            )
+            if value
+        ]
+        if unexpected_reuse:
+            raise ReportError(
+                "non-reused correctness must not contain reuse provenance: {0}".format(
+                    ", ".join(unexpected_reuse)
+                )
+            )
+        if origin == "FRESH" and receipt_sha:
+            sha_fields.append(("correctness_receipt_sha256", receipt_sha))
+        elif origin != "FRESH" and receipt_sha:
+            raise ReportError(
+                "{0} correctness must not contain a reusable receipt".format(origin)
+            )
+    for key, value in sha_fields:
+        if not re.match(r"^[0-9a-fA-F]{64}$", value):
+            raise ReportError(
+                "{0} must be a SHA-256 digest, found {1!r}".format(key, value)
+            )
+    if origin == "REUSED" and receipt_sha.lower() != source_receipt_sha.lower():
+        raise ReportError(
+            "REUSED correctness receipt/source receipt SHA-256 values differ"
+        )
+
+    fields.update(
+        {
+            "comparison_mode": comparison_mode,
+            "correctness_comparison_set": comparison_set,
+            "correctness_origin": origin,
+            "correctness_comparison_executed": comparison_executed,
+            "correctness_reuse_source": reuse_source,
+            "correctness_receipt_sha256": receipt_sha.lower(),
+            "correctness_reuse_source_receipt_sha256": (
+                source_receipt_sha.lower() if source_receipt_sha else ""
+            ),
+            "correctness_reuse_source_manifest_sha256": (
+                source_manifest_sha.lower() if source_manifest_sha else ""
+            ),
+        }
+    )
+    return fields
 
 
 def read_manifest_loose(path):
@@ -631,8 +797,13 @@ def read_correctness(run_dir, correctness_rows, required):
             raise ReportError("cannot read {0}: file does not exist".format(missing))
         return {"correctness_status": "", "correctness_sha256": "", "correctness_hash_rows": ""}
     status_text = read_text(status_path).strip()
-    if not status_text.startswith("PASS"):
-        raise ReportError("{0}: PASS status required".format(status_path))
+    if not (
+        status_text.startswith("PASS")
+        or status_text.startswith("PARTIAL")
+    ):
+        raise ReportError(
+            "{0}: PASS or PARTIAL status required".format(status_path)
+        )
     hash_rows = read_tsv(hash_path, ("sha256", "rows"))
     if len(hash_rows) != 1:
         raise ReportError("{0}: expected exactly one hash row".format(hash_path))
@@ -688,23 +859,42 @@ def read_nonpass_correctness(result_root, status_row):
     if not status_text and not mismatch:
         return {}
 
+    manifest = read_manifest_loose(run_dir / "provenance" / "manifest.txt")
+    try:
+        correctness_provenance = correctness_provenance_from_manifest(manifest)
+    except ReportError:
+        # A non-PASS run can terminate while appending provenance. Preserve the
+        # terminal failure row without presenting a partial receipt as valid.
+        correctness_provenance = correctness_provenance_from_manifest({})
+    try:
+        correctness_scope = correctness_scope_from_manifest(manifest)
+    except ReportError:
+        correctness_scope = ""
     output = {
         "correct": "FALSE" if mismatch or status_text.startswith("FAIL") else (
             "TRUE" if status_text.startswith("PASS") else "NA"
         ),
-        "correctness_scope": correctness_scope_from_manifest(
-            read_manifest_loose(run_dir / "provenance" / "manifest.txt")
-        ),
+        "correctness_scope": correctness_scope,
         "correctness_status": status_text or "FAIL: multiset comparison mismatch",
         "result_dir": str(run_dir.resolve()),
     }
+    output.update(correctness_provenance)
     rows_path = correctness_dir / "row_counts.tsv"
     if rows_path.exists():
         try:
-            table = rows_by_configuration(
-                read_tsv(rows_path, CORRECTNESS_FIELDS), rows_path
+            comparison_set = correctness_provenance.get(
+                "correctness_comparison_set", ""
             )
-            values = set(table[name]["rows"] for name in CONFIGURATIONS)
+            expected_configs = (
+                ("native", "pgplan")
+                if comparison_set == "pgplan-only"
+                else CONFIGURATIONS
+            )
+            table = rows_for_configurations(
+                read_tsv(rows_path, CORRECTNESS_FIELDS), rows_path,
+                expected_configs,
+            )
+            values = set(table[name]["rows"] for name in expected_configs)
             if len(values) == 1 and re.match(r"^(0|[1-9][0-9]*)$", next(iter(values))):
                 output["correctness_rows"] = next(iter(values))
         except ReportError:
@@ -814,14 +1004,28 @@ def read_pass_artifacts(result_root, status_row):
                 )
             )
 
+    manifest = read_manifest(run_dir / "provenance" / "manifest.txt")
+    correctness_provenance = correctness_provenance_from_manifest(manifest)
+    comparison_set = correctness_provenance["correctness_comparison_set"]
+    if not comparison_set:
+        # Runs created before comparison modes always checked all three
+        # configurations when row-count evidence exists.
+        comparison_set = "both"
+
     correctness_rows = ""
     correctness_path = run_dir / "correctness" / "row_counts.tsv"
     if correctness_path.exists():
-        correctness_table = rows_by_configuration(
-            read_tsv(correctness_path, CORRECTNESS_FIELDS), correctness_path
+        expected_correctness_configs = (
+            ("native", "pgplan")
+            if comparison_set == "pgplan-only"
+            else CONFIGURATIONS
+        )
+        correctness_table = rows_for_configurations(
+            read_tsv(correctness_path, CORRECTNESS_FIELDS), correctness_path,
+            expected_correctness_configs,
         )
         row_counts = set()
-        for configuration in CONFIGURATIONS:
+        for configuration in expected_correctness_configs:
             row = correctness_table[configuration]
             row_counts.add(
                 nonnegative_integer(
@@ -836,9 +1040,9 @@ def read_pass_artifacts(result_root, status_row):
             )
         correctness_rows = str(next(iter(row_counts)))
 
-    manifest = read_manifest(run_dir / "provenance" / "manifest.txt")
-    current_format = "correctness_outer_yan_selected_plan" in manifest
-    if current_format and correctness_rows == "":
+    current_format = bool(correctness_provenance["correctness_origin"])
+    comparison_ran = comparison_set in ("both", "pgplan-only")
+    if current_format and comparison_ran and correctness_rows == "":
         raise ReportError(
             "{0}: current-format PASS is missing correctness/row_counts.tsv".format(
                 run_dir
@@ -863,20 +1067,27 @@ def read_pass_artifacts(result_root, status_row):
             )
         )
 
-    target_pg, target_pg_raw, target_pg_verified = read_pgplan_trace(
+    target_pg, unused_target_pg_raw, target_pg_verified = read_pgplan_trace(
         run_dir / "traces" / "pgplan_explain.trace"
     )
-    correctness_pg, correctness_pg_raw, correctness_pg_verified = read_pgplan_trace(
+    require_correctness_pgplan = current_format and (
+        comparison_ran or correctness_provenance["correctness_origin"] == "REUSED"
+    )
+    correctness_pg, unused_correctness_pg_raw, correctness_pg_verified = read_pgplan_trace(
         run_dir / "traces" / "pgplan_correctness.trace",
-        required=current_format,
+        required=require_correctness_pgplan,
     )
     correctness_oy_path = run_dir / "traces" / "outer_yan_correctness_decision.trace"
     if not correctness_oy_path.exists():
         correctness_oy_path = run_dir / "traces" / "outer_yan_correctness.trace"
-    correctness_oy, unused_correctness_oy_raw = read_oy_trace(
-        correctness_oy_path, required=current_format
+    require_correctness_outer_yan = current_format and (
+        comparison_set == "both"
+        or correctness_provenance["correctness_origin"] == "REUSED"
     )
-    if current_format:
+    correctness_oy, unused_correctness_oy_raw = read_oy_trace(
+        correctness_oy_path, required=require_correctness_outer_yan
+    )
+    if require_correctness_outer_yan:
         correctness_selected = correctness_oy.get("selected_plan")
         if correctness_selected != manifest["correctness_outer_yan_selected_plan"]:
             raise ReportError(
@@ -888,7 +1099,7 @@ def read_pass_artifacts(result_root, status_row):
                 )
             )
     correctness = read_correctness(
-        run_dir, correctness_rows, required=current_format
+        run_dir, correctness_rows, required=(current_format and comparison_ran)
     )
     result = {
         "run_dir": str(run_dir),
@@ -910,14 +1121,13 @@ def read_pass_artifacts(result_root, status_row):
         "oy_values": oy_values,
         "outer_yan_decision_raw": oy_raw,
         "pgplan_target": target_pg,
-        "pgplan_target_trace_raw": target_pg_raw,
         "pgplan_target_verification": target_pg_verified,
         "pgplan_correctness": correctness_pg,
-        "pgplan_correctness_trace_raw": correctness_pg_raw,
         "pgplan_correctness_verification": correctness_pg_verified,
     }
     result.update(artifact)
     result.update(correctness)
+    result.update(correctness_provenance)
     return result
 
 
@@ -1025,7 +1235,7 @@ def build_comparison_rows(result_root, status_rows):
         # Additive columns use empty text only where no artifact exists.
         output = {field: "-" for field in ORIGINAL_CSV_FIELDS}
         output.update({field: "" for field in PGPLAN_CSV_FIELDS})
-        output.update({field: "" for field in THREE_WAY_CSV_FIELDS})
+        output.update({field: "" for field in COMPARISON_CSV_FIELDS})
         label = PurePosixPath(query).stem
         correctness_evidence = {}
         output.update(
@@ -1033,20 +1243,16 @@ def build_comparison_rows(result_root, status_rows):
                 "query": label,
                 "family": family,
                 "sql_path": query,
-                "correct": "TRUE" if status == "PASS" else "NA",
+                "correct": "NA",
                 "effective_pass": "main",
-                "kernel": "not-collected",
+                "kernel": "-",
                 "kernel_detail": "-",
                 "kernel_hash_reasons": "-",
-                "kernel_status": "not-collected",
-                "profile_status": "not-collected",
-                "t1_status": "not-collected",
                 "t1_off": "NA",
                 "t1_on": "NA",
                 "t1_speedup": "NA",
                 "t1_pgplan": "NA",
                 "t1_native_vs_pgplan_speedup": "NA",
-                "t1_pgplan_vs_outer_yan_speedup": "NA",
                 "profile_round1_operator_s": "NA",
                 "profile_round2_operator_s": "NA",
                 "profile_round3_operator_s": "NA",
@@ -1064,12 +1270,12 @@ def build_comparison_rows(result_root, status_rows):
                 "profile_threads": "NA",
                 "profile_cpu_time_s": "NA",
                 "pgplan_plan": existing_artifact(status_row["plan"]),
-                "three_way_status": status,
-                "three_way_phase": status_row["phase"],
-                "three_way_detail": status_row["detail"],
-                "three_way_status_plan": status_row["plan"],
-                "three_way_result_dir": status_row["result_dir"],
-                "three_way_diagnostic_log": diagnostic_log_path(
+                "pgplan_comparison_status": status,
+                "pgplan_comparison_phase": status_row["phase"],
+                "pgplan_comparison_detail": status_row["detail"],
+                "pgplan_comparison_status_plan": status_row["plan"],
+                "pgplan_comparison_result_dir": status_row["result_dir"],
+                "pgplan_comparison_diagnostic_log": diagnostic_log_path(
                     result_root, status_row
                 ),
                 "_status": status,
@@ -1083,14 +1289,25 @@ def build_comparison_rows(result_root, status_rows):
             outer_yan_vs_native = speedup(
                 medians["native"], medians["outer_yan"]
             )
-            outer_yan_vs_pgplan = speedup(
-                medians["pgplan"], medians["outer_yan"]
-            )
+            correctness_origin = artifacts["correctness_origin"]
+            if correctness_origin in ("FRESH", "REUSED") or (
+                not correctness_origin
+                and artifacts["correctness_status"].startswith("PASS")
+            ):
+                correct_value = "TRUE"
+                note_value = "OK"
+            elif correctness_origin == "PARTIAL":
+                correct_value = "PARTIAL"
+                note_value = "PGPLAN-ONLY"
+            else:
+                correct_value = "NA"
+                note_value = "NOT-CHECKED"
             output.update(
                 {
+                    "correct": correct_value,
                     "relation_count": artifacts["relation_count"],
                     "rows": artifacts["correctness_rows"],
-                    "note": "OK",
+                    "note": note_value,
                     "pgplan_status": "VERIFIED",
                     "pgplan_plan": artifacts["artifact_path"],
                     "pgplan_target_verification": artifacts[
@@ -1104,41 +1321,50 @@ def build_comparison_rows(result_root, status_rows):
                     "tm_on": artifacts["median_text"]["outer_yan"],
                     "tm_speedup": decimal_text(outer_yan_vs_native),
                     "tm_native_vs_pgplan_speedup": decimal_text(pgplan_vs_native),
-                    "tm_pgplan_vs_outer_yan_speedup": decimal_text(
-                        outer_yan_vs_pgplan
-                    ),
-                    "three_way_correctness_scope": artifacts[
+                    "pgplan_comparison_mode": artifacts["comparison_mode"],
+                    "pgplan_correctness_comparison_set": artifacts[
+                        "correctness_comparison_set"
+                    ],
+                    "pgplan_correctness_scope": artifacts[
                         "correctness_scope"
                     ],
-                    "three_way_correctness_status": artifacts[
+                    "pgplan_correctness_status": artifacts[
                         "correctness_status"
                     ],
-                    "three_way_correctness_sha256": artifacts[
+                    "pgplan_correctness_sha256": artifacts[
                         "correctness_sha256"
                     ],
-                    "three_way_correctness_hash_rows": artifacts[
+                    "pgplan_correctness_hash_rows": artifacts[
                         "correctness_hash_rows"
                     ],
-                    "three_way_correctness_outer_yan_selected_plan": artifacts[
+                    "pgplan_correctness_outer_yan_selected_plan": artifacts[
                         "correctness_outer_yan_selected_plan"
                     ],
-                    "three_way_measured_runs": artifacts["measured_runs"],
-                    "three_way_threads": artifacts["threads"],
-                    "three_way_result_dir": artifacts["run_dir"],
-                    "three_way_relations": artifacts["relations"],
-                    "three_way_join_count": artifacts["join_count"],
-                    "outer_yan_decision_raw": artifacts[
-                        "outer_yan_decision_raw"
+                    "pgplan_correctness_origin": artifacts[
+                        "correctness_origin"
                     ],
-                    "pgplan_target_trace_raw": artifacts[
-                        "pgplan_target_trace_raw"
+                    "pgplan_correctness_comparison_executed": artifacts[
+                        "correctness_comparison_executed"
                     ],
-                    "pgplan_correctness_trace_raw": artifacts[
-                        "pgplan_correctness_trace_raw"
+                    "pgplan_correctness_reuse_source": artifacts[
+                        "correctness_reuse_source"
                     ],
+                    "pgplan_correctness_receipt_sha256": artifacts[
+                        "correctness_receipt_sha256"
+                    ],
+                    "pgplan_correctness_reuse_source_receipt_sha256": artifacts[
+                        "correctness_reuse_source_receipt_sha256"
+                    ],
+                    "pgplan_correctness_reuse_source_manifest_sha256": artifacts[
+                        "correctness_reuse_source_manifest_sha256"
+                    ],
+                    "pgplan_comparison_measured_runs": artifacts["measured_runs"],
+                    "pgplan_comparison_threads": artifacts["threads"],
+                    "pgplan_comparison_result_dir": artifacts["run_dir"],
+                    "pgplan_comparison_relations": artifacts["relations"],
+                    "pgplan_comparison_join_count": artifacts["join_count"],
                     "_pgplan_speedup": pgplan_vs_native,
                     "_outer_yan_native_speedup": outer_yan_vs_native,
-                    "_outer_yan_pgplan_speedup": outer_yan_vs_pgplan,
                     "_timeout_seconds": artifacts["timeout_seconds"],
                 }
             )
@@ -1152,9 +1378,6 @@ def build_comparison_rows(result_root, status_rows):
                 t1_outer_vs_native = speedup(
                     t1_medians["native"], t1_medians["outer_yan"]
                 )
-                t1_outer_vs_pgplan = speedup(
-                    t1_medians["pgplan"], t1_medians["outer_yan"]
-                )
                 output.update(
                     {
                         "t1_off": artifacts["t1_median_text"]["native"],
@@ -1164,10 +1387,6 @@ def build_comparison_rows(result_root, status_rows):
                         "t1_native_vs_pgplan_speedup": decimal_text(
                             t1_pgplan_vs_native
                         ),
-                        "t1_pgplan_vs_outer_yan_speedup": decimal_text(
-                            t1_outer_vs_pgplan
-                        ),
-                        "t1_status": "collected",
                     }
                 )
 
@@ -1184,8 +1403,6 @@ def build_comparison_rows(result_root, status_rows):
             target_pg = artifacts["pgplan_target"]
             correctness_pg = artifacts["pgplan_correctness"]
             for key in (
-                "artifact_raw_signature",
-                "imported_raw_signature",
                 "expected_semantic_signature",
                 "final_semantic_signature",
                 "implied_equality_count",
@@ -1198,30 +1415,60 @@ def build_comparison_rows(result_root, status_rows):
             correctness_evidence = read_nonpass_correctness(result_root, status_row)
             if correctness_evidence:
                 output["correct"] = correctness_evidence.get("correct", "NA")
+                output["pgplan_comparison_mode"] = correctness_evidence.get(
+                    "comparison_mode", ""
+                )
+                output["pgplan_correctness_comparison_set"] = correctness_evidence.get(
+                    "correctness_comparison_set", ""
+                )
                 output["rows"] = correctness_evidence.get(
                     "correctness_rows", "-"
                 )
-                output["three_way_correctness_scope"] = correctness_evidence.get(
+                output["pgplan_correctness_scope"] = correctness_evidence.get(
                     "correctness_scope", ""
                 )
-                output["three_way_correctness_status"] = correctness_evidence.get(
+                output["pgplan_correctness_status"] = correctness_evidence.get(
                     "correctness_status", ""
                 )
-                output["three_way_correctness_sha256"] = correctness_evidence.get(
+                output["pgplan_correctness_sha256"] = correctness_evidence.get(
                     "correctness_sha256", ""
                 )
-                output["three_way_correctness_hash_rows"] = correctness_evidence.get(
+                output["pgplan_correctness_hash_rows"] = correctness_evidence.get(
                     "correctness_hash_rows", ""
                 )
-                output["three_way_result_dir"] = correctness_evidence.get(
-                    "result_dir", output["three_way_result_dir"]
+                output["pgplan_correctness_origin"] = correctness_evidence.get(
+                    "correctness_origin", ""
+                )
+                output[
+                    "pgplan_correctness_comparison_executed"
+                ] = correctness_evidence.get(
+                    "correctness_comparison_executed", ""
+                )
+                output[
+                    "pgplan_correctness_reuse_source"
+                ] = correctness_evidence.get("correctness_reuse_source", "")
+                output[
+                    "pgplan_correctness_receipt_sha256"
+                ] = correctness_evidence.get("correctness_receipt_sha256", "")
+                output[
+                    "pgplan_correctness_reuse_source_receipt_sha256"
+                ] = correctness_evidence.get(
+                    "correctness_reuse_source_receipt_sha256", ""
+                )
+                output[
+                    "pgplan_correctness_reuse_source_manifest_sha256"
+                ] = correctness_evidence.get(
+                    "correctness_reuse_source_manifest_sha256", ""
+                )
+                output["pgplan_comparison_result_dir"] = correctness_evidence.get(
+                    "result_dir", output["pgplan_comparison_result_dir"]
                 )
         output["note"] = legacy_note(status, status_row["phase"], correctness_evidence)
         comparison_rows.append(output)
     total = len(comparison_rows)
     for ordinal, output in enumerate(comparison_rows, start=1):
-        output["three_way_ordinal"] = str(ordinal)
-        output["three_way_total"] = str(total)
+        output["pgplan_comparison_ordinal"] = str(ordinal)
+        output["pgplan_comparison_total"] = str(total)
     return comparison_rows
 
 
@@ -1230,7 +1477,6 @@ def aggregate_row(family, rows):
     passed = [row for row in selected if row["_status"] == "PASS"]
     pgplan_speedups = [row["_pgplan_speedup"] for row in passed]
     outer_native_speedups = [row["_outer_yan_native_speedup"] for row in passed]
-    outer_pgplan_speedups = [row["_outer_yan_pgplan_speedup"] for row in passed]
     return {
         "family": family,
         "selected_queries": str(len(selected)),
@@ -1242,15 +1488,9 @@ def aggregate_row(family, rows):
         "outer_yan_speedup_vs_native_geomean": geometric_mean(
             outer_native_speedups
         ),
-        "outer_yan_speedup_vs_pgplan_geomean": geometric_mean(
-            outer_pgplan_speedups
-        ),
         "pgplan_faster_than_native": str(sum(value > 1 for value in pgplan_speedups)),
         "outer_yan_faster_than_native": str(
             sum(value > 1 for value in outer_native_speedups)
-        ),
-        "outer_yan_faster_than_pgplan": str(
-            sum(value > 1 for value in outer_pgplan_speedups)
         ),
     }
 
@@ -1281,24 +1521,13 @@ def detail_value(value):
 
 
 def render_comparison_block(row, index, total):
-    profile_display = (
-        "NA(not-collected)"
-        if row["profile_status"] == "not-collected"
-        else "Total-Time={0}s R1={1}s R2={2}s R3={3}s OtherCPU={4}s".format(
-            display(row["profile_total_time_s"]),
-            display(row["profile_round1_operator_s"]),
-            display(row["profile_round2_operator_s"]),
-            display(row["profile_round3_operator_s"]),
-            display(row["profile_other_elapsed_s"]),
-        )
-    )
     main = (
         "[{0:3d}/{1}] {2:<36} correct={3} reorder={4} selected={5} "
-        "kernel={6} profile=[{7}]  TM:off={8} on={9} spd={10}  "
-        "T1:off={11} on={12} spd={13} "
-        "PGPlan:[status={14} TM={15} spd(off/pgplan)={16} "
-        "spd(pgplan/on)={17} T1={18} spd(off/pgplan)={19} "
-        "spd(pgplan/on)={20}]"
+        "comparison={6} PGPlan={7}  "
+        "TM:[Original={8} PGPlan={9} OuterYan={10}] "
+        "Speedup:[Original/PGPlan={11} Original/OuterYan={12}]  "
+        "T1:[Original={13} PGPlan={14} OuterYan={15}] "
+        "Speedup:[Original/PGPlan={16} Original/OuterYan={17}]"
     ).format(
         index,
         total,
@@ -1306,21 +1535,18 @@ def render_comparison_block(row, index, total):
         row["correct"],
         display(row["outer_reordered"], "-"),
         display(row["selected_plan"], "-"),
-        display(row["kernel"], "not-collected"),
-        profile_display,
+        display(row["pgplan_comparison_mode"]),
+        display(row["pgplan_status"]),
         display(row["tm_off"]),
+        display(row["tm_pgplan"]),
         display(row["tm_on"]),
+        display(row["tm_native_vs_pgplan_speedup"]),
         display(row["tm_speedup"]),
         display(row["t1_off"]),
-        display(row["t1_on"]),
-        display(row["t1_speedup"]),
-        display(row["pgplan_status"]),
-        display(row["tm_pgplan"]),
-        display(row["tm_native_vs_pgplan_speedup"]),
-        display(row["tm_pgplan_vs_outer_yan_speedup"]),
         display(row["t1_pgplan"]),
+        display(row["t1_on"]),
         display(row["t1_native_vs_pgplan_speedup"]),
-        display(row["t1_pgplan_vs_outer_yan_speedup"]),
+        display(row["t1_speedup"]),
     )
 
     decision = (
@@ -1392,20 +1618,12 @@ def render_comparison_block(row, index, total):
         display(row["semijoin_probe_emit_weight"]),
     )
     pgplan = (
-        "[target={0} correctness={1} artifact_raw={2} imported_raw={3} "
-        "expected={4} final={5} implied_equalities={6} "
-        "correctness_expected={7} correctness_final={8} "
-        "correctness_implied_equalities={9}]"
+        "[target={0} correctness={1} implied_equalities={2} "
+        "correctness_implied_equalities={3}]"
     ).format(
         display(row["pgplan_target_verification"]),
         display(row["pgplan_correctness_verification"]),
-        detail_value(row["pgplan_artifact_raw_signature"]),
-        detail_value(row["pgplan_imported_raw_signature"]),
-        detail_value(row["pgplan_expected_semantic_signature"]),
-        detail_value(row["pgplan_final_semantic_signature"]),
         display(row["pgplan_implied_equality_count"]),
-        detail_value(row["pgplan_correctness_expected_semantic_signature"]),
-        detail_value(row["pgplan_correctness_final_semantic_signature"]),
         display(row["pgplan_correctness_implied_equality_count"]),
     )
     details = (
@@ -1417,31 +1635,36 @@ def render_comparison_block(row, index, total):
         row["note"], display(row["rows"], "-"),
         display(row["relation_count"], "-"),
     )
-    if row["correct"] == "TRUE" and row["selected_plan"] in SELECTED_PLANS:
+    if row["_status"] == "PASS" and row["selected_plan"] in SELECTED_PLANS:
         details += (
             " decision={0} risk={1} cost={2} gate_cmp={3} SJ={4} weights={5}"
         ).format(decision, risk, cost, gate, semijoin, weights)
     else:
         details += " gate_detail=[{0}]".format(
-            detail_value(row["three_way_detail"])
+            detail_value(row["pgplan_comparison_detail"])
         )
     details += (
-        " pgplan={0} correctness=[scope={1} status={2} sha256={3}] "
-        "three_way=[status={4} phase={5} detail={6} runs={7} threads={8}] "
-        "artifacts=[duckdb={9} enabled={10} trace={11} cost={12} "
-        "pgplan={13} run={14} diagnostic_log={15}]"
+        " pgplan={0} correctness=[mode={1} checked={2} scope={3} origin={4} "
+        "status={5} sha256={6}] "
+        "comparison=[status={7} phase={8} detail={9} runs={10} threads={11}] "
+        "artifacts=[duckdb={12} enabled={13} trace={14} cost={15} "
+        "pgplan={16} run={17} diagnostic_log={18}]"
     ).format(
-        pgplan, display(row["three_way_correctness_scope"]),
-        detail_value(row["three_way_correctness_status"]),
-        display(row["three_way_correctness_sha256"]),
-        row["three_way_status"], detail_value(row["three_way_phase"]),
-        detail_value(row["three_way_detail"]),
-        display(row["three_way_measured_runs"]),
-        display(row["three_way_threads"]), detail_value(row["duckdb_plan"]),
+        pgplan, display(row["pgplan_comparison_mode"]),
+        display(row["pgplan_correctness_comparison_set"]),
+        display(row["pgplan_correctness_scope"]),
+        display(row["pgplan_correctness_origin"]),
+        detail_value(row["pgplan_correctness_status"]),
+        display(row["pgplan_correctness_sha256"]),
+        row["pgplan_comparison_status"],
+        detail_value(row["pgplan_comparison_phase"]),
+        detail_value(row["pgplan_comparison_detail"]),
+        display(row["pgplan_comparison_measured_runs"]),
+        display(row["pgplan_comparison_threads"]), detail_value(row["duckdb_plan"]),
         detail_value(row["enabled_plan"]), detail_value(row["trace_file"]),
         detail_value(row["cost_file"]), detail_value(row["pgplan_plan"]),
-        detail_value(row["three_way_result_dir"]),
-        detail_value(row["three_way_diagnostic_log"]),
+        detail_value(row["pgplan_comparison_result_dir"]),
+        detail_value(row["pgplan_comparison_diagnostic_log"]),
     )
     return "\n" + LOG_SEPARATOR + "\n" + main + "\n" + details + "\n"
 
@@ -1551,7 +1774,7 @@ def main(argv=None):
         return 2
 
     print(
-        "[three-way] selected={0} pass={1} skip={2} fail={3}".format(
+        "[comparison] selected={0} pass={1} skip={2} fail={3}".format(
             totals["selected_queries"],
             totals["pass_queries"],
             totals["skip_queries"],
@@ -1559,14 +1782,12 @@ def main(argv=None):
         )
     )
     print(
-        "[three-way] geometric-mean speedup over {0} timed queries "
+        "[comparison] geometric-mean speedup over {0} timed queries "
         "(>1 means the named candidate is faster): "
-        "pgplan_vs_native={1} outer_yan_vs_native={2} "
-        "outer_yan_vs_pgplan={3}".format(
+        "pgplan_vs_original={1} outer_yan_vs_original={2}".format(
             totals["timed_queries"],
             totals["pgplan_speedup_vs_native_geomean"] or "n/a",
             totals["outer_yan_speedup_vs_native_geomean"] or "n/a",
-            totals["outer_yan_speedup_vs_pgplan_geomean"] or "n/a",
         )
     )
     for name in (
@@ -1576,7 +1797,7 @@ def main(argv=None):
         "summary_tsv",
         "failures_tsv",
     ):
-        print("[three-way] {0}={1}".format(name, outputs[name]))
+        print("[comparison] {0}={1}".format(name, outputs[name]))
     return 0
 
 

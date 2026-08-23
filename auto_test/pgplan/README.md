@@ -18,6 +18,40 @@ The tooling supports Python 3.7+ using only the standard library. Set
 `PYTHON_BIN=/absolute/path/to/a/repo-local/python3` to avoid the system Python;
 no separate Python installation is required for a normal run.
 
+PGPlan artifacts persist by default under `auto_test/pgplan/plans`. Before
+starting PostgreSQL, the corpus runner checks that location for every selected
+query. Each JSON artifact has an artifact-bound sample-identity sidecar. A
+cache entry is accepted only when its canonical query hash, artifact bytes,
+PostgreSQL 16.2 provenance/settings, family schema/data label, exact bounded
+planning-sample fingerprint, statistics epoch, and typed binary tree all
+validate. A single miss recaptures that selected family coherently under one
+new `ANALYZE` epoch; fully cached families do not start PostgreSQL. A missing,
+malformed, or stale entry is recaptured and replaced atomically, and every
+result directory still receives its own immutable copy. Override the location
+with `PGPLAN_PLAN_CACHE` or `--plan-cache`. Delete one cached JSON file (or
+choose a new cache directory) to force that family's coherent recapture.
+
+Correctness comparison mode is independent of the cached plan and performance
+work:
+
+```sh
+# Default: (a) Original == PGPlan and (b) Original == OuterYan
+bash auto_test/run_all.sh
+
+# skip1: run only comparison (a)
+bash auto_test/run_all.sh --skip1
+
+# skip2: do not rerun correctness; still run EXPLAIN, PGPlan verification,
+# and Original/PGPlan/OuterYan TM and T1 performance
+bash auto_test/run_all.sh --performance-only
+```
+
+`--skip2`, `--performance_only`, and the accepted compatibility misspelling
+`--performace_only` are aliases for `--performance-only`. This manual mode
+records correctness as `NOT_RUN`; it does not claim to validate an earlier
+result. Use `--reuse-from` when the earlier target-data comparison must be
+cryptographically validated before performance is rerun.
+
 Manual PGPlan commands are:
 
 ```sh
@@ -51,6 +85,26 @@ Bounded corpus runs SHA-256 fingerprint their correctness database and builder
 manifest once per family, then copy those provenance records into every query
 result directory.
 
+For a later performance-only rerun of the same corpus inputs, reuse the sealed
+target correctness receipts and the retained PGPlan artifacts:
+
+```sh
+bash auto_test/run_all.sh \
+  --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
+```
+
+This one option automatically preserves the existing binary, target databases,
+and query files (Steps 1--3 are skipped), and skips PostgreSQL setup, sampled
+schema preparation, and plan capture. Native, PGPlan, and OuterYan EXPLAIN,
+semantic verification, TM, and T1 run normally in a new self-contained result
+directory. The prior receipt must be a sealed fresh target-mode comparison and
+must match the exact query, PGPlan artifact, DuckDB binary/version, and target
+database hashes. A missing/mismatched receipt or plan, an escaping prior path,
+or a non-empty target `.wal` fails that query without falling back; later
+queries continue. Use `PGPLAN_CORRECTNESS_MODE=reuse` with
+`PGPLAN_CORRECTNESS_FROM` only when correctness should be reused but a fresh
+PostgreSQL plan should still be captured.
+
 For a default manual query, pass the target database once; correctness defaults
 to that same file:
 
@@ -66,22 +120,28 @@ auto_test/pgplan/experiment.sh \
 Pass `--correctness-db /absolute/path/to/small-correctness.duckdb` only when an
 explicit bounded/manual correctness scope is intended.
 
-Thus a default successful run establishes complete three-way target-data
-multiset equality, PGPlan tree adherence, and performance. A bounded-mode PASS
-is scoped to its recorded small database. Neither executes PostgreSQL's
-physical plan.
+Thus a default successful run establishes both target-data equalities
+(Original=PGPlan and Original=OuterYan), PGPlan tree adherence, and performance.
+A bounded-mode PASS is scoped to its recorded small database. Neither mode
+executes PostgreSQL's physical plan.
+
+A reuse-mode PASS does not perform or claim a second result comparison. It
+cryptographically cites the matching prior target-mode equality receipt, then
+reruns all three current plan checks and timing configurations. The new run
+copies the PGPlan artifact and receipt provenance instead of depending on the
+prior directory at report time.
 
 Plan capture always uses plain PostgreSQL `EXPLAIN`, never `EXPLAIN ANALYZE`.
 Its default 300-second optimizer limit is controlled by
-`PGPLAN_CAPTURE_TIMEOUT_SECS`/`--capture-timeout`. DuckDB's separate
-three-way execution limit is controlled by `PGPLAN_TIMEOUT_SECS`/`--timeout`.
+`PGPLAN_CAPTURE_TIMEOUT_SECS`/`--capture-timeout`. DuckDB's separate execution
+limit is controlled by `PGPLAN_TIMEOUT_SECS`/`--timeout`.
 That limit also covers complete-result CSV framing, sorting, comparison, and
 hashing. Either timeout records that query as `SKIP` and continues with the
 corpus, but the corpus exits nonzero because the query is incomplete;
 non-timeout errors remain `FAIL`.
 
-The corpus stage is the complete three-way benchmark; it is not a PG-only
-execution pass. Per-query medians are stored in
+The corpus stage is the complete Original/PGPlan/OuterYan performance run; it
+is not a PG-only execution pass. Per-query medians are stored in
 `runs/<family>/<query>/timing/summary.tsv`. The result root contains
 `comparison.tsv`/`comparison.csv` for all selected queries, a human-readable
 `comparison.log`, `summary.tsv` for overall and per-family aggregate speedups,
@@ -91,21 +151,27 @@ in `comparison.log`, which contains the same ordered records and values as the
 machine-readable comparison files.
 
 The comparison CSV/TSV preserves the complete `experiment_onoff.sh` CSV header
-as its leading columns, in exactly the original order. PGPlan artifact,
-verification, TM/T1, and pairwise-speedup columns follow that prefix; corpus
-status and provenance fields use a `three_way_` prefix. The text log likewise
-keeps the original separator plus two-line query block and appends PGPlan
-timing and verification information.
+as its leading columns, in exactly the original order. PGPlan verification,
+TM/T1, correctness mode, and provenance columns follow that prefix, with
+`pgplan` in every appended field name. Raw plan signatures are retained only
+in trace artifacts, not in the human log or CSV.
 
-For every `PASS`, the original `TM:off/on` and `T1:off/on` columns remain the
-Native/OuterYan comparison. Appended `tm_pgplan` and `t1_pgplan` columns add the
-third target-data median and both PGPlan pairwise speedups. Ratios are baseline
-time divided by candidate time, so a value above one favors the named
-candidate. The three-way corpus runs independent timing batches for all three
-configurations: TM uses one warm-up plus the configured odd measured-run count,
-while T1 uses one warm-up plus exactly one measured run. It does not yet
-collect the legacy phase profile and semi-join kernel trace, so those remain
-explicitly not collected. The original
+The appended correctness fields distinguish `FRESH`, `PARTIAL`, `NOT_RUN`, and
+`REUSED` work. In particular, `pgplan_correctness_origin` and
+`pgplan_correctness_comparison_executed` state whether this result directory
+performed a comparison. Reused rows retain their source and receipt SHA-256
+values in `pgplan_correctness_*` columns. Older results remain readable with
+empty fields instead of guessed values.
+
+For every completed performance run, the original CSV's `TM:off/on` and
+`T1:off/on` columns retain their Original/OuterYan meanings. Appended
+`tm_pgplan` and `t1_pgplan` columns add PGPlan plus the Original/PGPlan
+speedups. The human line orders each suite as Original, PGPlan, OuterYan and
+prints exactly `Original/PGPlan` and `Original/OuterYan`. TM uses one warm-up
+plus the configured odd measured-run count; T1 uses one warm-up plus exactly
+one measured run. This workflow does not run the legacy kernel-trace or
+phase-profile batches, so their placeholders are omitted from the human log;
+the original CSV columns remain present but empty/NA for compatibility. The original
 `rows` column refers to the complete target result by default. Both timing
 suites use `.mode trash`, which executes and fully materializes the bare query
 while excluding CLI result serialization and filesystem output from the real

@@ -28,7 +28,7 @@ The resulting CLI is `build/release/duckdb`. A debug build is available with
 
 ## One-command build and test
 
-From the repository root, the complete OuterYan workflow is:
+From the repository root, the default PGPlan/OuterYan workflow is:
 
 ```bash
 bash auto_test/run_all.sh
@@ -36,16 +36,57 @@ bash auto_test/run_all.sh
 
 This command:
 
-1. builds the release DuckDB CLI containing the current OuterYan code;
-2. builds or reuses the graph, TPC-H, TPC-DS, and JOB databases according to
-   `auto_test/configs.sh`;
-3. runs every query under `auto_test/outerjoin_query/{graph,tpch,tpcds,job}`; and
-4. writes timestamped reports to:
+1. builds the release DuckDB CLI and the configured target databases;
+2. checks the persistent PGPlan cache under `auto_test/pgplan/plans` before
+   starting PostgreSQL, and captures only missing or stale plan families;
+3. runs every query under `auto_test/outerjoin_query/{graph,tpch,tpcds,job}`;
+4. checks both `Original == PGPlan` and `Original == OuterYan` on target data;
+5. records Original, PGPlan, and OuterYan TM/T1 performance; and
+6. writes a timestamped result directory containing:
 
 ```text
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.txt
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.attempts.csv
+auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.log
+auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.tsv
+auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.csv
+auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/summary.tsv
+auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/failures.tsv
+```
+
+The comparison mode is controlled directly from the same command:
+
+```bash
+# Default: (a) Original == PGPlan and (b) Original == OuterYan.
+bash auto_test/run_all.sh
+
+# skip1: run only comparison (a); retain every EXPLAIN and timing phase.
+bash auto_test/run_all.sh --skip1
+
+# skip2: skip both correctness comparisons; retain plan verification and
+# Original/PGPlan/OuterYan TM and T1 timing.
+bash auto_test/run_all.sh --performance-only
+
+# Accepted compatibility spelling requested by existing server scripts.
+bash auto_test/run_all.sh --performace_only
+```
+
+`--skip2` and `--performance_only` are additional aliases for
+`--performance-only`. Performance-only records correctness as `NOT_RUN`; use
+`--reuse-from PRIOR_CORPUS` instead when the earlier target-data result must be
+validated from its sealed receipt.
+
+Generated typed plans remain in `auto_test/pgplan/plans/<family>/`. Override
+that location with `PGPLAN_PLAN_CACHE=/absolute/path` or
+`--plan-cache /absolute/path`. Each plan is accepted only with its matching
+sample/statistics identity sidecar. One cache miss recaptures the selected
+family under a coherent PostgreSQL `ANALYZE` epoch; an all-cache-hit run does
+not set up or start PostgreSQL.
+
+For a faster repeat performance run when the binary, databases, and generated
+queries already exist:
+
+```bash
+SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 \
+  bash auto_test/run_all.sh --performance-only
 ```
 
 Existing databases are reused. If dataset or scale settings changed and every
@@ -54,6 +95,9 @@ database should be rebuilt, run:
 ```bash
 FORCE=1 bash auto_test/run_all.sh
 ```
+
+Set `RUN_PGPLAN=0` to use the historical DuckDB-versus-OuterYan two-way
+`experiment_onoff.sh` workflow instead.
 
 ## OuterYan plan selection
 
@@ -190,8 +234,8 @@ DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
     --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
 
-# Release build plus P0/P1 representative bare-query validation (3–7 relations).
-SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
+# Historical two-way P0/P1 representative validation (3–7 relations).
+RUN_PGPLAN=0 SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
     --only all \
     --query-list auto_test/representative_queries.txt \
     --capture-plans
@@ -300,10 +344,11 @@ Useful runtime controls are:
 `DUCKDB_OY_SIMPLIFY_SCAN_FILTERS=1` is an experimental, generally unsound
 measurement switch. It must not be enabled for correctness conclusions.
 
-For a one-command build/data/experiment workflow, run
-`bash auto_test/run_all.sh`. Existing databases are reused unless explicitly
-rebuilt, and arguments after `run_all.sh` are forwarded to
-`experiment_onoff.sh`.
+For the default PGPlan comparison workflow, run `bash auto_test/run_all.sh`;
+arguments are forwarded to `auto_test/pgplan/corpus_experiment.sh`. Set
+`RUN_PGPLAN=0` for the historical two-way workflow, where arguments are instead
+forwarded to `experiment_onoff.sh`. Existing databases are reused unless
+explicitly rebuilt.
 
 ---
 

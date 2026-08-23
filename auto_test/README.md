@@ -14,7 +14,7 @@ synopsis.
 |---|---|
 | `configs.sh` | Shared DuckDB, corpus, timing, and PGPlan defaults |
 | `run_all.sh` | Build/data orchestration followed by corpus-wide DuckDB/PGPlan/OuterYan comparison |
-| `pgplan/` | PostgreSQL 16.2 setup, logical-tree capture/import, three-way PGPlan experiment, and documentation |
+| `pgplan/` | PostgreSQL 16.2 setup, cached logical-tree capture/import, comparison experiment, and documentation |
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
 | `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
@@ -49,21 +49,25 @@ corresponding environment values.
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
-| `RUN_PGPLAN` | `1` | Run the three-way PGPlan comparison for the selected corpus |
+| `RUN_PGPLAN` | `1` | Run the PGPlan comparison workflow for the selected corpus |
 | `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
 | `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
 | `PGPLAN_INSTALL_DIR` | `postgres/postgresql` | Repo-local PostgreSQL installation prefix used by `source` mode |
 | `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
-| `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive fresh PGPlan artifacts |
+| `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive validated cached or freshly captured PGPlan artifacts |
 | `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
+| `PGPLAN_PLAN_CACHE` | `auto_test/pgplan/plans` | Persistent validated typed-plan cache; override with `--plan-cache` |
+| `PGPLAN_COMPARISON_MODE` | `both` | `both`, `pgplan-only` (`--skip1`), or `none` (`--performance-only`) |
 | `PGPLAN_RUNS` | `OY_RUNS` (`3`) | Positive odd TM measured-run count after one warm-up; T1 always has one warm-up plus one measured run |
-| `PGPLAN_CORRECTNESS_MODE` | `target` | `target` compares complete target-data results; `bounded` is an explicit quick diagnostic |
+| `PGPLAN_CORRECTNESS_MODE` | `target` | `target` compares complete target results; `bounded` is a diagnostic; `reuse` requires a sealed prior target receipt |
+| `PGPLAN_CORRECTNESS_FROM` | empty | Prior corpus root used by correctness-only `reuse` mode |
+| `PGPLAN_REUSE_FROM` | empty | Prior corpus root used to reuse both PGPlan artifacts and sealed correctness receipts |
 | `PGPLAN_CORRECTNESS_GRAPH_ROWS` | `500` | Bounded-mode deterministic graph prefix |
 | `PGPLAN_CORRECTNESS_JOB_ROWS` | `1000` | Bounded-mode deterministic JOB prefix |
 | `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS` | `2000000` | Bounded-mode builder preflight result cap |
 | `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS` | `30` | Bounded-mode builder preflight timeout |
 | `PGPLAN_CAPTURE_TIMEOUT_SECS` | `300` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
-| `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and correctness post-processing step during the three-way experiment |
+| `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and requested correctness post-processing step |
 | `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
 | `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
 
@@ -665,6 +669,15 @@ SET disabled_optimizers TO 'outer_yan';
 # OuterYan for every query in auto_test/outerjoin_query.
 bash auto_test/run_all.sh
 
+# Check only (a) Original == PGPlan; OuterYan correctness is skipped, while
+# Original/PGPlan/OuterYan EXPLAIN and performance remain unchanged.
+bash auto_test/run_all.sh --skip1
+
+# Skip both correctness comparisons for a manual performance-only rerun.
+# Cached PGPlan artifacts are reused; all EXPLAIN, verification, TM, and T1
+# performance work still runs.
+bash auto_test/run_all.sh --performance-only
+
 # Optionally use the pinned postgres:16.2 image instead of the default
 # repo-local source build.
 PGPLAN_SETUP=docker bash auto_test/run_all.sh
@@ -680,6 +693,13 @@ bash auto_test/run_all.sh
 # independent minimal plan-selection data. Run only the TPC-H family.
 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
 
+# Performance rerun: reuse each query's PGPlan artifact and sealed target-data
+# correctness receipt. PostgreSQL setup/capture and result comparison are
+# skipped; Native, PGPlan, and OuterYan EXPLAIN/TM/T1 tests are otherwise the
+# same and are written to a new self-contained result directory.
+bash auto_test/run_all.sh \
+  --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
+
 # Keep the historical DuckDB-vs-OuterYan corpus workflow without PGPlan
 RUN_PGPLAN=0 bash auto_test/run_all.sh
 
@@ -692,11 +712,13 @@ RUN_PGPLAN=0 OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default three-way stage walks all 206 SQL files under `outerjoin_query`:
-7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It captures a fresh
-PostgreSQL artifact for each query, executes the same bare query once as native
-DuckDB, PGPlan, and normal OuterYan on the target DuckDB database, compares all
-three complete result multisets, and only then records target-data timings.
+The default comparison stage walks all 206 SQL files under `outerjoin_query`:
+7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It first checks the persistent
+typed-plan cache under `auto_test/pgplan/plans`, capturing a PostgreSQL artifact
+only for an absent or stale entry. It executes the same bare query once as
+Original DuckDB, PGPlan, and normal OuterYan on the target DuckDB database,
+checks Original against each candidate, and only then records target-data
+timings.
 PostgreSQL is a planning oracle only: it receives plain `EXPLAIN`,
 never `EXPLAIN ANALYZE` and never a result-producing execution.
 `--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
@@ -708,9 +730,36 @@ so a successful run means every selected query completed correctness and both
 timing suites. For a quicker diagnostic without a target-scale correctness
 claim, set `PGPLAN_CORRECTNESS_MODE=bounded`.
 
-This stage is a three-way experiment even though PostgreSQL artifact capture
-messages use the `[pgplan]` prefix. Each successful query writes its Native,
-PGPlan, and OuterYan TM medians under `runs/<family>/<query>/timing/summary.tsv`
+Override the plan cache with `PGPLAN_PLAN_CACHE` or `--plan-cache`. A cached
+entry must match the exact canonical query hash, artifact SHA-256, PostgreSQL
+version/settings, family schema/data identity, bounded planning-sample
+fingerprint, statistics epoch, and typed binary tree. Otherwise every selected
+query in that family is recaptured under one coherent `ANALYZE` epoch and
+replaced atomically. `--skip1` selects only Original-versus-PGPlan correctness.
+`--performance-only` (aliases: `--skip2`, `--performance_only`, and the accepted
+misspelling `--performace_only`) skips both result comparisons but retains all
+plan verification and performance phases. Its correctness status is honestly
+recorded as `NOT_RUN`.
+
+For repeat performance measurements, `--reuse-from PRIOR_CORPUS` verifies and
+reuses the prior target-scale correctness receipt and PGPlan artifact for the
+same family/query. It skips PostgreSQL setup, sampled-schema preparation, plan
+capture, and new CSV export/sort/comparison. Reuse is cryptographically bound
+to the exact query bytes, PostgreSQL artifact, DuckDB binary/version, and
+target database. A default complete target-correctness run and a sealed reuse
+run fingerprint each selected target database once. `skip1` and
+performance-only avoid that full-file read because they cannot create or
+consume a complete correctness receipt. Every mode still rejects a non-empty
+or unsafe DuckDB `.wal`; a missing receipt/artifact, hash mismatch, or path
+escaping the prior root is a per-query failure with no fresh-correctness or
+native-plan fallback. Remaining queries continue.
+`PGPLAN_CORRECTNESS_MODE=reuse` plus `PGPLAN_CORRECTNESS_FROM` remains the
+granular option when only correctness should be reused and fresh PostgreSQL
+plans are still desired.
+
+This is one comparison workflow with three timed configurations: Original,
+PGPlan, and OuterYan. Each successful query writes its TM medians under
+`runs/<family>/<query>/timing/summary.tsv`
 and independent single-thread medians under `timing/t1_summary.tsv`.
 At corpus completion the runner also writes `comparison.tsv` and
 `comparison.csv` with one row for every selected query, a human-readable
@@ -724,21 +773,23 @@ CSV, so the screen-readable and machine-readable reports stay in parity.
 Timing and speedup fields are populated only for `PASS` rows.
 
 The comparison CSV/TSV starts with the exact `experiment_onoff.sh` CSV header,
-in its original order and with unchanged meanings. PGPlan artifact,
-verification, TM/T1, and pairwise-speedup columns are appended; corpus status
-and provenance columns use a `three_way_` prefix. The text report keeps the
-original full-width separator and two-line per-query block, with PGPlan content
-added to those lines.
+in its original order and with unchanged meanings. Appended fields are all
+identified by `pgplan` in their names and cover PGPlan verification/timing,
+comparison mode/status, and correctness provenance. Raw plan signatures remain in trace artifacts;
+they are not printed in the human log or copied into the CSV.
 
-Each successful block retains the original Native/OuterYan `TM:off/on` and
-`T1:off/on` fields. Appended `tm_pgplan` and `t1_pgplan` columns add the third
-target-data median and both PGPlan pairwise speedups. Each ratio is baseline
-time divided by candidate time, so a value greater than one favors the named
-candidate. The three-way workflow records independent timing batches for all
-three configurations: TM uses one warm-up plus `PGPLAN_RUNS` measured runs,
-while T1 uses one warm-up plus exactly one measured run. It does not yet
-collect the legacy phase profile or semi-join kernel trace, so those fields
-remain explicitly not collected. Its
+The provenance columns distinguish `FRESH`, `PARTIAL`, `NOT_RUN`, and `REUSED`
+correctness. Reused rows retain their source/receipt hashes; legacy artifacts
+leave unavailable additive fields empty instead of guessing.
+
+Each successful block orders TM and T1 as Original, PGPlan, OuterYan, then
+prints only `Original/PGPlan` and `Original/OuterYan` speedups. The original
+CSV `off/on` columns retain their Original/OuterYan meanings, while
+`tm_pgplan` and `t1_pgplan` add PGPlan. TM uses one warm-up plus
+`PGPLAN_RUNS` measurements; T1 uses one warm-up plus one measurement. The
+workflow does not collect the legacy kernel-trace or phase-profile batches, so
+their empty/NA compatibility columns remain in the original CSV prefix but the
+human log no longer prints unhelpful placeholders. Its
 original `rows` column is the complete target-scale result count by default. These
 reports are generated before a failure status is returned, so a mixed run
 remains inspectable without rerunning completed queries.
@@ -762,8 +813,8 @@ DuckDB target data:
    TPC-DS, and JOB schemas capped by `PGPLAN_SAMPLE_ROWS` (1000 rows per table
    by default), followed by `ANALYZE`. These rows select the typed logical tree
    through plain `EXPLAIN` only.
-2. The configured target DuckDB files are used for complete three-way multiset
-   correctness, all three EXPLAIN plans, PGPlan semantic-signature verification,
+2. The configured target DuckDB files are used for both requested multiset
+comparisons, all three EXPLAIN plans, PGPlan semantic-signature verification,
    and release timing. Correctness emits complete CSV and sorts it externally.
    Timing uses `.mode trash`, which still executes and fully drains the bare
    query while excluding CLI CSV serialization and filesystem output from the
@@ -772,6 +823,12 @@ DuckDB target data:
 `PGPLAN_CORRECTNESS_MODE=bounded` is an explicit diagnostic alternative. It
 builds deterministic small correctness databases and records their
 fingerprints, but its PASS is scoped only to that bounded data.
+
+Reuse does not make a new correctness claim: a reuse-mode PASS cites a sealed
+prior target-mode equality check whose fingerprints match the current inputs,
+then reruns all three plan verification and timing configurations. The new
+result copies the selected PGPlan artifact and receipt provenance so it does
+not depend on mutable files in the prior result directory after completion.
 
 Accordingly, a default PASS supports exact target-data Native/PGPlan/OuterYan
 result equality, PGPlan tree adherence, and target-data performance. It still

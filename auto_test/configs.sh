@@ -153,91 +153,194 @@ export PGPLAN_PORT="${PGPLAN_PORT:-${PG_REPLAY_PORT:-${PGPLAN_CONTAINER_PORT:-${
 export PGPLAN_DATABASE="${PGPLAN_DATABASE:-${PG_REPLAY_DATABASE:-${PGPLAN_CONTAINER_DATABASE:-${PG_REPLAY_CONTAINER_DATABASE:-duckyan_tpch}}}}"
 export PGPLAN_USER="${PGPLAN_USER:-${PG_REPLAY_USER:-${PGPLAN_CONTAINER_USER:-${PG_REPLAY_CONTAINER_USER:-postgres}}}}"
 export PGPLAN_PASSWORD_FILE="${PGPLAN_PASSWORD_FILE:-$PGPLAN_INSTALL_DIR/.pgplan-password}"
-_oy_pgplan_generate_password=0
-_oy_pgplan_managed_password=""
+_oy_pgplan_general_password="${PGPLAN_PASSWORD:-${PG_REPLAY_PASSWORD:-}}"
+_oy_pgplan_container_override="${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-}}"
+_OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE=0
+_OY_PGPLAN_CONTAINER_PASSWORD_FROM_FILE=0
+
+# Reading an already-created private credential is side-effect free. Creating
+# it, repairing its mode, and creating its parent belong to setup_pg.sh: a run
+# whose plans all hit the persistent cache must not need a writable PostgreSQL
+# installation path merely because it sources this configuration file.
+_pgplan_read_existing_managed_password() {
+    local candidate mode
+    [ -f "$PGPLAN_PASSWORD_FILE" ] && [ ! -L "$PGPLAN_PASSWORD_FILE" ] && \
+        [ -O "$PGPLAN_PASSWORD_FILE" ] && [ -r "$PGPLAN_PASSWORD_FILE" ] || return 1
+    if mode="$(stat -c '%a' "$PGPLAN_PASSWORD_FILE" 2>/dev/null)"; then
+        :
+    elif mode="$(stat -f '%Lp' "$PGPLAN_PASSWORD_FILE" 2>/dev/null)"; then
+        :
+    else
+        return 1
+    fi
+    case "$mode" in 400|600) ;; *) return 1 ;; esac
+    candidate="$(sed -n '1p' "$PGPLAN_PASSWORD_FILE")" || return 1
+    [[ "$candidate" =~ ^[0-9a-f]{64}$ ]] || return 1
+    printf '%s' "$candidate"
+}
+
+_oy_pgplan_file_password=""
 case "$PGPLAN_SETUP" in
     source)
-        # Empty overrides are equivalent to absent overrides. In particular,
-        # PGPLAN_PASSWORD="" must not disable private-secret generation.
-        _oy_pgplan_managed_password="${PGPLAN_PASSWORD:-${PG_REPLAY_PASSWORD:-}}"
+        if [ -z "$_oy_pgplan_general_password" ] && \
+                _oy_pgplan_file_password="$(_pgplan_read_existing_managed_password)"; then
+            _oy_pgplan_general_password="$_oy_pgplan_file_password"
+            _OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE=1
+        fi
         ;;
     docker)
-        _oy_pgplan_managed_password="${PGPLAN_PASSWORD:-${PG_REPLAY_PASSWORD:-${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-}}}}"
+        if [ -z "$_oy_pgplan_general_password" ] && \
+                [ -n "$_oy_pgplan_container_override" ]; then
+            _oy_pgplan_general_password="$_oy_pgplan_container_override"
+        fi
+        if [ -z "$_oy_pgplan_general_password" ] && \
+                _oy_pgplan_file_password="$(_pgplan_read_existing_managed_password)"; then
+            _oy_pgplan_general_password="$_oy_pgplan_file_password"
+            _OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE=1
+        fi
         ;;
 esac
-if { [ "$PGPLAN_SETUP" = "source" ] || [ "$PGPLAN_SETUP" = "docker" ]; } && \
-        [ -z "$_oy_pgplan_managed_password" ]; then
-    _oy_pgplan_generate_password=1
-fi
-if [ "$_oy_pgplan_generate_password" = "1" ]; then
-    # A well-known password would leave a loopback-only cluster exposed to
-    # other accounts on a shared experiment server. Generate one private
-    # per-installation secret and reuse it across normal run_all invocations.
-    mkdir -p "$PGPLAN_INSTALL_DIR"
-    if [ ! -e "$PGPLAN_PASSWORD_FILE" ]; then
-        _oy_pgplan_generated_password="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-        (umask 077; set -o noclobber; printf '%s\n' "$_oy_pgplan_generated_password" \
-            > "$PGPLAN_PASSWORD_FILE") 2>/dev/null || true
-        unset _oy_pgplan_generated_password
-    fi
-    if [ ! -f "$PGPLAN_PASSWORD_FILE" ] || [ ! -O "$PGPLAN_PASSWORD_FILE" ]; then
-        echo "ERROR: PGPLAN_PASSWORD_FILE must be a regular file owned by the current user: $PGPLAN_PASSWORD_FILE" >&2
-        return 1 2>/dev/null || exit 1
-    fi
-    chmod 600 "$PGPLAN_PASSWORD_FILE"
-    PGPLAN_PASSWORD="$(sed -n '1p' "$PGPLAN_PASSWORD_FILE")"
-    if [[ ! "$PGPLAN_PASSWORD" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "ERROR: generated PGPLAN_PASSWORD_FILE is malformed: $PGPLAN_PASSWORD_FILE" >&2
-        return 1 2>/dev/null || exit 1
-    fi
-    export PGPLAN_PASSWORD
-else
-    case "$PGPLAN_SETUP" in
-        source|docker)
-            # Managed modes never use a well-known fallback. This value is
-            # non-empty by construction unless password resolution regresses.
-            PGPLAN_PASSWORD="$_oy_pgplan_managed_password"
-            if [ -z "$PGPLAN_PASSWORD" ]; then
-                echo "ERROR: managed PGPlan setup requires a non-empty generated or explicit password" >&2
-                return 1 2>/dev/null || exit 1
-            fi
-            export PGPLAN_PASSWORD
+
+case "$PGPLAN_SETUP" in
+    source|docker)
+        PGPLAN_PASSWORD="$_oy_pgplan_general_password"
+        PG_REPLAY_PASSWORD="$PGPLAN_PASSWORD"
+        PGPLAN_CONTAINER_PASSWORD="$_oy_pgplan_container_override"
+        if [ -z "$PGPLAN_CONTAINER_PASSWORD" ]; then
+            PGPLAN_CONTAINER_PASSWORD="$PGPLAN_PASSWORD"
+            _OY_PGPLAN_CONTAINER_PASSWORD_FROM_FILE="$_OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE"
+        fi
+        PG_REPLAY_CONTAINER_PASSWORD="$PGPLAN_CONTAINER_PASSWORD"
+        export PGPLAN_PASSWORD PG_REPLAY_PASSWORD
+        export PGPLAN_CONTAINER_PASSWORD PG_REPLAY_CONTAINER_PASSWORD
+        ;;
+    *)
+        # External mode retains its historical configuration aliases and
+        # fallback; configs.sh does not apply it to the caller's connection.
+        PGPLAN_PASSWORD="${PGPLAN_PASSWORD:-${PG_REPLAY_PASSWORD:-${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-duckyan}}}}"
+        PG_REPLAY_PASSWORD="$PGPLAN_PASSWORD"
+        PGPLAN_CONTAINER_PASSWORD="${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-$PGPLAN_PASSWORD}}"
+        PG_REPLAY_CONTAINER_PASSWORD="$PGPLAN_CONTAINER_PASSWORD"
+        export PGPLAN_PASSWORD PG_REPLAY_PASSWORD
+        export PGPLAN_CONTAINER_PASSWORD PG_REPLAY_CONTAINER_PASSWORD
+        ;;
+esac
+unset _oy_pgplan_general_password _oy_pgplan_container_override _oy_pgplan_file_password
+
+# Materialize the managed credential only from an explicit setup path. The
+# function is intentionally defined by configs.sh so setup_pg.sh and the
+# standalone local-container loader share the same secure implementation.
+pgplan_ensure_managed_password() {
+    local mode="${1:-$PGPLAN_SETUP}" candidate from_file generated
+    case "$mode" in
+        source)
+            candidate="${PGPLAN_PASSWORD:-}"
+            from_file="${_OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE:-0}"
             ;;
-        *)
-            # External mode retains its historical configuration aliases and
-            # fallback; configs.sh does not apply it to the caller's connection.
-            export PGPLAN_PASSWORD="${PGPLAN_PASSWORD:-${PG_REPLAY_PASSWORD:-${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-duckyan}}}}"
+        docker)
+            candidate="${PGPLAN_CONTAINER_PASSWORD:-${PGPLAN_PASSWORD:-}}"
+            from_file="${_OY_PGPLAN_CONTAINER_PASSWORD_FROM_FILE:-0}"
+            ;;
+        *) return 0 ;;
+    esac
+
+    if [ -z "$candidate" ]; then
+        mkdir -p "$PGPLAN_INSTALL_DIR" || {
+            echo "ERROR: could not create managed PostgreSQL credential directory: $PGPLAN_INSTALL_DIR" >&2
+            return 1
+        }
+        if [ ! -e "$PGPLAN_PASSWORD_FILE" ] && [ ! -L "$PGPLAN_PASSWORD_FILE" ]; then
+            generated="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" || return 1
+            [[ "$generated" =~ ^[0-9a-f]{64}$ ]] || {
+                echo "ERROR: could not generate a private PostgreSQL password" >&2
+                return 1
+            }
+            (umask 077; set -o noclobber; printf '%s\n' "$generated" \
+                > "$PGPLAN_PASSWORD_FILE") 2>/dev/null || true
+        fi
+        from_file=1
+    fi
+
+    if [ "$from_file" = "1" ]; then
+        if [ ! -f "$PGPLAN_PASSWORD_FILE" ] || [ -L "$PGPLAN_PASSWORD_FILE" ] || \
+                [ ! -O "$PGPLAN_PASSWORD_FILE" ]; then
+            echo "ERROR: PGPLAN_PASSWORD_FILE must be a regular, non-symlink file owned by the current user: $PGPLAN_PASSWORD_FILE" >&2
+            return 1
+        fi
+        chmod 600 "$PGPLAN_PASSWORD_FILE" || return 1
+        candidate="$(sed -n '1p' "$PGPLAN_PASSWORD_FILE")" || return 1
+        if [[ ! "$candidate" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: generated PGPLAN_PASSWORD_FILE is malformed: $PGPLAN_PASSWORD_FILE" >&2
+            return 1
+        fi
+    fi
+    [ -n "$candidate" ] || {
+        echo "ERROR: managed PostgreSQL setup requires a nonempty password" >&2
+        return 1
+    }
+    case "$candidate" in
+        *$'\n'*|*$'\r'*)
+            echo "ERROR: managed PostgreSQL password must not contain a newline" >&2
+            return 1
             ;;
     esac
-fi
-unset _oy_pgplan_generate_password _oy_pgplan_managed_password
+
+    case "$mode" in
+        source)
+            PGPLAN_PASSWORD="$candidate"
+            PG_REPLAY_PASSWORD="$candidate"
+            if [ -z "${PGPLAN_CONTAINER_PASSWORD:-}" ]; then
+                PGPLAN_CONTAINER_PASSWORD="$candidate"
+                PG_REPLAY_CONTAINER_PASSWORD="$candidate"
+            fi
+            _OY_PGPLAN_GENERAL_PASSWORD_FROM_FILE="$from_file"
+            ;;
+        docker)
+            PGPLAN_CONTAINER_PASSWORD="$candidate"
+            PG_REPLAY_CONTAINER_PASSWORD="$candidate"
+            if [ -z "${PGPLAN_PASSWORD:-}" ]; then
+                PGPLAN_PASSWORD="$candidate"
+                PG_REPLAY_PASSWORD="$candidate"
+            fi
+            _OY_PGPLAN_CONTAINER_PASSWORD_FROM_FILE="$from_file"
+            ;;
+    esac
+    PGPASSWORD="$candidate"
+    export PGPLAN_PASSWORD PG_REPLAY_PASSWORD
+    export PGPLAN_CONTAINER_PASSWORD PG_REPLAY_CONTAINER_PASSWORD PGPASSWORD
+}
 export PGPLAN_CONTAINER_NAME="${PGPLAN_CONTAINER_NAME:-${PG_REPLAY_CONTAINER_NAME:-duckyan-pg16-2}}"
 export PGPLAN_CONTAINER_IMAGE="${PGPLAN_CONTAINER_IMAGE:-${PG_REPLAY_CONTAINER_IMAGE:-postgres:$PGPLAN_VERSION}}"
 export PGPLAN_CONTAINER_PORT="${PGPLAN_CONTAINER_PORT:-${PG_REPLAY_CONTAINER_PORT:-$PGPLAN_PORT}}"
 export PGPLAN_CONTAINER_DATABASE="${PGPLAN_CONTAINER_DATABASE:-${PG_REPLAY_CONTAINER_DATABASE:-$PGPLAN_DATABASE}}"
 export PGPLAN_CONTAINER_USER="${PGPLAN_CONTAINER_USER:-${PG_REPLAY_CONTAINER_USER:-$PGPLAN_USER}}"
-export PGPLAN_CONTAINER_PASSWORD="${PGPLAN_CONTAINER_PASSWORD:-${PG_REPLAY_CONTAINER_PASSWORD:-$PGPLAN_PASSWORD}}"
 export PG_REPLAY_HOST="$PGPLAN_HOST"
 export PG_REPLAY_PORT="$PGPLAN_PORT"
 export PG_REPLAY_DATABASE="$PGPLAN_DATABASE"
 export PG_REPLAY_USER="$PGPLAN_USER"
-export PG_REPLAY_PASSWORD="$PGPLAN_PASSWORD"
 export PG_REPLAY_CONTAINER_NAME="$PGPLAN_CONTAINER_NAME"
 export PG_REPLAY_CONTAINER_IMAGE="$PGPLAN_CONTAINER_IMAGE"
 export PG_REPLAY_CONTAINER_PORT="$PGPLAN_CONTAINER_PORT"
 export PG_REPLAY_CONTAINER_DATABASE="$PGPLAN_CONTAINER_DATABASE"
 export PG_REPLAY_CONTAINER_USER="$PGPLAN_CONTAINER_USER"
-export PG_REPLAY_CONTAINER_PASSWORD="$PGPLAN_CONTAINER_PASSWORD"
 
 export PG_DSN="${PG_DSN:-host=$PGPLAN_HOST port=$PGPLAN_PORT dbname=$PGPLAN_DATABASE user=$PGPLAN_USER}"
 case "$PGPLAN_SETUP" in
     source)
         # The managed endpoint and role always use the per-installation secret;
         # do not let an unrelated ambient libpq password select another value.
-        export PGPASSWORD="$PGPLAN_PASSWORD"
+        if [ -n "$PGPLAN_PASSWORD" ]; then
+            export PGPASSWORD="$PGPLAN_PASSWORD"
+        else
+            unset PGPASSWORD
+        fi
         ;;
     docker)
-        export PGPASSWORD="$PGPLAN_CONTAINER_PASSWORD"
+        if [ -n "$PGPLAN_CONTAINER_PASSWORD" ]; then
+            export PGPASSWORD="$PGPLAN_CONTAINER_PASSWORD"
+        else
+            unset PGPASSWORD
+        fi
         ;;
 esac
 
@@ -260,18 +363,48 @@ export PSQL_BIN
 # families use isolated, row-capped schemas derived from their DuckDB schemas.
 export PGPLAN_CORPUS="${PGPLAN_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_query}"
 export PGPLAN_SAMPLE_ROWS="${PGPLAN_SAMPLE_ROWS:-1000}"
-# Exact result comparison defaults to the same target DuckDB database used for
-# EXPLAIN/signature validation and timing. Set this to `bounded` explicitly to
-# build deterministic small correctness databases for a quicker diagnostic
-# run; bounded mode is not the default correctness claim.
-export PGPLAN_CORRECTNESS_MODE="${PGPLAN_CORRECTNESS_MODE:-${PG_REPLAY_CORRECTNESS_MODE:-target}}"
-case "$PGPLAN_CORRECTNESS_MODE" in
-    target|bounded) ;;
+# Normal runs retain validated PostgreSQL artifacts across result directories.
+# The cache key mirrors the corpus-relative query stem (family/name.pg.json).
+export PGPLAN_PLAN_CACHE="${PGPLAN_PLAN_CACHE:-$OY_REPO_ROOT/auto_test/pgplan/plans}"
+# `both` checks Original against PGPlan and OuterYan. `pgplan-only` omits the
+# OuterYan result comparison; `none` performs plan verification and timing only.
+export PGPLAN_COMPARISON_MODE="${PGPLAN_COMPARISON_MODE:-both}"
+case "$PGPLAN_COMPARISON_MODE" in
+    both|pgplan-only|none) ;;
     *)
-        echo "ERROR: PGPLAN_CORRECTNESS_MODE must be target or bounded" >&2
+        echo "ERROR: PGPLAN_COMPARISON_MODE must be both, pgplan-only, or none" >&2
         return 1 2>/dev/null || exit 1
         ;;
 esac
+# Exact result comparison defaults to the same target DuckDB database used for
+# EXPLAIN/signature validation and timing. Set this to `bounded` explicitly to
+# build deterministic small correctness databases for a quicker diagnostic
+# run; bounded mode is not the default correctness claim. `reuse` skips a new
+# comparison only after experiment.sh validates a sealed target-scale receipt
+# from the matching per-query run below PGPLAN_CORRECTNESS_FROM.
+export PGPLAN_REUSE_FROM="${PGPLAN_REUSE_FROM:-}"
+export PGPLAN_CORRECTNESS_MODE="${PGPLAN_CORRECTNESS_MODE:-${PG_REPLAY_CORRECTNESS_MODE:-target}}"
+export PGPLAN_CORRECTNESS_FROM="${PGPLAN_CORRECTNESS_FROM:-${PG_REPLAY_CORRECTNESS_FROM:-}}"
+if [ -n "$PGPLAN_REUSE_FROM" ]; then
+    PGPLAN_CORRECTNESS_MODE="reuse"
+    PGPLAN_CORRECTNESS_FROM="$PGPLAN_REUSE_FROM"
+    export PGPLAN_CORRECTNESS_MODE PGPLAN_CORRECTNESS_FROM
+fi
+case "$PGPLAN_CORRECTNESS_MODE" in
+    target|bounded|reuse) ;;
+    *)
+        echo "ERROR: PGPLAN_CORRECTNESS_MODE must be target, bounded, or reuse" >&2
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
+# Corpus root from a previous target-mode run. It is required only in `reuse`
+# mode; corpus_experiment.sh resolves and validates each per-query directory
+# beneath <root>/runs/<family>/<query-label> without falling back to fresh
+# correctness when a receipt is missing or stale.
+if [ "$PGPLAN_CORRECTNESS_MODE" = "reuse" ] && [ -z "$PGPLAN_CORRECTNESS_FROM" ]; then
+    echo "ERROR: PGPLAN_CORRECTNESS_FROM is required when PGPLAN_CORRECTNESS_MODE=reuse" >&2
+    return 1 2>/dev/null || exit 1
+fi
 export PGPLAN_CORRECTNESS_GRAPH_ROWS="${PGPLAN_CORRECTNESS_GRAPH_ROWS:-500}"
 export PGPLAN_CORRECTNESS_JOB_ROWS="${PGPLAN_CORRECTNESS_JOB_ROWS:-1000}"
 export PGPLAN_CORRECTNESS_MAX_RESULT_ROWS="${PGPLAN_CORRECTNESS_MAX_RESULT_ROWS:-2000000}"
@@ -289,7 +422,10 @@ export PGPLAN_TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${PG_REPLAY_TIMEOUT_GRACE:-
 export PGPLAN_TMPDIR="${PGPLAN_TMPDIR:-${PG_REPLAY_TMPDIR:-$OY_TMPDIR}}"
 export PG_REPLAY_QUERY="$PGPLAN_QUERY"
 export PG_REPLAY_EXECUTION_DB="$PGPLAN_EXECUTION_DB"
+export PG_REPLAY_PLAN_CACHE="$PGPLAN_PLAN_CACHE"
+export PG_REPLAY_COMPARISON_MODE="$PGPLAN_COMPARISON_MODE"
 export PG_REPLAY_CORRECTNESS_MODE="$PGPLAN_CORRECTNESS_MODE"
+export PG_REPLAY_CORRECTNESS_FROM="$PGPLAN_CORRECTNESS_FROM"
 export PG_REPLAY_CORRECTNESS_GRAPH_ROWS="$PGPLAN_CORRECTNESS_GRAPH_ROWS"
 export PG_REPLAY_CORRECTNESS_JOB_ROWS="$PGPLAN_CORRECTNESS_JOB_ROWS"
 export PG_REPLAY_CORRECTNESS_MAX_RESULT_ROWS="$PGPLAN_CORRECTNESS_MAX_RESULT_ROWS"
@@ -322,6 +458,12 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  PGPLAN_CORPUS     = $PGPLAN_CORPUS"
         echo "  PGPLAN_SAMPLE_ROWS = $PGPLAN_SAMPLE_ROWS"
         echo "  PGPLAN_CORRECTNESS_MODE = $PGPLAN_CORRECTNESS_MODE"
+        if [ "$PGPLAN_CORRECTNESS_MODE" = "reuse" ]; then
+            echo "  PGPLAN_CORRECTNESS_FROM = $PGPLAN_CORRECTNESS_FROM"
+        fi
+        if [ -n "$PGPLAN_REUSE_FROM" ]; then
+            echo "  PGPLAN_REUSE_FROM = $PGPLAN_REUSE_FROM (plans + correctness)"
+        fi
         echo "  PGPLAN_CORRECTNESS_ROWS = graph:$PGPLAN_CORRECTNESS_GRAPH_ROWS job:$PGPLAN_CORRECTNESS_JOB_ROWS"
         echo "  PGPLAN_CORRECTNESS_MAX_ROWS = $PGPLAN_CORRECTNESS_MAX_RESULT_ROWS"
         echo "  PGPLAN_CAPTURE_TIMEOUT = ${PGPLAN_CAPTURE_TIMEOUT_SECS}s"

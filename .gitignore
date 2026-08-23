@@ -409,5 +409,6 @@ run_all_chain.log
 watchdog.log
 test/sql/optimizer/outer_yan/data/*.csv
 /auto_test/results/
+/auto_test/pgplan/plans/
 /postgres/
 OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md

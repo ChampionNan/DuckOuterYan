@@ -126,6 +126,12 @@ class SetupPostgresTest(unittest.TestCase):
             self.assertNotIn(" trust", hba)
             self.assertIn("peer", hba)
             self.assertIn("scram-sha-256", hba)
+            password_file = root / "install/.pgplan-password"
+            self.assertRegex(
+                password_file.read_text(encoding="utf-8").strip(),
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertEqual(password_file.stat().st_mode & 0o777, 0o600)
 
     def test_new_source_cluster_uses_peer_and_scram_from_initdb(self):
         with tempfile.TemporaryDirectory() as temporary:

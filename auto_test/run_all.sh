@@ -10,7 +10,7 @@
 #   2. Build the databases required by the selected benchmark strata
 #   3. Regenerate the benchmark and provenance manifests
 #   4. Prepare PostgreSQL plan-selection data
-#   5. Compare DuckDB/PGPlan/OuterYan for every selected corpus query
+#   5. Run the selected Original/PGPlan/OuterYan comparisons for the corpus
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
@@ -29,7 +29,16 @@
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
 #   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
-#   PGPLAN_CORRECTNESS_MODE  target (default, complete target results) | bounded
+#   PGPLAN_PLAN_CACHE  Persistent typed-plan cache (default auto_test/pgplan/plans)
+#   PGPLAN_COMPARISON_MODE  both (default) | pgplan-only | none
+#   --comparison-mode MODE  CLI equivalent
+#   --skip1          Alias for --comparison-mode pgplan-only
+#   --skip2, --performance-only, --performance_only, --performace_only
+#                    Aliases for --comparison-mode none
+#   PGPLAN_CORRECTNESS_MODE  target (default) | bounded | reuse
+#   PGPLAN_CORRECTNESS_FROM  Prior target-mode corpus root required by reuse
+#   PGPLAN_REUSE_FROM  One-parameter prior corpus for plan+correctness reuse
+#   --reuse-from DIR  CLI equivalent; automatically sets all three SKIP_* flags
 #   PGPLAN_CORRECTNESS_GRAPH_ROWS  Bounded-mode graph prefix (default 500)
 #   PGPLAN_CORRECTNESS_JOB_ROWS  Bounded-mode JOB prefix (default 1000)
 #   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Bounded-mode result cap (default 2000000)
@@ -82,6 +91,28 @@ PGPLAN_RESULT_DIRS=()
 RUN_STATUS=0
 RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-1}}"
 CUSTOM_CORPUS="$CALLER_OY_CORPUS"
+REUSE_SHORTCUT_FROM="${PGPLAN_REUSE_FROM:-}"
+argument_index=0
+while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
+    if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--reuse-from" ]; then
+        [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ] || \
+            err "--reuse-from requires a prior corpus directory"
+        REUSE_SHORTCUT_FROM="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+        argument_index=$((argument_index + 2))
+    else
+        argument_index=$((argument_index + 1))
+    fi
+done
+if [ -n "$REUSE_SHORTCUT_FROM" ]; then
+    for skip_name in SKIP_BUILD SKIP_DATA SKIP_QUERY_GEN; do
+        if [ "${!skip_name+x}" = "x" ] && [ "${!skip_name}" != "1" ]; then
+            err "$skip_name=${!skip_name} conflicts with --reuse-from; reuse requires the existing binary, databases, and query bytes"
+        fi
+        printf -v "$skip_name" '%s' 1
+        export "$skip_name"
+    done
+    log "Reuse mode: preserving existing DuckDB binary, databases, and queries from the sealed run inputs"
+fi
 
 case "$RUN_PGPLAN" in
     0|1) ;;
@@ -126,30 +157,94 @@ else
     log "Step 3/5: Skipping benchmark generation (SKIP_QUERY_GEN=1)"
 fi
 
-# --- Step 4/5: PostgreSQL-backed three-way corpus ---------------------------
+# --- Step 4/5: PostgreSQL-backed comparison corpus ---------------------------
 run_pgplan_corpus() {
     local corpus out_dir corpus_status=0 argument_index=0
+    local correctness_mode correctness_from reuse_from comparison_mode plan_cache
     local -a corpus_command
     corpus="${PGPLAN_CORPUS:-${CUSTOM_CORPUS:-$SCRIPT_DIR/outerjoin_query}}"
     out_dir="${PGPLAN_OUT:-$SCRIPT_DIR/results/pgplan_corpus_${RUN_TS}}"
+    correctness_mode="${PGPLAN_CORRECTNESS_MODE:-target}"
+    correctness_from="${PGPLAN_CORRECTNESS_FROM:-}"
+    reuse_from="${PGPLAN_REUSE_FROM:-}"
+    comparison_mode="${PGPLAN_COMPARISON_MODE:-both}"
+    plan_cache="${PGPLAN_PLAN_CACHE:-$SCRIPT_DIR/pgplan/plans}"
     [ -x "$SCRIPT_DIR/pgplan/corpus_experiment.sh" ] || \
         err "PGPlan corpus helper not found: $SCRIPT_DIR/pgplan/corpus_experiment.sh"
 
     # Forwarded corpus arguments follow the defaults below, so their last
     # --out value wins. Track that same location for the final handoff.
     while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
-        if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--out" ] && \
-                [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-            out_dir="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-            argument_index=$((argument_index + 2))
-        else
-            argument_index=$((argument_index + 1))
-        fi
+        case "${EXPERIMENT_ARGS[$argument_index]}" in
+            --out)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    out_dir="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            --correctness-mode)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    correctness_mode="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            --correctness-from)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    correctness_from="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            --reuse-from)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    reuse_from="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    correctness_mode="reuse"
+                    correctness_from="$reuse_from"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            --comparison-mode)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    comparison_mode="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            --skip1)
+                comparison_mode="pgplan-only"
+                argument_index=$((argument_index + 1))
+                ;;
+            --skip2|--performance-only|--performance_only|--performace_only)
+                comparison_mode="none"
+                argument_index=$((argument_index + 1))
+                ;;
+            --plan-cache)
+                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
+                    plan_cache="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+                    argument_index=$((argument_index + 2))
+                else
+                    argument_index=$((argument_index + 1))
+                fi
+                ;;
+            *) argument_index=$((argument_index + 1)) ;;
+        esac
     done
+    if [ -n "$reuse_from" ]; then
+        correctness_mode="reuse"
+        correctness_from="$reuse_from"
+    fi
 
     # Record the handoff location before running the corpus. The corpus returns
     # nonzero when any query fails, but its status and aggregate reports are
-    # still the useful output of the completed three-way experiment.
+    # still the useful output of the completed comparison experiment.
     PGPLAN_RESULT_DIRS+=("$out_dir")
 
     corpus_command=(
@@ -159,18 +254,43 @@ run_pgplan_corpus() {
         --pg-dsn "$PG_DSN"
         --rows "${PGPLAN_SAMPLE_ROWS:-1000}"
         --threads "${PGPLAN_THREADS:-${OY_THREADS:-1}}"
+        --correctness-mode "${PGPLAN_CORRECTNESS_MODE:-target}"
+        --comparison-mode "${PGPLAN_COMPARISON_MODE:-both}"
+        --plan-cache "${PGPLAN_PLAN_CACHE:-$SCRIPT_DIR/pgplan/plans}"
         --out "$out_dir"
     )
+    if [ -n "${PGPLAN_CORRECTNESS_FROM:-}" ]; then
+        corpus_command+=(--correctness-from "$PGPLAN_CORRECTNESS_FROM")
+    fi
+    if [ -n "${PGPLAN_REUSE_FROM:-}" ]; then
+        corpus_command+=(--reuse-from "$PGPLAN_REUSE_FROM")
+    fi
     if [ "${#EXPERIMENT_ARGS[@]}" -gt 0 ]; then
         corpus_command+=("${EXPERIMENT_ARGS[@]}")
     fi
 
-    if [ "${PGPLAN_CORRECTNESS_MODE:-target}" = "bounded" ]; then
-        log "Step 4/5: Preparing PostgreSQL 16.2 plan data and bounded correctness databases"
+    if [ "$comparison_mode" = "none" ]; then
+        log "Step 4/5: Checking the persistent PGPlan cache and preparing cache misses (correctness disabled)"
+    elif [ "$comparison_mode" = "pgplan-only" ]; then
+        log "Step 4/5: Checking the persistent PGPlan cache and preparing Original-versus-PGPlan correctness"
     else
-        log "Step 4/5: Preparing PostgreSQL 16.2 plan data (target-scale exact correctness)"
+        case "$correctness_mode" in
+            bounded)
+                log "Step 4/5: Checking the persistent PGPlan cache and preparing bounded correctness databases"
+                ;;
+            reuse)
+                if [ -n "$reuse_from" ]; then
+                    log "Step 4/5: Reusing PGPlan artifacts and sealed target correctness from $reuse_from (PostgreSQL setup skipped)"
+                else
+                    log "Step 4/5: Checking the persistent PGPlan cache (reusing sealed target correctness from $correctness_from)"
+                fi
+                ;;
+            *)
+                log "Step 4/5: Checking the persistent PGPlan cache and preparing exact target-data comparisons"
+                ;;
+        esac
     fi
-    log "Step 5/5: Comparing DuckDB, PGPlan, and OuterYan across $corpus"
+    log "Step 5/5: Comparison mode=$comparison_mode across $corpus (plan cache: $plan_cache)"
     if "${corpus_command[@]}" 2>&1 | tee -a "$RUN_LOG"; then
         corpus_status=0
     else
@@ -211,7 +331,7 @@ TOTAL=$((SECONDS - START_TIME))
 if [ "$RUN_STATUS" -eq 0 ]; then
     log "All done! Total time: $(elapsed $TOTAL)"
 else
-    log "Three-way corpus finished with failures (exit status $RUN_STATUS; total time: $(elapsed $TOTAL))"
+    log "Comparison corpus finished with failures (exit status $RUN_STATUS; total time: $(elapsed $TOTAL))"
 fi
 echo "Run log: $RUN_LOG"
 if [ "${#RESULT_TXTS[@]}" -gt 0 ]; then
@@ -227,14 +347,14 @@ fi
 if [ "$RUN_PGPLAN" = "1" ]; then
     if [ "${#PGPLAN_RESULT_DIRS[@]}" -gt 0 ]; then
         for result_dir in "${PGPLAN_RESULT_DIRS[@]}"; do
-            echo "Three-way result directory: $result_dir"
-            echo "Three-way status TSV: $result_dir/status.tsv"
-            echo "Three-way comparison TSV: $result_dir/comparison.tsv"
-            echo "Three-way comparison CSV: $result_dir/comparison.csv"
-            echo "Three-way detailed log: $result_dir/comparison.log"
-            echo "Three-way summary TSV: $result_dir/summary.tsv"
-            echo "Three-way failures TSV: $result_dir/failures.tsv"
-            echo "Three-way plan artifacts: $result_dir/artifacts"
+            echo "Comparison result directory: $result_dir"
+            echo "Comparison status TSV: $result_dir/status.tsv"
+            echo "Comparison TSV: $result_dir/comparison.tsv"
+            echo "Comparison CSV: $result_dir/comparison.csv"
+            echo "Comparison detailed log: $result_dir/comparison.log"
+            echo "Comparison summary TSV: $result_dir/summary.tsv"
+            echo "Comparison failures TSV: $result_dir/failures.tsv"
+            echo "Comparison plan artifacts: $result_dir/artifacts"
         done
     fi
 fi

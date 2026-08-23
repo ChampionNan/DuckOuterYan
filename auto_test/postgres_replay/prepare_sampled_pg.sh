@@ -195,12 +195,13 @@ CONSTRAINTS_ESCAPED="$(escape_duckdb_string "$CONSTRAINTS")"
     ) TO '$METADATA_ESCAPED' (FORMAT CSV, HEADER TRUE);
     COPY (
         SELECT c.table_name, c.constraint_index, c.constraint_type,
-               unnest(c.constraint_column_names) AS column_name
+               unnest(c.constraint_column_names) AS column_name,
+               generate_subscripts(c.constraint_column_names, 1) AS column_ordinal
         FROM duckdb_constraints() c
         WHERE c.schema_name = 'main'
           AND lower(c.table_name) IN ($TABLE_IN)
           AND c.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-        ORDER BY lower(c.table_name), c.constraint_index
+        ORDER BY lower(c.table_name), c.constraint_index, column_ordinal
     ) TO '$CONSTRAINTS_ESCAPED' (FORMAT CSV, HEADER TRUE);
 " >/dev/null
 [ -s "$METADATA" ] || die "DuckDB returned no column metadata"
@@ -230,6 +231,23 @@ quote_duckdb_identifier() {
     printf '"%s"' "$identifier"
 }
 
+# `ORDER BY rowid LIMIT N` plans as TOP_N over a full scan. Use the bounded
+# physical rowid range [0, N) consistently for row counts, coercion checks, and
+# export. Rowid gaps, if present, are part of this deterministic sample recipe.
+ROWID_COUNTS="$TEMP_ROOT/rowid_counts.tsv"
+printf 'table\tsample_rows\n' > "$ROWID_COUNTS"
+for table in "${TABLES[@]}"; do
+    SAMPLE_ROWS="$({
+        "$DUCKDB_BIN" "$DUCKDB_DB" -no-init -bail -csv -noheader -c \
+            "SELECT count(*) FROM \"$table\"
+             WHERE rowid >= 0 AND rowid < $ROW_CAP;"
+    } | tr -d '[:space:]')"
+    case "$SAMPLE_ROWS" in
+        ''|*[!0-9]*) die "could not count bounded physical rowid sample for $table: ${SAMPLE_ROWS:-<empty>}" ;;
+    esac
+    printf '%s\t%s\n' "$table" "$SAMPLE_ROWS" >> "$ROWID_COUNTS"
+done
+
 COERCION_COUNT=0
 while IFS=$'\t' read -r coercion_table column source_type pg_type validation; do
     [ "$coercion_table" = "table_name" ] && continue
@@ -245,7 +263,9 @@ while IFS=$'\t' read -r coercion_table column source_type pg_type validation; do
     INVALID_ROWS="$({
         "$DUCKDB_BIN" "$DUCKDB_DB" -no-init -bail -csv -noheader -c \
             "SELECT count(*)
-             FROM (SELECT * FROM \"$coercion_table\" ORDER BY rowid LIMIT $ROW_CAP) AS pgplan_sample
+             FROM (SELECT * FROM \"$coercion_table\"
+                   WHERE rowid >= 0 AND rowid < $ROW_CAP
+                   ORDER BY rowid) AS pgplan_sample
              WHERE $quoted_column IS NOT NULL
                AND (TRY_CAST($quoted_column AS BIGINT) IS NULL
                     OR CAST(TRY_CAST($quoted_column AS BIGINT) AS DOUBLE)
@@ -291,7 +311,9 @@ for table in "${TABLES[@]}"; do
         TABLE_COERCIONS="${TABLE_COERCIONS}${column}:${source_type}->${pg_type}"
     done < "$COERCIONS"
 
-    SAMPLE_QUERY="SELECT * FROM \"$table\" ORDER BY rowid LIMIT $ROW_CAP"
+    SAMPLE_QUERY="SELECT * FROM \"$table\"
+                  WHERE rowid >= 0 AND rowid < $ROW_CAP
+                  ORDER BY rowid"
     if [ -n "$REPLACEMENTS" ]; then
         SAMPLE_QUERY="SELECT * REPLACE ($REPLACEMENTS) FROM ($SAMPLE_QUERY) AS pgplan_sample"
     fi
@@ -301,10 +323,8 @@ for table in "${TABLES[@]}"; do
         ) TO '$DATA_FILE_ESCAPED' (FORMAT CSV, HEADER FALSE);
     " >/dev/null
 
-    EXPECTED_ROWS="$({
-        "$DUCKDB_BIN" "$DUCKDB_DB" -no-init -bail -csv -noheader -c \
-            "SELECT count(*) FROM (SELECT * FROM \"$table\" ORDER BY rowid LIMIT $ROW_CAP);"
-    } | tr -d '[:space:]')"
+    EXPECTED_ROWS="$(awk -F '\t' -v wanted="$table" \
+        '$1 == wanted {print $2; exit}' "$ROWID_COUNTS")"
     case "$EXPECTED_ROWS" in ''|*[!0-9]*) die "could not count sampled DuckDB table $table" ;; esac
 
     "$PSQL_BIN" -X -q --set=ON_ERROR_STOP=1 --dbname="$PG_DSN" \

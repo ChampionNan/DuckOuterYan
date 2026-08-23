@@ -89,13 +89,6 @@ if [ "$PGPLAN_SETUP" = "source" ]; then
             die "managed source mode requires a loopback PGPLAN_HOST (127.0.0.1, ::1, or localhost)"
             ;;
     esac
-    [ -n "$PGPLAN_PASSWORD" ] || \
-        die "managed source mode requires a nonempty PGPLAN_PASSWORD"
-    case "$PGPLAN_PASSWORD" in
-        *$'\n'*|*$'\r'*)
-            die "PGPLAN_PASSWORD must not contain a newline in managed source mode"
-            ;;
-    esac
 fi
 [ "$PGPLAN_VERSION" = "16.2" ] || die "PGPlan v1 requires PGPLAN_VERSION=16.2"
 [ "$PGPLAN_VERSION_NUM" = "160002" ] || \
@@ -127,6 +120,19 @@ if [ "$PGPLAN_SETUP" = "docker" ]; then
             [ "$PSQL_BIN" != "$SCRIPT_DIR/docker_psql.sh" ]; then
         die "managed Docker mode requires PSQL_BIN=$OY_REPO_ROOT/auto_test/pgplan/docker_psql.sh"
     fi
+fi
+if [ "$PGPLAN_SETUP" != "external" ]; then
+    pgplan_ensure_managed_password "$PGPLAN_SETUP" || \
+        die "could not initialize the managed PostgreSQL credential"
+fi
+if [ "$PGPLAN_SETUP" = "source" ]; then
+    [ -n "$PGPLAN_PASSWORD" ] || \
+        die "managed source mode requires a nonempty PGPLAN_PASSWORD"
+    case "$PGPLAN_PASSWORD" in
+        *$'\n'*|*$'\r'*)
+            die "PGPLAN_PASSWORD must not contain a newline in managed source mode"
+            ;;
+    esac
 fi
 
 require_executable() {

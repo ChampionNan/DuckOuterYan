@@ -13,6 +13,7 @@ import unittest
 
 
 SOURCE_RUN_ALL = Path(__file__).resolve().parents[1] / "run_all.sh"
+SOURCE_CONFIGS = Path(__file__).resolve().parents[1] / "configs.sh"
 
 
 class RunAllPGPlanTests(unittest.TestCase):
@@ -61,6 +62,11 @@ class RunAllPGPlanTests(unittest.TestCase):
             export PGPLAN_EXECUTION_DB="${{PGPLAN_EXECUTION_DB:-$TPCH_DB}}"
             export PGPLAN_RUNS="${{PGPLAN_RUNS:-$OY_RUNS}}"
             export PGPLAN_THREADS="${{PGPLAN_THREADS:-$OY_THREADS}}"
+            export PGPLAN_PLAN_CACHE="${{PGPLAN_PLAN_CACHE:-{self.repo / 'auto_test/pgplan/plans'}}}"
+            export PGPLAN_COMPARISON_MODE="${{PGPLAN_COMPARISON_MODE:-both}}"
+            export PGPLAN_CORRECTNESS_MODE="${{PGPLAN_CORRECTNESS_MODE:-target}}"
+            export PGPLAN_CORRECTNESS_FROM="${{PGPLAN_CORRECTNESS_FROM:-}}"
+            export PGPLAN_REUSE_FROM="${{PGPLAN_REUSE_FROM:-}}"
             export PGPLAN_CAPTURE_TIMEOUT_SECS="${{PGPLAN_CAPTURE_TIMEOUT_SECS:-300}}"
             export PGPLAN_TIMEOUT_SECS="${{PGPLAN_TIMEOUT_SECS:-$OY_TIMEOUT_SECS}}"
             export PGPLAN_TIMEOUT_GRACE="${{PGPLAN_TIMEOUT_GRACE:-$OY_BATCH_GRACE_SECS}}"
@@ -111,6 +117,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         path.chmod(0o755)
 
     def _run(self, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        inject_default_skips = overrides.pop("_inject_default_skips", "1") == "1"
         env = os.environ.copy()
         for name in (
             "DUCKDB_BIN",
@@ -122,12 +129,25 @@ class RunAllPGPlanTests(unittest.TestCase):
             "PGPLAN_EXECUTION_DB",
             "PGPLAN_RUNS",
             "PGPLAN_THREADS",
+            "PGPLAN_PLAN_CACHE",
+            "PGPLAN_COMPARISON_MODE",
+            "PGPLAN_CORRECTNESS_MODE",
+            "PGPLAN_CORRECTNESS_FROM",
+            "PGPLAN_REUSE_FROM",
             "PGPLAN_CAPTURE_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_SECS",
             "PGPLAN_TIMEOUT_GRACE",
             "PGPLAN_TMPDIR",
             "PGPLAN_OUT",
             "PGPLAN_PLAN_OUT",
+            "PGPLAN_SETUP",
+            "PGPLAN_INSTALL_DIR",
+            "PGPLAN_PASSWORD_FILE",
+            "PGPLAN_PASSWORD",
+            "PGPLAN_CONTAINER_PASSWORD",
+            "PG_REPLAY_PASSWORD",
+            "PG_REPLAY_CONTAINER_PASSWORD",
+            "PGPASSWORD",
             "PG_REPLAY_QUERY",
             "PG_REPLAY_EXECUTION_DB",
             "PG_REPLAY_RUNS",
@@ -139,16 +159,20 @@ class RunAllPGPlanTests(unittest.TestCase):
             "PG_REPLAY_OUT",
             "PG_REPLAY_PLAN_OUT",
             "HARNESS_EXIT_CODE",
+            "SKIP_BUILD",
+            "SKIP_DATA",
+            "SKIP_QUERY_GEN",
         ):
             env.pop(name, None)
-        env.update(
-            {
-                "HARNESS_LOG": str(self.log),
-                "SKIP_BUILD": "1",
-                "SKIP_DATA": "1",
-                "SKIP_QUERY_GEN": "1",
-            }
-        )
+        env["HARNESS_LOG"] = str(self.log)
+        if inject_default_skips:
+            env.update(
+                {
+                    "SKIP_BUILD": "1",
+                    "SKIP_DATA": "1",
+                    "SKIP_QUERY_GEN": "1",
+                }
+            )
         env.update(overrides)
         return subprocess.run(
             ["bash", str(self.auto_test / "run_all.sh"), *args],
@@ -197,23 +221,45 @@ class RunAllPGPlanTests(unittest.TestCase):
         self.assertIn("--capture-timeout 23", corpus_args)
         self.assertIn("--only tpch", corpus_args)
         self.assertIn(
-            "Preparing PostgreSQL 16.2 plan data (target-scale exact correctness)",
+            "Checking the persistent PGPlan cache and preparing exact target-data comparisons",
             result.stdout,
         )
-        self.assertIn(f"Three-way status TSV: {result_dir / 'status.tsv'}", result.stdout)
+        self.assertIn(f"Comparison status TSV: {result_dir / 'status.tsv'}", result.stdout)
         self.assertIn(
-            f"Three-way comparison TSV: {result_dir / 'comparison.tsv'}", result.stdout
+            f"Comparison TSV: {result_dir / 'comparison.tsv'}", result.stdout
         )
         self.assertIn(
-            f"Three-way comparison CSV: {result_dir / 'comparison.csv'}", result.stdout
+            f"Comparison CSV: {result_dir / 'comparison.csv'}", result.stdout
         )
         self.assertIn(
-            f"Three-way detailed log: {result_dir / 'comparison.log'}", result.stdout
+            f"Comparison detailed log: {result_dir / 'comparison.log'}", result.stdout
         )
-        self.assertIn(f"Three-way summary TSV: {result_dir / 'summary.tsv'}", result.stdout)
+        self.assertIn(f"Comparison summary TSV: {result_dir / 'summary.tsv'}", result.stdout)
         self.assertIn(
-            f"Three-way failures TSV: {result_dir / 'failures.tsv'}", result.stdout
+            f"Comparison failures TSV: {result_dir / 'failures.tsv'}", result.stdout
         )
+
+    def test_run_all_reaches_cache_aware_corpus_with_unusable_pg_install(self) -> None:
+        # Cache hit/miss detection happens inside the corpus runner, after
+        # run_all sources configs.sh. Loading configuration must therefore be
+        # filesystem-neutral when PostgreSQL is never needed.
+        shutil.copy2(SOURCE_CONFIGS, self.auto_test / "configs.sh")
+        blocker = self.repo / "unwritable-pg-parent"
+        blocker.write_text("not a directory", encoding="utf-8")
+        result = self._run(
+            "--limit",
+            "1",
+            DUCKDB_BIN=str(self.duckdb),
+            PGPLAN_SETUP="source",
+            PGPLAN_INSTALL_DIR=str(blocker / "postgresql"),
+            PGPLAN_PASSWORD="",
+            PGPLAN_CONTAINER_PASSWORD="",
+            PG_REPLAY_PASSWORD="",
+            PG_REPLAY_CONTAINER_PASSWORD="",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(blocker.is_file())
+        self.assertIn("corpus\t", self.log.read_text(encoding="utf-8"))
 
     def test_corpus_failure_prints_handoff_then_preserves_exit_status(self) -> None:
         result_dir = self.repo / "failed-threeway-results"
@@ -223,7 +269,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 23, result.stdout)
-        self.assertIn("Three-way corpus finished with failures (exit status 23", result.stdout)
+        self.assertIn("Comparison corpus finished with failures (exit status 23", result.stdout)
         self.assertNotIn("All done!", result.stdout)
         for filename in (
             "status.tsv",
@@ -234,7 +280,91 @@ class RunAllPGPlanTests(unittest.TestCase):
             "failures.tsv",
         ):
             self.assertIn(str(result_dir / filename), result.stdout)
-        self.assertIn(f"Three-way result directory: {result_dir}", result.stdout)
+        self.assertIn(f"Comparison result directory: {result_dir}", result.stdout)
+
+    def test_reuse_from_is_forwarded_as_the_one_parameter_fast_mode(self) -> None:
+        prior = self.repo / "prior corpus"
+        result_dir = self.repo / "reuse-results"
+        result = self._run(
+            "--reuse-from",
+            str(prior),
+            PGPLAN_OUT=str(result_dir),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        call = self.log.read_text(encoding="utf-8").strip()
+        self.assertIn(f"--reuse-from {prior}", call)
+        self.assertIn(
+            f"Reusing PGPlan artifacts and sealed target correctness from {prior} "
+            "(PostgreSQL setup skipped)",
+            result.stdout,
+        )
+        self.assertIn("Reuse mode: preserving existing DuckDB binary", result.stdout)
+
+    def test_reuse_from_alone_auto_skips_build_data_and_query_generation(self) -> None:
+        prior = self.repo / "prior-corpus"
+        result = self._run(
+            "--reuse-from",
+            str(prior),
+            _inject_default_skips="0",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("Step 1/5: Skipping build (SKIP_BUILD=1)", result.stdout)
+        self.assertIn("Step 2/5: Skipping data build (SKIP_DATA=1)", result.stdout)
+        self.assertIn(
+            "Step 3/5: Skipping benchmark generation (SKIP_QUERY_GEN=1)",
+            result.stdout,
+        )
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("corpus\t"), calls)
+
+    def test_environment_reuse_from_is_forwarded(self) -> None:
+        prior = self.repo / "prior-env-corpus"
+        result = self._run(PGPLAN_REUSE_FROM=str(prior))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        call = self.log.read_text(encoding="utf-8").strip()
+        self.assertIn(f"--reuse-from {prior}", call)
+
+    def test_comparison_alias_and_plan_cache_are_forwarded(self) -> None:
+        cache = self.repo / "persistent plan cache"
+        result = self._run("--skip1", "--plan-cache", str(cache))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        call = self.log.read_text(encoding="utf-8").strip()
+        self.assertIn("--comparison-mode both", call)
+        self.assertIn(f"--plan-cache {self.repo / 'auto_test/pgplan/plans'}", call)
+        self.assertIn("--skip1", call)
+        self.assertIn(f"--plan-cache {cache}", call)
+        self.assertIn("Comparison mode=pgplan-only", result.stdout)
+
+    def test_reuse_rejects_explicit_rebuild_request(self) -> None:
+        prior = self.repo / "prior-corpus"
+        result = self._run(
+            "--reuse-from", str(prior), SKIP_BUILD="0"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SKIP_BUILD=0 conflicts with --reuse-from",
+            result.stdout,
+        )
+        self.assertFalse(self.log.exists())
+
+    def test_reuse_rejects_explicit_data_or_query_regeneration(self) -> None:
+        prior = self.repo / "prior-corpus"
+        for variable in ("SKIP_DATA", "SKIP_QUERY_GEN"):
+            with self.subTest(variable=variable):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self._run(
+                    "--reuse-from",
+                    str(prior),
+                    **{variable: "0"},
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    f"{variable}=0 conflicts with --reuse-from",
+                    result.stdout,
+                )
+                self.assertFalse(self.log.exists())
 
     def test_forwarded_out_path_is_used_for_the_final_handoff(self) -> None:
         environment_out = self.repo / "environment-results"
@@ -249,10 +379,10 @@ class RunAllPGPlanTests(unittest.TestCase):
         self.assertTrue((command_line_out / "status.tsv").is_file())
         self.assertFalse(environment_out.exists())
         self.assertIn(
-            f"Three-way result directory: {command_line_out}", result.stdout
+            f"Comparison result directory: {command_line_out}", result.stdout
         )
         self.assertNotIn(
-            f"Three-way result directory: {environment_out}", result.stdout
+            f"Comparison result directory: {environment_out}", result.stdout
         )
 
     def test_escape_hatch_preserves_legacy_corpus_run(self) -> None:

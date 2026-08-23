@@ -41,7 +41,11 @@ class PGPlanConfigTest(unittest.TestCase):
             "PYTHON_BIN",
             "PGPLAN_QUERY",
             "PGPLAN_EXECUTION_DB",
+            "PGPLAN_PLAN_CACHE",
+            "PGPLAN_COMPARISON_MODE",
             "PGPLAN_CORRECTNESS_MODE",
+            "PGPLAN_CORRECTNESS_FROM",
+            "PGPLAN_REUSE_FROM",
             "PGPLAN_CORRECTNESS_GRAPH_ROWS",
             "PGPLAN_CORRECTNESS_JOB_ROWS",
             "PGPLAN_CORRECTNESS_MAX_RESULT_ROWS",
@@ -69,7 +73,10 @@ class PGPlanConfigTest(unittest.TestCase):
             "PG_REPLAY_CONTAINER_PASSWORD",
             "PG_REPLAY_QUERY",
             "PG_REPLAY_EXECUTION_DB",
+            "PG_REPLAY_PLAN_CACHE",
+            "PG_REPLAY_COMPARISON_MODE",
             "PG_REPLAY_CORRECTNESS_MODE",
+            "PG_REPLAY_CORRECTNESS_FROM",
             "PG_REPLAY_CORRECTNESS_GRAPH_ROWS",
             "PG_REPLAY_CORRECTNESS_JOB_ROWS",
             "PG_REPLAY_CORRECTNESS_MAX_RESULT_ROWS",
@@ -95,14 +102,18 @@ for name in RUN_PGPLAN PYTHON_BIN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM
     PGPLAN_ROOT PGPLAN_SOURCE_DIR PGPLAN_INSTALL_DIR PGPLAN_DATA_DIR \
     PGPLAN_HOST PGPLAN_PORT PGPLAN_DATABASE PGPLAN_USER PGPLAN_PASSWORD PGPLAN_PASSWORD_FILE \
     PGPLAN_CONTAINER_PASSWORD PG_REPLAY_PASSWORD PG_REPLAY_CONTAINER_PASSWORD PG_DSN PSQL_BIN \
-    PGPASSWORD PGPLAN_QUERY PGPLAN_EXECUTION_DB PGPLAN_CORRECTNESS_MODE PGPLAN_CORRECTNESS_GRAPH_ROWS \
+    PGPASSWORD PGPLAN_QUERY PGPLAN_EXECUTION_DB PGPLAN_PLAN_CACHE PGPLAN_COMPARISON_MODE \
+    PGPLAN_CORRECTNESS_MODE PGPLAN_CORRECTNESS_FROM \
+    PGPLAN_REUSE_FROM PGPLAN_CORRECTNESS_GRAPH_ROWS \
     PGPLAN_CORRECTNESS_JOB_ROWS PGPLAN_CORRECTNESS_MAX_RESULT_ROWS \
     PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS PGPLAN_RUNS PGPLAN_THREADS \
     PGPLAN_CAPTURE_TIMEOUT_SECS PGPLAN_TIMEOUT_SECS PGPLAN_TIMEOUT_GRACE \
     PGPLAN_TMPDIR PGPLAN_FORCE_DATA PG_REPLAY_CAPTURE_TIMEOUT_SECS \
-    PG_REPLAY_CORRECTNESS_MODE PG_REPLAY_CORRECTNESS_GRAPH_ROWS PG_REPLAY_CORRECTNESS_JOB_ROWS \
+    PG_REPLAY_CORRECTNESS_MODE PG_REPLAY_CORRECTNESS_FROM \
+    PG_REPLAY_CORRECTNESS_GRAPH_ROWS PG_REPLAY_CORRECTNESS_JOB_ROWS \
     PG_REPLAY_CORRECTNESS_MAX_RESULT_ROWS PG_REPLAY_CORRECTNESS_QUERY_TIMEOUT_SECS \
-    RUN_PG_REPLAY PG_REPLAY_SETUP PG_REPLAY_QUERY PG_REPLAY_FORCE_DATA; do
+    RUN_PG_REPLAY PG_REPLAY_SETUP PG_REPLAY_QUERY PG_REPLAY_PLAN_CACHE \
+    PG_REPLAY_COMPARISON_MODE PG_REPLAY_FORCE_DATA; do
     printf '%s=%s\n' "$name" "${!name-}"
 done
 """
@@ -129,11 +140,18 @@ done
         self.assertEqual(values["PGPLAN_INSTALL_DIR"], str(prefix))
         self.assertEqual(values["PGPLAN_DATA_DIR"], str(prefix / "data"))
         self.assertEqual(values["PSQL_BIN"], str(prefix / "bin" / "psql"))
-        self.assertRegex(values["PGPASSWORD"], r"^[0-9a-f]{64}$")
         password_file = Path(values["PGPLAN_PASSWORD_FILE"])
         self.assertEqual(password_file, prefix / ".pgplan-password")
-        self.assertEqual(password_file.read_text(encoding="utf-8").strip(), values["PGPASSWORD"])
-        self.assertEqual(password_file.stat().st_mode & 0o777, 0o600)
+        # Loading configuration may reuse an existing private secret, but must
+        # not create one. Fresh installs materialize it only from setup_pg.sh.
+        if password_file.exists():
+            self.assertRegex(values["PGPASSWORD"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                password_file.read_text(encoding="utf-8").strip(),
+                values["PGPASSWORD"],
+            )
+        else:
+            self.assertEqual(values["PGPASSWORD"], "")
         self.assertEqual(
             values["PGPLAN_QUERY"],
             str(
@@ -143,8 +161,19 @@ done
             ),
         )
         self.assertEqual(values["PGPLAN_EXECUTION_DB"], str(REPO_ROOT / "tpch_db"))
+        self.assertEqual(
+            values["PGPLAN_PLAN_CACHE"],
+            str(REPO_ROOT / "auto_test" / "pgplan" / "plans"),
+        )
+        self.assertEqual(values["PGPLAN_COMPARISON_MODE"], "both")
+        self.assertEqual(
+            values["PG_REPLAY_PLAN_CACHE"], values["PGPLAN_PLAN_CACHE"]
+        )
+        self.assertEqual(values["PG_REPLAY_COMPARISON_MODE"], "both")
         self.assertEqual(values["PGPLAN_CORRECTNESS_MODE"], "target")
         self.assertEqual(values["PG_REPLAY_CORRECTNESS_MODE"], "target")
+        self.assertEqual(values["PGPLAN_CORRECTNESS_FROM"], "")
+        self.assertEqual(values["PGPLAN_REUSE_FROM"], "")
         self.assertEqual(values["PGPLAN_CORRECTNESS_GRAPH_ROWS"], "500")
         self.assertEqual(values["PGPLAN_CORRECTNESS_JOB_ROWS"], "1000")
         self.assertEqual(values["PGPLAN_CORRECTNESS_MAX_RESULT_ROWS"], "2000000")
@@ -169,6 +198,34 @@ done
         self.assertEqual(values["PGPLAN_CORRECTNESS_MODE"], "bounded")
         self.assertEqual(values["PG_REPLAY_CORRECTNESS_MODE"], "bounded")
 
+    def test_plan_cache_and_comparison_mode_are_configurable(self):
+        values = self.load_config(
+            PGPLAN_PLAN_CACHE="/tmp/pgplan-cache",
+            PGPLAN_COMPARISON_MODE="pgplan-only",
+        )
+        self.assertEqual(values["PGPLAN_PLAN_CACHE"], "/tmp/pgplan-cache")
+        self.assertEqual(values["PG_REPLAY_PLAN_CACHE"], "/tmp/pgplan-cache")
+        self.assertEqual(values["PGPLAN_COMPARISON_MODE"], "pgplan-only")
+        self.assertEqual(values["PG_REPLAY_COMPARISON_MODE"], "pgplan-only")
+
+    def test_correctness_reuse_requires_and_exports_prior_corpus(self):
+        prior = "/tmp/prior-pgplan-corpus"
+        values = self.load_config(
+            PGPLAN_CORRECTNESS_MODE="reuse",
+            PGPLAN_CORRECTNESS_FROM=prior,
+        )
+        self.assertEqual(values["PGPLAN_CORRECTNESS_MODE"], "reuse")
+        self.assertEqual(values["PGPLAN_CORRECTNESS_FROM"], prior)
+        self.assertEqual(values["PG_REPLAY_CORRECTNESS_MODE"], "reuse")
+        self.assertEqual(values["PG_REPLAY_CORRECTNESS_FROM"], prior)
+
+    def test_one_parameter_reuse_selects_plan_and_correctness_reuse(self):
+        prior = "/tmp/prior-pgplan-corpus"
+        values = self.load_config(PGPLAN_REUSE_FROM=prior)
+        self.assertEqual(values["PGPLAN_REUSE_FROM"], prior)
+        self.assertEqual(values["PGPLAN_CORRECTNESS_MODE"], "reuse")
+        self.assertEqual(values["PGPLAN_CORRECTNESS_FROM"], prior)
+
     def test_pgplan_timing_defaults_follow_main_harness(self):
         values = self.load_config(
             OY_RUNS=5,
@@ -186,9 +243,14 @@ done
         self.assertEqual(values["PGPLAN_TMPDIR"], "/tmp/duckyan-test")
 
     def test_source_mode_ignores_an_unrelated_ambient_libpq_password(self):
-        values = self.load_config(PGPASSWORD="stale-ambient-password")
-        self.assertRegex(values["PGPASSWORD"], r"^[0-9a-f]{64}$")
-        self.assertNotEqual(values["PGPASSWORD"], "stale-ambient-password")
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "not-created"
+            values = self.load_config(
+                PGPLAN_INSTALL_DIR=prefix,
+                PGPASSWORD="stale-ambient-password",
+            )
+            self.assertEqual(values["PGPASSWORD"], "")
+            self.assertFalse(prefix.exists())
 
     def test_docker_mode_uses_repository_wrapper_and_preserves_overrides(self):
         values = self.load_config(
@@ -203,18 +265,24 @@ done
             str(REPO_ROOT / "auto_test/pgplan/docker_psql.sh"),
         )
 
-    def test_docker_mode_uses_the_private_managed_password_by_default(self):
-        values = self.load_config(PGPLAN_SETUP="docker", PGPASSWORD="stale")
-        self.assertRegex(values["PGPASSWORD"], r"^[0-9a-f]{64}$")
-        self.assertEqual(
-            Path(values["PGPLAN_PASSWORD_FILE"]).read_text(encoding="utf-8").strip(),
-            values["PGPASSWORD"],
-        )
+    def test_docker_mode_defers_private_password_creation_to_setup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "not-created"
+            values = self.load_config(
+                PGPLAN_SETUP="docker",
+                PGPLAN_INSTALL_DIR=prefix,
+                PGPASSWORD="stale",
+            )
+            self.assertEqual(values["PGPASSWORD"], "")
+            self.assertEqual(values["PGPLAN_PASSWORD"], "")
+            self.assertFalse(prefix.exists())
 
-    def test_empty_managed_password_overrides_generate_a_private_secret(self):
+    def test_empty_managed_password_overrides_are_side_effect_free(self):
         for setup in ("source", "docker"):
             with self.subTest(setup=setup), tempfile.TemporaryDirectory() as temporary:
-                prefix = Path(temporary) / "postgresql"
+                blocker = Path(temporary) / "unwritable-install-parent"
+                blocker.write_text("not a directory", encoding="utf-8")
+                prefix = blocker / "postgresql"
                 values = self.load_config(
                     PGPLAN_SETUP=setup,
                     PGPLAN_INSTALL_DIR=prefix,
@@ -223,25 +291,25 @@ done
                     PGPLAN_CONTAINER_PASSWORD="",
                     PG_REPLAY_CONTAINER_PASSWORD="",
                 )
-                self.assertRegex(values["PGPLAN_PASSWORD"], r"^[0-9a-f]{64}$")
-                self.assertNotEqual(values["PGPLAN_PASSWORD"], "duckyan")
-                self.assertEqual(values["PGPASSWORD"], values["PGPLAN_PASSWORD"])
-                self.assertEqual(
-                    values["PG_REPLAY_PASSWORD"], values["PGPLAN_PASSWORD"]
-                )
-                self.assertEqual(
-                    values["PGPLAN_CONTAINER_PASSWORD"], values["PGPLAN_PASSWORD"]
-                )
-                self.assertEqual(
-                    values["PG_REPLAY_CONTAINER_PASSWORD"],
-                    values["PGPLAN_PASSWORD"],
-                )
-                self.assertEqual(
-                    Path(values["PGPLAN_PASSWORD_FILE"])
-                    .read_text(encoding="utf-8")
-                    .strip(),
-                    values["PGPLAN_PASSWORD"],
-                )
+                self.assertEqual(values["PGPLAN_PASSWORD"], "")
+                self.assertEqual(values["PG_REPLAY_PASSWORD"], "")
+                self.assertEqual(values["PGPLAN_CONTAINER_PASSWORD"], "")
+                self.assertEqual(values["PG_REPLAY_CONTAINER_PASSWORD"], "")
+                self.assertEqual(values["PGPASSWORD"], "")
+                self.assertTrue(blocker.is_file())
+
+    def test_existing_private_password_is_reused_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix = Path(temporary) / "postgresql"
+            prefix.mkdir()
+            password_file = prefix / ".pgplan-password"
+            secret = "a" * 64
+            password_file.write_text(secret + "\n", encoding="utf-8")
+            password_file.chmod(0o400)
+            values = self.load_config(PGPLAN_INSTALL_DIR=prefix)
+            self.assertEqual(values["PGPASSWORD"], secret)
+            self.assertEqual(values["PGPLAN_PASSWORD"], secret)
+            self.assertEqual(password_file.stat().st_mode & 0o777, 0o400)
 
     def test_nonempty_legacy_managed_password_overrides_empty_new_names(self):
         with tempfile.TemporaryDirectory() as temporary:

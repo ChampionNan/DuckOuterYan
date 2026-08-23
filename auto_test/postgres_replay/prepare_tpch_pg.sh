@@ -18,7 +18,7 @@ CONTAINER_NAME="${PGPLAN_CONTAINER_NAME:-duckyan-pg16-2}"
 CONTAINER_PORT="${PGPLAN_CONTAINER_PORT:-55432}"
 CONTAINER_DATABASE="${PGPLAN_CONTAINER_DATABASE:-duckyan_tpch}"
 CONTAINER_USER="${PGPLAN_CONTAINER_USER:-postgres}"
-CONTAINER_PASSWORD="${PGPLAN_CONTAINER_PASSWORD:-duckyan}"
+CONTAINER_PASSWORD="${PGPLAN_CONTAINER_PASSWORD:-}"
 CONTAINER_IMAGE="${PGPLAN_CONTAINER_IMAGE:-postgres:16.2}"
 PG_DSN_EXPLICIT=0
 SOURCE_ARG=""
@@ -121,16 +121,21 @@ fi
 # docker_psql.sh is a separate process and reads these values from configs.sh.
 # Export the resolved CLI overrides so it addresses the container just started
 # by this invocation rather than the configured defaults.
+[[ "$CONTAINER_PORT" =~ ^[0-9]+$ ]] || die "--port must be numeric"
+[ "$CONTAINER_PORT" -ge 1 ] && [ "$CONTAINER_PORT" -le 65535 ] || \
+    die "--port must be between 1 and 65535"
 if [ "$LOCAL_CONTAINER" -eq 1 ]; then
+    if [ -z "$CONTAINER_PASSWORD" ]; then
+        pgplan_ensure_managed_password docker || \
+            die "could not initialize the local-container PostgreSQL credential"
+        CONTAINER_PASSWORD="$PGPLAN_CONTAINER_PASSWORD"
+    fi
     export PGPLAN_CONTAINER_NAME="$CONTAINER_NAME"
     export PGPLAN_CONTAINER_PORT="$CONTAINER_PORT"
     export PGPLAN_CONTAINER_DATABASE="$CONTAINER_DATABASE"
     export PGPLAN_CONTAINER_USER="$CONTAINER_USER"
     export PGPLAN_CONTAINER_PASSWORD="$CONTAINER_PASSWORD"
 fi
-[[ "$CONTAINER_PORT" =~ ^[0-9]+$ ]] || die "--port must be numeric"
-[ "$CONTAINER_PORT" -ge 1 ] && [ "$CONTAINER_PORT" -le 65535 ] || \
-    die "--port must be between 1 and 65535"
 
 TEMP_ROOT=""
 cleanup() {
