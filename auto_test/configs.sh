@@ -23,6 +23,11 @@ OY_CONFIG_LOADED=1
 _OY_CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OY_REPO_ROOT="${OY_REPO_ROOT:-$(cd "$_OY_CONFIG_DIR/.." && pwd)}"
 
+# Python 3.7+ is sufficient; all PGPlan tooling uses only the standard library.
+# Set an absolute repo-local interpreter here if the system `python3` should
+# not be used.
+export PYTHON_BIN="${PYTHON_BIN:-python3}"
+
 # ===========================================================================
 # 1) DuckDB binary
 # ===========================================================================

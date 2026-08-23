@@ -14,6 +14,9 @@ compares native DuckDB, PGPlan, and normal OuterYan across all 206 queries in
 `PGPLAN_SETUP=docker`. Both managed providers generate and reuse a private
 mode-`0600` password file unless a password is explicitly provided; a legacy
 container with a different credential is rejected with recovery instructions.
+The tooling supports Python 3.7+ using only the standard library. Set
+`PYTHON_BIN=/absolute/path/to/a/repo-local/python3` to avoid the system Python;
+no separate Python installation is required for a normal run.
 
 Manual PGPlan commands are:
 

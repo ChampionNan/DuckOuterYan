@@ -38,6 +38,7 @@ corresponding environment values.
 
 | Variable | Current source default | Meaning |
 |---|---:|---|
+| `PYTHON_BIN` | `python3` | Python 3.7+ standard-library interpreter; may be an absolute repo-local path |
 | `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |

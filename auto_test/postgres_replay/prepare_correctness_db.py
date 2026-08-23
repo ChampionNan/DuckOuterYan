@@ -1176,7 +1176,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         publish_file(staged_manifest, manifest, args.force)
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
-        staged_manifest.unlink(missing_ok=True)
+        try:
+            staged_manifest.unlink()
+        except FileNotFoundError:
+            pass
 
     maximum = max((count for _, count in query_results), default=0)
     diagnostic = {

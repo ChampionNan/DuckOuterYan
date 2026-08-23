@@ -433,7 +433,9 @@ select DuckDB's candidate. The manifest records `outer_yan_selected_plan`, so
 three configurations are not mislabeled as three distinct logical trees.
 
 The harness uses only shell tools and the Python standard library; it requires
-no pip packages and no Docker runtime.
+Python 3.7 or newer, no pip packages, and no Docker runtime. Set `PYTHON_BIN`
+to an absolute repo-local interpreter when the system `python3` should not be
+used; `run_all.sh` validates that interpreter before starting setup.
 
 ### Claim boundary
 

@@ -19,6 +19,7 @@
 #   OY_THREADS       Multi-thread profile/timing count (default 48)
 #   OY_RUNS          Timed iterations per config (default 3, median taken)
 #   JOBS             Make parallelism (default: nproc)
+#   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
 #   SKIP_DATA        Set to 1 to skip target DuckDB database generation
 #   SKIP_QUERY_GEN   Set to 1 to keep the existing generated benchmark
@@ -50,6 +51,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CALLER_OY_CORPUS="${OY_CORPUS:-}"
 CALLER_DUCKDB_BIN="${DUCKDB_BIN:-}"
 . "$SCRIPT_DIR/configs.sh"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+export PYTHON_BIN
 
 cd "$REPO_ROOT"
 
@@ -61,6 +64,14 @@ RUN_LOG="$SCRIPT_DIR/results/run_all_${RUN_TS}.log"
 log() { printf '\n\033[1;36m===> %s\033[0m\n' "$*"; }
 err() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 elapsed() { local s=$1; printf '%dm%02ds' $((s/60)) $((s%60)); }
+
+if [[ "$PYTHON_BIN" == */* ]]; then
+    [ -x "$PYTHON_BIN" ] || err "Python binary is not executable: $PYTHON_BIN"
+else
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 || err "Python binary was not found: $PYTHON_BIN"
+fi
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' || \
+    err "Python 3.7 or newer is required: $PYTHON_BIN"
 
 START_TIME=$SECONDS
 EXPERIMENT_ARGS=("$@")
@@ -107,7 +118,7 @@ fi
 # --- Step 3: Generate benchmark ---------------------------------------------
 if [ "${SKIP_QUERY_GEN:-0}" != "1" ]; then
     log "Step 3/5: Regenerating benchmark queries and manifests"
-    python3 "$SCRIPT_DIR/gen_outerjoin_benchmark.py" 2>&1 | tee -a "$RUN_LOG"
+    "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" 2>&1 | tee -a "$RUN_LOG"
 else
     log "Step 3/5: Skipping benchmark generation (SKIP_QUERY_GEN=1)"
 fi

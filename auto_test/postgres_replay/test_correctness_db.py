@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import csv
 import io
 import os
@@ -16,6 +17,11 @@ import unittest
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 BUILDER = SCRIPT_DIR / "prepare_correctness_db.py"
+RUNTIME_PYTHON_SCRIPTS = tuple(
+    path
+    for path in sorted(SCRIPT_DIR.glob("*.py"))
+    if not path.name.startswith("test_")
+)
 sys.path.insert(0, str(SCRIPT_DIR))
 import prepare_correctness_db as correctness_builder  # noqa: E402
 
@@ -35,6 +41,46 @@ def find_duckdb() -> Path | None:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate.resolve()
     return None
+
+
+class PythonCompatibilityTest(unittest.TestCase):
+    def test_runtime_scripts_parse_with_python_37_grammar(self) -> None:
+        for script in RUNTIME_PYTHON_SCRIPTS:
+            with self.subTest(script=script.name):
+                source = script.read_text(encoding="utf-8")
+                if sys.version_info >= (3, 11):
+                    ast.parse(
+                        source,
+                        filename=str(script),
+                        feature_version=(3, 7),
+                    )
+                elif sys.version_info >= (3, 8):
+                    ast.parse(source, filename=str(script), feature_version=7)
+                else:
+                    # Running under 3.7 already enforces the desired grammar.
+                    ast.parse(source, filename=str(script))
+
+    def test_runtime_scripts_avoid_python_38_path_unlink_keyword(self) -> None:
+        incompatible_calls = []
+        for script in RUNTIME_PYTHON_SCRIPTS:
+            source = script.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(script))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if (
+                    not isinstance(node.func, ast.Attribute)
+                    or node.func.attr != "unlink"
+                ):
+                    continue
+                if any(keyword.arg == "missing_ok" for keyword in node.keywords):
+                    incompatible_calls.append((script.name, node.lineno))
+        self.assertEqual(
+            incompatible_calls,
+            [],
+            "Path.unlink(missing_ok=...) requires Python 3.8; "
+            f"incompatible call(s): {incompatible_calls}",
+        )
 
 
 class CorrectnessDatabaseTest(unittest.TestCase):

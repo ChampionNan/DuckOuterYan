@@ -38,6 +38,7 @@ class PGPlanConfigTest(unittest.TestCase):
             "PGPLAN_PASSWORD",
             "PGPLAN_PASSWORD_FILE",
             "PGPLAN_CONTAINER_PASSWORD",
+            "PYTHON_BIN",
             "PGPLAN_QUERY",
             "PGPLAN_EXECUTION_DB",
             "PGPLAN_CORRECTNESS_GRAPH_ROWS",
@@ -88,7 +89,7 @@ class PGPlanConfigTest(unittest.TestCase):
         env.update({key: str(value) for key, value in overrides.items()})
         shell = """
 source "$1"
-for name in RUN_PGPLAN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM \
+for name in RUN_PGPLAN PYTHON_BIN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM \
     PGPLAN_ROOT PGPLAN_SOURCE_DIR PGPLAN_INSTALL_DIR PGPLAN_DATA_DIR \
     PGPLAN_HOST PGPLAN_PORT PGPLAN_DATABASE PGPLAN_USER PGPLAN_PASSWORD PGPLAN_PASSWORD_FILE \
     PGPLAN_CONTAINER_PASSWORD PG_REPLAY_PASSWORD PG_REPLAY_CONTAINER_PASSWORD PG_DSN PSQL_BIN \
@@ -117,6 +118,7 @@ done
         pg_root = REPO_ROOT / "postgres"
         prefix = pg_root / "postgresql"
         self.assertEqual(values["RUN_PGPLAN"], "1")
+        self.assertEqual(values["PYTHON_BIN"], "python3")
         self.assertEqual(values["PGPLAN_SETUP"], "source")
         self.assertEqual(values["PGPLAN_VERSION"], "16.2")
         self.assertEqual(values["PGPLAN_VERSION_NUM"], "160002")
