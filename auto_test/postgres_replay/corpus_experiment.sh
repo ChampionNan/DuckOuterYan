@@ -439,11 +439,16 @@ SKIP_GRAPH=0
 SKIP_TPCH=0
 SKIP_TPCDS=0
 SKIP_JOB=0
+QUERY_SEPARATOR="--------------------------------------------------------------------------------"
 for index in "${!QUERY_PATHS[@]}"; do
     family="${QUERY_FAMILIES[$index]}"
     query="${QUERY_PATHS[$index]}"
     label="${QUERY_LABELS[$index]}"
     relative="${QUERY_RELATIVES[$index]}"
+    printf '\n%s\n' "$QUERY_SEPARATOR"
+    printf '[pgplan] query %d/%d: %s\n' \
+        "$((index + 1))" "${#QUERY_PATHS[@]}" "$relative"
+    printf '%s\n' "$QUERY_SEPARATOR"
     case "$family" in
         graph) family_skipped="$SKIP_GRAPH" ;;
         tpch) family_skipped="$SKIP_TPCH" ;;
@@ -576,6 +581,7 @@ for index in "${!QUERY_PATHS[@]}"; do
     echo "[pgplan] PASS $relative"
 done
 
+printf '\n%s\n' "$QUERY_SEPARATOR"
 PASS_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "PASS" {count++} END {print count + 0}' "$STATUS_TSV")"
 FAIL_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "FAIL" {count++} END {print count + 0}' "$STATUS_TSV")"
 SKIP_COUNT="$(awk -F '\t' 'NR > 1 && $3 == "SKIP" {count++} END {print count + 0}' "$STATUS_TSV")"

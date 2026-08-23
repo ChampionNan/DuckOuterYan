@@ -609,6 +609,9 @@ class CorpusRunnerTest(unittest.TestCase):
             ["graph/a_keep.sql", "tpch/c_keep.sql"],
         )
         self.assertTrue(all(row["status"] == "PASS" for row in status))
+        self.assertIn("[pgplan] query 1/2: graph/a_keep.sql", result.stdout)
+        self.assertIn("[pgplan] query 2/2: tpch/c_keep.sql", result.stdout)
+        self.assertIn("----------------------------------------", result.stdout)
         calls = self.log.read_text(encoding="utf-8")
         self.assertEqual(calls.count("prepare "), 1)
         self.assertEqual(calls.count("correctness "), 2)
