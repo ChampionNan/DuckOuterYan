@@ -496,6 +496,30 @@ class CorpusRunnerTest(unittest.TestCase):
             """,
         )
         self._write_executable(
+            self.tools / "prepare_correctness_db.sh",
+            r"""
+            printf 'correctness %s\n' "$*" >> "$FAKE_CALL_LOG"
+            out=''
+            manifest=''
+            family=''
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --family) family="$2"; shift 2 ;;
+                    --out) out="$2"; shift 2 ;;
+                    --manifest) manifest="$2"; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            if [ "${FAKE_CORRECTNESS_FAIL_FAMILY:-}" = "$family" ]; then
+                echo "intentional $family correctness preparation failure" >&2
+                exit 7
+            fi
+            mkdir -p "$(dirname "$out")" "$(dirname "$manifest")"
+            : > "$out"
+            printf 'ok\n' > "$manifest"
+            """,
+        )
+        self._write_executable(
             self.tools / "make_plan.sh",
             r"""
             printf 'capture %s\n' "$*" >> "$FAKE_CALL_LOG"
@@ -537,7 +561,8 @@ class CorpusRunnerTest(unittest.TestCase):
                     exit 124
                     ;;
             esac
-            mkdir -p "$out"
+            mkdir -p "$out/provenance"
+            printf 'description=fake experiment\n' > "$out/provenance/manifest.txt"
             """,
         )
 
@@ -586,12 +611,32 @@ class CorpusRunnerTest(unittest.TestCase):
         self.assertTrue(all(row["status"] == "PASS" for row in status))
         calls = self.log.read_text(encoding="utf-8")
         self.assertEqual(calls.count("prepare "), 1)
+        self.assertEqual(calls.count("correctness "), 2)
         self.assertIn("--family graph", calls)
         self.assertIn("--rows 11", calls)
+        self.assertIn("--rows 500", calls)
+        self.assertIn("--correctness-db", calls)
+        self.assertIn(
+            "--correctness-db {}/correctness_dbs/graph.duckdb".format(out.resolve()),
+            calls,
+        )
+        self.assertIn(
+            "--correctness-db {}/correctness_dbs/tpch.duckdb".format(out.resolve()),
+            calls,
+        )
         self.assertIn("--pg-schema pgplan_graph", calls)
         self.assertIn("--plan-data graph-duckdb-sample-11", calls)
         self.assertIn("--pg-schema public", calls)
         self.assertIn("--plan-data tpch-sf0.01", calls)
+        provenance = out / "runs" / "graph" / "a_keep" / "provenance"
+        self.assertTrue((provenance / "correctness_db_manifest.tsv").is_file())
+        self.assertTrue((provenance / "correctness_db_fingerprints.tsv").is_file())
+        run_manifest = (provenance / "manifest.txt").read_text(encoding="utf-8")
+        self.assertRegex(run_manifest, r"correctness_db_sha256=[0-9a-f]{64}\n")
+        self.assertRegex(
+            run_manifest,
+            r"correctness_db_manifest_sha256=[0-9a-f]{64}\n",
+        )
 
     def test_capture_failure_is_recorded_and_later_query_continues(self) -> None:
         (self.corpus / "graph" / "a_bad.sql").write_text("SELECT 1;\n", encoding="utf-8")
@@ -648,6 +693,46 @@ class CorpusRunnerTest(unittest.TestCase):
         self.assertIn("phase=correctness", status[0]["detail"])
         self.assertEqual(self.log.read_text(encoding="utf-8").count("experiment "), 2)
 
+    def test_correctness_database_failure_fails_closed_for_the_family(self) -> None:
+        (self.corpus / "graph" / "a.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (self.corpus / "graph" / "b.sql").write_text("SELECT 2;\n", encoding="utf-8")
+        out = self.root / "correctness-prepare-failure"
+        env = os.environ.copy()
+        env.update(
+            {
+                "OY_CONFIG_LOADED": "",
+                "FAKE_CALL_LOG": str(self.log),
+                "FAKE_CORRECTNESS_FAIL_FAMILY": "graph",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                str(self.tools / "corpus_experiment.sh"),
+                "--only",
+                "graph",
+                "--runs",
+                "1",
+                "--out",
+                str(out),
+            ],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        with (out / "status.tsv").open(newline="", encoding="utf-8") as source:
+            status = list(csv.DictReader(source, delimiter="\t"))
+        self.assertEqual([row["status"] for row in status], ["FAIL", "FAIL"])
+        self.assertTrue(all(row["phase"] == "prepare" for row in status))
+        self.assertIn("correctness preparation failure", status[0]["detail"])
+        calls = self.log.read_text(encoding="utf-8")
+        self.assertEqual(calls.count("correctness "), 1)
+        self.assertNotIn("capture ", calls)
+        self.assertNotIn("experiment ", calls)
+
 
 class ExperimentTimeoutTest(unittest.TestCase):
     def run_experiment_with_duck_exit(self, duck_exit: int, duck_stderr=""):
@@ -678,6 +763,7 @@ class ExperimentTimeoutTest(unittest.TestCase):
         )
         out = root / "out"
         env = os.environ.copy()
+        env.pop("PGPLAN_CORRECTNESS_DB", None)
         env.update(
             {
                 "PYTHON_BIN": sys.executable,
@@ -747,6 +833,23 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
                 import sys
 
                 sql = sys.stdin.read()
+                if "pragma_version()" in sql:
+                    call_kind = "version"
+                elif "duckdb_settings()" in sql:
+                    call_kind = "settings"
+                elif "EXPLAIN " in sql:
+                    call_kind = "explain"
+                elif ".mode csv" in sql:
+                    call_kind = "correctness"
+                elif ".timer on" in sql:
+                    call_kind = "timing"
+                else:
+                    call_kind = "unknown"
+                call_log = os.environ.get("FAKE_DUCK_CALL_LOG")
+                if call_log:
+                    with open(call_log, "a", encoding="utf-8") as target:
+                        target.write("{}\t{}\n".format(call_kind, sys.argv[-1]))
+
                 trace = os.environ.get("DUCKDB_OYTRACE")
                 if trace:
                     Path(trace).write_text(
@@ -765,6 +868,8 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
                         print('[PGPLAN] {"event":"verified"}', file=sys.stderr)
                     print("logical_plan")
                 elif ".mode csv" in sql:
+                    if "SET VARIABLE pgplan = '" in sql:
+                        print('[PGPLAN] {"event":"verified"}', file=sys.stderr)
                     if (
                         os.environ.get("FAKE_DUCK_MISMATCH_PGPLAN") == "1"
                         and "SET VARIABLE pgplan = '" in sql
@@ -796,9 +901,10 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def run_experiment(self, **overrides: str):
+    def run_experiment(self, extra_args=(), **overrides: str):
         out = self.root / "out"
         env = os.environ.copy()
+        env.pop("PGPLAN_CORRECTNESS_DB", None)
         env.update(
             {
                 "PATH": str(self.tools) + os.pathsep + env.get("PATH", ""),
@@ -809,25 +915,26 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             }
         )
         env.update(overrides)
+        command = [
+            "bash",
+            str(EXPERIMENT),
+            "--duckdb-bin",
+            str(self.duckdb),
+            "--execution-db",
+            str(self.database),
+            "--query",
+            str(self.query),
+            "--plan",
+            str(self.plan),
+            "--runs",
+            "1",
+            "--threads",
+            "1",
+        ]
+        command.extend(extra_args)
+        command.extend(["--out", str(out)])
         result = subprocess.run(
-            [
-                "bash",
-                str(EXPERIMENT),
-                "--duckdb-bin",
-                str(self.duckdb),
-                "--execution-db",
-                str(self.database),
-                "--query",
-                str(self.query),
-                "--plan",
-                str(self.plan),
-                "--runs",
-                "1",
-                "--threads",
-                "1",
-                "--out",
-                str(out),
-            ],
+            command,
             env=env,
             text=True,
             capture_output=True,
@@ -851,6 +958,71 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             raise AssertionError(manifest)
         if "skip_reason=postprocess_timeout" not in manifest:
             raise AssertionError(manifest)
+
+    def assert_database_routing(self, call_log: Path, correctness_db: Path) -> None:
+        calls = [
+            tuple(line.split("\t", 1))
+            for line in call_log.read_text(encoding="utf-8").splitlines()
+        ]
+        kinds = [kind for kind, _database in calls]
+        self.assertEqual(kinds.count("version"), 1)
+        self.assertEqual(kinds.count("settings"), 3)
+        self.assertEqual(kinds.count("explain"), 3)
+        self.assertEqual(kinds.count("correctness"), 3)
+        self.assertEqual(kinds.count("timing"), 3)
+        self.assertNotIn("unknown", kinds)
+        for kind, database in calls:
+            expected = correctness_db if kind == "correctness" else self.database
+            self.assertEqual(database, str(expected.resolve()), (kind, database))
+
+    def test_correctness_database_environment_is_isolated_from_target_work(self) -> None:
+        correctness_db = self.root / "correctness.db"
+        correctness_db.touch()
+        call_log = self.root / "database-calls.tsv"
+        result, out = self.run_experiment(
+            PGPLAN_CORRECTNESS_DB=str(correctness_db),
+            FAKE_DUCK_CALL_LOG=str(call_log),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_database_routing(call_log, correctness_db)
+        manifest = (out / "provenance/manifest.txt").read_text(encoding="utf-8")
+        self.assertIn("execution_db={}\n".format(self.database.resolve()), manifest)
+        self.assertIn("correctness_db={}\n".format(correctness_db.resolve()), manifest)
+
+    def test_correctness_database_defaults_to_execution_database(self) -> None:
+        call_log = self.root / "default-database-calls.tsv"
+        result, out = self.run_experiment(FAKE_DUCK_CALL_LOG=str(call_log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_database_routing(call_log, self.database)
+        manifest = (out / "provenance/manifest.txt").read_text(encoding="utf-8")
+        expected = str(self.database.resolve())
+        self.assertIn("execution_db={}\n".format(expected), manifest)
+        self.assertIn("correctness_db={}\n".format(expected), manifest)
+
+    def test_correctness_database_cli_overrides_environment(self) -> None:
+        environment_db = self.root / "environment-correctness.db"
+        environment_db.touch()
+        cli_db = self.root / "cli-correctness.db"
+        cli_db.touch()
+        call_log = self.root / "database-override-calls.tsv"
+        result, _out = self.run_experiment(
+            extra_args=("--correctness-db", str(cli_db)),
+            PGPLAN_CORRECTNESS_DB=str(environment_db),
+            FAKE_DUCK_CALL_LOG=str(call_log),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_database_routing(call_log, cli_db)
+
+    def test_missing_correctness_database_fails_before_execution(self) -> None:
+        missing = self.root / "missing-correctness.db"
+        call_log = self.root / "missing-database-calls.tsv"
+        result, _out = self.run_experiment(
+            extra_args=("--correctness-db", str(missing)),
+            FAKE_DUCK_CALL_LOG=str(call_log),
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("correctness database does not exist", result.stderr)
+        self.assertFalse(call_log.exists())
 
     def test_csv_framing_timeout_is_skipped(self) -> None:
         python_wrapper = self.write_tool(

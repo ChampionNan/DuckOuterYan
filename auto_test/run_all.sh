@@ -9,7 +9,7 @@
 #   1. Compile DuckDB release with required extensions (tpch, tpcds)
 #   2. Build the databases required by the selected benchmark strata
 #   3. Regenerate the benchmark and provenance manifests
-#   4. Prepare the managed PostgreSQL 16.2 plan-selection database
+#   4. Prepare PostgreSQL plan-selection data and bounded correctness databases
 #   5. Compare DuckDB/PGPlan/OuterYan for every selected corpus query
 #
 # Environment overrides (all optional):
@@ -27,6 +27,10 @@
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
 #   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
+#   PGPLAN_CORRECTNESS_GRAPH_ROWS  Small exact-check graph prefix (default 500)
+#   PGPLAN_CORRECTNESS_JOB_ROWS  Small exact-check JOB prefix (default 1000)
+#   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Small-result preflight cap (default 2000000)
+#   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Small-DB preflight limit (default 30)
 #   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 60)
 #   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
 #   OY_CORPUS        Custom corpus for RUN_PGPLAN=0 legacy two-way mode
@@ -116,7 +120,7 @@ run_pgplan_corpus() {
     [ -x "$SCRIPT_DIR/pgplan/corpus_experiment.sh" ] || \
         err "PGPlan corpus helper not found: $SCRIPT_DIR/pgplan/corpus_experiment.sh"
 
-    log "Step 4/5: Preparing PostgreSQL 16.2 and minimal plan-selection data"
+    log "Step 4/5: Preparing PostgreSQL 16.2 plan data and bounded correctness databases"
     log "Step 5/5: Comparing DuckDB, PGPlan, and OuterYan across $corpus"
     bash "$SCRIPT_DIR/pgplan/corpus_experiment.sh" \
         --corpus "$corpus" \

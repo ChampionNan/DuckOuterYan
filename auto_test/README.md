@@ -55,6 +55,10 @@ corresponding environment values.
 | `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
 | `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive fresh PGPlan artifacts |
 | `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
+| `PGPLAN_CORRECTNESS_GRAPH_ROWS` | `500` | Per-table deterministic graph prefix for exact correctness |
+| `PGPLAN_CORRECTNESS_JOB_ROWS` | `1000` | Per-table deterministic JOB prefix for exact correctness |
+| `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS` | `2000000` | Fail closed before testing if a small-DB query exceeds this output bound |
+| `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS` | `30` | Per-query timeout while validating the small correctness database |
 | `PGPLAN_CAPTURE_TIMEOUT_SECS` | `60` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
 | `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and correctness post-processing step during the three-way experiment |
 | `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
@@ -687,9 +691,11 @@ RUN_PGPLAN=0 OY_CORPUS=auto_test/outerjoin_benchmark/core \
 
 The default three-way stage walks all 206 SQL files under `outerjoin_query`:
 7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It captures a fresh
-PostgreSQL artifact for each query, executes the same bare query as native
-DuckDB, PGPlan, and normal OuterYan, compares complete result multisets, and
-only then records timings.
+PostgreSQL artifact for each query, executes the same bare query once as native
+DuckDB, PGPlan, and normal OuterYan on a bounded small DuckDB database,
+compares the three complete result multisets, and only then records target-data
+timings. PostgreSQL is a planning oracle only: it receives plain `EXPLAIN`,
+never `EXPLAIN ANALYZE` and never a result-producing execution.
 `--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
 attempt is recorded in `status.tsv`; there is no native-plan fallback when
 capture or PGPlan application fails. A PostgreSQL planning, DuckDB execution,
@@ -698,10 +704,35 @@ query continues; every other failure remains `FAIL` and makes the corpus
 command return nonzero. For a quick bounded server run, pass
 `--capture-timeout 60 --timeout 60`.
 
-TPC-H uses the exact SF0.01 PostgreSQL dataset. Graph, TPC-DS, and JOB use
-isolated schemas with at most `PGPLAN_SAMPLE_ROWS` rows per table (1000 by
-default), followed by `ANALYZE`. These rows select the PostgreSQL tree only;
-all three configurations execute on the configured target-scale DuckDB files.
+The workflow deliberately uses three distinct data roles:
+
+1. PostgreSQL plan selection uses exact TPC-H SF0.01 or isolated graph,
+   TPC-DS, and JOB schemas capped by `PGPLAN_SAMPLE_ROWS` (1000 rows per table
+   by default), followed by `ANALYZE`. These rows select the typed logical tree
+   through plain `EXPLAIN` only.
+2. Exact three-way correctness uses a separate bounded DuckDB database: a
+   deterministic `ORDER BY rowid` prefix of 500 rows per graph table, TPC-H `dbgen` at
+   SF0.01, TPC-DS `dsdgen` at SF0.01, or an `ORDER BY rowid` prefix of 1000
+   rows per JOB table. The builder clones the target catalog's table DDL and
+   keys, validates a configurable result-row bound and per-query timeout, and
+   writes a manifest. The corpus runner fingerprints both the published
+   database and manifest once per family and copies those records into each
+   query run. TPC-DS and JOB may be enriched with bounded target-rowid
+   witnesses captured from the current target execution. The prefixes and
+   generator bases are deterministic; witness enrichment is not a claim of
+   byte-identical fixtures across engines or runs, nor does it imply that every
+   query result is nonempty.
+3. The configured target DuckDB files are used for all three EXPLAIN plans,
+   PGPlan semantic-signature verification, and release timing. Timed queries
+   use output-discarding mode; target-scale result materialization is not part
+   of correctness checking.
+
+Accordingly, the evidence supports exact Native/PGPlan/OuterYan result equality
+on the small correctness database, plus PGPlan tree adherence and performance
+on the target database. It does not claim a target-scale complete-result
+comparison or execution of PostgreSQL's physical plan. See
+[`pgplan/README.md`](pgplan/README.md) for the manual `--correctness-db`
+interface and builder options.
 
 `PGPLAN_SETUP=source` follows the repo-local paths in `configs.sh` and pins
 PostgreSQL 16.2. If the managed binary is absent, it downloads the verified

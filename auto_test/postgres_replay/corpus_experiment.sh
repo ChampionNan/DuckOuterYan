@@ -15,6 +15,10 @@ RUNS="${PGPLAN_RUNS:-${OY_RUNS:-3}}"
 THREADS="${PGPLAN_THREADS:-${OY_THREADS:-1}}"
 TIMEOUT_SECS="${PGPLAN_TIMEOUT_SECS:-${OY_TIMEOUT_SECS:-0}}"
 CAPTURE_TIMEOUT_SECS="${PGPLAN_CAPTURE_TIMEOUT_SECS:-${PG_REPLAY_CAPTURE_TIMEOUT_SECS:-60}}"
+CORRECTNESS_GRAPH_ROWS="${PGPLAN_CORRECTNESS_GRAPH_ROWS:-500}"
+CORRECTNESS_JOB_ROWS="${PGPLAN_CORRECTNESS_JOB_ROWS:-1000}"
+CORRECTNESS_MAX_RESULT_ROWS="${PGPLAN_CORRECTNESS_MAX_RESULT_ROWS:-2000000}"
+CORRECTNESS_QUERY_TIMEOUT_SECS="${PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS:-30}"
 DUCKDB_BIN="${DUCKDB_BIN:-}"
 PG_DSN="${PG_DSN:-}"
 OUT=""
@@ -41,6 +45,11 @@ most --rows rows per DuckDB table (default 1000). TPC-H uses the exact SF0.01
 data prepared by setup_pg.sh. Selection order is graph, tpch, tpcds, job and is
 locale independent; --limit is global. --pattern is a shell glob on the query
 filename without .sql.
+
+Exact result comparison is separate from target-scale planning and timing. The
+runner builds one deterministic small DuckDB database per selected family and
+uses it only for the three bare-query multiset checks. EXPLAIN, PGPlan semantic
+verification, and timing continue to use the configured target database.
 
 Every selected query gets one row in OUT/status.tsv. PostgreSQL plain-EXPLAIN
 or DuckDB execution timeouts are recorded as SKIP, their remaining experiment
@@ -144,12 +153,20 @@ esac
 [[ "$TIMEOUT_SECS" =~ ^[0-9]+$ ]] || die "--timeout must be a non-negative integer"
 [[ "$CAPTURE_TIMEOUT_SECS" =~ ^[0-9]+$ ]] || \
     die "--capture-timeout must be a non-negative integer"
+[[ "$CORRECTNESS_GRAPH_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+    die "PGPLAN_CORRECTNESS_GRAPH_ROWS must be a positive integer"
+[[ "$CORRECTNESS_JOB_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+    die "PGPLAN_CORRECTNESS_JOB_ROWS must be a positive integer"
+[[ "$CORRECTNESS_MAX_RESULT_ROWS" =~ ^[1-9][0-9]*$ ]] || \
+    die "PGPLAN_CORRECTNESS_MAX_RESULT_ROWS must be a positive integer"
+[[ "$CORRECTNESS_QUERY_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || \
+    die "PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS must be a positive integer"
 [ -d "$CORPUS" ] || die "corpus directory does not exist: $CORPUS"
 CORPUS="$(cd "$CORPUS" && pwd -P)"
 [ -x "$DUCKDB_BIN" ] || die "DuckDB binary is not executable: $DUCKDB_BIN"
 [ -n "$PG_DSN" ] || die "--pg-dsn is required (or set PG_DSN)"
 
-for helper in setup_pg.sh prepare_sampled_pg.sh make_plan.sh experiment.sh; do
+for helper in setup_pg.sh prepare_sampled_pg.sh prepare_correctness_db.sh make_plan.sh experiment.sh; do
     [ -x "$SCRIPT_DIR/$helper" ] || die "required helper is not executable: $SCRIPT_DIR/$helper"
 done
 
@@ -161,13 +178,15 @@ if [ -e "$OUT" ] && [ -n "$(find "$OUT" -mindepth 1 -maxdepth 1 -print -quit 2>/
 fi
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd -P)"
-mkdir -p "$OUT/artifacts" "$OUT/runs" "$OUT/logs" "$OUT/data_manifests"
+mkdir -p "$OUT/artifacts" "$OUT/runs" "$OUT/logs" "$OUT/data_manifests" \
+    "$OUT/correctness_dbs" "$OUT/query_snapshots"
 STATUS_TSV="$OUT/status.tsv"
 printf 'family\tquery\tstatus\tphase\tdetail\tplan\tresult_dir\n' > "$STATUS_TSV"
 
 QUERY_FAMILIES=()
 QUERY_PATHS=()
 QUERY_LABELS=()
+QUERY_RELATIVES=()
 for family in "${FAMILIES[@]}"; do
     query_dir="$CORPUS/$family"
     [ -d "$query_dir" ] || die "selected corpus family is missing: $query_dir"
@@ -177,6 +196,7 @@ for family in "${FAMILIES[@]}"; do
         QUERY_FAMILIES+=("$family")
         QUERY_PATHS+=("$query_path")
         QUERY_LABELS+=("$label")
+        QUERY_RELATIVES+=("${query_path#$CORPUS/}")
         if [ "$LIMIT" -gt 0 ] && [ "${#QUERY_PATHS[@]}" -ge "$LIMIT" ]; then
             break
         fi
@@ -187,6 +207,16 @@ for family in "${FAMILIES[@]}"; do
 done
 [ "${#QUERY_PATHS[@]}" -gt 0 ] || \
     die "no corpus queries matched (only=$ONLY pattern=$PATTERN)"
+
+# Freeze the selected SQL before PostgreSQL setup or data preparation. Capture,
+# correctness-fixture construction, and all three DuckDB modes consume these
+# same immutable bytes even if the generated corpus is edited concurrently.
+for index in "${!QUERY_PATHS[@]}"; do
+    snapshot="$OUT/query_snapshots/${QUERY_RELATIVES[$index]}"
+    mkdir -p "$(dirname "$snapshot")"
+    cp -- "${QUERY_PATHS[$index]}" "$snapshot"
+    QUERY_PATHS[$index]="$snapshot"
+done
 
 db_for_family() {
     case "$1" in
@@ -224,12 +254,68 @@ append_status() {
         >> "$STATUS_TSV"
 }
 
+sha256_file() {
+    local path="$1" digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(sha256sum -- "$path" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        digest="$(shasum -a 256 -- "$path" | awk '{print $1}')"
+    elif command -v openssl >/dev/null 2>&1; then
+        digest="$(openssl dgst -sha256 "$path" | awk '{print $NF}')"
+    else
+        echo "sha256sum, shasum, or openssl is required for correctness provenance" >&2
+        return 1
+    fi
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+        echo "invalid SHA-256 digest for $path: $digest" >&2
+        return 1
+    }
+    printf '%s' "$digest"
+}
+
+attach_correctness_provenance() {
+    local family="$1" result_dir="$2"
+    local source_manifest="$OUT/data_manifests/${family}_correctness.tsv"
+    local source_fingerprints="$OUT/data_manifests/${family}_correctness.sha256.tsv"
+    local provenance="$result_dir/provenance"
+    local run_manifest="$provenance/manifest.txt"
+    local database_sha manifest_sha
+    if [ ! -r "$source_manifest" ] || [ ! -r "$source_fingerprints" ]; then
+        echo "correctness manifest or fingerprint file is missing for $family" >&2
+        return 1
+    fi
+    database_sha="$(awk -F '\t' '$1 == "database" {print $2}' "$source_fingerprints")"
+    manifest_sha="$(awk -F '\t' '$1 == "manifest" {print $2}' "$source_fingerprints")"
+    if ! [[ "$database_sha" =~ ^[0-9a-f]{64}$ ]] || \
+            ! [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "invalid correctness provenance digest for $family" >&2
+        return 1
+    fi
+    if ! mkdir -p "$provenance" || \
+            ! cp -- "$source_manifest" "$provenance/correctness_db_manifest.tsv" || \
+            ! cp -- "$source_fingerprints" "$provenance/correctness_db_fingerprints.tsv"; then
+        echo "could not copy correctness provenance for $family" >&2
+        return 1
+    fi
+    if [ -f "$run_manifest" ]; then
+        if ! {
+            printf 'correctness_db_sha256=%s\n' "$database_sha"
+            printf 'correctness_db_manifest=%s\n' "$provenance/correctness_db_manifest.tsv"
+            printf 'correctness_db_manifest_sha256=%s\n' "$manifest_sha"
+        } >> "$run_manifest"; then
+            echo "could not append correctness provenance for $family" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
 echo "[pgplan] selected ${#QUERY_PATHS[@]} query(s); status=$STATUS_TSV"
 SETUP_LOG="$OUT/logs/setup_pg.log"
 if ! bash "$SCRIPT_DIR/setup_pg.sh" > "$SETUP_LOG" 2>&1; then
     detail="$(sanitize_detail "$SETUP_LOG")"
     for index in "${!QUERY_PATHS[@]}"; do
-        relative="${QUERY_PATHS[$index]#$CORPUS/}"
+        relative="${QUERY_RELATIVES[$index]}"
         append_status "${QUERY_FAMILIES[$index]}" "$relative" FAIL setup "$detail" "" ""
     done
     echo "ERROR: PostgreSQL setup failed: $detail" >&2
@@ -243,37 +329,89 @@ PREPARED_TPCDS=0
 PREPARED_JOB=0
 CURRENT_SCHEMA=""
 CURRENT_PLAN_DATA=""
+CURRENT_CORRECTNESS_DB=""
 
 prepare_family() {
-    local family="$1" family_db prepare_log force_args=()
+    local family="$1" family_db correctness_db correctness_log prepare_log correctness_rows
+    local correctness_manifest correctness_fingerprints correctness_db_sha correctness_manifest_sha
+    local force_args=() correctness_args=()
     case "$family" in
         graph)
             [ "$PREPARED_GRAPH" -eq 0 ] || return 0
             CURRENT_SCHEMA="pgplan_graph"
             CURRENT_PLAN_DATA="graph-duckdb-sample-$ROW_CAP"
+            correctness_rows="$CORRECTNESS_GRAPH_ROWS"
             ;;
         tpch)
             [ "$PREPARED_TPCH" -eq 0 ] || return 0
             CURRENT_SCHEMA="public"
             CURRENT_PLAN_DATA="tpch-sf0.01"
-            PREPARED_TPCH=1
-            return 0
+            correctness_rows=""
             ;;
         tpcds)
             [ "$PREPARED_TPCDS" -eq 0 ] || return 0
             CURRENT_SCHEMA="pgplan_tpcds"
             CURRENT_PLAN_DATA="tpcds-duckdb-sample-$ROW_CAP"
+            correctness_rows=""
             ;;
         job)
             [ "$PREPARED_JOB" -eq 0 ] || return 0
             CURRENT_SCHEMA="pgplan_job"
             CURRENT_PLAN_DATA="job-duckdb-sample-$ROW_CAP"
+            correctness_rows="$CORRECTNESS_JOB_ROWS"
             ;;
         *) return 2 ;;
     esac
 
     family_db="$(db_for_family "$family")" || return 2
-    prepare_log="$OUT/logs/prepare_$family.log"
+    correctness_db="$OUT/correctness_dbs/$family.duckdb"
+    correctness_log="$OUT/logs/prepare_correctness_$family.log"
+    CURRENT_CORRECTNESS_DB="$correctness_db"
+    correctness_args=(
+        --family "$family"
+        --source-db "$family_db"
+        --out "$correctness_db"
+        --query-dir "$OUT/query_snapshots/$family"
+        --max-result-rows "$CORRECTNESS_MAX_RESULT_ROWS"
+        --query-timeout "$CORRECTNESS_QUERY_TIMEOUT_SECS"
+        --duckdb-bin "$DUCKDB_BIN"
+        --manifest "$OUT/data_manifests/${family}_correctness.tsv"
+    )
+    if [ -n "$correctness_rows" ]; then
+        correctness_args+=(--rows "$correctness_rows")
+    fi
+    echo "[pgplan] prepare bounded $family correctness DB: $correctness_db"
+    if ! bash "$SCRIPT_DIR/prepare_correctness_db.sh" \
+            "${correctness_args[@]}" > "$correctness_log" 2>&1; then
+        PREPARE_FAILURE_DETAIL="$(sanitize_detail "$correctness_log")"
+        return 1
+    fi
+    correctness_manifest="$OUT/data_manifests/${family}_correctness.tsv"
+    correctness_fingerprints="$OUT/data_manifests/${family}_correctness.sha256.tsv"
+    if ! correctness_db_sha="$(sha256_file "$correctness_db")" || \
+            ! correctness_manifest_sha="$(sha256_file "$correctness_manifest")"; then
+        PREPARE_FAILURE_DETAIL="could not fingerprint the $family correctness database"
+        return 1
+    fi
+    if ! {
+        printf 'object\tsha256\tpath\n'
+        printf 'database\t%s\t%s\n' "$correctness_db_sha" "$correctness_db"
+        printf 'manifest\t%s\t%s\n' "$correctness_manifest_sha" "$correctness_manifest"
+    } > "$correctness_fingerprints"; then
+        PREPARE_FAILURE_DETAIL="could not write the $family correctness fingerprints"
+        return 1
+    fi
+
+    # setup_pg.sh already prepared the exact SF0.01 PostgreSQL data. Other
+    # families additionally need their isolated PostgreSQL plan-selection
+    # schema populated from the target DuckDB database.
+    if [ "$family" = "tpch" ]; then
+        PREPARED_TPCH=1
+        return 0
+    fi
+
+    prepare_log="$OUT/logs/prepare_pg_$family.log"
+    echo "[pgplan] prepare minimal PostgreSQL $family plan-selection data"
     if [ "${PGPLAN_SETUP:-${PG_REPLAY_SETUP:-source}}" != "external" ] || \
             [ "${PGPLAN_FORCE_SAMPLED_DATA:-${PGPLAN_FORCE_DATA:-${PG_REPLAY_FORCE_DATA:-0}}}" = "1" ]; then
         force_args=(--force)
@@ -305,7 +443,7 @@ for index in "${!QUERY_PATHS[@]}"; do
     family="${QUERY_FAMILIES[$index]}"
     query="${QUERY_PATHS[$index]}"
     label="${QUERY_LABELS[$index]}"
-    relative="${query#$CORPUS/}"
+    relative="${QUERY_RELATIVES[$index]}"
     case "$family" in
         graph) family_skipped="$SKIP_GRAPH" ;;
         tpch) family_skipped="$SKIP_TPCH" ;;
@@ -337,18 +475,22 @@ for index in "${!QUERY_PATHS[@]}"; do
         graph)
             CURRENT_SCHEMA="pgplan_graph"
             CURRENT_PLAN_DATA="graph-duckdb-sample-$ROW_CAP"
+            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/graph.duckdb"
             ;;
         tpch)
             CURRENT_SCHEMA="public"
             CURRENT_PLAN_DATA="tpch-sf0.01"
+            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpch.duckdb"
             ;;
         tpcds)
             CURRENT_SCHEMA="pgplan_tpcds"
             CURRENT_PLAN_DATA="tpcds-duckdb-sample-$ROW_CAP"
+            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/tpcds.duckdb"
             ;;
         job)
             CURRENT_SCHEMA="pgplan_job"
             CURRENT_PLAN_DATA="job-duckdb-sample-$ROW_CAP"
+            CURRENT_CORRECTNESS_DB="$OUT/correctness_dbs/job.duckdb"
             ;;
     esac
 
@@ -388,7 +530,7 @@ for index in "${!QUERY_PATHS[@]}"; do
     fi
 
     execution_db="$(db_for_family "$family")"
-    echo "[pgplan] execute $relative (per-statement timeout=${TIMEOUT_SECS}s; log=$experiment_log)"
+    echo "[pgplan] execute $relative (correctness=small-$family; target EXPLAIN/timing; per-step timeout=${TIMEOUT_SECS}s; log=$experiment_log)"
     if PGPLAN_TIMEOUT_SECS="$TIMEOUT_SECS" \
             PGPLAN_TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${OY_BATCH_GRACE_SECS:-30}}" \
             PGPLAN_TMPDIR="${PGPLAN_TMPDIR:-${OY_TMPDIR:-$OUT/tmp}}" \
@@ -396,15 +538,25 @@ for index in "${!QUERY_PATHS[@]}"; do
             bash "$SCRIPT_DIR/experiment.sh" \
                 --duckdb-bin "$DUCKDB_BIN" \
                 --execution-db "$execution_db" \
+                --correctness-db "$CURRENT_CORRECTNESS_DB" \
                 --query "$query" \
                 --plan "$plan" \
                 --runs "$RUNS" \
                 --threads "$THREADS" \
                 --out "$result_dir" \
-                > "$experiment_log" 2>&1; then
+                2>&1 | tee "$experiment_log"; then
         experiment_rc=0
     else
         experiment_rc=$?
+    fi
+    provenance_log="$OUT/logs/${family}__${label}__correctness_provenance.log"
+    if ! attach_correctness_provenance "$family" "$result_dir" \
+            > "$provenance_log" 2>&1; then
+        detail="$(sanitize_detail "$provenance_log")"
+        append_status "$family" "$relative" FAIL provenance "$detail" "$plan" "$result_dir"
+        echo "[pgplan] FAIL $relative (provenance: $detail)" >&2
+        FAILED=1
+        continue
     fi
     if [ "$experiment_rc" -eq 124 ]; then
         detail="$(sanitize_detail "$experiment_log")"

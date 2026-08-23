@@ -379,6 +379,10 @@ tools/pythonpkg/duckdb_build/
 
 # own
 *_db*
+!/auto_test/pgplan/prepare_correctness_db.sh
+!/auto_test/postgres_replay/prepare_correctness_db.py
+!/auto_test/postgres_replay/prepare_correctness_db.sh
+!/auto_test/postgres_replay/test_correctness_db.py
 
 lsqb*
 *_data

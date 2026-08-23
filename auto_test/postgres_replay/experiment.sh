@@ -23,6 +23,9 @@ Required (each also has the environment fallback shown):
   --out PATH          Output directory (PGPLAN_OUT)
 
 Optional:
+  --correctness-db PATH
+                      DuckDB database used only for the three exact multiset
+                      checks (PGPLAN_CORRECTNESS_DB; default: execution DB)
   --runs N            Positive odd measured-run count after one warm-up
                       (PGPLAN_RUNS, default: 3)
   --threads N         Positive DuckDB thread count
@@ -63,6 +66,7 @@ require_value() {
 
 DUCKDB_BIN="${DUCKDB_BIN:-}"
 EXECUTION_DB="${PGPLAN_EXECUTION_DB:-${PG_REPLAY_EXECUTION_DB:-}}"
+CORRECTNESS_DB="${PGPLAN_CORRECTNESS_DB:-}"
 QUERY_PATH="${PGPLAN_QUERY:-${PG_REPLAY_QUERY:-}}"
 PLAN_PATH="${PGPLAN_PLAN:-${PG_REPLAY_PLAN:-}}"
 OUT_DIR="${PGPLAN_OUT:-${PG_REPLAY_OUT:-}}"
@@ -78,6 +82,8 @@ while [ "$#" -gt 0 ]; do
 			require_value "$@"; DUCKDB_BIN="$2"; shift 2 ;;
 		--execution-db)
 			require_value "$@"; EXECUTION_DB="$2"; shift 2 ;;
+		--correctness-db)
+			require_value "$@"; CORRECTNESS_DB="$2"; shift 2 ;;
 		--query)
 			require_value "$@"; QUERY_PATH="$2"; shift 2 ;;
 		--plan)
@@ -101,6 +107,7 @@ done
 
 [ -n "$DUCKDB_BIN" ] || usage_error "--duckdb-bin is required"
 [ -n "$EXECUTION_DB" ] || usage_error "--execution-db is required"
+[ -n "$CORRECTNESS_DB" ] || CORRECTNESS_DB="$EXECUTION_DB"
 [ -n "$QUERY_PATH" ] || usage_error "--query is required"
 [ -n "$PLAN_PATH" ] || usage_error "--plan is required"
 [ -n "$OUT_DIR" ] || usage_error "--out is required"
@@ -114,6 +121,7 @@ case "$KEEP_CORRECTNESS_FILES" in 0|1) ;; *) usage_error "PGPLAN_KEEP_CORRECTNES
 
 [ -x "$DUCKDB_BIN" ] || die "DuckDB binary is not executable: $DUCKDB_BIN"
 [ -f "$EXECUTION_DB" ] || die "execution database does not exist: $EXECUTION_DB"
+[ -f "$CORRECTNESS_DB" ] || die "correctness database does not exist: $CORRECTNESS_DB"
 [ -r "$QUERY_PATH" ] || die "query file is not readable: $QUERY_PATH"
 [ -r "$PLAN_PATH" ] || die "plan artifact is not readable: $PLAN_PATH"
 if [[ "$PYTHON_BIN" == */* ]]; then
@@ -138,6 +146,7 @@ canonical_file() {
 
 DUCKDB_BIN="$(canonical_file "$DUCKDB_BIN")"
 EXECUTION_DB="$(canonical_file "$EXECUTION_DB")"
+CORRECTNESS_DB="$(canonical_file "$CORRECTNESS_DB")"
 QUERY_PATH="$(canonical_file "$QUERY_PATH")"
 PLAN_PATH="$(canonical_file "$PLAN_PATH")"
 case "$DUCKDB_BIN" in
@@ -218,14 +227,14 @@ emit_bare_query() {
 	printf '%s\n;\n' "$QUERY_SQL"
 }
 
-# run_duck SQL STDOUT STDERR MULTIPLIER [OY_TRACE]
+# run_duck SQL STDOUT STDERR MULTIPLIER [OY_TRACE] [DATABASE]
 # MULTIPLIER is N+1 for a warm-up plus N measured executions. SQL also carries
 # the per-statement limit; this outer watchdog only prevents a wedged process.
 run_duck() {
 	local sql_file="$1" stdout_file="$2" stderr_file="$3" multiplier="$4"
-	local oy_trace="${5:-}" watchdog=0
+	local oy_trace="${5:-}" database="${6:-$EXECUTION_DB}" watchdog=0
 	local -a command
-	command=("$DUCKDB_BIN" -no-init -bail "$EXECUTION_DB")
+	command=("$DUCKDB_BIN" -no-init -bail "$database")
 	if [ "$TIMEOUT_SECS" -gt 0 ]; then
 		watchdog=$((TIMEOUT_SECS * multiplier + TIMEOUT_GRACE))
 		command=("$TIMEOUT_BIN" "$watchdog" "${command[@]}")
@@ -334,10 +343,10 @@ PLAN_SQL="$(sql_escape_literal "$PGPLAN_PLAN_PATH")"
 NULL_SENTINEL="__DUCKYAN_SQL_NULL_${$}_${RANDOM}_${RANDOM}__"
 STARTED_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 {
-	printf 'description=%s\n' "PostgreSQL 16.2's $PLAN_DATA-selected logical join tree, executed by DuckDB on the target-scale dataset."
+	printf 'description=%s\n' "PostgreSQL 16.2's $PLAN_DATA-selected logical join tree: exact three-way equality on the correctness database; DuckDB EXPLAIN, semantic verification, and timing on the target database."
 	printf 'started_utc=%s\n' "$STARTED_UTC"
-	printf 'duckdb_bin=%s\nexecution_db=%s\nquery=%s\nplan_source=%s\npgplan=%s\n' \
-		"$DUCKDB_BIN" "$EXECUTION_DB" "$QUERY_PATH" "$PLAN_PATH" "$PGPLAN_PLAN_PATH"
+	printf 'duckdb_bin=%s\nexecution_db=%s\ncorrectness_db=%s\nquery=%s\nplan_source=%s\npgplan=%s\n' \
+		"$DUCKDB_BIN" "$EXECUTION_DB" "$CORRECTNESS_DB" "$QUERY_PATH" "$PLAN_PATH" "$PGPLAN_PLAN_PATH"
 	printf 'query_sha256=%s\nplan_sha256=%s\nruns=%s\nthreads=%s\n' \
 		"$QUERY_SHA256" "$PLAN_SHA256" "$RUNS" "$THREADS"
 	printf 'postgres_plan_data=%s\npostgres_plan_schema=%s\n' "$PLAN_DATA" "$PLAN_SCHEMA"
@@ -461,7 +470,8 @@ for config in native pgplan outer_yan; do
 	OY_TRACE=""
 	[ "$config" != outer_yan ] || OY_TRACE="$OUT_DIR/traces/outer_yan_correctness.trace"
 	if run_duck "$RESULT_SQL" "$OUT_DIR/correctness/${config}.csv" \
-			"$OUT_DIR/correctness/${config}.stderr" 1 "$OY_TRACE"; then
+			"$OUT_DIR/correctness/${config}.stderr" 1 "$OY_TRACE" \
+			"$CORRECTNESS_DB"; then
 		:
 	else
 		rc=$?
@@ -503,6 +513,28 @@ for config in native pgplan outer_yan; do
 	case "$ROWS" in ''|*[!0-9]*) die "invalid row count for $config results: $ROWS" ;; esac
 	printf '%s\t%s\n' "$config" "$ROWS" >> "$OUT_DIR/correctness/row_counts.tsv"
 done
+
+# Executing the correctness query must itself apply and verify the immutable
+# artifact on the small database. Target EXPLAIN verification above does not
+# substitute for this independent catalog/binding check.
+grep '^\[PGPLAN\]' "$OUT_DIR/correctness/pgplan.stderr" \
+	> "$OUT_DIR/traces/pgplan_correctness.trace" || true
+if [ ! -s "$OUT_DIR/traces/pgplan_correctness.trace" ]; then
+	die "PGPlan correctness execution emitted no [PGPLAN] diagnostic (see $OUT_DIR/correctness/pgplan.stderr)"
+fi
+grep '^\[OY_DECISION\]' "$OUT_DIR/traces/outer_yan_correctness.trace" \
+	> "$OUT_DIR/traces/outer_yan_correctness_decision.trace" || true
+if [ ! -s "$OUT_DIR/traces/outer_yan_correctness_decision.trace" ]; then
+	die "OuterYan correctness execution emitted no [OY_DECISION] record"
+fi
+CORRECTNESS_OY_SELECTED_PLAN="$(sed -n 's/.* selected_plan=\([^ ]*\).*/\1/p' \
+	"$OUT_DIR/traces/outer_yan_correctness_decision.trace" | sed -n '1p')"
+case "$CORRECTNESS_OY_SELECTED_PLAN" in
+	DUCKDB|OUTERYAN) ;;
+	*) die "could not parse correctness-database OuterYan selected_plan" ;;
+esac
+printf 'correctness_outer_yan_selected_plan=%s\n' "$CORRECTNESS_OY_SELECTED_PLAN" \
+	>> "$OUT_DIR/provenance/manifest.txt"
 
 CORRECTNESS_OK=1
 for config in pgplan outer_yan; do
