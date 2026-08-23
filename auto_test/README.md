@@ -60,7 +60,7 @@ corresponding environment values.
 | `PGPLAN_CORRECTNESS_JOB_ROWS` | `1000` | Per-table deterministic JOB prefix for exact correctness |
 | `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS` | `2000000` | Fail closed before testing if a small-DB query exceeds this output bound |
 | `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS` | `30` | Per-query timeout while validating the small correctness database |
-| `PGPLAN_CAPTURE_TIMEOUT_SECS` | `60` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
+| `PGPLAN_CAPTURE_TIMEOUT_SECS` | `300` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
 | `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and correctness post-processing step during the three-way experiment |
 | `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
 | `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
@@ -703,7 +703,7 @@ capture or PGPlan application fails. A PostgreSQL planning, DuckDB execution,
 or correctness post-processing timeout is recorded as `SKIP` and the next
 query continues; every other failure remains `FAIL` and makes the corpus
 command return nonzero. For a quick bounded server run, pass
-`--capture-timeout 60 --timeout 60`.
+`--capture-timeout 300 --timeout 60`.
 
 The workflow deliberately uses three distinct data roles:
 

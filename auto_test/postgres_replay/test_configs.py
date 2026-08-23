@@ -149,7 +149,7 @@ done
             values["PG_REPLAY_CORRECTNESS_GRAPH_ROWS"],
             values["PGPLAN_CORRECTNESS_GRAPH_ROWS"],
         )
-        self.assertEqual(values["PGPLAN_CAPTURE_TIMEOUT_SECS"], "60")
+        self.assertEqual(values["PGPLAN_CAPTURE_TIMEOUT_SECS"], "300")
         self.assertEqual(
             values["PG_REPLAY_CAPTURE_TIMEOUT_SECS"],
             values["PGPLAN_CAPTURE_TIMEOUT_SECS"],

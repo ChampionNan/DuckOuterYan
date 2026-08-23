@@ -14,7 +14,7 @@ OUT=""
 EXPECTED_PG_VERSION="${PGPLAN_VERSION_NUM:-160002}"
 PG_SCHEMA="public"
 PLAN_DATA="tpch-sf0.01"
-CAPTURE_TIMEOUT_SECS="${PGPLAN_CAPTURE_TIMEOUT_SECS:-${PG_REPLAY_CAPTURE_TIMEOUT_SECS:-60}}"
+CAPTURE_TIMEOUT_SECS="${PGPLAN_CAPTURE_TIMEOUT_SECS:-${PG_REPLAY_CAPTURE_TIMEOUT_SECS:-300}}"
 
 usage() {
     cat <<'USAGE'
@@ -33,7 +33,7 @@ their compiled defaults; max_parallel_workers_per_gather=0 and the requested
 non-public plan schema's deterministic search_path are the sole plan-affecting
 overrides. statement_timeout only bounds planner wall time.
 The default plain-EXPLAIN optimizer timeout is PGPLAN_CAPTURE_TIMEOUT_SECS
-(60 seconds); 0 disables it. A timeout exits with status 124 and writes no
+(300 seconds); 0 disables it. A timeout exits with status 124 and writes no
 artifact.
 USAGE
 }

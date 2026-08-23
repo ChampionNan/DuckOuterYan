@@ -71,7 +71,7 @@ does not establish target-scale result equality or execute PostgreSQL's
 physical plan.
 
 Plan capture always uses plain PostgreSQL `EXPLAIN`, never `EXPLAIN ANALYZE`.
-Its default 60-second optimizer limit is controlled by
+Its default 300-second optimizer limit is controlled by
 `PGPLAN_CAPTURE_TIMEOUT_SECS`/`--capture-timeout`. DuckDB's separate
 three-way execution limit is controlled by `PGPLAN_TIMEOUT_SECS`/`--timeout`.
 That limit also covers complete-result CSV framing, sorting, comparison, and

@@ -94,7 +94,7 @@ A PostgreSQL plain-`EXPLAIN` timeout or a DuckDB execution timeout is `SKIP`,
 while every other failure is `FAIL` and makes the corpus command return
 nonzero. PGPlan never falls back to DuckDB's native tree.
 
-PostgreSQL plan capture defaults to 60 seconds
+PostgreSQL plan capture defaults to 300 seconds
 (`PGPLAN_CAPTURE_TIMEOUT_SECS` or `--capture-timeout`). DuckDB execution uses a
 separate limit (`PGPLAN_TIMEOUT_SECS` or `--timeout`), which is applied to each
 DuckDB statement and each potentially large correctness step (CSV framing,
@@ -247,7 +247,7 @@ EXPLAIN (FORMAT JSON, VERBOSE, COSTS TRUE, SETTINGS TRUE)
 
 without `ANALYZE`, inside a read-only transaction. A dependency-free SQL
 scanner rejects multiple statements before invoking `psql`. Capture also sets
-a transaction-local `statement_timeout` (60 seconds by default); this only
+a transaction-local `statement_timeout` (300 seconds by default); this only
 bounds PostgreSQL optimizer wall time and is not a physical-plan execution.
 
 The normalized artifact has this stable shape:
@@ -404,11 +404,11 @@ auto_test/pgplan/experiment.sh \
   --out /absolute/path/to/results
 ```
 
-For a bounded corpus run where both planning and each DuckDB statement may use
-at most 60 seconds:
+For a bounded corpus run where PostgreSQL planning may use five minutes and
+each DuckDB statement may use at most 60 seconds:
 
 ```sh
-bash auto_test/run_all.sh --capture-timeout 60 --timeout 60
+bash auto_test/run_all.sh --capture-timeout 300 --timeout 60
 ```
 
 `--correctness-db` (or `PGPLAN_CORRECTNESS_DB`) selects the database used only

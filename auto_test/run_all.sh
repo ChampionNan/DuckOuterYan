@@ -32,7 +32,7 @@
 #   PGPLAN_CORRECTNESS_JOB_ROWS  Small exact-check JOB prefix (default 1000)
 #   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Small-result preflight cap (default 2000000)
 #   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Small-DB preflight limit (default 30)
-#   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 60)
+#   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 300)
 #   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
 #   OY_CORPUS        Custom corpus for RUN_PGPLAN=0 legacy two-way mode
 #
