@@ -49,6 +49,9 @@ LEGACY_WIN_SELECTION_POLICY = (
     "experiment_onoff_20260810_084908.csv: correct=TRUE; "
     "selected_plan=OUTERYAN; tm_speedup>1.0"
 )
+ACTIVE_LEGACY_SOURCE_SELECTION_POLICY = (
+    LEGACY_WIN_SELECTION_POLICY + "; archived source query before active normalization"
+)
 
 INDUSTRY_INSPIRED_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
     (
@@ -60,8 +63,8 @@ INDUSTRY_INSPIRED_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
     (
         "tpch",
         "oy_th_real_custdist.sql",
-        "completeness_aggregation",
-        "Customer activity is aggregated while retaining customers without order lines.",
+        "completeness_detail",
+        "Customer activity detail retains customers without order lines.",
     ),
     (
         "tpch",
@@ -84,8 +87,8 @@ INDUSTRY_INSPIRED_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
     (
         "tpcds",
         "oy_ds_real_store_agg.sql",
-        "dimension_coverage_aggregation",
-        "Store activity is aggregated while optional item, store, and customer dimensions are retained.",
+        "dimension_coverage_detail",
+        "Store activity detail retains optional item, store, and customer dimensions.",
     ),
     (
         "tpcds",
@@ -114,6 +117,16 @@ JOIN_SQL = {
     "L": "LEFT OUTER JOIN",
     "R": "RIGHT OUTER JOIN",
     "F": "FULL OUTER JOIN",
+}
+
+ACTIVE_JOIN_SQL = "FULL OUTER JOIN"
+SIMPLE_EDGE_EQUALITY = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)"
+)
+ACTIVE_AGGREGATE_SOURCES = {
+    ("tpch", "oy_th_real_custdist.sql"),
+    ("tpcds", "oy_ds_real_store_agg.sql"),
 }
 
 
@@ -937,6 +950,7 @@ def reference_timeouts() -> set[str]:
 def build_left_deep(seed: Seed, kinds: Sequence[str]) -> str:
     expression = seed.relations[0]
     for relation, predicate, kind in zip(seed.relations[1:], seed.predicates, kinds):
+        predicate = active_edge_predicate(predicate)
         expression = f"({expression} {JOIN_SQL[kind]} {relation} ON {predicate})"
     return expression
 
@@ -949,6 +963,7 @@ def build_right_deep(seed: Seed, kinds: Sequence[str]) -> str:
     """Build a right-deep tree whose emitted operators are given by kinds."""
     expression = seed.relations[0]
     for relation, predicate, kind in zip(seed.relations[1:], seed.predicates, kinds):
+        predicate = active_edge_predicate(predicate)
         expression = f"({relation} {JOIN_SQL[kind]} {expression} ON {predicate})"
     return expression
 
@@ -956,6 +971,32 @@ def build_right_deep(seed: Seed, kinds: Sequence[str]) -> str:
 def build_right_mirror(seed: Seed, kinds: Sequence[str]) -> str:
     """Mirror a labeled left-deep tree into an equivalent right-deep tree."""
     return build_right_deep(seed, tuple(flip_join_kind(kind) for kind in kinds))
+
+
+def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
+    """Build a second cross-product-free deep traversal from the last relation."""
+    aliases = [relation_alias(relation) for relation in seed.relations]
+    relation_by_alias = dict(zip(aliases, seed.relations))
+    edges = [(*predicate_aliases(predicate), index) for index, predicate in enumerate(seed.predicates)]
+    visited = {aliases[-1]}
+    expression = relation_by_alias[aliases[-1]]
+    while len(visited) < len(aliases):
+        candidates: list[tuple[int, str]] = []
+        for left, right, edge_index in edges:
+            if (left in visited) == (right in visited):
+                continue
+            candidates.append((edge_index, right if left in visited else left))
+        if not candidates:
+            raise ValueError(f"{seed.seed_id}: cannot form alternate deep traversal")
+        edge_index, new_alias = max(candidates)
+        relation = relation_by_alias[new_alias]
+        predicate = active_edge_predicate(seed.predicates[edge_index])
+        if right_deep:
+            expression = f"({relation} {ACTIVE_JOIN_SQL} {expression} ON {predicate})"
+        else:
+            expression = f"({expression} {ACTIVE_JOIN_SQL} {relation} ON {predicate})"
+        visited.add(new_alias)
+    return expression
 
 
 def alternate_vector(seed: Seed) -> tuple[str, ...]:
@@ -970,6 +1011,61 @@ def alternate_vector(seed: Seed) -> tuple[str, ...]:
 
 def relation_alias(relation: str) -> str:
     return relation.split()[-1]
+
+
+def active_edge_predicate(predicate: str) -> str:
+    """Return one plain, type-compatible equality for the same graph edge."""
+    match = SIMPLE_EDGE_EQUALITY.search(predicate)
+    if not match:
+        raise ValueError(f"join edge has no plain qualified equality: {predicate}")
+    equality = match.group(0)
+    # The local JOB load infers person_role_id as DOUBLE while char_name.id is
+    # INTEGER. Using ci.role_id keeps this graph edge column-to-column and
+    # avoids the implicit cast that is outside OuterYan's current envelope.
+    if equality == "chn.id = ci.person_role_id":
+        return "chn.id = ci.role_id"
+    return equality
+
+
+def sql_join_graph(sql: str) -> Counter[tuple[str, str]]:
+    """Extract the undirected alias pairs used by generated ON equalities."""
+    graph: Counter[tuple[str, str]] = Counter()
+    pattern = re.compile(r"\bON\s+" + SIMPLE_EDGE_EQUALITY.pattern, re.IGNORECASE)
+    for match in pattern.finditer(sql):
+        left_alias = match.group(1).split(".", 1)[0]
+        right_alias = match.group(2).split(".", 1)[0]
+        graph[tuple(sorted((left_alias, right_alias)))] += 1
+    return graph
+
+
+def normalize_active_sql(sql: str, *, flatten_aggregate: bool = False) -> str:
+    """Keep the join graph/grouping while forcing the active applicability envelope."""
+    normalized = re.sub(
+        r"\b(?:INNER|LEFT(?:\s+OUTER)?|RIGHT(?:\s+OUTER)?|FULL(?:\s+OUTER)?)\s+JOIN\b",
+        ACTIVE_JOIN_SQL,
+        sql,
+        flags=re.IGNORECASE,
+    )
+    if flatten_aggregate:
+        normalized, select_count = re.subn(
+            r"\ASELECT\b.*?\bFROM\b",
+            "SELECT *\nFROM",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if select_count != 1:
+            raise ValueError("could not flatten active aggregate projection")
+        normalized, group_count = re.subn(
+            r"\s+GROUP\s+BY\b.*?(?=;)",
+            "",
+            normalized,
+            count=1,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if group_count != 1:
+            raise ValueError("could not remove active aggregate GROUP BY")
+    return normalized
 
 
 def bushy_root_partition(seed: Seed) -> tuple[set[str], set[str], int] | None:
@@ -1054,7 +1150,7 @@ def build_bushy_mixed(seed: Seed, kinds: Sequence[str]) -> str:
         left_nodes, right_nodes, edge_index = split(nodes)
         return (
             f"({build(left_nodes)} {JOIN_SQL[kinds[edge_index]]} {build(right_nodes)} "
-            f"ON {seed.predicates[edge_index]})"
+            f"ON {active_edge_predicate(seed.predicates[edge_index])})"
         )
 
     if bushy_root_partition(seed) is None:
@@ -1076,41 +1172,45 @@ def query_sql(seed: Seed, expression: str, variant: str, variant_semantics: str)
 
 def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, str, str]]:
     edge_count = len(seed.predicates)
+    full_vector = ("F",) * edge_count
+    legacy_suffix_kinds = ("L", "R", "F")
+    left_suffix_kind = legacy_suffix_kinds[(2 * seed_index) % len(legacy_suffix_kinds)]
+    right_suffix_kind = legacy_suffix_kinds[(2 * seed_index + 1) % len(legacy_suffix_kinds)]
     yield (
         "ldmx",
-        "".join(seed.semantic_vector),
+        "".join(full_vector),
         "left_deep",
-        "primary left-deep mixture of mandatory, optional, and reconciliation edges",
+        "primary left-deep FULL-outer applicability form",
         query_sql(
             seed,
-            build_left_deep(seed, seed.semantic_vector),
+            build_left_deep(seed, full_vector),
             "ldmx",
-            "primary left-deep mixed join labeling",
+            "primary left-deep FULL-outer applicability form",
         ),
     )
     yield (
         "rdmx",
-        "".join(flip_join_kind(kind) for kind in seed.semantic_vector),
+        "".join(full_vector),
         "right_deep",
-        "RIGHT-deep mirror, equivalent to the primary left-deep mixture",
+        "right-deep FULL-outer applicability form",
         query_sql(
             seed,
-            build_right_mirror(seed, seed.semantic_vector),
+            build_right_mirror(seed, full_vector),
             "rdmx",
-            "semantics-equivalent right-deep mirror of the primary mixed labeling",
+            "right-deep FULL-outer applicability form",
         ),
     )
     if bushy_root_partition(seed) is not None:
         yield (
             "bmx",
-            "".join(seed.semantic_vector),
+            "".join(full_vector),
             "bushy",
-            "balanced connected bushy tree with the documented mixed labeling",
+            "balanced connected bushy FULL-outer applicability form",
             query_sql(
                 seed,
-                build_bushy_mixed(seed, seed.semantic_vector),
+                build_bushy_mixed(seed, full_vector),
                 "bmx",
-                "cross-product-free bushy grouping with mixed join labeling",
+                "cross-product-free bushy FULL-outer applicability form",
             ),
         )
     else:
@@ -1119,44 +1219,37 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
             "alt",
             "".join(alternate),
             "left_deep",
-            "systematic alternate mixture for join-kind coverage",
+            "alternate mixed applicability form",
             query_sql(
                 seed,
                 build_left_deep(seed, alternate),
                 "alt",
-                "deterministic alternate mixed labeling; bushy grouping is structurally ineligible",
+                "alternate mixed form; bushy grouping is structurally ineligible",
             ),
         )
 
-    # Uniform controls are distributed globally over LEFT, RIGHT, and FULL.
-    # With 68 slots, the closest possible balance is 23/23/22.
-    uniform_kinds = ("L", "R", "F")
-    left_uniform_kind = uniform_kinds[(2 * seed_index) % len(uniform_kinds)]
-    right_uniform_kind = uniform_kinds[(2 * seed_index + 1) % len(uniform_kinds)]
-    left_uniform = (left_uniform_kind,) * edge_count
-    right_uniform = (right_uniform_kind,) * edge_count
     yield (
-        f"ldu{left_uniform_kind}",
-        "".join(left_uniform),
+        f"ldu{left_suffix_kind}",
+        "".join(full_vector),
         "left_deep",
-        f"uniform left-deep {JOIN_SQL[left_uniform_kind]} control",
+        "secondary left-deep FULL-outer control",
         query_sql(
             seed,
-            build_left_deep(seed, left_uniform),
-            f"ldu{left_uniform_kind}",
-            f"uniform left-deep {JOIN_SQL[left_uniform_kind]} control",
+            build_alternate_deep(seed, right_deep=False),
+            f"ldu{left_suffix_kind}",
+            "secondary left-deep FULL-outer control",
         ),
     )
     yield (
-        f"rdu{right_uniform_kind}",
-        "".join(right_uniform),
+        f"rdu{right_suffix_kind}",
+        "".join(full_vector),
         "right_deep",
-        f"uniform right-deep {JOIN_SQL[right_uniform_kind]} control",
+        "secondary right-deep FULL-outer control",
         query_sql(
             seed,
-            build_right_deep(seed, right_uniform),
-            f"rdu{right_uniform_kind}",
-            f"uniform right-deep {JOIN_SQL[right_uniform_kind]} control",
+            build_alternate_deep(seed, right_deep=True),
+            f"rdu{right_suffix_kind}",
+            "secondary right-deep FULL-outer control",
         ),
     )
 
@@ -1216,6 +1309,11 @@ def generate_core(root: Path) -> int:
         for suffix, vector, tree_shape, variant_semantics, sql in variant_rows(seed, seed_index):
             query_id = f"ojb_{seed.seed_id}_{suffix}"
             relative_path = f"{seed.family}/{query_id}.sql"
+            expected_graph = Counter(
+                tuple(sorted(predicate_aliases(predicate))) for predicate in seed.predicates
+            )
+            if sql_join_graph(sql) != expected_graph:
+                raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
             (core / relative_path).write_text(sql, encoding="utf-8")
             manifest_rows.append(
                 {
@@ -1233,7 +1331,7 @@ def generate_core(root: Path) -> int:
                     "tree_shape": tree_shape,
                     "join_vector": vector,
                     "relation_count": str(len(seed.relations)),
-                    "predicate_class": "null_rejecting",
+                    "predicate_class": "null_rejecting_outeryan_applicable",
                     "semantic_role": variant_semantics,
                     "semantics": seed.semantics,
                 }
@@ -1286,7 +1384,7 @@ def generate_supplemental(root: Path) -> int:
 
 
 def generate_industry_inspired(root: Path) -> int:
-    """Materialize business patterns plus legacy OuterYan regression wins."""
+    """Materialize graph-preserving, OuterYan-applicable evaluation queries."""
     destination_root = root / "industry_inspired"
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
@@ -1305,7 +1403,11 @@ def generate_industry_inspired(root: Path) -> int:
             raise FileNotFoundError(f"industry-inspired source query not found: {source}")
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        normalized_sql = normalize_active_sql(
+            source.read_text(encoding="utf-8"),
+            flatten_aggregate=(family, filename) in ACTIVE_AGGREGATE_SOURCES,
+        )
+        destination.write_text(normalized_sql, encoding="utf-8")
         observed_speedup = wins.get((family, filename), "")
         rows.append(
             {
@@ -1323,9 +1425,12 @@ def generate_industry_inspired(root: Path) -> int:
                 "semantics": semantics,
                 "industry_status": "industry_inspired_not_industry_derived",
                 "production_source_id": "none",
-                "selection_policy": LEGACY_WIN_SELECTION_POLICY if observed_speedup else "",
+                "selection_policy": (
+                    ACTIVE_LEGACY_SOURCE_SELECTION_POLICY if observed_speedup else ""
+                ),
                 "observed_tm_speedup": observed_speedup,
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "active_transformation": "graph_preserving_outeryan_applicability_normalization",
+                "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
             }
         )
 
@@ -1337,7 +1442,8 @@ def generate_industry_inspired(root: Path) -> int:
             raise FileNotFoundError(f"legacy performance-win query not found: {source}")
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        normalized_sql = normalize_active_sql(source.read_text(encoding="utf-8"))
+        destination.write_text(normalized_sql, encoding="utf-8")
         rows.append(
             {
                 "query_id": source.stem,
@@ -1348,14 +1454,15 @@ def generate_industry_inspired(root: Path) -> int:
                 "source": f"outerjoin_query_old/{family}/{filename}",
                 "pattern_class": "observed_outeryan_speedup",
                 "semantics": (
-                    "Legacy synthetic query retained as a regression guard for a "
-                    "previously observed OuterYan speedup."
+                    "Graph from a legacy synthetic query with a previously observed "
+                    "OuterYan speedup; the active SQL is applicability-normalized."
                 ),
                 "industry_status": "not_industry_derived",
                 "production_source_id": "none",
-                "selection_policy": LEGACY_WIN_SELECTION_POLICY,
+                "selection_policy": ACTIVE_LEGACY_SOURCE_SELECTION_POLICY,
                 "observed_tm_speedup": speedup,
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "active_transformation": "graph_preserving_outeryan_applicability_normalization",
+                "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
             }
         )
 
@@ -1377,7 +1484,7 @@ def generate_industry_inspired(root: Path) -> int:
 
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     return len(rows)
@@ -1583,27 +1690,21 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     if suffix_counts["bmx"] + suffix_counts["alt"] != len(SEEDS):
         raise RuntimeError(f"every seed must have exactly one bmx/alt variant: {suffix_counts}")
 
-    mixed_rows = [row for row in manifest_rows if len(set(row["join_vector"])) > 1]
-    uniform_rows = [row for row in manifest_rows if len(set(row["join_vector"])) == 1]
-    if len(mixed_rows) != 102 or len(uniform_rows) != 68:
-        raise RuntimeError(
-            f"unexpected mixed/control split: mixed={len(mixed_rows)}, "
-            f"uniform={len(uniform_rows)}"
-        )
-    if any(not row["query_id"].rsplit("_", 1)[-1].startswith(("ldu", "rdu")) for row in uniform_rows):
-        raise RuntimeError("only lduX/rduX variants may be uniform controls")
-
-    uniform_kinds = Counter(row["join_vector"][0] for row in uniform_rows)
-    if uniform_kinds != Counter({"L": 23, "R": 23, "F": 22}):
-        raise RuntimeError(f"uniform controls are not join-kind balanced: {uniform_kinds}")
-    uniform_shapes = Counter(row["tree_shape"] for row in uniform_rows)
-    if uniform_shapes != Counter({"left_deep": 34, "right_deep": 34}):
-        raise RuntimeError(f"uniform controls are not shape balanced: {uniform_shapes}")
+    for row in manifest_rows:
+        suffix = row["query_id"].rsplit("_", 1)[-1]
+        expected_vector = "F" * (int(row["relation_count"]) - 1)
+        if suffix != "alt" and row["join_vector"] != expected_vector:
+            raise RuntimeError(
+                f"{row['query_id']}: active join vector must be {expected_vector}, "
+                f"got {row['join_vector']}"
+            )
+        if suffix == "alt" and set(row["join_vector"]) == {"I"}:
+            raise RuntimeError(f"{row['query_id']}: alternate vector has no outer join")
     all_shapes = Counter(row["tree_shape"] for row in manifest_rows)
     if all_shapes != Counter({"left_deep": 80, "right_deep": 68, "bushy": 22}):
         raise RuntimeError(f"unexpected core shape distribution: {all_shapes}")
     predicate_classes = Counter(row["predicate_class"] for row in manifest_rows)
-    if predicate_classes != Counter({"null_rejecting": CORE_QUERY_COUNT}):
+    if predicate_classes != Counter({"null_rejecting_outeryan_applicable": CORE_QUERY_COUNT}):
         raise RuntimeError(f"unsupported predicate classes in core: {predicate_classes}")
 
     for relative_path in sorted(actual_paths):
@@ -1614,6 +1715,10 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         )
         if "OUTER JOIN" not in upper:
             raise RuntimeError(f"{relative_path}: no outer join")
+        if not relative_path.endswith("_alt.sql") and any(
+            token in statement for token in (" INNER JOIN", " LEFT OUTER JOIN", " RIGHT OUTER JOIN")
+        ):
+            raise RuntimeError(f"{relative_path}: active core join is not FULL OUTER")
         if " ON 1=1" in upper:
             raise RuntimeError(f"{relative_path}: cross product")
         if any(token in upper for token in ("GROUP BY", "SELECT DISTINCT", " OVER (")):
@@ -1640,6 +1745,17 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     valid_prefixes = ("derived__", "industry__")
     if any(not row["query_id"].startswith(valid_prefixes) for row in active_rows):
         raise RuntimeError("active benchmark query is missing its provenance prefix")
+    for relative_path in sorted(active_paths):
+        sql = (active_root / relative_path).read_text(encoding="utf-8")
+        statement = "\n".join(
+            line for line in sql.upper().splitlines() if not line.lstrip().startswith("--")
+        )
+        if any(token in statement for token in ("GROUP BY", "SELECT DISTINCT", " OVER (")):
+            raise RuntimeError(f"{relative_path}: active query bypasses OuterYan")
+        if "derived__ojb_" not in relative_path and any(
+            token in statement for token in (" INNER JOIN", " LEFT OUTER JOIN", " RIGHT OUTER JOIN")
+        ):
+            raise RuntimeError(f"{relative_path}: active join is not FULL OUTER")
 
 
 def main() -> None:

@@ -139,9 +139,10 @@ queries and 27 legacy synthetic performance guards use `derived__`; the nine
 business-role patterns use `industry__`, including the one that is also a
 pinned legacy win. Exact roles remain in the manifest rather than being encoded
 as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
-TPC-DS 35, JOB 50, and SQLStorm 60), including
-102 mixed-join queries, of which 34 are mixed right-deep and 22 are genuinely
-bushy. The evaluation under `outerjoin_benchmark/industry_inspired/` is the
+TPC-DS 35, JOB 50, and SQLStorm 60), including 80 left-deep, 68 right-deep,
+and 22 genuinely bushy graph-preserving applicability inputs. Of these, 158
+use all-FULL vectors and 12 use mixed `alt` vectors. The evaluation under
+`outerjoin_benchmark/industry_inspired/` is the
 union of nine explainable legacy business patterns and all 28 correct queries
 where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
 query belongs to both groups, so the corpus contains 36 unique queries. Its
@@ -165,31 +166,31 @@ Query traversal is deterministic. Families are visited in the order selected by
 the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
 family, SQL basenames are ordered bytewise (`LC_ALL=C`). For a bushy-eligible
 seed, suffixes normally execute as `bmx`, `ldmx`, `lduX`, `rdmx`, and `rduX`;
-otherwise `alt` replaces `bmx`. Here `X` is `L`, `R`, or `F`. This is only
+otherwise `alt` replaces `bmx`. Here `X` is a legacy filename label; this is only
 filename order; it is not a semantic progression. A `--query-list` file
 overrides this order and is processed line by line.
 
 ### Core query variants
 
-The suffix records both the binary join-tree shape and the assignment of join
-types to the fixed source skeleton:
+The suffix records the binary join-tree traversal. Primary/control vectors are
+FULL (`F...F`) so they survive pre-OuterYan simplification; the 12 `alt`
+queries retain mixed vectors. Older suffix stems remain for result-file continuity.
 
 | Suffix | Tree and join labeling | Meaning |
 |---|---|---|
-| `ldmx` | Left-deep mixed tree | Primary left-deep query; every query combines at least two of `INNER`, `LEFT`, `RIGHT`, and `FULL`. |
-| `rdmx` | Right-deep mixed mirror of `ldmx` | Swaps operands and LEFT/RIGHT while retaining INNER/FULL, giving the same multiset semantics as `ldmx`. |
-| `bmx` | Connected bushy tree with the mixed vector | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
-| `alt` | Alternate left-deep mixed tree | Replaces `bmx` for a three-relation or star skeleton that cannot form a true cross-product-free bushy tree. |
-| `lduL`, `lduR`, `lduF` | Uniform left-deep control | Uses only LEFT, RIGHT, or FULL outer joins, respectively. |
-| `rduL`, `rduR`, `rduF` | Uniform right-deep control | Right-deep counterpart using one outer-join kind throughout. |
+| `ldmx` | Primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
+| `rdmx` | Primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
+| `bmx` | Connected bushy FULL tree | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
+| `alt` | Alternate left-deep mixed tree | Replaces `bmx` when a true cross-product-free bushy tree is unavailable. |
+| `lduX` | Alternate left-deep FULL tree | Starts at the opposite graph side; `X` is a legacy filename label and the manifest records the actual all-`F` vector. |
+| `rduX` | Alternate right-deep FULL tree | Starts at the opposite graph side; `X` is a legacy filename label and the manifest records the actual all-`F` vector. |
 
-Mixed queries are the majority: 102 of 170. Uniform controls account for the
-remaining 68 and are balanced as closely as possible across join kinds: 23
-all-LEFT, 23 all-RIGHT, and 22 all-FULL. They are also shape-balanced, with 34
-left-deep and 34 right-deep controls. Overall, the core contains 80 left-deep,
-68 right-deep, and 22 bushy queries. Only `ldmx`/`rdmx` is an equivalence pair;
-`bmx` is an independently specified query because outer joins are not generally
-associative.
+The core contains 80 left-deep, 68 right-deep, and 22 bushy queries. Every
+grouping is independently specified because outer joins are not generally
+associative. Global NULL-rejecting predicates remain selective, while the FULL
+input labels ensure at least one outer edge remains when filter pushdown runs.
+The two historical aggregate patterns in the active evaluation set are emitted
+as detail projections so they do not bypass OuterYan.
 
 The schema-only legacy queries are not included in any active benchmark
 component. They remain in `outerjoin_query_old/` solely as historical inputs.

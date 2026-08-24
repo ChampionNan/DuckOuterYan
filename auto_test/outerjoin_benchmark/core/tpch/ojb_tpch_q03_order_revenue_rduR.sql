@@ -1,6 +1,6 @@
 -- source: TPC-H Q3
--- transformation: connected join-subgraph adaptation; uniform right-deep RIGHT OUTER JOIN control
+-- transformation: connected join-subgraph adaptation; secondary right-deep FULL-outer control
 -- business_semantics: Customer orders are the mandatory backbone and line items provide optional revenue detail.
 SELECT *
-FROM (lineitem l RIGHT OUTER JOIN (orders o RIGHT OUTER JOIN customer c ON c.c_custkey = o.o_custkey) ON o.o_orderkey = l.l_orderkey)
+FROM (customer c FULL OUTER JOIN (orders o FULL OUTER JOIN lineitem l ON o.o_orderkey = l.l_orderkey) ON c.c_custkey = o.o_custkey)
 WHERE c.c_custkey % 1000 = 0;

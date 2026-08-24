@@ -51,8 +51,10 @@ Generation is deterministic. The script verifies that every core query:
 - has at least three relations and at least one outer join;
 - uses a connected sequence of source-derived equality predicates;
 - contains no cross product (`ON 1=1`);
-- stays inside the current core applicability envelope (no aggregate,
-  `DISTINCT`, or window operator); and
+- uses `FULL OUTER JOIN` in every primary/control slot (the `alt` slot is an
+  applicability-checked mixed vector), with one plain equality per graph edge;
+- stays inside the current applicability envelope (no aggregate, `DISTINCT`,
+  or window operator); and
 - has an exact manifest entry.
 
 The generated SQL has also been `EXPLAIN`-validated against the local TPC-H,
@@ -60,35 +62,33 @@ TPC-DS, and JOB databases with OuterYan both enabled and disabled.
 
 ## Transformation variants
 
-For each normalized source skeleton, the generator emits five standard
-variants:
+For each normalized source skeleton, the generator emits five tree-grouping
+variants. The suffixes are retained for continuity with earlier result files;
+the manifest's `join_vector` is authoritative. Primary/control slots are
+all-`F`, while the structurally necessary `alt` slot remains mixed.
 
 | Suffix | Transformation | Purpose |
 |---|---|---|
-| `ldmx` | left-deep mixed join vector | Primary left-deep test combining mandatory, optional, and reconciliation edges. |
-| `rdmx` | right-deep mixed mirror | Preserve `ldmx` semantics while swapping operands and LEFT/RIGHT at every node. |
-| `bmx` | connected bushy mixed tree | Exercise bushy grouping when the join graph admits two nontrivial connected root subplans. |
-| `alt` | deterministic alternate mixture | Replace `bmx` when a three-relation or star skeleton cannot form a true bushy tree without a cross product. |
-| `lduX` / `rduX` | uniform left-/right-deep control, where `X` is `L`, `R`, or `F` | Isolate a single outer-join kind while balancing LEFT, RIGHT, and FULL coverage. |
+| `ldmx` | primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
+| `rdmx` | primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
+| `bmx` | connected bushy FULL tree | Exercise bushy grouping when the graph admits two nontrivial connected root subplans. |
+| `alt` | alternate left-deep mixed tree | Replace `bmx` when a true cross-product-free bushy tree is unavailable. |
+| `lduX` / `rduX` | alternate left-/right-deep FULL tree | Start from the opposite graph side; `X` is a legacy filename label and the manifest still records an all-`F` vector. |
 
-`ldmx` and `rdmx` have the same relational semantics: operand exchange also
-exchanges LEFT and RIGHT, while INNER and FULL remain unchanged. Their paired
-results directly test join direction and child orientation. A `bmx` query is
-not claimed to be equivalent, because regrouping outer joins can change query
-semantics.
-
-The 170-query core contains 102 mixed-join queries and 68 uniform controls. The
-mixed population comprises 34 `ldmx`, 34 `rdmx`, 22 `bmx`, and 12 structurally
-necessary `alt` cases. Uniform controls comprise 34 left-deep and 34 right-deep
-queries, with the join kinds distributed 23 LEFT, 23 RIGHT, and 22 FULL. Thus,
-mixed joins are the main workload rather than an auxiliary variant.
+The 170-query core comprises 34 `ldmx`, 34 `rdmx`, 22 `bmx`, 12 `alt`, 34
+`lduX`, and 34 `rduX` cases. The 158 non-`alt` entries are all-FULL; the 12
+`alt` entries retain mixed labels. It retains 80 left-deep, 68 right-deep, and
+22 bushy inputs. Regrouped outer joins are independently specified queries; no
+cross-grouping semantic-equivalence claim is made.
 
 The transformation extracts a connected subgraph of relation instances,
-aliases, and equality predicates from the named source query. That subgraph is
-fixed across all variants of the seed. Projection and selection are normalized
-to remain executable as a flat optimizer test. Consequently, the precise claim
-is **join-skeleton-derived**, not a claim that the complete original benchmark
-query is semantically equivalent after its inner joins become outer joins.
+aliases, and equality edges from the named source query. That graph is fixed
+across all variants. Active `ON` clauses retain one plain column equality per
+edge and discard unary `ON` conjuncts that would be outside OuterYan's current
+envelope. One JOB edge uses a type-compatible column on the same pair of
+relations to avoid an implicit cast. Projection and global selection remain
+flat and executable. Consequently, the precise claim is **join-graph-derived**,
+not semantic equivalence with the complete source query.
 
 Each generated selection is a global `WHERE` predicate evaluated over the
 complete join tree, and every conjunct is NULL-rejecting with respect to the
@@ -96,13 +96,18 @@ relation it references. NULL-tolerant guards such as `P(x) OR x IS NULL`, as
 well as `COALESCE` and `IS [NOT] DISTINCT FROM`, are excluded from the core.
 This keeps the performance workload within OuterYan's null-rejection envelope;
 separate correctness tests cover safe handling of NULL-tolerant predicates.
-The `predicate_class` manifest column marks every core entry as
-`null_rejecting`.
+Primary/control joins are initially FULL so filter pushdown may simplify
+direction without collapsing the complete graph to a pure inner query; the 12
+mixed `alt` cases are separately applicability-checked. The `predicate_class`
+manifest value is `null_rejecting_outeryan_applicable`.
 
-Shape and join-vector labels describe the input SQL before semantic
-simplification. A global NULL-rejecting predicate can legitimately collapse an
-enclosing outer join; those cases exercise outer-join simplification, whereas
-the remaining cases continue into outer-join enumeration and execution.
+The 36-query evaluation view receives the same graph-preserving FULL-join
+normalization. Its two historical aggregate patterns are emitted as detail
+projections because the active optimizer deliberately bypasses aggregate
+queries. `supplemental/` remains the exact, unnormalized 28-query legacy-win
+view for historical comparison. Historical speedups in the active evaluation
+manifest describe source-selection provenance; they do not transfer to the
+normalized SQL.
 
 ## Provenance terminology
 

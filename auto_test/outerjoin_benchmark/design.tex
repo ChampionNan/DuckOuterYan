@@ -12,21 +12,13 @@ semantically equivalent workloads.
 The core benchmark contains 34 traceable seeds: 5 from TPC-H, 7 from TPC-DS,
 10 from JOB, and 12 from SQLStorm. From each seed, we extract a connected,
 acyclic equality-join skeleton containing 3--6 relation instances. We retain
-the relations and join predicates, normalize the surrounding query, and expose
-attributes from multiple relations. Each generated selection is placed in the
-global \texttt{WHERE} clause above the complete join tree, and every conjunct
-is NULL-rejecting with respect to the relation it references. In particular,
-we exclude NULL-tolerant guards such as $P(x)\lor x\ \texttt{IS NULL}$, as well
-as \texttt{COALESCE} and \texttt{IS [NOT] DISTINCT FROM}. This restriction
-keeps the performance workload within the null-rejection assumptions used by
-OuterYan; NULL-tolerant predicates are retained only in separate correctness
-tests.
-
-The reported tree shapes and join vectors characterize the input SQL before
-semantic simplification. A global NULL-rejecting predicate may legitimately
-collapse an enclosing outer join. Such queries exercise the simplification
-stage, while queries with surviving outer edges exercise outer-join enumeration
-and execution.
+the relation graph, normalize every active edge to one plain column equality,
+label primary/control joins FULL OUTER, and retain a mixed alternate only when
+a bushy grouping is unavailable. Each generated selection remains in the global \texttt{WHERE}
+clause and is NULL-rejecting. Unary \texttt{ON} conjuncts and equality-side
+casts are excluded because they are outside OuterYan's current applicability
+envelope. The FULL primary/control labels let filter pushdown simplify
+preservation direction without reducing the complete graph to a pure inner query.
 
 \begin{figure}[t]
   \centering
@@ -41,25 +33,23 @@ and execution.
   \label{fig:outerjoin-benchmark-construction}
 \end{figure}
 
-Each skeleton produces five deterministic variants: a mixed left-deep tree
-(\texttt{ldmx}); its semantics-preserving mirror, obtained by swapping operands
-and LEFT/RIGHT join types (\texttt{rdmx}); a balanced bushy tree when the graph
-permits one, otherwise a fixed alternative mixed tree (\texttt{bmx}/\texttt{alt});
-and left- and right-deep uniform controls (\texttt{lduX} and \texttt{rduX}, where
-$\mathsf{X}\in\{\mathsf{L},\mathsf{R},\mathsf{F}\}$). This gives 170 queries:
-102 mixed and 68 uniform, with 80 left-deep, 68 right-deep, and 22 genuinely
-bushy trees. Explicit parentheses fix the binary join tree because outer joins
-are not freely associative or commutative.
+Each skeleton produces five deterministic applicability-oriented groupings: primary
+left- and right-deep trees (\texttt{ldmx}/\texttt{rdmx}); a balanced bushy tree
+when the graph permits one, otherwise an applicability-checked mixed left-deep traversal
+(\texttt{bmx}/\texttt{alt}); and alternate left- and right-deep traversals that
+start from the opposite graph side (the legacy filename slots
+\texttt{lduX}/\texttt{rduX}). This gives
+170 queries with 80 left-deep, 68 right-deep, and 22 genuinely bushy trees.
+Explicit parentheses fix the binary join tree.
 
 This construction provides a controlled and representative measure of
-outer-join performance. Holding the relations and join predicates fixed while
-varying join type and tree shape isolates the system's handling of outer joins
-from unrelated changes to query content. The combination of mixed and uniform
-joins, left-deep, right-deep, and bushy trees, and multiple source schemas
-covers the main semantic and structural factors that affect outer-join
-optimization and execution. Projecting columns from multiple inputs makes
-NULL-extension observable whenever it survives the declared NULL-rejecting
-selection.
+outer-join performance. Holding the relation graph fixed while varying tree
+grouping isolates enumeration behavior from unrelated query-content changes.
+The left-deep, right-deep, and bushy trees span multiple source schemas, while
+the applicability-oriented labels ensure that every generated case reaches
+OuterYan rather than being discarded after pre-optimizer simplification. Projecting columns from
+multiple inputs keeps NULL-extension observable whenever it survives the
+declared NULL-rejecting selection.
 
 We also include the legacy workload in
 \path{auto_test/outerjoin_query_old/} as a separate industry-oriented test
