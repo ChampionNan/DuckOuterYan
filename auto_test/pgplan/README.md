@@ -1,10 +1,10 @@
 # PGPlan
 
 This is the canonical user-facing entry point for the PostgreSQL logical-tree
-baseline. A normal run needs no PostgreSQL or Docker environment setting:
+baseline. PGPlan is opt-in; the source provider needs no Docker setting:
 
 ```sh
-bash auto_test/run_all.sh
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 ```
 
 The default source provider installs and starts pinned PostgreSQL 16.2 under
@@ -35,15 +35,15 @@ Correctness comparison mode is independent of the cached plan and performance
 work:
 
 ```sh
-# Default: (a) Original == PGPlan and (b) Original == OuterYan
-bash auto_test/run_all.sh
+# PGPlan mode: (a) Original == PGPlan and (b) Original == OuterYan
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 # skip1: run only comparison (a)
-bash auto_test/run_all.sh --skip1
+RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
 
 # skip2: do not rerun correctness; still run EXPLAIN, PGPlan verification,
 # and Original/PGPlan/OuterYan TM and T1 performance
-bash auto_test/run_all.sh --performance-only
+RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
 ```
 
 `--skip2`, `--performance_only`, and the accepted compatibility misspelling
@@ -89,7 +89,7 @@ For a later performance-only rerun of the same corpus inputs, reuse the sealed
 target correctness receipts and the retained PGPlan artifacts:
 
 ```sh
-bash auto_test/run_all.sh \
+RUN_PGPLAN=1 bash auto_test/run_all.sh \
   --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
 ```
 
@@ -165,9 +165,10 @@ empty fields instead of guessed values.
 
 For every completed performance run, the original CSV's `TM:off/on` and
 `T1:off/on` columns retain their Original/OuterYan meanings. Appended
-`tm_pgplan` and `t1_pgplan` columns add PGPlan plus the Original/PGPlan
-speedups. The human line orders each suite as Original, PGPlan, OuterYan and
-prints exactly `Original/PGPlan` and `Original/OuterYan`. TM uses one warm-up
+`tm_pgplan` and `t1_pgplan` columns add PGPlan. Legacy Original/PGPlan speedup
+fields remain for compatibility, and PGPlan/OuterYan fields provide the direct
+comparison. The human line orders each suite as Original, PGPlan, OuterYan and
+prints exactly `Original/OuterYan` and `PGPlan/OuterYan`. TM uses one warm-up
 plus the configured odd measured-run count; T1 uses one warm-up plus exactly
 one measured run. This workflow does not run the legacy kernel-trace or
 phase-profile batches, so their placeholders are omitted from the human log;

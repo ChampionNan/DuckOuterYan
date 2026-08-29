@@ -99,9 +99,9 @@ def topology_from_query(query: str) -> str:
     query = strip_provenance_prefix(query).lower()
     if re.search(r"_(?:ldmx|ldu[lrfi]|alt)$", query):
         return "left-deep"
-    if re.search(r"_(?:rdmx|rdu[lrfi])$", query):
+    if re.search(r"_(?:rdmx|rdax|rdu[lrfi])$", query):
         return "right-deep"
-    if query.endswith("_bmx"):
+    if re.search(r"_(?:bmx|bdmx)$", query):
         return "bushy"
     if "_real_" in query:
         return "industry"

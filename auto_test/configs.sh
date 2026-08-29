@@ -110,10 +110,11 @@ export OY_TMPDIR="${OY_TMPDIR:-$OY_REPO_ROOT/auto_test/results/tmp}"
 # ===========================================================================
 # 7) PostgreSQL plan baseline (PGPlan)
 # ===========================================================================
-# Run the PGPlan baseline from run_all.sh. Set RUN_PGPLAN=0 to retain the
-# DuckDB/OuterYan-only workflow. Previous PG_REPLAY_* spellings are accepted
-# only as compatibility aliases; new callers should use PGPLAN_*.
-export RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-1}}"
+# The normal run_all.sh workflow compares only DuckDB Original and OuterYan.
+# Set RUN_PGPLAN=1 explicitly for the PostgreSQL-backed three-way experiment.
+# Previous PG_REPLAY_* spellings are accepted only as compatibility aliases;
+# new callers should use PGPLAN_*.
+export RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}"
 export RUN_PG_REPLAY="$RUN_PGPLAN"
 
 # source:   auto-download/build/install/start pinned PostgreSQL in this checkout;

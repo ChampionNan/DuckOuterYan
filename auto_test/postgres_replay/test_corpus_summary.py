@@ -40,8 +40,10 @@ PGPLAN_FIELDS = (
     "pgplan_correctness_implied_equality_count",
     "tm_pgplan",
     "tm_native_vs_pgplan_speedup",
+    "tm_pgplan_vs_outer_yan_speedup",
     "t1_pgplan",
     "t1_native_vs_pgplan_speedup",
+    "t1_pgplan_vs_outer_yan_speedup",
 )
 COMPARISON_FIELDS = (
     "pgplan_comparison_mode",
@@ -335,8 +337,8 @@ class CorpusSummaryTest(unittest.TestCase):
             self.assertIn(
                 "geometric-mean speedup over 2 timed queries", result.stdout
             )
-            self.assertIn("pgplan_vs_original=1.000000000", result.stdout)
-            self.assertIn("outer_yan_vs_original=3.162277660", result.stdout)
+            self.assertIn("Original/OuterYan=3.162277660", result.stdout)
+            self.assertIn("PGPlan/OuterYan=3.162277660", result.stdout)
 
             comparison = read_tsv(root / "comparison.tsv")
             self.assertEqual(
@@ -357,6 +359,9 @@ class CorpusSummaryTest(unittest.TestCase):
                 comparison[0]["tm_native_vs_pgplan_speedup"], "2.000000000"
             )
             self.assertEqual(comparison[0]["tm_speedup"], "5.000000000")
+            self.assertEqual(
+                comparison[0]["tm_pgplan_vs_outer_yan_speedup"], "2.500000000"
+            )
             self.assertEqual(comparison[0]["rows"], "42")
             self.assertEqual(
                 comparison[0]["pgplan_comparison_result_dir"], str(graph_run.resolve())
@@ -382,6 +387,7 @@ class CorpusSummaryTest(unittest.TestCase):
             self.assertEqual(summary[0]["fail_queries"], "1")
             self.assertEqual(summary[0]["pgplan_speedup_vs_native_geomean"], "1.000000000")
             self.assertEqual(summary[0]["outer_yan_speedup_vs_native_geomean"], "3.162277660")
+            self.assertEqual(summary[0]["outer_yan_speedup_vs_pgplan_geomean"], "3.162277660")
 
             failures = read_tsv(root / "failures.tsv")
             self.assertEqual([row["status"] for row in failures], ["FAIL", "SKIP"])
@@ -837,10 +843,10 @@ class CorpusSummaryTest(unittest.TestCase):
                 '                  correct=TRUE reorder=1 selected=OUTERYAN '
                 'comparison=NA PGPlan=VERIFIED  '
                 'TM:[Original=10 PGPlan=5 OuterYan=2] '
-                'Speedup:[Original/PGPlan=2.000000000 '
-                'Original/OuterYan=5.000000000]  '
+                'Speedup:[Original/OuterYan=5.000000000 '
+                'PGPlan/OuterYan=2.500000000]  '
                 'T1:[Original=NA PGPlan=NA OuterYan=NA] '
-                'Speedup:[Original/PGPlan=NA Original/OuterYan=NA]'
+                'Speedup:[Original/OuterYan=NA PGPlan/OuterYan=NA]'
             )
             self.assertEqual(nonblank_lines[1], expected_outer_main)
             self.assertIn(
@@ -920,6 +926,9 @@ class CorpusSummaryTest(unittest.TestCase):
             self.assertEqual(
                 row["t1_native_vs_pgplan_speedup"], "2.000000000"
             )
+            self.assertEqual(
+                row["t1_pgplan_vs_outer_yan_speedup"], "2.000000000"
+            )
             self.assertNotIn("t1_status", row)
             # The comparison run-count field continues to describe TM;
             # the T1 artifact has its fixed one-measurement contract.
@@ -929,8 +938,8 @@ class CorpusSummaryTest(unittest.TestCase):
                 "T1:[Original=12 PGPlan=6 OuterYan=3]", log_text
             )
             self.assertIn(
-                "Speedup:[Original/PGPlan=2.000000000 "
-                "Original/OuterYan=4.000000000]",
+                "Speedup:[Original/OuterYan=4.000000000 "
+                "PGPlan/OuterYan=2.000000000]",
                 log_text,
             )
 

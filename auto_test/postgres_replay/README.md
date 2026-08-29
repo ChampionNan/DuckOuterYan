@@ -21,10 +21,11 @@ includes continue to work.
 
 ## One-command corpus workflow
 
-From the repository root, no Docker setting is required:
+PGPlan is excluded from the normal `run_all.sh` workflow. Opt in explicitly;
+no Docker setting is required for the default source provider:
 
 ```sh
-bash auto_test/run_all.sh
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 ```
 
 The default persistent artifact cache is `auto_test/pgplan/plans`. The corpus
@@ -40,14 +41,14 @@ Set `PGPLAN_PLAN_CACHE` or pass `--plan-cache DIR` to choose another location.
 Correctness modes are manual and do not change EXPLAIN or timing work:
 
 ```sh
-# Default: Original == PGPlan, and Original == OuterYan
-bash auto_test/run_all.sh
+# PGPlan mode: Original == PGPlan, and Original == OuterYan
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 # Only Original == PGPlan
-bash auto_test/run_all.sh --skip1
+RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
 
 # No correctness queries; performance and plan verification only
-bash auto_test/run_all.sh --performance-only
+RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
 ```
 
 `--skip2`, `--performance_only`, and the accepted compatibility misspelling
@@ -56,7 +57,7 @@ rather than claiming that an old comparison still applies. The stricter
 `--reuse-from` path remains available when prior correctness must be validated
 from its sealed receipt.
 
-The default `RUN_PGPLAN=1` workflow:
+The opt-in `RUN_PGPLAN=1` workflow:
 
 1. builds or reuses the release DuckDB binary and target DuckDB databases;
 2. validates persistent typed artifacts for all selected queries;
@@ -110,7 +111,7 @@ After one successful default target-mode corpus, repeat only plan verification
 and performance with:
 
 ```sh
-bash auto_test/run_all.sh \
+RUN_PGPLAN=1 bash auto_test/run_all.sh \
   --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
 ```
 
@@ -135,6 +136,7 @@ artifact and receipt provenance make the new result self-contained.
 The lower-level correctness-only variant is:
 
 ```sh
+RUN_PGPLAN=1 \
 PGPLAN_CORRECTNESS_MODE=reuse \
 PGPLAN_CORRECTNESS_FROM=/absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS \
   bash auto_test/run_all.sh
@@ -147,7 +149,7 @@ comparison; `bounded` remains only a diagnostic.
 Use the corpus options to run a selected query subset:
 
 ```sh
-bash auto_test/run_all.sh --only tpcds --pattern '*q72*' --limit 1 --runs 1
+RUN_PGPLAN=1 bash auto_test/run_all.sh --only tpcds --pattern '*q72*' --limit 1 --runs 1
 ```
 
 Selection order is graph, TPC-H, TPC-DS, then JOB; file order is bytewise and
@@ -192,9 +194,10 @@ rather than guessing an origin.
 
 For completed performance, the original CSV's `TM:off/on` and `T1:off/on`
 fields retain their Original/OuterYan meanings. Appended `tm_pgplan` and
-`t1_pgplan` fields add PGPlan and the Original/PGPlan speedups. The human line
-orders times as Original, PGPlan, OuterYan and prints only Original/PGPlan and
-Original/OuterYan ratios; values above one favor the candidate denominator.
+`t1_pgplan` fields add PGPlan. Legacy Original/PGPlan speedup fields remain for
+compatibility, while new PGPlan/OuterYan fields provide the direct comparison.
+The human line orders times as Original, PGPlan, OuterYan and prints only
+Original/OuterYan and PGPlan/OuterYan ratios; values above one favor OuterYan.
 The workflow does not collect the legacy phase profile or semi-join kernel
 trace. Their placeholders are omitted from the human log while the original
 CSV columns remain empty/NA for compatibility. The original `rows` column is the complete target-database
@@ -260,7 +263,7 @@ mode-`0600` secret at `PGPLAN_PASSWORD_FILE` unless a password is explicitly
 provided:
 
 ```sh
-PGPLAN_SETUP=docker bash auto_test/run_all.sh
+RUN_PGPLAN=1 PGPLAN_SETUP=docker bash auto_test/run_all.sh
 ```
 
 If a container created by an older setup uses a different password, setup
@@ -273,7 +276,7 @@ An existing PostgreSQL 16.2 server can be selected explicitly:
 PGPLAN_SETUP=external \
 PG_DSN='host=127.0.0.1 port=5432 dbname=duckyan_tpch user=postgres' \
 PSQL_BIN=/absolute/path/to/psql \
-bash auto_test/run_all.sh
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 ```
 
 External mode must already contain the exact public TPC-H SF0.01 tables unless
@@ -284,8 +287,9 @@ external mode requires `PGPLAN_FORCE_SAMPLED_DATA=1`.
 `SKIP_DATA=1` skips only target DuckDB database generation; it does not skip
 PostgreSQL setup or its minimal plan-selection data. `SKIP_PG_DATA=1` forbids
 TPC-H loading/repair and requires the exact SF0.01 cardinalities to be present.
-`RUN_PGPLAN=0` selects the historical two-configuration DuckDB/OuterYan
-workflow.
+The default `RUN_PGPLAN=0` selects the two-configuration DuckDB
+Original/OuterYan workflow and performs no PostgreSQL setup, capture, import,
+correctness, or timing work.
 
 ## Manual plan-data preparation
 
@@ -535,7 +539,7 @@ each DuckDB statement may use at most 60 seconds:
 
 ```sh
 PGPLAN_CORRECTNESS_MODE=bounded \
-  bash auto_test/run_all.sh --capture-timeout 300 --timeout 60
+  RUN_PGPLAN=1 bash auto_test/run_all.sh --capture-timeout 300 --timeout 60
 ```
 
 `--correctness-db` (or `PGPLAN_CORRECTNESS_DB`) selects the database used only

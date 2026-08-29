@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused wiring tests for run_all.sh's corpus-wide PGPlan stage."""
+"""Focused wiring tests for run_all.sh's two-way and opt-in PGPlan stages."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             export OY_TIMEOUT_SECS="${{OY_TIMEOUT_SECS:-90}}"
             export OY_BATCH_GRACE_SECS="${{OY_BATCH_GRACE_SECS:-4}}"
             export OY_TMPDIR="${{OY_TMPDIR:-{self.repo / 'tmp'}}}"
-            export RUN_PGPLAN="${{RUN_PGPLAN:-1}}"
+            export RUN_PGPLAN="${{RUN_PGPLAN:-0}}"
             export PGPLAN_QUERY="${{PGPLAN_QUERY:-{self.query}}}"
             export PGPLAN_EXECUTION_DB="${{PGPLAN_EXECUTION_DB:-$TPCH_DB}}"
             export PGPLAN_RUNS="${{PGPLAN_RUNS:-$OY_RUNS}}"
@@ -184,7 +184,24 @@ class RunAllPGPlanTests(unittest.TestCase):
             stderr=subprocess.STDOUT,
         )
 
-    def test_default_runs_corpus_wide_three_way_experiment(self) -> None:
+    def test_default_runs_only_original_outeryan_experiment(self) -> None:
+        result = self._run("--limit", "1")
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("onoff\t"), calls)
+        self.assertIn(str(self.auto_test / "outerjoin_query"), calls[0])
+        self.assertIn("--only all", calls[0])
+        self.assertIn("--limit 1", calls[0])
+        self.assertIn(
+            "PGPlan disabled; running default Original/OuterYan workflow",
+            result.stdout,
+        )
+        self.assertNotIn("persistent PGPlan cache", result.stdout)
+        self.assertNotIn("Comparison status TSV:", result.stdout)
+
+    def test_explicit_opt_in_runs_corpus_wide_three_way_experiment(self) -> None:
         cli_duckdb = self.repo / "cli-duckdb"
         cli_duckdb.touch()
         cli_duckdb.chmod(0o755)
@@ -200,6 +217,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "23",
             "--only",
             "tpch",
+            RUN_PGPLAN="1",
             PGPLAN_OUT=str(result_dir),
         )
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -250,6 +268,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             "--limit",
             "1",
             DUCKDB_BIN=str(self.duckdb),
+            RUN_PGPLAN="1",
             PGPLAN_SETUP="source",
             PGPLAN_INSTALL_DIR=str(blocker / "postgresql"),
             PGPLAN_PASSWORD="",
@@ -264,6 +283,7 @@ class RunAllPGPlanTests(unittest.TestCase):
     def test_corpus_failure_prints_handoff_then_preserves_exit_status(self) -> None:
         result_dir = self.repo / "failed-threeway-results"
         result = self._run(
+            RUN_PGPLAN="1",
             PGPLAN_OUT=str(result_dir),
             HARNESS_EXIT_CODE="23",
         )
@@ -288,6 +308,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         result = self._run(
             "--reuse-from",
             str(prior),
+            RUN_PGPLAN="1",
             PGPLAN_OUT=str(result_dir),
         )
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -305,6 +326,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         result = self._run(
             "--reuse-from",
             str(prior),
+            RUN_PGPLAN="1",
             _inject_default_skips="0",
         )
         self.assertEqual(result.returncode, 0, result.stdout)
@@ -320,14 +342,16 @@ class RunAllPGPlanTests(unittest.TestCase):
 
     def test_environment_reuse_from_is_forwarded(self) -> None:
         prior = self.repo / "prior-env-corpus"
-        result = self._run(PGPLAN_REUSE_FROM=str(prior))
+        result = self._run(RUN_PGPLAN="1", PGPLAN_REUSE_FROM=str(prior))
         self.assertEqual(result.returncode, 0, result.stdout)
         call = self.log.read_text(encoding="utf-8").strip()
         self.assertIn(f"--reuse-from {prior}", call)
 
     def test_comparison_alias_and_plan_cache_are_forwarded(self) -> None:
         cache = self.repo / "persistent plan cache"
-        result = self._run("--skip1", "--plan-cache", str(cache))
+        result = self._run(
+            "--skip1", "--plan-cache", str(cache), RUN_PGPLAN="1"
+        )
         self.assertEqual(result.returncode, 0, result.stdout)
         call = self.log.read_text(encoding="utf-8").strip()
         self.assertIn("--comparison-mode both", call)
@@ -339,7 +363,7 @@ class RunAllPGPlanTests(unittest.TestCase):
     def test_reuse_rejects_explicit_rebuild_request(self) -> None:
         prior = self.repo / "prior-corpus"
         result = self._run(
-            "--reuse-from", str(prior), SKIP_BUILD="0"
+            "--reuse-from", str(prior), RUN_PGPLAN="1", SKIP_BUILD="0"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
@@ -357,6 +381,7 @@ class RunAllPGPlanTests(unittest.TestCase):
                 result = self._run(
                     "--reuse-from",
                     str(prior),
+                    RUN_PGPLAN="1",
                     **{variable: "0"},
                 )
                 self.assertNotEqual(result.returncode, 0)
@@ -372,6 +397,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         result = self._run(
             "--out",
             str(command_line_out),
+            RUN_PGPLAN="1",
             PGPLAN_OUT=str(environment_out),
         )
 
@@ -385,7 +411,7 @@ class RunAllPGPlanTests(unittest.TestCase):
             f"Comparison result directory: {environment_out}", result.stdout
         )
 
-    def test_escape_hatch_preserves_legacy_corpus_run(self) -> None:
+    def test_explicit_zero_preserves_two_way_corpus_run(self) -> None:
         result = self._run("--limit", "1", RUN_PGPLAN="0")
         self.assertEqual(result.returncode, 0, result.stdout)
         calls = self.log.read_text(encoding="utf-8").splitlines()

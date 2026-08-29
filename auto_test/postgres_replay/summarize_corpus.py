@@ -143,8 +143,10 @@ PGPLAN_CSV_FIELDS = (
     "pgplan_correctness_implied_equality_count",
     "tm_pgplan",
     "tm_native_vs_pgplan_speedup",
+    "tm_pgplan_vs_outer_yan_speedup",
     "t1_pgplan",
     "t1_native_vs_pgplan_speedup",
+    "t1_pgplan_vs_outer_yan_speedup",
 )
 COMPARISON_CSV_FIELDS = (
     "pgplan_comparison_mode",
@@ -242,8 +244,10 @@ SUMMARY_FIELDS = (
     "timed_queries",
     "pgplan_speedup_vs_native_geomean",
     "outer_yan_speedup_vs_native_geomean",
+    "outer_yan_speedup_vs_pgplan_geomean",
     "pgplan_faster_than_native",
     "outer_yan_faster_than_native",
+    "outer_yan_faster_than_pgplan",
 )
 
 
@@ -1253,6 +1257,7 @@ def build_comparison_rows(result_root, status_rows):
                 "t1_speedup": "NA",
                 "t1_pgplan": "NA",
                 "t1_native_vs_pgplan_speedup": "NA",
+                "t1_pgplan_vs_outer_yan_speedup": "NA",
                 "profile_round1_operator_s": "NA",
                 "profile_round2_operator_s": "NA",
                 "profile_round3_operator_s": "NA",
@@ -1289,6 +1294,9 @@ def build_comparison_rows(result_root, status_rows):
             outer_yan_vs_native = speedup(
                 medians["native"], medians["outer_yan"]
             )
+            outer_yan_vs_pgplan = speedup(
+                medians["pgplan"], medians["outer_yan"]
+            )
             correctness_origin = artifacts["correctness_origin"]
             if correctness_origin in ("FRESH", "REUSED") or (
                 not correctness_origin
@@ -1321,6 +1329,9 @@ def build_comparison_rows(result_root, status_rows):
                     "tm_on": artifacts["median_text"]["outer_yan"],
                     "tm_speedup": decimal_text(outer_yan_vs_native),
                     "tm_native_vs_pgplan_speedup": decimal_text(pgplan_vs_native),
+                    "tm_pgplan_vs_outer_yan_speedup": decimal_text(
+                        outer_yan_vs_pgplan
+                    ),
                     "pgplan_comparison_mode": artifacts["comparison_mode"],
                     "pgplan_correctness_comparison_set": artifacts[
                         "correctness_comparison_set"
@@ -1365,6 +1376,7 @@ def build_comparison_rows(result_root, status_rows):
                     "pgplan_comparison_join_count": artifacts["join_count"],
                     "_pgplan_speedup": pgplan_vs_native,
                     "_outer_yan_native_speedup": outer_yan_vs_native,
+                    "_outer_yan_pgplan_speedup": outer_yan_vs_pgplan,
                     "_timeout_seconds": artifacts["timeout_seconds"],
                 }
             )
@@ -1378,6 +1390,9 @@ def build_comparison_rows(result_root, status_rows):
                 t1_outer_vs_native = speedup(
                     t1_medians["native"], t1_medians["outer_yan"]
                 )
+                t1_outer_vs_pgplan = speedup(
+                    t1_medians["pgplan"], t1_medians["outer_yan"]
+                )
                 output.update(
                     {
                         "t1_off": artifacts["t1_median_text"]["native"],
@@ -1386,6 +1401,9 @@ def build_comparison_rows(result_root, status_rows):
                         "t1_speedup": decimal_text(t1_outer_vs_native),
                         "t1_native_vs_pgplan_speedup": decimal_text(
                             t1_pgplan_vs_native
+                        ),
+                        "t1_pgplan_vs_outer_yan_speedup": decimal_text(
+                            t1_outer_vs_pgplan
                         ),
                     }
                 )
@@ -1477,6 +1495,7 @@ def aggregate_row(family, rows):
     passed = [row for row in selected if row["_status"] == "PASS"]
     pgplan_speedups = [row["_pgplan_speedup"] for row in passed]
     outer_native_speedups = [row["_outer_yan_native_speedup"] for row in passed]
+    outer_pgplan_speedups = [row["_outer_yan_pgplan_speedup"] for row in passed]
     return {
         "family": family,
         "selected_queries": str(len(selected)),
@@ -1488,9 +1507,15 @@ def aggregate_row(family, rows):
         "outer_yan_speedup_vs_native_geomean": geometric_mean(
             outer_native_speedups
         ),
+        "outer_yan_speedup_vs_pgplan_geomean": geometric_mean(
+            outer_pgplan_speedups
+        ),
         "pgplan_faster_than_native": str(sum(value > 1 for value in pgplan_speedups)),
         "outer_yan_faster_than_native": str(
             sum(value > 1 for value in outer_native_speedups)
+        ),
+        "outer_yan_faster_than_pgplan": str(
+            sum(value > 1 for value in outer_pgplan_speedups)
         ),
     }
 
@@ -1525,9 +1550,9 @@ def render_comparison_block(row, index, total):
         "[{0:3d}/{1}] {2:<36} correct={3} reorder={4} selected={5} "
         "comparison={6} PGPlan={7}  "
         "TM:[Original={8} PGPlan={9} OuterYan={10}] "
-        "Speedup:[Original/PGPlan={11} Original/OuterYan={12}]  "
+        "Speedup:[Original/OuterYan={11} PGPlan/OuterYan={12}]  "
         "T1:[Original={13} PGPlan={14} OuterYan={15}] "
-        "Speedup:[Original/PGPlan={16} Original/OuterYan={17}]"
+        "Speedup:[Original/OuterYan={16} PGPlan/OuterYan={17}]"
     ).format(
         index,
         total,
@@ -1540,13 +1565,13 @@ def render_comparison_block(row, index, total):
         display(row["tm_off"]),
         display(row["tm_pgplan"]),
         display(row["tm_on"]),
-        display(row["tm_native_vs_pgplan_speedup"]),
         display(row["tm_speedup"]),
+        display(row["tm_pgplan_vs_outer_yan_speedup"]),
         display(row["t1_off"]),
         display(row["t1_pgplan"]),
         display(row["t1_on"]),
-        display(row["t1_native_vs_pgplan_speedup"]),
         display(row["t1_speedup"]),
+        display(row["t1_pgplan_vs_outer_yan_speedup"]),
     )
 
     decision = (
@@ -1783,11 +1808,11 @@ def main(argv=None):
     )
     print(
         "[comparison] geometric-mean speedup over {0} timed queries "
-        "(>1 means the named candidate is faster): "
-        "pgplan_vs_original={1} outer_yan_vs_original={2}".format(
+        "(>1 means OuterYan is faster): "
+        "Original/OuterYan={1} PGPlan/OuterYan={2}".format(
             totals["timed_queries"],
-            totals["pgplan_speedup_vs_native_geomean"] or "n/a",
             totals["outer_yan_speedup_vs_native_geomean"] or "n/a",
+            totals["outer_yan_speedup_vs_pgplan_geomean"] or "n/a",
         )
     )
     for name in (

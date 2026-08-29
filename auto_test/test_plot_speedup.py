@@ -83,8 +83,10 @@ class PlotSpeedupLoadTest(unittest.TestCase):
             "derived__ojb_job_21a_skeleton_lduF": "left-deep",
             "derived__ojb_job_21a_skeleton_alt": "left-deep",
             "derived__ojb_job_21a_skeleton_rdmx": "right-deep",
+            "derived__ojb_job_21a_skeleton_rdax": "right-deep",
             "derived__ojb_job_21a_skeleton_rduL": "right-deep",
             "derived__ojb_job_21a_skeleton_bmx": "bushy",
+            "derived__ojb_job_21a_skeleton_bdmx": "bushy",
             "industry__oy_th_real_supplier_right": "industry",
         }
         self.assertEqual(

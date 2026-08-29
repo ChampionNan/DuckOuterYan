@@ -33,14 +33,15 @@ preservation direction without reducing the complete graph to a pure inner query
   \label{fig:outerjoin-benchmark-construction}
 \end{figure}
 
-Each skeleton produces five deterministic applicability-oriented groupings: primary
-left- and right-deep trees (\texttt{ldmx}/\texttt{rdmx}); a balanced bushy tree
-when the graph permits one, otherwise an applicability-checked mixed left-deep traversal
-(\texttt{bmx}/\texttt{alt}); and alternate left- and right-deep traversals that
-start from the opposite graph side (the legacy filename slots
-\texttt{lduX}/\texttt{rduX}). This gives
-170 queries with 80 left-deep, 68 right-deep, and 22 genuinely bushy trees.
-Explicit parentheses fix the binary join tree.
+Each skeleton produces five deterministic applicability-oriented groupings:
+primary left- and right-deep trees (\texttt{ldmx}/\texttt{rdmx}); a balanced
+bushy tree when the graph permits one, otherwise an applicability-checked mixed
+left-deep traversal (\texttt{bmx}/\texttt{alt}); an additional connected bushy
+tree, or a secondary right-deep tree when a bushy root is structurally
+unavailable (\texttt{bdmx}/\texttt{rdax}); and an alternate right-deep traversal
+that starts from the opposite graph side (\texttt{rduX}). This gives 170 queries
+with 46 left-deep, 80 right-deep, and 44 genuinely bushy trees. Explicit
+parentheses fix the binary join tree.
 
 This construction provides a controlled and representative measure of
 outer-join performance. Holding the relation graph fixed while varying tree

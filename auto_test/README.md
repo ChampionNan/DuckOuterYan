@@ -13,7 +13,7 @@ synopsis.
 | Path | Purpose |
 |---|---|
 | `configs.sh` | Shared DuckDB, corpus, timing, and PGPlan defaults |
-| `run_all.sh` | Build/data orchestration followed by corpus-wide DuckDB/PGPlan/OuterYan comparison |
+| `run_all.sh` | Build/data orchestration followed by the default DuckDB Original/OuterYan comparison; PGPlan is opt-in |
 | `pgplan/` | PostgreSQL 16.2 setup, cached logical-tree capture/import, comparison experiment, and documentation |
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
@@ -49,7 +49,7 @@ corresponding environment values.
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
-| `RUN_PGPLAN` | `1` | Run the PGPlan comparison workflow for the selected corpus |
+| `RUN_PGPLAN` | `0` | Set to `1` to opt into PGPlan generation and three-way comparison |
 | `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
 | `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
 | `PGPLAN_INSTALL_DIR` | `postgres/postgresql` | Repo-local PostgreSQL installation prefix used by `source` mode |
@@ -139,15 +139,17 @@ queries and 27 legacy synthetic performance guards use `derived__`; the nine
 business-role patterns use `industry__`, including the one that is also a
 pinned legacy win. Exact roles remain in the manifest rather than being encoded
 as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
-TPC-DS 35, JOB 50, and SQLStorm 60), including 80 left-deep, 68 right-deep,
-and 22 genuinely bushy graph-preserving applicability inputs. Of these, 158
+TPC-DS 35, JOB 50, and SQLStorm 60), including 46 left-deep, 80 right-deep,
+and 44 genuinely bushy graph-preserving applicability inputs. Of these, 158
 use all-FULL vectors and 12 use mixed `alt` vectors. The evaluation under
 `outerjoin_benchmark/industry_inspired/` is the
 union of nine explainable legacy business patterns and all 28 correct queries
 where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
 query belongs to both groups, so the corpus contains 36 unique queries. Its
 manifest labels the two roles separately; performance-selected entries are not
-claimed to be industry-derived. Run the complete component with:
+claimed to be industry-derived. The complete active 206-query corpus contains
+62 left-deep, 88 right-deep, and 56 bushy inputs. Run the complete component
+with:
 
 ```bash
 OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
@@ -164,10 +166,10 @@ component view under `outerjoin_benchmark/supplemental`. See
 
 Query traversal is deterministic. Families are visited in the order selected by
 the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
-family, SQL basenames are ordered bytewise (`LC_ALL=C`). For a bushy-eligible
-seed, suffixes normally execute as `bmx`, `ldmx`, `lduX`, `rdmx`, and `rduX`;
-otherwise `alt` replaces `bmx`. Here `X` is a legacy filename label; this is only
-filename order; it is not a semantic progression. A `--query-list` file
+family, SQL basenames are ordered bytewise (`LC_ALL=C`). A bushy-eligible seed
+emits `bdmx`, `bmx`, `ldmx`, `rdmx`, and `rduX`; a bushy-ineligible seed emits
+`alt`, `ldmx`, `rdax`, `rdmx`, and `rduX`. Here `X` is a legacy filename label;
+this is only filename order, not a semantic progression. A `--query-list` file
 overrides this order and is processed line by line.
 
 ### Core query variants
@@ -181,11 +183,12 @@ queries retain mixed vectors. Older suffix stems remain for result-file continui
 | `ldmx` | Primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
 | `rdmx` | Primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
 | `bmx` | Connected bushy FULL tree | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
+| `bdmx` | Secondary connected bushy FULL tree | Uses another connected split/orientation of the same fixed graph. |
 | `alt` | Alternate left-deep mixed tree | Replaces `bmx` when a true cross-product-free bushy tree is unavailable. |
-| `lduX` | Alternate left-deep FULL tree | Starts at the opposite graph side; `X` is a legacy filename label and the manifest records the actual all-`F` vector. |
+| `rdax` | Secondary right-deep FULL tree | Replaces `bdmx` when the graph cannot form a true bushy root. |
 | `rduX` | Alternate right-deep FULL tree | Starts at the opposite graph side; `X` is a legacy filename label and the manifest records the actual all-`F` vector. |
 
-The core contains 80 left-deep, 68 right-deep, and 22 bushy queries. Every
+The core contains 46 left-deep, 80 right-deep, and 44 bushy queries. Every
 grouping is independently specified because outer joins are not generally
 associative. Global NULL-rejecting predicates remain selective, while the FULL
 input labels ensure at least one outer edge remains when filter pushdown runs.
@@ -588,8 +591,9 @@ Each benchmark family has its own per-query speed-up page; derived and industry
 queries remain together on that family's page and use `[D]` and `[I]`
 provenance tags. Boxes and bars use flat colors without shadows or hatch
 patterns; box-plot median lines are omitted so they do not obscure the points.
-The shape parser recognizes the generated `bmx`,
-`ldmx`, `lduX`, `rdmx`, `rduX`, and `alt` suffixes. There is intentionally no
+The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
+`rdmx`, `rduX`, and `alt` suffixes, plus `lduX` in historical result files.
+There is intentionally no
 speed-up-by-kernel page.
 
 The single phase page contains every eligible benchmark query in one figure.
@@ -666,60 +670,67 @@ SET disabled_optimizers TO 'outer_yan';
 ## One-command and manual workflows
 
 ```bash
-# Build release and data, regenerate queries, then compare DuckDB, PGPlan, and
-# OuterYan for every query in auto_test/outerjoin_query.
+# Build release and data, regenerate queries, then compare DuckDB Original and
+# OuterYan for every query in auto_test/outerjoin_query. No PG plan is generated
+# or executed by this default workflow.
 bash auto_test/run_all.sh
+
+# Explicitly opt into PGPlan generation and Original/PGPlan/OuterYan testing.
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 # Check only (a) Original == PGPlan; OuterYan correctness is skipped, while
 # Original/PGPlan/OuterYan EXPLAIN and performance remain unchanged.
-bash auto_test/run_all.sh --skip1
+RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
 
 # Skip both correctness comparisons for a manual performance-only rerun.
 # Cached PGPlan artifacts are reused; all EXPLAIN, verification, TM, and T1
 # performance work still runs.
-bash auto_test/run_all.sh --performance-only
+RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
 
 # Optionally use the pinned postgres:16.2 image instead of the default
 # repo-local source build.
-PGPLAN_SETUP=docker bash auto_test/run_all.sh
+RUN_PGPLAN=1 PGPLAN_SETUP=docker bash auto_test/run_all.sh
 
 # Use an existing PostgreSQL 16.2 instance. Its public schema must contain
 # exact TPC-H SF0.01, and the role must be able to create sampled schemas.
 PGPLAN_SETUP=external \
 PG_DSN='host=127.0.0.1 port=5432 dbname=duckyan_tpch user=postgres' \
 PSQL_BIN=/absolute/path/to/psql \
-bash auto_test/run_all.sh
+RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 # Reuse existing DuckDB data; setup still verifies or prepares PostgreSQL's
 # independent minimal plan-selection data. Run only the TPC-H family.
-SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
+RUN_PGPLAN=1 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
 
 # Performance rerun: reuse each query's PGPlan artifact and sealed target-data
 # correctness receipt. PostgreSQL setup/capture and result comparison are
 # skipped; Native, PGPlan, and OuterYan EXPLAIN/TM/T1 tests are otherwise the
 # same and are written to a new self-contained result directory.
-bash auto_test/run_all.sh \
+RUN_PGPLAN=1 bash auto_test/run_all.sh \
   --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
 
-# Keep the historical DuckDB-vs-OuterYan corpus workflow without PGPlan
+# The explicit spelling below is equivalent to the default two-way workflow.
 RUN_PGPLAN=0 bash auto_test/run_all.sh
 
 # Run PGPlan on another family-structured corpus root.
-PGPLAN_CORPUS=auto_test/outerjoin_benchmark/core \
+RUN_PGPLAN=1 PGPLAN_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 
-# Run one custom corpus through the historical two-way harness.
-RUN_PGPLAN=0 OY_CORPUS=auto_test/outerjoin_benchmark/core \
+# Run one custom corpus through the default two-way harness.
+OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
 The default comparison stage walks all 206 SQL files under `outerjoin_query`:
-7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It first checks the persistent
-typed-plan cache under `auto_test/pgplan/plans`, capturing a PostgreSQL artifact
-only for an absent or stale entry. It executes the same bare query once as
-Original DuckDB, PGPlan, and normal OuterYan on the target DuckDB database,
-checks Original against each candidate, and only then records target-data
-timings.
+7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It executes each bare query
+with OuterYan disabled (Original) and enabled, verifies complete result
+equivalence, records the selected DuckDB/OuterYan plan, and then measures both
+configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture
+PG plans, import PG plans, or run PGPlan correctness/timing.
+
+With `RUN_PGPLAN=1`, the opt-in comparison instead checks the persistent typed-
+plan cache under `auto_test/pgplan/plans`, captures missing or stale PostgreSQL
+artifacts, and runs the Original/PGPlan/OuterYan workflow.
 PostgreSQL is a planning oracle only: it receives plain `EXPLAIN`,
 never `EXPLAIN ANALYZE` and never a result-producing execution.
 `--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
@@ -784,9 +795,10 @@ correctness. Reused rows retain their source/receipt hashes; legacy artifacts
 leave unavailable additive fields empty instead of guessing.
 
 Each successful block orders TM and T1 as Original, PGPlan, OuterYan, then
-prints only `Original/PGPlan` and `Original/OuterYan` speedups. The original
+prints only `Original/OuterYan` and `PGPlan/OuterYan` speedups. The original
 CSV `off/on` columns retain their Original/OuterYan meanings, while
-`tm_pgplan` and `t1_pgplan` add PGPlan. TM uses one warm-up plus
+`tm_pgplan` and `t1_pgplan` add PGPlan; legacy Original/PGPlan speedup fields
+remain for compatibility. TM uses one warm-up plus
 `PGPLAN_RUNS` measurements; T1 uses one warm-up plus one measurement. The
 workflow does not collect the legacy kernel-trace or phase-profile batches, so
 their empty/NA compatibility columns remain in the original CSV prefix but the
@@ -831,11 +843,11 @@ then reruns all three plan verification and timing configurations. The new
 result copies the selected PGPlan artifact and receipt provenance so it does
 not depend on mutable files in the prior result directory after completion.
 
-Accordingly, a default PASS supports exact target-data Native/PGPlan/OuterYan
-result equality, PGPlan tree adherence, and target-data performance. It still
-does not represent execution of PostgreSQL's physical plan. See
-[`pgplan/README.md`](pgplan/README.md) for the manual `--correctness-db`
-interface and builder options.
+Accordingly, a target-mode PGPlan PASS supports exact target-data
+Native/PGPlan/OuterYan result equality, PGPlan tree adherence, and target-data
+performance. It still does not represent execution of PostgreSQL's physical
+plan. See [`pgplan/README.md`](pgplan/README.md) for the manual
+`--correctness-db` interface and builder options.
 
 `PGPLAN_SETUP=source` follows the repo-local paths in `configs.sh` and pins
 PostgreSQL 16.2. If the managed binary is absent, it downloads the verified

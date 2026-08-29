@@ -9,8 +9,8 @@
 #   1. Compile DuckDB release with required extensions (tpch, tpcds)
 #   2. Build the databases required by the selected benchmark strata
 #   3. Regenerate the benchmark and provenance manifests
-#   4. Prepare PostgreSQL plan-selection data
-#   5. Run the selected Original/PGPlan/OuterYan comparisons for the corpus
+#   4. Skip PostgreSQL work by default
+#   5. Run the Original/OuterYan bare-query comparison for the corpus
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
@@ -24,7 +24,7 @@
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
 #   SKIP_DATA        Set to 1 to skip target DuckDB database generation
 #   SKIP_QUERY_GEN   Set to 1 to keep the existing generated benchmark
-#   RUN_PGPLAN       Set to 0 to use the legacy two-way harness (default 1)
+#   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
 #   PGPLAN_SETUP     source (default, auto-installs) | docker | external
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
 #   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
@@ -45,7 +45,7 @@
 #   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Bounded-mode preflight limit (default 30)
 #   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 300)
 #   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
-#   OY_CORPUS        Custom corpus for RUN_PGPLAN=0 legacy two-way mode
+#   OY_CORPUS        Custom corpus for the default two-way mode
 #
 # Docker is optional. With no PostgreSQL override, source mode downloads,
 # verifies, builds, installs, initializes, and starts PostgreSQL 16.2 under the
@@ -89,7 +89,7 @@ EXPERIMENT_ARGS=("$@")
 RESULT_TXTS=()
 PGPLAN_RESULT_DIRS=()
 RUN_STATUS=0
-RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-1}}"
+RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}"
 CUSTOM_CORPUS="$CALLER_OY_CORPUS"
 REUSE_SHORTCUT_FROM="${PGPLAN_REUSE_FROM:-}"
 argument_index=0
@@ -318,10 +318,10 @@ if [ "$RUN_PGPLAN" = "1" ]; then
         RUN_STATUS=$?
     fi
 elif [ -n "$CUSTOM_CORPUS" ]; then
-    log "Step 4/5: PGPlan disabled (RUN_PGPLAN=0)"
+    log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
     run_experiment "custom" "$CUSTOM_CORPUS" "all"
 else
-    log "Step 4/5: PGPlan disabled (RUN_PGPLAN=0)"
+    log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
     run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_query" "all"
 fi
 log "Experiments complete ($(elapsed $((SECONDS - STEP4_START))))"

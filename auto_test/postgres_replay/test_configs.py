@@ -130,7 +130,7 @@ done
         values = self.load_config()
         pg_root = REPO_ROOT / "postgres"
         prefix = pg_root / "postgresql"
-        self.assertEqual(values["RUN_PGPLAN"], "1")
+        self.assertEqual(values["RUN_PGPLAN"], "0")
         self.assertEqual(values["PYTHON_BIN"], "python3")
         self.assertEqual(values["PGPLAN_SETUP"], "source")
         self.assertEqual(values["PGPLAN_VERSION"], "16.2")

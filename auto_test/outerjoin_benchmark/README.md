@@ -72,14 +72,16 @@ all-`F`, while the structurally necessary `alt` slot remains mixed.
 | `ldmx` | primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
 | `rdmx` | primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
 | `bmx` | connected bushy FULL tree | Exercise bushy grouping when the graph admits two nontrivial connected root subplans. |
+| `bdmx` | secondary connected bushy FULL tree | Use another connected split/orientation of the fixed graph. |
 | `alt` | alternate left-deep mixed tree | Replace `bmx` when a true cross-product-free bushy tree is unavailable. |
-| `lduX` / `rduX` | alternate left-/right-deep FULL tree | Start from the opposite graph side; `X` is a legacy filename label and the manifest still records an all-`F` vector. |
+| `rdax` | secondary right-deep FULL tree | Replace `bdmx` when a true bushy root is structurally unavailable. |
+| `rduX` | alternate right-deep FULL tree | Start from the opposite graph side; `X` is a legacy filename label and the manifest still records an all-`F` vector. |
 
-The 170-query core comprises 34 `ldmx`, 34 `rdmx`, 22 `bmx`, 12 `alt`, 34
-`lduX`, and 34 `rduX` cases. The 158 non-`alt` entries are all-FULL; the 12
-`alt` entries retain mixed labels. It retains 80 left-deep, 68 right-deep, and
-22 bushy inputs. Regrouped outer joins are independently specified queries; no
-cross-grouping semantic-equivalence claim is made.
+The 170-query core comprises 34 `ldmx`, 34 `rdmx`, 22 `bmx`, 22 `bdmx`, 12
+`alt`, 12 `rdax`, and 34 `rduX` cases. The 158 non-`alt` entries are all-FULL;
+the 12 `alt` entries retain mixed labels. It contains 46 left-deep, 80
+right-deep, and 44 bushy inputs. Regrouped outer joins are independently
+specified queries; no cross-grouping semantic-equivalence claim is made.
 
 The transformation extracts a connected subgraph of relation instances,
 aliases, and equality edges from the named source query. That graph is fixed

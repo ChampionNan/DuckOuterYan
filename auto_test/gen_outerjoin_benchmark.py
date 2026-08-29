@@ -975,11 +975,28 @@ def build_right_mirror(seed: Seed, kinds: Sequence[str]) -> str:
 
 def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
     """Build a second cross-product-free deep traversal from the last relation."""
+    return build_connected_deep(
+        seed,
+        right_deep=right_deep,
+        start_index=len(seed.relations) - 1,
+        prefer_max_edge=True,
+    )
+
+
+def build_connected_deep(
+    seed: Seed,
+    *,
+    right_deep: bool,
+    start_index: int,
+    prefer_max_edge: bool,
+) -> str:
+    """Build a connected all-FULL traversal from a selected relation."""
     aliases = [relation_alias(relation) for relation in seed.relations]
     relation_by_alias = dict(zip(aliases, seed.relations))
     edges = [(*predicate_aliases(predicate), index) for index, predicate in enumerate(seed.predicates)]
-    visited = {aliases[-1]}
-    expression = relation_by_alias[aliases[-1]]
+    start_alias = aliases[start_index]
+    visited = {start_alias}
+    expression = relation_by_alias[start_alias]
     while len(visited) < len(aliases):
         candidates: list[tuple[int, str]] = []
         for left, right, edge_index in edges:
@@ -988,7 +1005,7 @@ def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
             candidates.append((edge_index, right if left in visited else left))
         if not candidates:
             raise ValueError(f"{seed.seed_id}: cannot form alternate deep traversal")
-        edge_index, new_alias = max(candidates)
+        edge_index, new_alias = (max(candidates) if prefer_max_edge else min(candidates))
         relation = relation_by_alias[new_alias]
         predicate = active_edge_predicate(seed.predicates[edge_index])
         if right_deep:
@@ -997,6 +1014,28 @@ def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
             expression = f"({expression} {ACTIVE_JOIN_SQL} {relation} ON {predicate})"
         visited.add(new_alias)
     return expression
+
+
+def build_secondary_right_deep(seed: Seed) -> str:
+    """Build a third syntactically distinct connected right-deep FULL tree."""
+    full_vector = ("F",) * len(seed.predicates)
+    existing = {
+        build_right_mirror(seed, full_vector),
+        build_alternate_deep(seed, right_deep=True),
+    }
+    middle = len(seed.relations) // 2
+    start_order = [middle, *range(len(seed.relations))]
+    for start_index in dict.fromkeys(start_order):
+        for prefer_max_edge in (False, True):
+            candidate = build_connected_deep(
+                seed,
+                right_deep=True,
+                start_index=start_index,
+                prefer_max_edge=prefer_max_edge,
+            )
+            if candidate not in existing:
+                return candidate
+    raise ValueError(f"{seed.seed_id}: cannot form a distinct secondary right-deep traversal")
 
 
 def alternate_vector(seed: Seed) -> tuple[str, ...]:
@@ -1107,12 +1146,15 @@ def bushy_root_partition(seed: Seed) -> tuple[set[str], set[str], int] | None:
     return first, second, edge_index
 
 
-def build_bushy_mixed(seed: Seed, kinds: Sequence[str]) -> str:
+def build_bushy_mixed(seed: Seed, kinds: Sequence[str], *, alternate: bool = False) -> str:
     """Build a balanced connected tree without introducing cross products."""
+    if alternate and any(kind != "F" for kind in kinds):
+        raise ValueError("alternate bushy orientation currently requires all-FULL joins")
     aliases = [relation_alias(relation) for relation in seed.relations]
     alias_order = {alias: index for index, alias in enumerate(aliases)}
     relation_by_alias = dict(zip(aliases, seed.relations))
     edges = [(*predicate_aliases(predicate), index) for index, predicate in enumerate(seed.predicates)]
+    all_aliases = set(aliases)
 
     def split(nodes: set[str]) -> tuple[set[str], set[str], int]:
         candidates: list[tuple[int, int, set[str], set[str]]] = []
@@ -1139,8 +1181,21 @@ def build_bushy_mixed(seed: Seed, kinds: Sequence[str]) -> str:
                 candidates.append((abs(len(visited) - len(other)), edge_index, visited, other))
         if not candidates:
             raise ValueError(f"{seed.seed_id}: cannot form a connected bushy subplan")
-        _, edge_index, first, second = min(candidates, key=lambda item: (item[0], item[1]))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        choices = candidates
+        if nodes == all_aliases:
+            choices = [
+                candidate
+                for candidate in candidates
+                if min(len(candidate[2]), len(candidate[3])) >= 2
+            ]
+            if not choices:
+                raise ValueError(f"{seed.seed_id}: source skeleton has no bushy root split")
+        candidate_index = 1 if alternate and len(choices) > 1 else 0
+        _, edge_index, first, second = choices[candidate_index]
         if min(alias_order[alias] for alias in first) > min(alias_order[alias] for alias in second):
+            first, second = second, first
+        if alternate and len(choices) == 1:
             first, second = second, first
         return first, second, edge_index
 
@@ -1174,7 +1229,6 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
     edge_count = len(seed.predicates)
     full_vector = ("F",) * edge_count
     legacy_suffix_kinds = ("L", "R", "F")
-    left_suffix_kind = legacy_suffix_kinds[(2 * seed_index) % len(legacy_suffix_kinds)]
     right_suffix_kind = legacy_suffix_kinds[(2 * seed_index + 1) % len(legacy_suffix_kinds)]
     yield (
         "ldmx",
@@ -1200,7 +1254,8 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
             "right-deep FULL-outer applicability form",
         ),
     )
-    if bushy_root_partition(seed) is not None:
+    bushy_eligible = bushy_root_partition(seed) is not None
+    if bushy_eligible:
         yield (
             "bmx",
             "".join(full_vector),
@@ -1228,18 +1283,36 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
             ),
         )
 
-    yield (
-        f"ldu{left_suffix_kind}",
-        "".join(full_vector),
-        "left_deep",
-        "secondary left-deep FULL-outer control",
-        query_sql(
-            seed,
-            build_alternate_deep(seed, right_deep=False),
-            f"ldu{left_suffix_kind}",
-            "secondary left-deep FULL-outer control",
-        ),
-    )
+    if bushy_eligible:
+        primary_bushy = build_bushy_mixed(seed, full_vector)
+        alternate_bushy = build_bushy_mixed(seed, full_vector, alternate=True)
+        if alternate_bushy == primary_bushy:
+            raise ValueError(f"{seed.seed_id}: secondary bushy tree duplicates the primary tree")
+        yield (
+            "bdmx",
+            "".join(full_vector),
+            "bushy",
+            "secondary connected bushy FULL-outer applicability form",
+            query_sql(
+                seed,
+                alternate_bushy,
+                "bdmx",
+                "secondary cross-product-free bushy FULL-outer applicability form",
+            ),
+        )
+    else:
+        yield (
+            "rdax",
+            "".join(full_vector),
+            "right_deep",
+            "secondary right-deep FULL-outer applicability form",
+            query_sql(
+                seed,
+                build_secondary_right_deep(seed),
+                "rdax",
+                "secondary right-deep FULL-outer applicability form",
+            ),
+        )
     yield (
         f"rdu{right_suffix_kind}",
         "".join(full_vector),
@@ -1689,6 +1762,13 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         raise RuntimeError(f"every seed must have one ldmx/rdmx pair: {suffix_counts}")
     if suffix_counts["bmx"] + suffix_counts["alt"] != len(SEEDS):
         raise RuntimeError(f"every seed must have exactly one bmx/alt variant: {suffix_counts}")
+    if suffix_counts["bdmx"] + suffix_counts["rdax"] != len(SEEDS):
+        raise RuntimeError(f"every seed must have exactly one bdmx/rdax variant: {suffix_counts}")
+    rdu_count = sum(
+        count for suffix, count in suffix_counts.items() if suffix.startswith("rdu")
+    )
+    if rdu_count != len(SEEDS):
+        raise RuntimeError(f"every seed must have exactly one rduX variant: {suffix_counts}")
 
     for row in manifest_rows:
         suffix = row["query_id"].rsplit("_", 1)[-1]
@@ -1701,7 +1781,7 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         if suffix == "alt" and set(row["join_vector"]) == {"I"}:
             raise RuntimeError(f"{row['query_id']}: alternate vector has no outer join")
     all_shapes = Counter(row["tree_shape"] for row in manifest_rows)
-    if all_shapes != Counter({"left_deep": 80, "right_deep": 68, "bushy": 22}):
+    if all_shapes != Counter({"left_deep": 46, "right_deep": 80, "bushy": 44}):
         raise RuntimeError(f"unexpected core shape distribution: {all_shapes}")
     predicate_classes = Counter(row["predicate_class"] for row in manifest_rows)
     if predicate_classes != Counter({"null_rejecting_outeryan_applicable": CORE_QUERY_COUNT}):
