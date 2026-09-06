@@ -584,22 +584,46 @@ counts.
 `outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
 counts for every relation depth present in the run.
 
-`plot_speedup.py` writes one multi-page `outeryan_benchmark_figures.pdf`; it
-does not create separate PDF files. Files with the same timestamp are merged
+`plot_speedup.py` writes one multi-page `outeryan_benchmark_figures.pdf` by
+default, with optional standalone figures. Files with the same timestamp are merged
 into one logical run, including older `core` and `industry_inspired` CSV pairs.
-Each benchmark family has its own per-query speed-up page; derived and industry
-queries remain together on that family's page and use `[D]` and `[I]`
-provenance tags. Boxes and bars use flat colors without shadows or hatch
-patterns; box-plot median lines are omitted so they do not obscure the points.
+Per-query runtimes are shown in three figures. The first is a compact horizontal
+dot view containing all correct and timed queries; it appends `[OuterYan]` or
+`[DuckDB]` to identify the plan selected during the ON run. The two
+`Running time Comparison` figures contain only queries whose ON run selected
+OuterYan: one combines graph, TPC-H, and TPC-DS, and one contains JOB. Each
+query has four vertical bars: single-thread OFF/ON and multi-thread OFF/ON,
+using light blue and peach pairs. The `--metric` setting affects the all-query
+dot view; the selected-query comparisons always show both thread settings.
+Only queries with all four finite, positive timings are included in the
+selected-query comparisons; incomplete queries are omitted. Query IDs are
+assigned before this filtering so the remaining labels do not change.
+Benchmark subtitles and separators identify the sections. Query labels and
+legends are enlarged, with the abbreviation key directly below the `Query` axis.
 The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
 `rdmx`, `rduX`, and `alt` suffixes, plus `lduX` in historical result files.
 There is intentionally no
 speed-up-by-kernel page.
 
-The single phase page contains every eligible benchmark query in one figure.
-Each query has grouped R1, R2, R3, and residual `OtherCPU` active-work bars on a
-base-10 logarithmic x-axis, plus matching-thread wall-time bars. DuckDB-selected
+The single `OuterYan Execution Time Details` figure samples up to 20 eligible OuterYan-selected queries per
+benchmark, evenly across each family's shape/runtime-ordered rows. All samples
+share one vertical grouped-bar axis with benchmark subtitles and separators.
+Each query has `Round 1`, `Round 2`, `Round 3`, residual `Other`, and profiled
+wall-clock `Total Time` bars on a base-10 logarithmic y-axis. DuckDB-selected
 queries and incomplete profiles are omitted rather than represented as zero.
+The phase and `Other` values are aggregate operator CPU work across threads,
+while `Total Time` is wall-clock time; the bars are not an additive wall-time
+decomposition.
+
+The compact selected-only figures label queries as
+`<benchmark>-<shape>-<index>`: `G/H/D/J` are graph/TPC-H/TPC-DS/JOB and
+`LD/RD/B/S/A/I/O` are left-deep/right-deep/bushy/star/aggregate/industry/other.
+
+Pass `--split-output-dir DIR` to additionally write four standalone report
+figures: `runtime_all_queries.pdf`, `runtime_outeryan_queries.pdf` (graph, TPC-H,
+and TPC-DS), `runtime_outeryan_queries_job.pdf` (JOB), and
+`phase_breakdown_outeryan.pdf`. With multiple logical runs, each run is written
+under its timestamp subdirectory.
 
 Result files are grouped by their filename timestamp before plotting. A paired
 `experiment_onoff_<timestamp>.csv` and

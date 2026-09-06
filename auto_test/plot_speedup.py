@@ -6,9 +6,11 @@ Consequently, historical ``core``, ``custom``, and ``industry_inspired`` CSVs
 from the same invocation are merged before plotting. Attempts files fill rows
 missing from the final CSV; final rows win duplicates.
 
-The PDF contains summary and shape/relation-count pages, one per-query speed-up
-page for each benchmark family, and one phase-breakdown page shared by every
-family. There is intentionally no kernel-speedup view.
+The PDF contains summary and shape/relation-count pages, compact per-query
+runtime views for all queries, separate JOB and other-benchmark OuterYan-selected
+runtime comparisons with both thread settings, and one vertical phase-breakdown
+figure shared by every family. There is intentionally no
+kernel-speedup view.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import glob
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 
 import matplotlib
@@ -27,6 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 
@@ -35,22 +39,35 @@ C_TM = "#DD8452"
 FAMILY_ORDER = ["graph", "TPC-H", "TPC-DS", "JOB"]
 TOPOLOGY_ORDER = ["left-deep", "right-deep", "bushy", "star", "aggregate", "industry"]
 CLASS_ORDER = ["derived", "industry", "custom", "legacy"]
-CLASS_TAG = {
-    "derived": "D",
+FAMILY_CODES = {"graph": "G", "TPC-H": "H", "TPC-DS": "D", "JOB": "J"}
+TOPOLOGY_CODES = {
+    "left-deep": "LD",
+    "right-deep": "RD",
+    "bushy": "B",
+    "star": "S",
+    "aggregate": "A",
     "industry": "I",
-    "custom": "C",
-    "legacy": "L",
+    "other": "O",
 }
-PHASES = [
-    ("R1 semi-join", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
-    ("R2 semi-join", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
-    ("R3 real join", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
-    ("OtherCPU", "profile_other_elapsed_s", "profile_other_ratio", "#B0B0B0"),
+PHASE_SAMPLE_PER_FAMILY = 20
+QUERY_CODE_KEY = (
+    "G=graph, H=TPC-H, D=TPC-DS, J=JOB; LD=left-deep, RD=right-deep, "
+    "B=bushy, S=star, A=aggregate, I=industry, O=other"
+)
+RUNTIME_SERIES = [
+    ("Single-thread: DuckDB (OFF)", "t1_off", "#A4BEDF"),
+    ("Single-thread: OuterYan (ON)", "t1_on", "#6B9AC7"),
+    ("Multi-thread: DuckDB (OFF)", "tm_off", "#EFC69E"),
+    ("Multi-thread: OuterYan (ON)", "tm_on", "#E59C6D"),
 ]
-OUTERYAN_TOTAL_LABEL = "OuterYan wall total (profiled)"
-OUTERYAN_TOTAL_COLOR = "#EFCB68"
-BASELINE_LABEL = "DuckDB wall total (matching-thread median)"
-BASELINE_COLOR = "#F4A6B7"
+PHASES = [
+    ("Round 1", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
+    ("Round 2", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
+    ("Round 3", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
+    ("Other", "profile_other_elapsed_s", "profile_other_ratio", "#999999"),
+]
+OUTERYAN_TOTAL_LABEL = "Total Time"
+OUTERYAN_TOTAL_COLOR = "#E2B448"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUTS = ["results/experiment_onoff_*.csv"]
@@ -190,19 +207,36 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
     frame["topology"] = frame["query"].map(topology_from_query)
 
     fallback_relations = frame["query"].map(relation_count_from_name)
+    sql_relations = pd.Series(np.nan, index=frame.index, dtype="float64")
+    if "sql_path" in frame:
+        corpus_root = SCRIPT_DIR / "outerjoin_query"
+
+        def relation_count_from_sql_path(relative_path: object) -> float:
+            if not isinstance(relative_path, str) or not relative_path:
+                return np.nan
+            path = Path(relative_path)
+            if path.is_absolute() or ".." in path.parts:
+                return np.nan
+            try:
+                sql = (corpus_root / path).read_text(encoding="utf-8")
+            except OSError:
+                return np.nan
+            sql = re.sub(r"--[^\n]*", "", sql)
+            sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+            count = len(re.findall(r"\b(?:FROM|JOIN)\b", sql, flags=re.IGNORECASE))
+            return float(count) if count > 0 else np.nan
+
+        sql_relations = frame["sql_path"].map(relation_count_from_sql_path)
     if "relation_count" in frame:
         valid = frame["relation_count"].where(
             frame["relation_count"].gt(0)
             & frame["relation_count"].eq(np.floor(frame["relation_count"]))
         )
-        frame["relation_count"] = valid.fillna(fallback_relations)
+        frame["relation_count"] = sql_relations.fillna(valid).fillna(fallback_relations)
     else:
-        frame["relation_count"] = fallback_relations
+        frame["relation_count"] = sql_relations.fillna(fallback_relations)
 
-    frame["display_query"] = [
-        f"[{CLASS_TAG.get(query_class, '?')}] {query}"
-        for query_class, query in zip(frame["query_class"], frame["query"])
-    ]
+    frame["display_query"] = frame["query"].astype(str)
     return frame
 
 
@@ -312,6 +346,16 @@ def save_page(pdf: PdfPages, figure: plt.Figure) -> None:
     plt.close(figure)
 
 
+def tighten_mosaic(figure: plt.Figure, rect: tuple[float, float, float, float]) -> None:
+    """Apply tight layout while tolerating the intentional row-spanning JOB axis."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="This figure includes Axes that are not compatible with tight_layout",
+        )
+        figure.tight_layout(rect=rect)
+
+
 def page_summary(pdf: PdfPages, frame: pd.DataFrame, run: str) -> None:
     figure, axes = plt.subplots(1, 3, figsize=(17, 5.4))
     grouped_box(axes[0], frame, "family", FAMILY_ORDER, "Benchmark")
@@ -342,55 +386,277 @@ def page_shape_relations(pdf: PdfPages, frame: pd.DataFrame, run: str) -> None:
     save_page(pdf, figure)
 
 
-def page_per_query(
-    pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str, family: str
-) -> None:
-    metric_column = f"{metric}_speedup"
-    other_column = "t1_speedup" if metric == "tm" else "tm_speedup"
-    sub = frame.dropna(subset=[metric_column]).copy()
-    sub = sub.sort_values([metric_column, "query"], kind="stable")
-    if sub.empty:
-        return
-    height = min(42.0, max(10.0, 0.205 * len(sub) + 2.2))
-    figure, ax = plt.subplots(figsize=(12.0, height))
-    y = np.arange(len(sub))
-    bar_height = 0.38
-    metric_bars = ax.barh(
-        y + bar_height / 2, sub[metric_column], height=bar_height,
-        color=C_TM, edgecolor="none"
-    )
-    other_bars = ax.barh(
-        y - bar_height / 2, sub[other_column], height=bar_height,
-        color="#CCCCCC", edgecolor="none"
-    )
-    ax.axvline(1.0, color="grey", linestyle="--", linewidth=1)
-    ax.set_xscale("log")
-    plans = sub.get("selected_plan", pd.Series("", index=sub.index)).astype(str).str.upper()
-    plan_tags = np.select([plans.eq("OUTERYAN"), plans.eq("DUCKDB")], ["OY", "D"], default="?")
-    labels = [
-        f"{display} [{plan}]" for display, plan in zip(sub["display_query"], plan_tags)
+def benchmark_mosaic(
+    frame: pd.DataFrame, row_inches: float, minimum_height: float
+) -> tuple[plt.Figure, dict[str, plt.Axes]]:
+    """Lay out small families on the left and the larger JOB family on the right."""
+    counts = frame["family"].value_counts().to_dict()
+    left_families = [
+        family for family in ("graph", "TPC-H", "TPC-DS") if counts.get(family, 0) > 0
     ]
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=5.2)
-    ax.set_ylim(-1, len(sub))
-    ax.set_xlabel("speed-up (×, log; >1 = OuterYan ON faster)")
-    ax.set_title(f"{family} benchmark speed-up ({len(sub)} timed queries)")
-    ax.legend(
-        handles=[Patch(facecolor=C_TM, edgecolor="none", label=metric.upper()),
-                 Patch(facecolor="#CCCCCC", edgecolor="none", label=other_column[:2].upper())],
-        fontsize=8, loc="lower right"
+    has_job = counts.get("JOB", 0) > 0
+    left_units = sum(max(counts[family], 3) for family in left_families)
+    row_units = max(left_units, counts.get("JOB", 0), 1)
+    height = min(18.0, max(minimum_height, 2.6 + row_inches * row_units))
+    figure = plt.figure(figsize=(22.0 if has_job and left_families else 12.0, height))
+
+    if has_job and left_families:
+        height_ratios = [max(counts[family], 3) for family in left_families]
+        grid = figure.add_gridspec(
+            len(left_families), 2, width_ratios=[1.0, 1.15],
+            height_ratios=height_ratios, hspace=0.48, wspace=0.58
+        )
+        axes = {
+            family: figure.add_subplot(grid[index, 0])
+            for index, family in enumerate(left_families)
+        }
+        axes["JOB"] = figure.add_subplot(grid[:, 1])
+        return figure, axes
+
+    families = left_families + (["JOB"] if has_job else [])
+    grid = figure.add_gridspec(
+        max(len(families), 1), 1,
+        height_ratios=[max(counts[family], 3) for family in families] or None,
+        hspace=0.48,
     )
-    figure.tight_layout()
+    axes = {
+        family: figure.add_subplot(grid[index, 0])
+        for index, family in enumerate(families)
+    }
+    return figure, axes
+
+
+def add_short_query_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    """Assign stable family-shape indices such as H-RD-01 and J-B-03."""
+    labeled = frame.copy()
+    labeled["_family_code"] = labeled["family"].map(FAMILY_CODES).fillna("X")
+    labeled["_shape_code"] = labeled["topology"].map(TOPOLOGY_CODES).fillna("O")
+    stable = labeled.sort_values(["family", "topology", "query"], kind="stable")
+    stable["_shape_index"] = stable.groupby(
+        ["family", "_shape_code"], sort=False
+    ).cumcount() + 1
+    labeled["_shape_index"] = stable["_shape_index"].reindex(labeled.index)
+    labeled["short_query"] = [
+        f"{family}-{shape}-{index:02d}"
+        for family, shape, index in zip(
+            labeled["_family_code"], labeled["_shape_code"], labeled["_shape_index"]
+        )
+    ]
+    return labeled
+
+
+def sample_phase_queries(frame: pd.DataFrame, limit: int = PHASE_SAMPLE_PER_FAMILY) -> pd.DataFrame:
+    """Select deterministic, evenly spaced rows from each family and runtime range."""
+    sampled: list[pd.DataFrame] = []
+    family_sizes = frame["family"].value_counts().to_dict()
+    for family in FAMILY_ORDER:
+        family_rows = frame.loc[frame["family"].eq(family)].sort_values(
+            ["topology", "profile_total_time_s", "query"], kind="stable"
+        )
+        if family_rows.empty:
+            continue
+        if len(family_rows) > limit:
+            positions = np.rint(np.linspace(0, len(family_rows) - 1, limit)).astype(int)
+            family_rows = family_rows.iloc[np.unique(positions)]
+        family_rows = family_rows.copy()
+        family_rows["_family_available"] = family_sizes[family]
+        sampled.append(family_rows)
+    return pd.concat(sampled, ignore_index=False) if sampled else frame.iloc[0:0].copy()
+
+
+def grouped_query_positions(
+    frame: pd.DataFrame, gap: float = 1.75
+) -> tuple[pd.DataFrame, list[tuple[str, float, float, int, int]]]:
+    """Order query bars by benchmark and shape, leaving gaps for group subtitles."""
+    topology_rank = {name: index for index, name in enumerate(TOPOLOGY_ORDER + ["other"])}
+    parts: list[pd.DataFrame] = []
+    groups: list[tuple[str, float, float, int, int]] = []
+    cursor = 0.0
+    for family in FAMILY_ORDER:
+        family_rows = frame.loc[frame["family"].eq(family)].copy()
+        if family_rows.empty:
+            continue
+        family_rows["_topology_rank"] = family_rows["topology"].map(topology_rank).fillna(99)
+        family_rows = family_rows.sort_values(
+            ["_topology_rank", "short_query"], kind="stable"
+        )
+        positions = cursor + np.arange(len(family_rows), dtype=float)
+        family_rows["_x"] = positions
+        available = int(family_rows.get("_family_available", pd.Series(len(family_rows))).iloc[0])
+        groups.append((family, float(positions[0]), float(positions[-1]), len(family_rows), available))
+        parts.append(family_rows)
+        cursor = float(positions[-1] + 1.0 + gap)
+    return pd.concat(parts, ignore_index=False), groups
+
+
+def add_benchmark_subtitles(
+    ax: plt.Axes, groups: list[tuple[str, float, float, int, int]]
+) -> None:
+    for index, (family, left, right, shown, available) in enumerate(groups):
+        count = f"n={shown}" if shown == available else f"n={shown} of {available}"
+        ax.text(
+            (left + right) / 2.0, 1.015, f"{family} ({count})",
+            transform=ax.get_xaxis_transform(), ha="center", va="bottom",
+            fontsize=13, fontweight="semibold", clip_on=False,
+        )
+        if index:
+            previous_right = groups[index - 1][2]
+            ax.axvline((previous_right + left) / 2.0, color="0.78", linewidth=0.7)
+
+
+def positive_runtime_rows(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
+    off_column = f"{metric}_off"
+    on_column = f"{metric}_on"
+    speedup_column = f"{metric}_speedup"
+    if not {off_column, on_column}.issubset(frame.columns):
+        return frame.iloc[0:0].copy()
+    sub = frame.copy()
+    for column in (off_column, on_column, speedup_column):
+        if column in sub:
+            sub[column] = pd.to_numeric(sub[column], errors="coerce")
+    return sub.loc[
+        np.isfinite(sub[off_column]) & sub[off_column].gt(0)
+        & np.isfinite(sub[on_column]) & sub[on_column].gt(0)
+    ].copy()
+
+
+def plot_runtime_axis(
+    ax: plt.Axes, frame: pd.DataFrame, metric: str, family: str, show_plan: bool
+) -> None:
+    off_column = f"{metric}_off"
+    on_column = f"{metric}_on"
+    speedup_column = f"{metric}_speedup"
+    order_columns = [column for column in (speedup_column, "query") if column in frame]
+    ascending = [False, True] if speedup_column in order_columns else [True]
+    sub = frame.sort_values(order_columns, ascending=ascending, kind="stable")
+    y = np.arange(len(sub))
+    off = sub[off_column].to_numpy(float)
+    on = sub[on_column].to_numpy(float)
+    for row, off_value, on_value in zip(y, off, on):
+        ax.plot(
+            [off_value, on_value], [row, row], color="0.78", linewidth=0.45,
+            solid_capstyle="round", zorder=1
+        )
+    ax.scatter(off, y, s=11, color=C_T1, edgecolor="none", zorder=3)
+    ax.scatter(on, y, s=11, color=C_TM, edgecolor="none", zorder=4)
+
+    labels = sub["display_query"].astype(str).tolist()
+    if show_plan:
+        plans = sub.get("selected_plan", pd.Series("", index=sub.index)).astype(str).str.upper()
+        plan_tags = np.select(
+            [plans.eq("OUTERYAN"), plans.eq("DUCKDB")], ["OuterYan", "DuckDB"], default="?"
+        )
+        labels = [f"{query} [{plan}]" for query, plan in zip(labels, plan_tags)]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=4.5 if len(sub) > 45 else 5.2)
+    ax.invert_yaxis()
+    ax.set_xscale("log")
+    values = np.concatenate([off, on])
+    lower, upper = np.log10(values.min()), np.log10(values.max())
+    padding = max(0.08, (upper - lower) * 0.04)
+    ax.set_xlim(10 ** (lower - padding), 10 ** (upper + padding))
+    ax.grid(axis="x", which="both", color="0.90", linewidth=0.45)
+    ax.set_axisbelow(True)
+    ax.set_xlabel(f"{metric.upper()} wall-clock time (seconds, log)", fontsize=8)
+    ax.set_title(f"{family} (n={len(sub)})", fontsize=10)
+
+
+def selected_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep OuterYan-selected queries with all four finite, positive timings."""
+    plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
+    sub = frame.loc[plans.eq("OUTERYAN")].copy()
+    complete = pd.Series(True, index=sub.index)
+    for _, column, _ in RUNTIME_SERIES:
+        values = pd.to_numeric(
+            sub.get(column, pd.Series(np.nan, index=sub.index)), errors="coerce"
+        )
+        valid = np.isfinite(values) & values.gt(0)
+        sub[column] = values.where(valid)
+        complete &= valid
+    return sub.loc[complete].copy()
+
+
+def page_selected_runtime_bars(pdf: PdfPages, frame: pd.DataFrame) -> None:
+    sub, groups = grouped_query_positions(frame)
+    x = sub["_x"].to_numpy(float)
+    values = sub[[column for _, column, _ in RUNTIME_SERIES]].to_numpy(float)
+    positive = values[np.isfinite(values) & (values > 0)]
+    floor = 10 ** (np.log10(positive.min()) - 0.25)
+    width = min(29.0, max(17.0, 4.0 + 0.44 * len(sub)))
+    figure, ax = plt.subplots(figsize=(width, 7.8))
+    bar_width = 0.18
+    # A little extra space between thread settings makes each OFF/ON pair clear.
+    offsets = (-0.30, -0.12, 0.12, 0.30)
+    for offset, (label, column, color) in zip(offsets, RUNTIME_SERIES):
+        heights = sub[column].to_numpy(float)
+        ax.bar(
+            x + offset, heights - floor, bottom=floor,
+            width=bar_width, color=color, edgecolor="none", label=label,
+        )
+    ax.set_yscale("log")
+    ax.set_ylim(floor, positive.max() * 1.35)
+    ax.set_xlim(x.min() - 0.8, x.max() + 0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(sub["short_query"], rotation=90, ha="center", fontsize=11)
+    ax.tick_params(axis="y", labelsize=12)
+    ax.set_ylabel("Wall-clock time (seconds, log)", fontsize=14)
+    ax.set_xlabel("Query", fontsize=14, labelpad=8)
+    ax.grid(axis="y", which="major", color="0.88", linewidth=0.6)
+    ax.grid(axis="y", which="minor", color="0.95", linewidth=0.4)
+    ax.set_axisbelow(True)
+    add_benchmark_subtitles(ax, groups)
+    handles, labels = ax.get_legend_handles_labels()
+    figure.legend(
+        handles, labels, loc="upper center", bbox_to_anchor=(0.52, 0.911),
+        ncol=len(handles), frameon=False, fontsize=11,
+    )
+    figure.suptitle("Running time Comparison", fontsize=18, y=0.955)
+    figure.text(
+        0.52, 0.050, QUERY_CODE_KEY, ha="center", va="bottom", fontsize=10.5,
+    )
+    figure.subplots_adjust(left=0.055, right=0.99, bottom=0.245, top=0.81)
     save_page(pdf, figure)
 
 
-def pages_per_benchmark(
-    pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str
+def page_runtime(
+    pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str, selected_only: bool
 ) -> None:
-    """Write one speed-up page per family without splitting query provenance."""
-    for family in FAMILY_ORDER:
-        family_rows = frame.loc[frame["family"].eq(family)].copy()
-        page_per_query(pdf, family_rows, run, metric, family)
+    if selected_only:
+        plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
+        # Assign labels before excluding incomplete queries so their IDs do not shift.
+        labeled = add_short_query_labels(frame.loc[plans.eq("OUTERYAN")])
+        sub = selected_runtime_rows(labeled)
+        if sub.empty:
+            print(f"  runtime figure omitted for {run}: no complete OuterYan-selected timings")
+            return
+        is_job = sub["family"].eq("JOB")
+        for group in (sub.loc[~is_job], sub.loc[is_job]):
+            if not group.empty:
+                page_selected_runtime_bars(pdf, group)
+        return
+    sub = positive_runtime_rows(frame, metric)
+    if sub.empty:
+        print(f"  runtime figure omitted for {run}: no timed queries")
+        return
+    figure, axes = benchmark_mosaic(
+        sub, row_inches=0.115, minimum_height=8.0,
+    )
+    for family, ax in axes.items():
+        family_rows = sub.loc[sub["family"].eq(family)].copy()
+        plot_runtime_axis(ax, family_rows, metric, family, show_plan=True)
+    figure.suptitle("Runtime - all correct and timed queries", fontsize=14, y=0.995)
+    figure.legend(
+        handles=[
+            Line2D([], [], marker="o", linestyle="none", color=C_T1,
+                   markersize=5, label="OuterYan OFF (DuckDB)"),
+            Line2D([], [], marker="o", linestyle="none", color=C_TM,
+                   markersize=5, label="OuterYan enabled (ON)"),
+        ],
+        loc="upper center", ncol=2, fontsize=8, frameon=False,
+        bbox_to_anchor=(0.5, 0.975),
+    )
+    tighten_mosaic(figure, (0.01, 0.01, 0.99, 0.945))
+    save_page(pdf, figure)
 
 
 def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -403,7 +669,7 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     selected = frame.loc[plans.eq("OUTERYAN")].copy()
     if selected.empty:
         return selected, 0
-    for column in required + ["profile_threads", "profile_cpu_time_s", "t1_off", "tm_off"]:
+    for column in required + ["profile_threads", "profile_cpu_time_s"]:
         if column in selected:
             selected[column] = pd.to_numeric(selected[column], errors="coerce")
     seconds = selected[seconds_columns]
@@ -412,10 +678,6 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     cpu_time = selected.get("profile_cpu_time_s", total_time).where(
         lambda value: np.isfinite(value) & value.gt(0), total_time
     )
-    threads = selected.get("profile_threads", pd.Series(np.nan, index=selected.index))
-    t1_baseline = selected.get("t1_off", pd.Series(np.nan, index=selected.index))
-    tm_baseline = selected.get("tm_off", pd.Series(np.nan, index=selected.index))
-    baseline = t1_baseline.where(~threads.gt(1), tm_baseline)
     complete = (
         np.isfinite(seconds).all(axis=1)
         & seconds.ge(0).all(axis=1)
@@ -426,15 +688,12 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         & total_time.gt(0)
         & np.isfinite(cpu_time)
         & cpu_time.gt(0)
-        & np.isfinite(baseline)
-        & baseline.gt(0)
         & np.isclose(seconds.sum(axis=1), cpu_time, rtol=1e-6, atol=1e-9)
         & ratios.sum(axis=1).sub(1.0).abs().le(1e-6)
         & np.isclose(
             ratios.to_numpy(float), seconds.div(cpu_time, axis=0).to_numpy(float), atol=1e-6
         ).all(axis=1)
     )
-    selected["_baseline_time"] = baseline
     selected["_profile_cpu_time"] = cpu_time
     return selected.loc[complete].copy(), int((~complete).sum())
 
@@ -444,59 +703,61 @@ def page_phase(pdf: PdfPages, frame: pd.DataFrame, run: str) -> None:
     if sub.empty:
         print(f"  phase breakdown omitted for {run}: no complete selected profiles")
         return
-    sub = sub.sort_values(["family", "profile_total_time_s", "query"], kind="stable")
+    sub = add_short_query_labels(sub)
+    sub = sample_phase_queries(sub)
+    sub, groups = grouped_query_positions(sub)
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
-    positive = sub[seconds_columns].to_numpy(float)
-    positive = positive[positive > 0]
-    if not positive.size:
-        return
-    height = min(32.0, max(7.0, 0.48 * len(sub) + 2.0))
-    figure, ax = plt.subplots(figsize=(13.0, height))
-    y = np.arange(len(sub)) * 1.05
-    bar_height = 0.12
     totals = sub["profile_total_time_s"].to_numpy(float)
-    baselines = sub["_baseline_time"].to_numpy(float)
-    axis_floor = 10 ** np.floor(np.log10(min(positive.min(), totals.min(), baselines.min())))
-    offsets = (np.arange(len(PHASES) + 2) - (len(PHASES) + 1) / 2) * bar_height
-    for offset, (label, seconds, _, color) in zip(offsets[1:-1], PHASES):
-        values = sub[seconds].to_numpy(float)
+    phase_values = sub[seconds_columns].to_numpy(float)
+    positive = np.concatenate([phase_values[phase_values > 0], totals])
+    floor = 10 ** (np.log10(positive.min()) - 0.25)
+    x = sub["_x"].to_numpy(float)
+    width = min(30.0, max(19.0, 4.0 + 0.44 * len(sub)))
+    figure, ax = plt.subplots(figsize=(width, 8.2))
+    bar_width = 0.16
+    series = [
+        (label, seconds, color) for label, seconds, _, color in PHASES
+    ] + [(OUTERYAN_TOTAL_LABEL, "profile_total_time_s", OUTERYAN_TOTAL_COLOR)]
+    offsets = (np.arange(len(series)) - (len(series) - 1) / 2.0) * bar_width
+    for offset, (label, column, color) in zip(offsets, series):
+        values = sub[column].to_numpy(float)
         present = values > 0
-        bars = ax.barh(
-            y[present] + offset, values[present] - axis_floor, left=axis_floor,
-            height=bar_height, color=color, edgecolor="none", label=label
+        ax.bar(
+            x[present] + offset, values[present] - floor, bottom=floor,
+            width=bar_width, color=color, edgecolor="none", label=label,
         )
-    total_bars = ax.barh(
-        y + offsets[0], totals - axis_floor, left=axis_floor, height=bar_height,
-        color=OUTERYAN_TOTAL_COLOR, edgecolor="none", label=OUTERYAN_TOTAL_LABEL
-    )
-    baseline_bars = ax.barh(
-        y + offsets[-1], baselines - axis_floor, left=axis_floor, height=bar_height,
-        color=BASELINE_COLOR, edgecolor="none", label=BASELINE_LABEL
-    )
-    ax.set_yticks(y)
-    ax.set_yticklabels(
-        [f"{family} | {display}" for family, display in zip(sub["family"], sub["display_query"])],
-        fontsize=5.8
-    )
-    ax.set_xscale("log")
-    ax.set_xlim(axis_floor, max(positive.max(), totals.max(), baselines.max()) * 1.10)
-    ax.grid(axis="x", which="both", color="0.90", linewidth=0.5)
+    ax.set_yscale("log")
+    ax.set_ylim(floor, positive.max() * 1.45)
+    ax.set_xlim(x.min() - 0.9, x.max() + 0.9)
+    ax.set_xticks(x)
+    ax.set_xticklabels(sub["short_query"], rotation=90, ha="center", fontsize=11)
+    ax.tick_params(axis="y", labelsize=12)
+    ax.set_ylabel("Time (seconds, log)", fontsize=14)
+    ax.set_xlabel("Query", fontsize=14, labelpad=8)
+    ax.grid(axis="y", which="major", color="0.88", linewidth=0.6)
+    ax.grid(axis="y", which="minor", color="0.95", linewidth=0.4)
     ax.set_axisbelow(True)
-    ax.set_xlabel("seconds")
-    omission = f"; {skipped} incomplete selected profiles omitted" if skipped else ""
-    ax.set_title(
-        f"All benchmark phase breakdowns in one figure ({len(sub)} queries{omission})"
+    add_benchmark_subtitles(ax, groups)
+    if skipped:
+        print(f"  phase breakdown for {run}: {skipped} incomplete selected profiles omitted")
+    figure.suptitle(
+        "OuterYan Execution Time Details", fontsize=18, y=0.955,
     )
     phase_handles = [
         Patch(facecolor=color, edgecolor="none", label=label)
         for label, _, _, color in PHASES
     ]
-    phase_handles.extend([
-        Patch(facecolor=OUTERYAN_TOTAL_COLOR, edgecolor="none", label=OUTERYAN_TOTAL_LABEL),
-        Patch(facecolor=BASELINE_COLOR, edgecolor="none", label=BASELINE_LABEL),
-    ])
-    ax.legend(handles=phase_handles, ncol=3, fontsize=7, loc="lower right")
-    figure.tight_layout()
+    phase_handles.append(
+        Patch(facecolor=OUTERYAN_TOTAL_COLOR, edgecolor="none", label=OUTERYAN_TOTAL_LABEL)
+    )
+    figure.legend(
+        handles=phase_handles, ncol=5, fontsize=12, loc="upper center", frameon=False,
+        bbox_to_anchor=(0.52, 0.906),
+    )
+    figure.text(
+        0.52, 0.050, QUERY_CODE_KEY, ha="center", va="bottom", fontsize=10.5,
+    )
+    figure.subplots_adjust(left=0.05, right=0.99, bottom=0.235, top=0.815)
     save_page(pdf, figure)
 
 
@@ -537,6 +798,31 @@ def resolve_inputs(patterns: list[str], base_directory: Path) -> list[str]:
     return [path for path in paths if path.lower().endswith(".csv")]
 
 
+def write_standalone_runtime_figures(
+    output_directory: Path, frame: pd.DataFrame, run: str, metric: str
+) -> list[Path]:
+    """Write all-query dots, two selected-runtime comparisons, and sampled phases."""
+    output_directory.mkdir(parents=True, exist_ok=True)
+    outputs = [
+        ("runtime_all_queries.pdf", lambda pdf: page_runtime(pdf, frame, run, metric, False)),
+        ("runtime_outeryan_queries.pdf", lambda pdf: page_runtime(
+            pdf, frame.loc[~frame["family"].eq("JOB")], run, metric, True
+        )),
+        ("runtime_outeryan_queries_job.pdf", lambda pdf: page_runtime(
+            pdf, frame.loc[frame["family"].eq("JOB")], run, metric, True
+        )),
+        ("phase_breakdown_outeryan.pdf", lambda pdf: page_phase(pdf, frame, run)),
+    ]
+    paths: list[Path] = []
+    for filename, draw in outputs:
+        path = output_directory / filename
+        with PdfPages(path) as pdf:
+            draw(pdf)
+        paths.append(path)
+        print(f"  wrote standalone figure: {path}")
+    return paths
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", nargs="*", help="experiment_onoff CSV files")
@@ -544,7 +830,16 @@ def main() -> None:
         "-o", "--output", default=str(DEFAULT_OUTPUT),
         help="single output PDF (default: auto_test/results/plots/outeryan_benchmark_figures.pdf)"
     )
-    parser.add_argument("--metric", choices=["t1", "tm"], default="tm")
+    parser.add_argument(
+        "--split-output-dir",
+        help="also write runtime_all_queries.pdf, runtime_outeryan_queries.pdf (non-JOB), "
+             "runtime_outeryan_queries_job.pdf, and phase_breakdown_outeryan.pdf; "
+             "multiple runs receive timestamp subdirectories",
+    )
+    parser.add_argument(
+        "--metric", choices=["t1", "tm"], default="tm",
+        help="thread setting for all-query dots; selected-runtime bars always show both",
+    )
     args = parser.parse_args()
 
     paths = resolve_inputs(
@@ -574,10 +869,21 @@ def main() -> None:
             print(f"\n>>> unified run {run}: {len(sub)} timed, {skipped} skipped")
             page_summary(pdf, sub, run)
             page_shape_relations(pdf, sub, run)
-            pages_per_benchmark(pdf, sub, run, args.metric)
+            page_runtime(pdf, sub, run, args.metric, selected_only=False)
+            page_runtime(pdf, sub, run, args.metric, selected_only=True)
             page_phase(pdf, sub, run)
         page_run_comparison(pdf, measured)
     print(f"\nwrote one PDF: {output}")
+
+    if args.split_output_dir:
+        split_root = Path(os.path.expanduser(args.split_output_dir))
+        if not split_root.is_absolute():
+            split_root = Path.cwd() / split_root
+        runs = list(dict.fromkeys(frame["run"]))
+        for run in runs:
+            sub = measured.loc[measured["run"].eq(run)].copy()
+            run_directory = split_root / run if len(runs) > 1 else split_root
+            write_standalone_runtime_figures(run_directory, sub, run, args.metric)
 
 
 if __name__ == "__main__":
