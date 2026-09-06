@@ -27,7 +27,10 @@ records the disposition of all 254 historical queries. The newest complete run,
 and 84 timeouts. The timeouts are removed from the active historical corpus,
 listed in `timeout_exclusions.csv`, and preserved under
 `../outerjoin_query_timeout/`. The historical generator remains available as
-`../gen_queries.py`; it applies the same timeout exclusion list.
+`../gen_queries.py`; it applies the same timeout exclusion list. The historical
+query membership, timeout exclusions, and retained wins are pinned in
+`../legacy_corpus.py`. The result filename is provenance only; generation does
+not read that CSV or require a local `results/` directory.
 
 The core size is deliberately comparable to the 170 completed legacy cases,
 but core membership is not copied from that experiment. It contains 34 source

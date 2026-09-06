@@ -31,22 +31,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from legacy_corpus import (
+    COMPLETED_QUERY_PATHS,
+    LEGACY_OUTERYAN_WINS,
+    LEGACY_QUERIES,
+    REFERENCE_RUN,
+    TIMEOUT_QUERY_PATHS,
+)
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_ROOT = SCRIPT_DIR / "outerjoin_benchmark"
 LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
 TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
-REFERENCE_RESULT = SCRIPT_DIR / "results" / "experiment_onoff_20260810_084908.csv"
-REFERENCE_RESULT_SHA256 = "b27bbde2ca0e5ca2a63df07a62637220765ef48042eaca7ca4110fcecae5a4bb"
-REFERENCE_ROW_COUNT = 254
-REFERENCE_TIMEOUT_COUNT = 84
-CORE_QUERY_COUNT = REFERENCE_ROW_COUNT - REFERENCE_TIMEOUT_COUNT
-REFERENCE_OUTERYAN_WIN_COUNT = 28
+CORE_QUERY_COUNT = 170
 INDUSTRY_EVALUATION_QUERY_COUNT = 36
 ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
 LEGACY_WIN_SELECTION_POLICY = (
-    "experiment_onoff_20260810_084908.csv: correct=TRUE; "
+    f"{REFERENCE_RUN}: correct=TRUE; "
     "selected_plan=OUTERYAN; tm_speedup>1.0"
 )
 ACTIVE_LEGACY_SOURCE_SELECTION_POLICY = (
@@ -899,54 +902,6 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
 SEEDS = SEEDS + ADDITIONAL_SEEDS
 
 
-# The reference run calibrates corpus size and identifies a separate diagnostic
-# suite.  It never determines membership in the benchmark-derived core.
-def load_reference_rows() -> list[dict[str, str]]:
-    actual_hash = hashlib.sha256(REFERENCE_RESULT.read_bytes()).hexdigest()
-    if actual_hash != REFERENCE_RESULT_SHA256:
-        raise RuntimeError(
-            f"reference result changed: expected {REFERENCE_RESULT_SHA256}, got {actual_hash}"
-        )
-    with REFERENCE_RESULT.open(newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    timeout_count = sum(row["note"] == "TIMEOUT" for row in rows)
-    completed_count = sum(row["correct"] == "TRUE" for row in rows)
-    if (
-        len(rows) != REFERENCE_ROW_COUNT
-        or timeout_count != REFERENCE_TIMEOUT_COUNT
-        or completed_count != CORE_QUERY_COUNT
-    ):
-        raise RuntimeError(
-            "unexpected reference-result population: "
-            f"rows={len(rows)}, timeouts={timeout_count}, completed={completed_count}"
-        )
-    return rows
-
-
-def legacy_outeryan_wins() -> tuple[tuple[str, str, str], ...]:
-    """Return correct, selected OuterYan wins from the pinned reference run."""
-    selected: list[tuple[str, str, str]] = []
-    for row in load_reference_rows():
-        speedup = row["tm_speedup"]
-        if (
-            row["correct"] == "TRUE"
-            and row["selected_plan"] == "OUTERYAN"
-            and speedup not in ("", "-")
-            and float(speedup) > 1.0
-        ):
-            selected.append((row["family"], Path(row["sql_path"]).name, speedup))
-    if len(selected) != REFERENCE_OUTERYAN_WIN_COUNT:
-        raise RuntimeError(
-            "unexpected legacy OuterYan win population: "
-            f"expected {REFERENCE_OUTERYAN_WIN_COUNT}, got {len(selected)}"
-        )
-    return tuple(selected)
-
-
-def reference_timeouts() -> set[str]:
-    return {row["sql_path"] for row in load_reference_rows() if row["note"] == "TIMEOUT"}
-
-
 def build_left_deep(seed: Seed, kinds: Sequence[str]) -> str:
     expression = seed.relations[0]
     for relation, predicate, kind in zip(seed.relations[1:], seed.predicates, kinds):
@@ -1342,11 +1297,8 @@ def regenerate_legacy_sources() -> None:
 
     for generator in gen_queries.TARGETS["all"]:
         generator()
-    expected = {
-        row["sql_path"] for row in load_reference_rows() if row["correct"] == "TRUE"
-    }
     for source in LEGACY_ROOT.glob("*/*.sql"):
-        if str(source.relative_to(LEGACY_ROOT)) not in expected:
+        if str(source.relative_to(LEGACY_ROOT)) not in COMPLETED_QUERY_PATHS:
             source.unlink()
 
 
@@ -1427,7 +1379,7 @@ def generate_supplemental(root: Path) -> int:
     supplemental = root / "supplemental"
     reset_generated_dir(supplemental)
     rows: list[dict[str, str]] = []
-    for family, filename, speedup in legacy_outeryan_wins():
+    for family, filename, speedup in LEGACY_OUTERYAN_WINS:
         source = LEGACY_ROOT / family / filename
         if not source.is_file():
             raise FileNotFoundError(f"legacy stress query not found: {source}")
@@ -1463,7 +1415,7 @@ def generate_industry_inspired(root: Path) -> int:
     rows: list[dict[str, str]] = []
     wins = {
         (family, filename): speedup
-        for family, filename, speedup in legacy_outeryan_wins()
+        for family, filename, speedup in LEGACY_OUTERYAN_WINS
     }
     pattern_keys = {
         (family, filename)
@@ -1507,7 +1459,7 @@ def generate_industry_inspired(root: Path) -> int:
             }
         )
 
-    for family, filename, speedup in legacy_outeryan_wins():
+    for family, filename, speedup in LEGACY_OUTERYAN_WINS:
         if (family, filename) in pattern_keys:
             continue
         source = LEGACY_ROOT / family / filename
@@ -1645,18 +1597,17 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
 
 
 def generate_timeout_manifest(root: Path) -> int:
-    timeout_paths = reference_timeouts()
     rows = [
         {
-            "path": row["sql_path"],
-            "family": row["family"],
-            "query_id": row["query"],
+            "path": query.path,
+            "family": Path(query.path).parent.name,
+            "query_id": Path(query.path).stem,
             "disposition": "excluded_timeout",
-            "reference_result": REFERENCE_RESULT.name,
-            "reference_note": row["note"],
+            "reference_result": REFERENCE_RUN,
+            "reference_note": "TIMEOUT",
         }
-        for row in load_reference_rows()
-        if row["sql_path"] in timeout_paths
+        for query in LEGACY_QUERIES
+        if query.timed_out
     ]
     fields = list(rows[0])
     with (root / "timeout_exclusions.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1667,17 +1618,16 @@ def generate_timeout_manifest(root: Path) -> int:
 
 
 def classify_legacy(root: Path) -> int:
-    retained = {f"{family}/{filename}" for family, filename, _ in legacy_outeryan_wins()}
+    retained = {f"{family}/{filename}" for family, filename, _ in LEGACY_OUTERYAN_WINS}
     industry_inspired = {
         f"{family}/{filename}"
         for family, filename, _, _ in INDUSTRY_INSPIRED_PATTERNS
     }
-    timeouts = reference_timeouts()
     rows: list[dict[str, str]] = []
     sources: list[tuple[Path, Path]] = []
-    for reference_row in load_reference_rows():
-        source_root = TIMEOUT_ROOT if reference_row["note"] == "TIMEOUT" else LEGACY_ROOT
-        source = source_root / reference_row["sql_path"]
+    for query in LEGACY_QUERIES:
+        source_root = TIMEOUT_ROOT if query.timed_out else LEGACY_ROOT
+        source = source_root / query.path
         if not source.is_file():
             raise FileNotFoundError(f"classified legacy query not found: {source}")
         sources.append((source, source_root))
@@ -1690,10 +1640,10 @@ def classify_legacy(root: Path) -> int:
         else:
             content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
             content_status = "verified"
-        if relative in timeouts:
+        if relative in TIMEOUT_QUERY_PATHS:
             disposition = "excluded_timeout"
             provenance = "legacy_timeout"
-            reason = f"excluded by {REFERENCE_RESULT.name}"
+            reason = f"excluded by {REFERENCE_RUN}"
         elif relative in retained and relative in industry_inspired:
             disposition = "retain_industry_pattern_and_performance_win"
             provenance = "industry_inspired_synthetic+synthetic_optimizer_stress"

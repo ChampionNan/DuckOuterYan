@@ -158,8 +158,9 @@ OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
 
 The historical generator remains
 available as `gen_queries.py`; it writes to `outerjoin_query_old/` and applies
-the 84 timeout exclusions from
-`results/experiment_onoff_20260810_084908.csv`. The same 28
+the 84 timeout exclusions pinned in `legacy_corpus.py`. Both generators use
+this checked-in membership metadata, not local files under `results/`, so
+regeneration works on a fresh checkout or another server. The same 28
 performance-selected synthetic stress cases are also available as a focused
 component view under `outerjoin_benchmark/supplemental`. See
 `outerjoin_benchmark/README.md` for the transformation and terminology rules.
