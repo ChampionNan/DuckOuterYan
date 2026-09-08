@@ -232,7 +232,8 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	OuterYanCostGatePolicyResult result;
 	if (!costs.available || !ValidCost(costs.baseline_cost) || !ValidCost(costs.candidate_join_cost) ||
 	    !ValidCost(costs.candidate_total) || !ValidCost(costs.baseline_join_input_rows) ||
-	    !ValidCost(costs.candidate_join_input_rows)) {
+	    !ValidCost(costs.candidate_join_input_rows) ||
+	    !ValidCost(costs.semijoin_retained_cardinality_ratio)) {
 		return result;
 	}
 	if (costs.candidate_to_baseline_join_input_ratio_available &&
@@ -241,7 +242,11 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 		return result;
 	}
 
-	const auto strict_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * costs.baseline_cost;
+	const auto strict_ratio_limit =
+	    costs.semijoin_retained_cardinality_ratio < LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO
+	        ? LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO
+	        : MAX_CANDIDATE_TO_BASELINE_RATIO;
+	const auto strict_threshold = strict_ratio_limit * costs.baseline_cost;
 	if (!ValidCost(strict_threshold)) {
 		return result;
 	}
@@ -254,7 +259,7 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	    costs.semijoin_retained_cardinality_ratio >=
 	        STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO;
 	result.available = true;
-	result.cost_ratio_limit = MAX_CANDIDATE_TO_BASELINE_RATIO;
+	result.cost_ratio_limit = strict_ratio_limit;
 	result.baseline_threshold = strict_threshold;
 	// Preserve the strict threshold and margin in diagnostics whenever the
 	// candidate already wins at 1.0; the stretch ceiling is activated only
@@ -654,6 +659,11 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << " <= " << std::setprecision(6) << trace_costs.cost_ratio_limit << std::setprecision(17) << " * "
 		      << trace_costs.baseline_cost << "\n"
 		      << "raw_cost_comparison=" << trace_costs.candidate_total << " vs " << trace_costs.baseline_cost << "\n"
+		      << "strict_gate_policy=cost_ratio_limit=" << std::setprecision(6)
+		      << LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO
+		      << " when semijoin_retained_cardinality_ratio < "
+		      << LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO << "; otherwise "
+		      << MAX_CANDIDATE_TO_BASELINE_RATIO << std::setprecision(17) << "\n"
 		      << "stretch_gate_predicate=no_default_filter_upper_bound && no_uncertain_filter_guard && "
 		         "no_full_reduction_lower_bound && candidate_join_cost < baseline_cost && "
 		         "candidate_join_input_rows <= "

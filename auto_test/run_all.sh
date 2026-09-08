@@ -29,7 +29,7 @@
 #   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
 #   PGPLAN_SETUP     source (default, auto-installs) | docker | external
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
-#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 206 queries)
+#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 185 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
 #   PGPLAN_PLAN_CACHE  Persistent typed-plan cache (default auto_test/pgplan/plans)
 #   PGPLAN_COMPARISON_MODE  both (default) | pgplan-only | none

@@ -22,7 +22,7 @@ enum class OuterYanGateResult : uint8_t { PASS, FAIL, SKIPPED, UNAVAILABLE };
 //! depending on DP implementation types.
 struct OuterYanDecisionCosts {
 	bool available = false;
-	string formula_id = "OUTER_YAN_COST_V6";
+	string formula_id = "OUTER_YAN_COST_V7";
 	//! The generic table-filter estimate was also checked with unfiltered base
 	//! cardinalities. The selected flag means that conservative scenario was
 	//! the limiting (higher candidate/baseline ratio) gate input.

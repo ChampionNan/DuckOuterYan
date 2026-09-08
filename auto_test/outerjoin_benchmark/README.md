@@ -3,9 +3,11 @@
 This directory contains one provenance-backed benchmark for outer-join query
 optimization plus three auditable component views:
 
-- `benchmark/` is the active 206-query union used by `../outerjoin_query` and
+- `benchmark/` is the active 185-query filtered union used by `../outerjoin_query` and
   the default harness. Query names use only `derived__` and `industry__`.
-  Specific evaluation roles remain available in the manifest.
+  Specific evaluation roles remain available in the manifest. The complete
+  components below remain intact; the active subset is 151 core plus 34
+  evaluation queries.
 
 - `core/` is the 170-query paper benchmark. Every query is derived from a named
   TPC-H, TPC-DS, JOB, or SQLStorm query skeleton and has a row in
@@ -22,7 +24,7 @@ optimization plus three auditable component views:
 The historical corpus is preserved in `../outerjoin_query_old/`.
 `../outerjoin_query` is a compatibility link to `benchmark/`.
 `legacy_classification.csv`
-records the disposition of all 254 historical queries. The newest complete run,
+records the disposition of all 254 historical queries. The historical reference run,
 `../results/experiment_onoff_20260810_084908.csv`, contains 170 completed cases
 and 84 timeouts. The timeouts are removed from the active historical corpus,
 listed in `timeout_exclusions.csv`, and preserved under
@@ -31,6 +33,15 @@ listed in `timeout_exclusions.csv`, and preserved under
 query membership, timeout exclusions, and retained wins are pinned in
 `../legacy_corpus.py`. The result filename is provenance only; generation does
 not read that CSV or require a local `results/` directory.
+
+The active union separately excludes 21 confirmed 48-thread OFF correctness-gate
+timeouts from the August 30 run, pinned in `../benchmark_timeouts.py` and listed
+in `active_timeout_exclusions.csv`. Seven known timeout cases remain active at
+the user's request: two graph bushy queries and all five TPC-H Q9 star variants.
+Missing single-thread timings do not cause exclusions. No component SQL is
+deleted, and the generator does not read the reference results. See
+[`active_corpus_coverage.md`](active_corpus_coverage.md) for the exact policy,
+coverage limits, distribution changes, and recovery procedure.
 
 The core size is deliberately comparable to the 170 completed legacy cases,
 but core membership is not copied from that experiment. It contains 34 source
@@ -140,7 +151,7 @@ cases.
 ## Running
 
 The active benchmark retains the harness's `graph/`, `tpch/`, `tpcds/`, and
-`job/` family layout and runs once:
+`job/` family layout and runs at 16 and 32 threads by default:
 
 ```bash
 OY_CORPUS=auto_test/outerjoin_query \

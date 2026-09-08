@@ -1446,19 +1446,21 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		result.candidate_join_cost = 70.0;
 		result.candidate_total = 100.0;
 		result.baseline_join_input_rows = 1000.0;
-		result.candidate_join_input_rows = 700.0;
-		result.candidate_to_baseline_join_input_ratio = 0.70;
+		result.candidate_join_input_rows = 300.0;
+		result.candidate_to_baseline_join_input_ratio = 0.30;
 		result.candidate_to_baseline_join_input_ratio_available = true;
 		result.semijoin_retained_cardinality_ratio = 0.98;
 		return result;
 	};
 
 	REQUIRE(OuterYanOptimizer::MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.0));
+	REQUIRE(OuterYanOptimizer::LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(0.90));
+	REQUIRE(OuterYanOptimizer::LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.90));
 	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(1.0));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
-	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.75));
+	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.30));
 	REQUIRE(OuterYanOptimizer::STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.95));
-	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V6");
+	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V7");
 
 	SECTION("strict boundary remains inclusive") {
 		auto result = OuterYanOptimizer::EvaluateCostGate(costs());
@@ -1468,6 +1470,30 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		REQUIRE_FALSE(result.stretch_selected);
 		REQUIRE(result.cost_ratio_limit == Approx(1.0));
 		REQUIRE(result.baseline_threshold == Approx(100.0));
+	}
+
+	SECTION("reduction-dependent candidates require a ten percent margin") {
+		auto input = costs();
+		input.semijoin_retained_cardinality_ratio = 0.89;
+		input.candidate_total = 90.0;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.available);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE(result.pass);
+		REQUIRE_FALSE(result.stretch_selected);
+		REQUIRE(result.cost_ratio_limit == Approx(0.90));
+		REQUIRE(result.baseline_threshold == Approx(90.0));
+
+		input.candidate_total = 90.0001;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.pass);
+
+		input = costs();
+		input.semijoin_retained_cardinality_ratio = 0.90;
+		input.candidate_total = 100.0;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.pass);
+		REQUIRE(result.cost_ratio_limit == Approx(1.0));
 	}
 
 	SECTION("stretch boundary is inclusive") {
@@ -1506,8 +1532,8 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 	SECTION("stretch requires material real-join input and output savings") {
 		auto input = costs();
 		input.candidate_total = 110.0;
-		input.candidate_join_input_rows = 750.0;
-		input.candidate_to_baseline_join_input_ratio = 0.75;
+		input.candidate_join_input_rows = 300.0;
+		input.candidate_to_baseline_join_input_ratio = 0.30;
 		auto result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE(result.stretch_eligible);
 		REQUIRE(result.pass);
@@ -1515,8 +1541,8 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 
 		input = costs();
 		input.candidate_total = 110.0;
-		input.candidate_join_input_rows = 750.001;
-		input.candidate_to_baseline_join_input_ratio = 0.750001;
+		input.candidate_join_input_rows = 300.001;
+		input.candidate_to_baseline_join_input_ratio = 0.300001;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.stretch_eligible);
 		REQUIRE_FALSE(result.pass);

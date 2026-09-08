@@ -51,7 +51,7 @@ public:
 	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
-	//! it to the OuterYan candidate's real-join cost. V6 uses the full modeled
+	//! it to the OuterYan candidate's real-join cost. V7 uses the full modeled
 	//! row-work instead of the former 0.50 discount: the 2026-08-18 benchmark
 	//! showed that discount admitted candidates whose reducer work dominated the
 	//! realized execution time.
@@ -61,13 +61,18 @@ public:
 	//! cost. Uncertain table filters are checked under both their estimated and
 	//! unfiltered-cardinality scenarios.
 	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
-	//! A changed candidate may use this relaxed ceiling only when the V5
+	//! Candidates that depend on a material estimated reduction need headroom
+	//! for selectivity error and reducer scheduling work. The August 30 corpus
+	//! showed that near-tie estimates in this regime consistently regressed.
+	static constexpr double LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO = 0.90;
+	static constexpr double LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO = 0.90;
+	//! A changed candidate may use this relaxed ceiling only when the
 	//! confidence predicate succeeds. It is deliberately not a global
 	//! multiplier.
 	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
 	//! Require a material real-join build/probe input reduction before allowing
 	//! the stretch tier.
-	static constexpr double STRETCH_MAX_JOIN_INPUT_RATIO = 0.75;
+	static constexpr double STRETCH_MAX_JOIN_INPUT_RATIO = 0.30;
 	//! The stretch tier is intended for reorder-dominated candidates: reducer
 	//! rounds retain nearly all estimated rows, while the changed grouping still
 	//! lowers real-join work. Lower-retention candidates must win the strict gate

@@ -9,7 +9,7 @@ RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 The default source provider installs and starts pinned PostgreSQL 16.2 under
 the repository when it is missing, prepares minimal plan-selection data, then
-compares native DuckDB, PGPlan, and normal OuterYan across all 206 queries in
+compares native DuckDB, PGPlan, and normal OuterYan across all 185 active queries in
 `auto_test/outerjoin_query`. Docker is an optional provider selected with
 `PGPLAN_SETUP=docker`. Both managed providers generate and reuse a private
 mode-`0600` password file unless a password is explicitly provided; a legacy

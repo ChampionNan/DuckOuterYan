@@ -4,6 +4,7 @@
 import builtins
 import contextlib
 import csv
+import hashlib
 import io
 import os
 import shutil
@@ -104,7 +105,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
             ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
-                for core_only, count in ((False, 206), (True, 170)):
+                for core_only, count in ((False, 185), (True, 151)):
                     with self.subTest(core_only=core_only):
                         root = scratch / ("core-only" if core_only else "full")
                         argv = ["gen_outerjoin_benchmark.py", "--root", str(root)]
@@ -115,6 +116,10 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                         active = csv_rows(root / "benchmark" / "manifest.csv")
                         self.assertEqual(len(active), count)
                         self.assertEqual(
+                            len(csv_rows(root / "active_timeout_exclusions.csv")),
+                            19 if core_only else 21,
+                        )
+                        self.assertEqual(
                             {str(path.relative_to(legacy_root)) for path in legacy_root.glob("*/*.sql")},
                             MEMBERSHIP.COMPLETED_QUERY_PATHS,
                         )
@@ -122,7 +127,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                         if not core_only:
                             manifests += [
                                 "benchmark/manifest.csv", "industry_inspired/manifest.csv",
-                                "supplemental/manifest.csv",
+                                "supplemental/manifest.csv", "active_timeout_exclusions.csv",
                             ]
                         for manifest in manifests:
                             self.assertEqual(
@@ -130,6 +135,83 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                                 csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / manifest),
                                 manifest,
                             )
+
+    def test_active_exclusions_preserve_sources_and_all_other_queries(self):
+        root = SCRIPT_DIR / "outerjoin_benchmark"
+        active = csv_rows(root / "benchmark" / "manifest.csv")
+        excluded = csv_rows(root / "active_timeout_exclusions.csv")
+        pins = BENCHMARK.active_timeouts.EXCLUDED_QUERY_HASHES
+        protected = BENCHMARK.active_timeouts.RETAINED_TIMEOUT_QUERY_PATHS
+        self.assertEqual(len(pins), 21)
+        self.assertEqual(len(protected), 7)
+        self.assertTrue(protected.isdisjoint(pins))
+        self.assertEqual({row["path"] for row in excluded}, set(pins))
+        active_paths = {row["path"] for row in active}
+        self.assertTrue(protected <= active_paths)
+        self.assertTrue(active_paths.isdisjoint(pins))
+        # Reconstruct the unfiltered union: no missing-T1 or other healthy case
+        # may be dropped as an incidental rebalancing step.
+        expected = {
+            f"{row['family']}/derived__{row['query_id']}.sql"
+            for row in csv_rows(root / "manifest.csv")
+        }
+        for row in csv_rows(root / "industry_inspired" / "manifest.csv"):
+            prefix = "derived" if row["evaluation_role"] == "legacy_performance_win" else "industry"
+            expected.add(f"{row['family']}/{prefix}__{row['query_id']}.sql")
+        self.assertEqual(len(expected), 206)
+        self.assertEqual(active_paths, expected - pins.keys())
+        for row in active + excluded:
+            source_bytes = (root / row["source_path"]).read_bytes()
+            self.assertEqual(hashlib.sha256(source_bytes).hexdigest(), row["content_sha256"])
+            target = root / "benchmark" / row["path"]
+            if row["path"] in pins:
+                self.assertFalse(target.exists())
+                self.assertEqual(row["content_sha256"], pins[row["path"]])
+                self.assertEqual(row["reference_threads"], "48")
+                self.assertEqual(row["timeout_seconds"], "1800")
+                self.assertEqual(row["timeout_phase"], "correctness_off")
+            else:
+                self.assertEqual(target.read_bytes(), source_bytes)
+        BENCHMARK.validate_generated(root)
+
+    def test_changed_timeout_source_fails_before_replacing_active_view(self):
+        with tempfile.TemporaryDirectory(prefix="outeryan-timeout-pin-") as directory:
+            root = Path(directory)
+            BENCHMARK.generate_core(root)
+            BENCHMARK.generate_active_benchmark(root, include_industry=False)
+            active = root / "benchmark" / "manifest.csv"
+            before = active.read_bytes()
+            excluded = csv_rows(root / "active_timeout_exclusions.csv")[0]
+            source = root / excluded["source_path"]
+            source.write_text(source.read_text(encoding="utf-8") + "\n-- changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "timeout SQL changed"), forbid_result_access():
+                BENCHMARK.generate_active_benchmark(root, include_industry=False)
+            self.assertEqual(active.read_bytes(), before)
+
+    def test_protected_pattern_removal_is_rejected(self):
+        root = SCRIPT_DIR / "outerjoin_benchmark"
+        core = csv_rows(root / "manifest.csv")
+        active = csv_rows(root / "benchmark" / "manifest.csv")
+        for path in BENCHMARK.active_timeouts.RETAINED_TIMEOUT_QUERY_PATHS:
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "missing protected"):
+                BENCHMARK.validate_active_coverage(core, [row for row in active if row["path"] != path], True)
+
+    def test_regeneration_preserves_unmanaged_files_and_rejects_local_sql_edits(self):
+        with tempfile.TemporaryDirectory(prefix="outeryan-active-view-") as directory:
+            root = Path(directory)
+            BENCHMARK.generate_core(root)
+            BENCHMARK.generate_active_benchmark(root, include_industry=False)
+            extra = root / "benchmark" / "manifest copy.csv"
+            extra.write_text("keep this local copy\n", encoding="utf-8")
+            BENCHMARK.generate_active_benchmark(root, include_industry=False)
+            self.assertEqual(extra.read_text(encoding="utf-8"), "keep this local copy\n")
+            active = csv_rows(root / "benchmark" / "manifest.csv")
+            target = root / "benchmark" / active[0]["path"]
+            modified = target.read_text(encoding="utf-8") + "\n-- local change\n"
+            target.write_text(modified, encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "locally modified active SQL"):
+                BENCHMARK.generate_active_benchmark(root, include_industry=False)
+            self.assertEqual(target.read_text(encoding="utf-8"), modified)
 
 
 if __name__ == "__main__":

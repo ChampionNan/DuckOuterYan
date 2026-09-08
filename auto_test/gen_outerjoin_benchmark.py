@@ -7,8 +7,8 @@ relation instances and join predicates.  The SQL is normalized to a flat
 projection/filter/join skeleton so that it remains inside the optimizer's
 current applicability envelope.
 
-The active ``benchmark`` corpus is the union used by the harness. Query names
-use only two reporting prefixes: ``derived__`` for generated/legacy synthetic
+The active ``benchmark`` corpus is the timeout-filtered union used by the harness.
+Query names use only two reporting prefixes: ``derived__`` for generated/legacy synthetic
 queries and ``industry__`` for business-role patterns. The manifest preserves
 the more specific evaluation role, including whether a query was retained as
 a pinned legacy performance guard.
@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+import benchmark_timeouts as active_timeouts
 from legacy_corpus import (
     COMPLETED_QUERY_PATHS,
     LEGACY_OUTERYAN_WINS,
@@ -47,7 +48,12 @@ LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
 TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
 CORE_QUERY_COUNT = 170
 INDUSTRY_EVALUATION_QUERY_COUNT = 36
-ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
+ACTIVE_CORE_QUERY_COUNT = CORE_QUERY_COUNT - 19
+ACTIVE_BENCHMARK_QUERY_COUNT = (
+    CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
+    - len(active_timeouts.EXCLUDED_QUERY_HASHES)
+)
+MAX_CORE_PATTERN_SHARE_SHIFT = 0.02
 LEGACY_WIN_SELECTION_POLICY = (
     f"{REFERENCE_RUN}: correct=TRUE; "
     "selected_plan=OUTERYAN; tm_speedup>1.0"
@@ -1516,9 +1522,8 @@ def generate_industry_inspired(root: Path) -> int:
 
 
 def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
-    """Materialize the single harness corpus with provenance in query names."""
+    """Materialize the filtered harness corpus, keeping component sources intact."""
     destination_root = root / "benchmark"
-    reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
 
     with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
@@ -1527,9 +1532,6 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
         family = row["family"]
         source = root / "core" / row["path"]
         query_id = f"derived__{row['query_id']}"
-        destination = destination_root / family / f"{query_id}.sql"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
         rows.append(
             {
                 "query_id": query_id,
@@ -1564,9 +1566,6 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
             family = row["family"]
             source = root / "industry_inspired" / row["path"]
             query_id = f"{prefix}__{row['query_id']}"
-            destination = destination_root / family / f"{query_id}.sql"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
             rows.append(
                 {
                     "query_id": query_id,
@@ -1580,20 +1579,134 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                 }
             )
 
-    expected_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else CORE_QUERY_COUNT
+    expected_count = CORE_QUERY_COUNT + (INDUSTRY_EVALUATION_QUERY_COUNT if include_industry else 0)
     paths = {row["path"] for row in rows}
     if len(rows) != expected_count or len(paths) != expected_count:
         raise RuntimeError(
-            "active benchmark membership mismatch: "
+            "unfiltered benchmark membership mismatch: "
             f"expected={expected_count}, rows={len(rows)}, unique_paths={len(paths)}"
         )
 
+    excluded_paths = {
+        path
+        for path in active_timeouts.EXCLUDED_QUERY_HASHES
+        if include_industry or Path(path).name.startswith("derived__ojb_")
+    }
+    if not excluded_paths <= paths:
+        raise RuntimeError(f"unknown pinned timeout queries: {sorted(excluded_paths - paths)}")
+    excluded_rows = [row for row in rows if row["path"] in excluded_paths]
+    for row in excluded_rows:
+        if row["content_sha256"] != active_timeouts.EXCLUDED_QUERY_HASHES[row["path"]]:
+            raise RuntimeError(
+                f"timeout SQL changed; review exclusion before regenerating: {row['path']}"
+            )
+    rows = [row for row in rows if row["path"] not in excluded_paths]
+    expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else ACTIVE_CORE_QUERY_COUNT
+    if len(rows) != expected_active_count:
+        raise RuntimeError(f"unexpected filtered benchmark count: {len(rows)}")
+    validate_active_coverage(core_rows, rows, include_industry)
+
+    # Only replace files owned by the previous manifest; preserve unrelated
+    # files (including local manifest copies) in this generated directory.
+    previous_manifest = destination_root / "manifest.csv"
+    previous_rows = []
+    if previous_manifest.exists():
+        with previous_manifest.open(newline="", encoding="utf-8") as handle:
+            previous_rows = list(csv.DictReader(handle))
+    previous_paths = set()
+    for row in previous_rows:
+        relative_path = Path(row["path"])
+        if (
+            len(relative_path.parts) != 2
+            or relative_path.parts[0] not in {"graph", "tpch", "tpcds", "job"}
+            or relative_path.suffix != ".sql"
+        ):
+            raise RuntimeError(f"invalid generated SQL path: {relative_path}")
+        previous_paths.add(row["path"])
+        destination = destination_root / relative_path
+        if (
+            destination.exists()
+            and hashlib.sha256(destination.read_bytes()).hexdigest() != row["content_sha256"]
+        ):
+            raise RuntimeError(
+                f"locally modified active SQL; preserve changes before regenerating: {relative_path}"
+            )
+    actual_paths = {
+        str(path.relative_to(destination_root)) for path in destination_root.glob("*/*.sql")
+    }
+    if actual_paths - previous_paths:
+        raise RuntimeError(
+            "unmanaged active SQL; preserve files before regenerating: "
+            f"{sorted(actual_paths - previous_paths)}"
+        )
+    paths = {row["path"] for row in rows}
+    for relative_path in sorted(previous_paths - paths):
+        destination = destination_root / relative_path
+        if destination.exists():
+            destination.unlink()
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for row in rows:
+        destination = destination_root / row["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / row["source_path"], destination)
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+    exclusion_fields = fields + ["reference_run", "reference_threads", "timeout_seconds", "timeout_phase"]
+    with (root / "active_timeout_exclusions.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=exclusion_fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(
+            {
+                **row,
+                "reference_run": active_timeouts.REFERENCE_RUN,
+                "reference_threads": active_timeouts.REFERENCE_THREADS,
+                "timeout_seconds": active_timeouts.TIMEOUT_SECONDS,
+                "timeout_phase": active_timeouts.TIMEOUT_PHASE,
+            }
+            for row in excluded_rows
+        )
     return len(rows)
+
+
+def validate_active_coverage(
+    core_rows: list[dict[str, str]], active_rows: list[dict[str, str]], include_industry: bool
+) -> None:
+    """Keep protected cases and core pattern coverage without exact resampling."""
+    paths = {row["path"] for row in active_rows}
+    protected = {
+        path
+        for path in active_timeouts.RETAINED_TIMEOUT_QUERY_PATHS
+        if include_industry or Path(path).name.startswith("derived__ojb_")
+    }
+    if not protected <= paths:
+        raise RuntimeError(f"missing protected timeout coverage: {sorted(protected - paths)}")
+    if paths & active_timeouts.EXCLUDED_QUERY_HASHES.keys():
+        raise RuntimeError("excluded timeout query reappeared in active corpus")
+    retained_core = [
+        row for row in core_rows if f"{row['family']}/derived__{row['query_id']}.sql" in paths
+    ]
+    if len(retained_core) != ACTIVE_CORE_QUERY_COUNT:
+        raise RuntimeError(f"unexpected active core count: {len(retained_core)}")
+    for dimension in ("tree_shape", "topology", "relation_count", "join_vector"):
+        before = Counter(row[dimension] for row in core_rows)
+        after = Counter(row[dimension] for row in retained_core)
+        if before.keys() != after.keys():
+            raise RuntimeError(f"active core lost {dimension} coverage")
+        if any(
+            abs(after[key] / len(retained_core) - before[key] / len(core_rows)) > MAX_CORE_PATTERN_SHARE_SHIFT
+            for key in before
+        ):
+            raise RuntimeError(
+                f"active core {dimension} share shifted by more than "
+                f"{100 * MAX_CORE_PATTERN_SHARE_SHIFT:g} percentage points"
+            )
+        before_family = {(row["family"], row[dimension]) for row in core_rows}
+        after_family = {(row["family"], row[dimension]) for row in retained_core}
+        if before_family != after_family:
+            raise RuntimeError(f"active core lost family/{dimension} coverage")
 
 
 def generate_timeout_manifest(root: Path) -> int:
@@ -1767,11 +1880,12 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     active_paths = {
         str(path.relative_to(active_root)) for path in active_root.glob("*/*.sql")
     }
-    expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else CORE_QUERY_COUNT
+    expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else ACTIVE_CORE_QUERY_COUNT
     if len(active_rows) != expected_active_count or {
         row["path"] for row in active_rows
     } != active_paths:
         raise RuntimeError("active benchmark manifest does not match generated SQL")
+    validate_active_coverage(manifest_rows, active_rows, include_industry)
     valid_prefixes = ("derived__", "industry__")
     if any(not row["query_id"].startswith(valid_prefixes) for row in active_rows):
         raise RuntimeError("active benchmark query is missing its provenance prefix")
@@ -1807,7 +1921,9 @@ def main() -> None:
     print(
         f"generated {benchmark_count} active benchmark, {core_count} derived core, "
         f"{industry_count} industry-evaluation, and {supplemental_count} supplemental queries; "
-        f"excluded {timeout_count} timeouts and classified {legacy_count} legacy queries "
+        f"excluded {core_count + industry_count - benchmark_count} pinned active timeouts "
+        f"(protected coverage exceptions retained); "
+        f"archived {timeout_count} historical timeouts and classified {legacy_count} legacy queries "
         f"under {args.root}"
     )
 

@@ -68,13 +68,13 @@ The opt-in `RUN_PGPLAN=1` workflow:
 5. performs the requested correctness mode, then records independent Original,
    PGPlan, and OuterYan TM timing batches on target data.
 
-The default corpus is all 206 queries under `auto_test/outerjoin_query`:
+The default corpus is all 185 active queries under `auto_test/outerjoin_query`:
 
 | Family | Queries | PostgreSQL plan-selection data | DuckDB exact-correctness data |
 |---|---:|---|---|
 | graph | 7 | `pgplan_graph`, at most 1000 rows per table | configured target graph DB |
-| TPC-H | 54 | `public`, exact SF0.01 | configured target TPC-H DB |
-| TPC-DS | 63 | `pgplan_tpcds`, at most 1000 rows per table | configured target TPC-DS DB |
+| TPC-H | 53 | `public`, exact SF0.01 | configured target TPC-H DB |
+| TPC-DS | 43 | `pgplan_tpcds`, at most 1000 rows per table | configured target TPC-DS DB |
 | JOB | 82 | `pgplan_job`, at most 1000 rows per table | configured target JOB DB |
 
 Set `PGPLAN_SAMPLE_ROWS` to change the graph/TPC-DS/JOB row cap. The sampled

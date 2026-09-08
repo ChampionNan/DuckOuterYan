@@ -23,7 +23,7 @@ synopsis.
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
-| `outerjoin_benchmark/` | 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
+| `outerjoin_benchmark/` | 185-query active view, full 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
 | `results/` | Generated text, CSV, and trace output; historical profiles |
@@ -120,11 +120,16 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is the unified 206-query workload under
+The default corpus is the timeout-filtered 185-query workload under
 `outerjoin_benchmark/benchmark/`. The `outerjoin_query` compatibility link
-points there. It contains the 170 benchmark-derived queries, nine
-industry-inspired patterns, and all 28 pinned legacy OuterYan wins; one pattern
-is also a legacy win, so the latter two sets contribute 36 unique queries.
+points there. It contains 151 benchmark-derived queries and 34 evaluation
+queries. The complete component views retain 170 core queries and 36 evaluation
+queries (nine industry-inspired patterns plus all 28 pinned legacy OuterYan
+wins, with one overlap). Only 21 confirmed multithread timeout cases are removed
+from the active view; seven other timeout cases remain to protect graph bushy
+and TPC-H core star coverage. See
+[`active_corpus_coverage.md`](outerjoin_benchmark/active_corpus_coverage.md)
+for the evidence, exceptions, and before/after distributions.
 Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
 entire label using shell-glob syntax.
 
@@ -135,8 +140,9 @@ OY_CORPUS=auto_test/outerjoin_query \
 ```
 
 Generation is deterministic and writes query-level provenance manifests. Active
-query names use only `derived__` and `industry__`. The 170 benchmark-derived
-queries and 27 legacy synthetic performance guards use `derived__`; the nine
+query names use only `derived__` and `industry__`. In the complete components,
+the 170 benchmark-derived queries and 27 legacy synthetic performance guards
+use `derived__`; the nine
 business-role patterns use `industry__`, including the one that is also a
 pinned legacy win. Exact roles remain in the manifest rather than being encoded
 as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
@@ -148,8 +154,11 @@ union of nine explainable legacy business patterns and all 28 correct queries
 where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
 query belongs to both groups, so the corpus contains 36 unique queries. Its
 manifest labels the two roles separately; performance-selected entries are not
-claimed to be industry-derived. The complete active 206-query corpus contains
-62 left-deep, 88 right-deep, and 56 bushy inputs. Run the complete component
+claimed to be industry-derived. Before active timeout filtering, the full
+206-query union contains 62 left-deep, 88 right-deep, and 56 bushy inputs. The
+filtered core retains 41 left-deep, 70 right-deep, and 40 bushy inputs; all core
+pattern categories remain covered, but benchmark family weights change.
+Run the complete component (which bypasses active timeout filtering)
 with:
 
 ```bash
@@ -165,6 +174,10 @@ regeneration works on a fresh checkout or another server. The same 28
 performance-selected synthetic stress cases are also available as a focused
 component view under `outerjoin_benchmark/supplemental`. See
 `outerjoin_benchmark/README.md` for the transformation and terminology rules.
+The active view additionally applies `benchmark_timeouts.py`, with exclusions
+recorded in `outerjoin_benchmark/active_timeout_exclusions.csv`. This is a
+separate policy from the 84 older historical exclusions and also requires no
+local results file. Excluded SQL remains in its component source directory.
 
 Query traversal is deterministic. Families are visited in the order selected by
 the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
@@ -253,12 +266,14 @@ source-level gate computes:
 semijoin_raw_cost = round1_build + round1_probe + round2_build + round2_probe
 weighted_semijoin_cost = SEMIJOIN_COST_RATIO * semijoin_raw_cost
 candidate_total = candidate_join_cost + weighted_semijoin_cost
-strict_threshold = MAX_CANDIDATE_TO_BASELINE_RATIO * baseline_cost
+strict_ratio_limit = 0.90 when semijoin_retained_cardinality_ratio < 0.90,
+                     otherwise MAX_CANDIDATE_TO_BASELINE_RATIO
+strict_threshold = strict_ratio_limit * baseline_cost
 
 select OuterYan on the strict tier iff candidate_total <= strict_threshold
 ```
 
-Cost formula V3 applies two consistency checks before that final comparison.
+Cost formula V7 retains two consistency checks before that final comparison.
 For fully reduced all-INNER candidates, every intermediate estimate is bounded
 below by the largest reduced leaf in its subtree. For table filters that used
 DuckDB's generic selectivity fallback, the candidate and baseline are also
@@ -272,10 +287,13 @@ largest input is at least `1000x` the uncertain filtered relation and the two
 reducer rounds retain at least `99%` of estimated input cardinality. The trace
 records the retention ratio, amplification, and guard result explicitly.
 
-Cost formula V6 uses the full modeled semi-join row-work (`1.0 *
+Cost formula V7 uses the full modeled semi-join row-work (`1.0 *
 semijoin_raw_cost`) and a confidence-aware stretch tier without changing DP
 enumeration. The earlier `0.50` semi-join discount admitted regressions in the
-August 18 unified audit. The relaxed ceiling is `1.20`, but it is available only when all
+August 18 unified audit. Candidates whose reducer rounds are estimated to
+retain less than `90%` of input rows must beat the baseline by at least `10%`;
+this protects the strict tier when its apparent advantage depends on uncertain
+reduction estimates. The relaxed ceiling is `1.20`, but it is available only when all
 of the following planner-visible checks pass:
 
 ```text
@@ -283,7 +301,7 @@ no generic/default-filter upper-bound scenario
 no uncertain-filter amplification guard
 no active full-reduction cardinality lower-bound correction
 candidate_join_cost < baseline_cost
-candidate_join_input_rows <= 0.75 * baseline_join_input_rows
+candidate_join_input_rows <= 0.30 * baseline_join_input_rows
 semijoin_retained_cardinality_ratio >= 0.95
 ```
 
@@ -291,9 +309,10 @@ semijoin_retained_cardinality_ratio >= 0.95
 right cardinalities processed by every real join, approximating hash
 build/probe work that the output-only join cost does not capture. An eligible
 candidate whose total lies in `(1.0, 1.20] * baseline_cost` is selected with
-reason `COST_OUTERYAN_STRETCH`. All other candidates retain the strict `1.0`
-limit. The stretch constants are experimental safety margins, not a runtime
-performance guarantee.
+reason `COST_OUTERYAN_STRETCH`. High-retention candidates otherwise retain the
+strict `1.0` limit; lower-retention candidates use the guarded `0.90` limit.
+These constants are experimental safety margins, not a runtime performance
+guarantee.
 
 The trace and CSV report two separate comparisons: `raw_cost_winner` compares
 `candidate_total` directly with `baseline_cost`, while `gate_result` compares
@@ -304,8 +323,9 @@ policy decisions.
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
-`GATED`, uses a semi-join ratio of `1.0`, and keeps a baseline limit
-of `1.0`, plus the confidence-gated `1.20` stretch ceiling described above.
+`GATED`, uses a semi-join ratio of `1.0`, a lower-retention limit of `0.90`,
+a normal strict limit of `1.0`, and the confidence-gated `1.20` stretch ceiling
+described above.
 Rebuild the CLI after changing these source-level settings.
 
 Set `SELECTION_MODE` to `SelectionMode::GATED` for the cost gate, or to
@@ -526,7 +546,7 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[ 63/206] derived__example  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 TM:off=12.000000000 on=6.000000000 spd=2.000
+[ 63/185] derived__example  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 TM:off=12.000000000 on=6.000000000 spd=2.000
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
@@ -736,8 +756,8 @@ OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default comparison stage walks all 206 SQL files under `outerjoin_query`:
-7 graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It executes each bare query
+The default comparison stage walks all 185 SQL files under `outerjoin_query`:
+7 graph, 53 TPC-H, 43 TPC-DS, and 82 JOB queries. It executes each bare query
 with OuterYan disabled (Original) and enabled, verifies complete result
 equivalence, records the selected DuckDB/OuterYan plan, and then measures both
 configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture

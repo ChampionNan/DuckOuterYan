@@ -60,3 +60,319 @@ real industrial use cases while remaining reproducible. The corpus covers
 practical patterns such as optional dimension enrichment, sparse relationships,
 fact-completeness checks, and preserved master data, complementing the
 controlled variants in the core benchmark.
+
+% Structure-only draft. This block intentionally contains no measured result.
+% Fill the TODO comments only after the final corpus run and matching plots exist.
+% Requires: \usepackage{graphicx,booktabs}
+\providecommand{\OuterYanBenchmarkFigures}{output/pdf/outeryan_benchmark_figures.pdf}
+
+\subsection{Experimental Setup}
+\label{sec:experimental-setup}
+
+\paragraph{System configuration.}
+% TODO: Report the final measurement machine: CPU model, physical/logical cores,
+% memory, storage, operating system/kernel, compiler, DuckDB revision, and build
+% flags. State that performance numbers come from a release build.
+% TODO: State the memory limit, temporary-directory policy, and any settings
+% that can affect reproducibility.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Experimental environment.}
+  \label{tab:experimental-system}
+  \begin{tabular}{ll}
+    \toprule
+    Item & Configuration \\
+    \midrule
+    Processor & \\
+    Physical/logical cores & \\
+    Memory & \\
+    Storage & \\
+    Operating system & \\
+    Compiler & \\
+    DuckDB revision/build & \\
+    PostgreSQL planner & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Datasets and query corpus.}
+% TODO: Describe the graph, TPC-H, TPC-DS, and JOB data used by the final run.
+% Report scale factors/snapshot identifiers and the number of input, correct,
+% timed, failed, and timed-out queries. Keep generated, derived, and
+% industry-inspired query categories distinct.
+% TODO: Report the final left-deep, right-deep, and bushy distribution and the
+% relation-count distribution from the manifest used for that same run.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Datasets and final evaluated query counts.}
+  \label{tab:experimental-workload}
+  \begin{tabular}{llll}
+    \toprule
+    Family & Data/input & Scale & Evaluated queries \\
+    \midrule
+    Graph & & & \\
+    TPC-H & & & \\
+    TPC-DS & & & \\
+    JOB & & & \\
+    \midrule
+    Total & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Compared configurations.}
+% TODO: Define Original as DuckDB with outer_yan disabled.
+% TODO: Define OuterYan as the normal optimizer with outer_yan enabled, including
+% candidate selection, the cost gate, and semi-join reduction when selected.
+% Explain that a same-grouping candidate is labeled as the DuckDB plan.
+% TODO: Introduce PGPlan only as a separate opt-in experiment. Explain that
+% PostgreSQL provides a typed logical join tree, while DuckDB executes all three
+% configurations using the same target data and physical execution engine.
+
+\paragraph{Correctness protocol.}
+% TODO: State that correctness compares complete multisets from the bare query.
+% Describe Original=OuterYan for the default experiment and the two required
+% equalities plus signature verification for the PGPlan experiment.
+% State how failures, timeouts, and incomplete rows are handled.
+
+\paragraph{Timing protocol.}
+% TODO: Define T1 and TM, the final thread count, warm-up count, measured repeat
+% count, per-query statistic, timeout, and cache policy.
+% TODO: Explain whether aggregation uses geometric means, medians, confidence
+% intervals, and/or a practical tie threshold.
+
+\begin{equation}
+  S_{\mathrm{Original}/\mathrm{OuterYan}}
+  = \frac{T_{\mathrm{Original}}}{T_{\mathrm{OuterYan}}},
+  \qquad
+  S_{\mathrm{PGPlan}/\mathrm{OuterYan}}
+  = \frac{T_{\mathrm{PGPlan}}}{T_{\mathrm{OuterYan}}}.
+  \label{eq:reported-speedups}
+\end{equation}
+% TODO: State explicitly that values above one favor OuterYan for both ratios.
+
+\paragraph{Plan and phase diagnostics.}
+% TODO: List the recorded plan metadata: query family/category, relation count,
+% input tree shape, whether a different grouping was generated, selected plan,
+% and decision reason.
+% TODO: Define R1, R2, R3, OtherCPU, profiled wall time, and which profiles are
+% eligible for the phase breakdown. Keep profiled timing separate from T1/TM.
+
+\subsection{Results}
+\label{sec:experimental-results}
+
+% TODO: Add a short roadmap after all final results exist. Do not summarize the
+% current preview figures here because they predate the final corpus run.
+
+\subsubsection{Running Time Comparison}
+\label{sec:runtime-comparison}
+
+\paragraph{Overall runtime.}
+% TODO: From the final matching result files, report:
+% 1. correct/completed query count;
+% 2. DuckDB-plan versus OuterYan-plan selection count and share;
+% 3. T1 and TM geometric-mean Original/OuterYan speedup;
+% 4. win/tie/loss counts using a declared tie threshold;
+% 5. benchmark-family and query-category differences.
+% Do not infer these values from an older plot PDF.
+
+% Regenerate this PDF from the final result CSVs before submission.
+\begin{figure*}[t]
+  \centering
+  \includegraphics[page=1,width=\textwidth]{\OuterYanBenchmarkFigures}
+  \caption{Overall Original/OuterYan speedup distributions by benchmark family
+  and query category.}
+  \label{fig:runtime-summary}
+\end{figure*}
+
+\paragraph{Join-tree shape and relation count.}
+% TODO: Discuss left-deep, right-deep, and bushy queries separately.
+% Report both selection frequency and runtime, so a shape with many retained
+% DuckDB plans is not interpreted as an OuterYan performance result.
+% TODO: Discuss relation-count trends and identify whether they remain after
+% stratifying by selected plan and query family.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[page=2,width=\textwidth]{\OuterYanBenchmarkFigures}
+  \caption{Original/OuterYan speedup distributions by input join-tree shape and
+  relation count.}
+  \label{fig:shape-scale}
+\end{figure*}
+
+\paragraph{Per-query results.}
+% TODO: Identify stable wins, regressions, and near-one cases in the final run.
+% For each discussed outlier, record query identifier, family, shape, selected
+% plan, T1/TM ratio, and whether repeated measurements support the observation.
+% TODO: Explain the two per-query tags used by the plots.
+
+\begin{figure*}[p]
+  \centering
+  \includegraphics[page=3,height=0.27\textheight]{\OuterYanBenchmarkFigures}\hfill
+  \includegraphics[page=4,height=0.27\textheight]{\OuterYanBenchmarkFigures}\hfill
+  \includegraphics[page=5,height=0.27\textheight]{\OuterYanBenchmarkFigures}
+  \caption{Per-query T1 and TM Original/OuterYan speedups for TPC-H, TPC-DS,
+  and JOB. Add the graph panel if graph queries are part of the final report.}
+  \label{fig:per-query-speedup}
+\end{figure*}
+
+\paragraph{Phase breakdown.}
+% TODO: Report phase results only for selected OuterYan plans with complete
+% profiles. Discuss R1/R2 overhead, R3 work, OtherCPU, and the input reduction
+% achieved before R3. Do not add stacked CPU components to wall time.
+% TODO: Connect phase behavior to concrete wins/losses without treating
+% correlation as a causal explanation.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[page=6,width=\textwidth]{\OuterYanBenchmarkFigures}
+  \caption{R1, R2, R3, and OtherCPU breakdown for selected OuterYan plans with
+  complete profiles.}
+  \label{fig:phase-breakdown}
+\end{figure*}
+
+\subsubsection{PostgreSQL Plan Comparison}
+\label{sec:pgplan-comparison}
+
+\paragraph{Research question and proof obligation.}
+% TODO: Motivate the distinction between:
+% (a) PostgreSQL considered an OuterYan tree but assigned it a worse cost; and
+% (b) PostgreSQL did not admit the tree into its enumeration space.
+% The intended claim requires evidence for case (b), not merely a different
+% final EXPLAIN plan.
+
+For query $q$, let $\mathcal{S}_{\mathrm{PG}}(q)$ and
+$\mathcal{S}_{\mathrm{OY}}(q)$ be the logical trees admitted by PostgreSQL and
+OuterYan. For a fully enumerated witness query $q^*$, the intended evidence is
+\begin{equation}
+  p^* \in \mathcal{S}_{\mathrm{OY}}(q^*),
+  \qquad
+  p^* \notin \mathcal{S}_{\mathrm{PG}}(q^*),
+  \qquad
+  p^* = \arg\min_{p \in \mathcal{L}(q^*)}
+          T_{\mathrm{DuckDB}}(q^*,p),
+  \label{eq:pg-space-witness}
+\end{equation}
+where $\mathcal{L}(q^*)$ is the complete set of semantically legal logical
+trees evaluated under the controlled execution setup.
+% TODO: If enumeration of L is incomplete, replace "optimal" throughout with
+% "best measured plan."
+
+\paragraph{Three-way screening.}
+% TODO: Report only complete rows with Original, PGPlan, and OuterYan timing,
+% bare-query correctness, and verified PGPlan signatures.
+% TODO: Use Original/OuterYan and PGPlan/OuterYan. Values above one favor
+% OuterYan. Report the eligible count and the rule used to select the witness.
+% TODO: State that PGPlan is a PostgreSQL logical tree executed by DuckDB, not
+% PostgreSQL executor performance.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Three-way runtime summary.}
+  \label{tab:pgplan-runtime}
+  \begin{tabular}{lrrrrr}
+    \toprule
+    Comparison & T1 geo. mean & TM geo. mean & $>1$ & $\approx 1$ & $<1$ \\
+    \midrule
+    Original/OuterYan & & & & & \\
+    PGPlan/OuterYan & & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Step 1: prove PostgreSQL rejection.}
+% TODO: Choose one concrete OuterYan-winning query.
+% TODO: Encode the exact OuterYan binary tree, join kinds, and preserved-side
+% orientation. Feed its splits bottom-up through instrumented PostgreSQL
+% enumeration.
+% TODO: Record every accepted split and the first rejected split, including the
+% left/right relation sets, applicable outer-join restriction metadata, exact
+% rejection rule, PostgreSQL version, and planner settings.
+% TODO: Demonstrate that no alternative construction order admits the same
+% typed tree. Absence from final EXPLAIN output is not this proof.
+% TODO: Independently establish semantic validity with the OuterYan legality
+% proof and complete bare-query result equality.
+
+\paragraph{Step 2: prove the optimum is in OuterYan's space.}
+% TODO: Exhaustively enumerate every semantically legal logical grouping for the
+% witness query. Describe the legality oracle and how completeness is checked.
+% TODO: Pin each grouping in the same DuckDB build and execute it with the same
+% data, physical optimizer settings, warm-up, repeats, and threads.
+% TODO: Rank every legal grouping and show whether the selected OuterYan tree is
+% first. Compare it with the best PostgreSQL-admitted tree and report timing
+% stability. Restrict "optimal" to logical grouping under this execution setup.
+
+\begin{figure*}[t]
+  \centering
+  \fbox{\parbox[c][0.25\textheight][c]{0.94\textwidth}{
+    \centering
+    \textbf{Plan-space witness figure}\\[0.8em]
+    (a) Witness relation graph, join kinds, and preservation directions.\\
+    (b) OuterYan tree with PostgreSQL's first rejected split marked.\\
+    (c) Search-space relationship, highlighting the witness tree.\\
+    (d) Runtime and rank of every semantically legal grouping.
+  }}
+  \caption{Illustration structure for the PostgreSQL plan-space witness.}
+  \label{fig:pgplan-space-witness}
+\end{figure*}
+
+\paragraph{Witness evidence.}
+% TODO: Fill this table from retained enumeration traces and timing artifacts.
+% The PG-decision column must distinguish selected, admitted but not selected,
+% explicitly rejected, and unresolved.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Evidence for the selected plan-space witness.}
+  \label{tab:pgplan-witness}
+  \begin{tabular}{llllrr}
+    \toprule
+    Candidate & Logical grouping & PG decision & OuterYan space & TM median & Rank \\
+    \midrule
+    PostgreSQL output & & & & & \\
+    DuckDB Original & & & & & \\
+    OuterYan candidate & & & & & \\
+    Next-best legal tree & & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Generality beyond the witness.}
+% TODO: Repeat the membership test for every tractable selected OuterYan plan.
+% Report admitted, explicitly rejected, and unresolved separately. Never infer
+% rejection only because a tree is absent from PostgreSQL's chosen plan.
+% TODO: Stratify by join-tree shape only after reporting the overall counts.
+
+\begin{table*}[t]
+  \centering
+  \small
+  \caption{Coverage of the PostgreSQL/OuterYan plan-space membership test.}
+  \label{tab:pgplan-space-coverage}
+  \begin{tabular}{lrrrr}
+    \toprule
+    Metric & Left-deep & Right-deep & Bushy & All \\
+    \midrule
+    Complete three-way queries & & & & \\
+    Distinct OuterYan grouping selected & & & & \\
+    OuterYan tree admitted by PostgreSQL & & & & \\
+    OuterYan tree explicitly rejected by PostgreSQL & & & & \\
+    Membership unresolved & & & & \\
+    Rejected OuterYan tree is optimal/best measured & & & & \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+\paragraph{Discussion and limitations.}
+% TODO: Explain the concrete PostgreSQL legality restriction responsible for the
+% witness rejection and the semantic property that lets OuterYan admit the tree.
+% TODO: Connect the tree to measured cardinality/input-reduction evidence.
+% TODO: State the precise scope: logical join groupings executed in DuckDB, not
+% an end-to-end DuckDB-versus-PostgreSQL comparison.
+% TODO: State how many exclusions were explicitly verified. Avoid generalizing
+% the witness to all right-deep or bushy plans.
