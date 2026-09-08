@@ -116,16 +116,10 @@ ORIGINAL_CSV_FIELDS = (
     "unmatched_right_weight", "semijoin_materialize_weight",
     "semijoin_filter_build_weight", "semijoin_replay_weight",
     "semijoin_probe_lookup_weight", "semijoin_probe_emit_weight", "kernel",
-    "kernel_detail", "kernel_hash_reasons", "correct", "note", "t1_off",
-    "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup",
-    "profile_round1_operator_s", "profile_round2_operator_s",
-    "profile_round3_operator_s", "profile_round1_operator_count",
-    "profile_round2_operator_count", "profile_round3_operator_count",
-    "profile_total_time_s", "profile_round1_ratio", "profile_round2_ratio",
-    "profile_total_sj_ratio", "profile_round3_ratio",
-    "profile_other_elapsed_s", "profile_other_ratio", "profile_timed_samples",
+    "kernel_detail", "kernel_hash_reasons", "correct", "note",
+    "timing_threads", "tm_off", "tm_on", "tm_speedup",
     "rows", "effective_pass", "duckdb_plan", "enabled_plan", "trace_file",
-    "cost_file", "profile_threads", "profile_cpu_time_s",
+    "cost_file",
 )
 
 # PostgreSQL and corpus bookkeeping are additive.  In particular, do not
@@ -144,9 +138,6 @@ PGPLAN_CSV_FIELDS = (
     "tm_pgplan",
     "tm_native_vs_pgplan_speedup",
     "tm_pgplan_vs_outer_yan_speedup",
-    "t1_pgplan",
-    "t1_native_vs_pgplan_speedup",
-    "t1_pgplan_vs_outer_yan_speedup",
 )
 COMPARISON_CSV_FIELDS = (
     "pgplan_comparison_mode",
@@ -176,6 +167,13 @@ COMPARISON_CSV_FIELDS = (
     "pgplan_correctness_reuse_source_manifest_sha256",
 )
 COMPARISON_FIELDS = ORIGINAL_CSV_FIELDS + PGPLAN_CSV_FIELDS + COMPARISON_CSV_FIELDS
+
+# Retain historical measurements when re-summarizing old artifacts, but do not
+# emit empty single-thread columns for new multi-thread-only experiments.
+LEGACY_T1_FIELDS = (
+    "t1_off", "t1_on", "t1_speedup", "t1_pgplan",
+    "t1_native_vs_pgplan_speedup", "t1_pgplan_vs_outer_yan_speedup",
+)
 
 LEGACY_OY_FIELD_MAP = {
     "outer_reordered": "outer_reordered",
@@ -1258,22 +1256,6 @@ def build_comparison_rows(result_root, status_rows):
                 "t1_pgplan": "NA",
                 "t1_native_vs_pgplan_speedup": "NA",
                 "t1_pgplan_vs_outer_yan_speedup": "NA",
-                "profile_round1_operator_s": "NA",
-                "profile_round2_operator_s": "NA",
-                "profile_round3_operator_s": "NA",
-                "profile_round1_operator_count": "NA",
-                "profile_round2_operator_count": "NA",
-                "profile_round3_operator_count": "NA",
-                "profile_total_time_s": "NA",
-                "profile_round1_ratio": "NA",
-                "profile_round2_ratio": "NA",
-                "profile_total_sj_ratio": "NA",
-                "profile_round3_ratio": "NA",
-                "profile_other_elapsed_s": "NA",
-                "profile_other_ratio": "NA",
-                "profile_timed_samples": "NA",
-                "profile_threads": "NA",
-                "profile_cpu_time_s": "NA",
                 "pgplan_plan": existing_artifact(status_row["plan"]),
                 "pgplan_comparison_status": status,
                 "pgplan_comparison_phase": status_row["phase"],
@@ -1371,6 +1353,7 @@ def build_comparison_rows(result_root, status_rows):
                     ],
                     "pgplan_comparison_measured_runs": artifacts["measured_runs"],
                     "pgplan_comparison_threads": artifacts["threads"],
+                    "timing_threads": artifacts["threads"],
                     "pgplan_comparison_result_dir": artifacts["run_dir"],
                     "pgplan_comparison_relations": artifacts["relations"],
                     "pgplan_comparison_join_count": artifacts["join_count"],
@@ -1550,9 +1533,7 @@ def render_comparison_block(row, index, total):
         "[{0:3d}/{1}] {2:<36} correct={3} reorder={4} selected={5} "
         "comparison={6} PGPlan={7}  "
         "TM:[Original={8} PGPlan={9} OuterYan={10}] "
-        "Speedup:[Original/OuterYan={11} PGPlan/OuterYan={12}]  "
-        "T1:[Original={13} PGPlan={14} OuterYan={15}] "
-        "Speedup:[Original/OuterYan={16} PGPlan/OuterYan={17}]"
+        "Speedup:[Original/OuterYan={11} PGPlan/OuterYan={12}]"
     ).format(
         index,
         total,
@@ -1567,12 +1548,15 @@ def render_comparison_block(row, index, total):
         display(row["tm_on"]),
         display(row["tm_speedup"]),
         display(row["tm_pgplan_vs_outer_yan_speedup"]),
-        display(row["t1_off"]),
-        display(row["t1_pgplan"]),
-        display(row["t1_on"]),
-        display(row["t1_speedup"]),
-        display(row["t1_pgplan_vs_outer_yan_speedup"]),
     )
+    if row["t1_off"] not in ("", "-", "NA"):
+        main += (
+            "  T1:[Original={0} PGPlan={1} OuterYan={2}] "
+            "Speedup:[Original/OuterYan={3} PGPlan/OuterYan={4}]"
+        ).format(*(display(row[field]) for field in (
+            "t1_off", "t1_pgplan", "t1_on", "t1_speedup",
+            "t1_pgplan_vs_outer_yan_speedup",
+        )))
 
     decision = (
         "[mode={0} reason={1} raw_winner={2} gate={3} gate_applied={4} "
@@ -1742,9 +1726,12 @@ def generate_report(result_root):
         "summary_tsv": result_root / "summary.tsv",
         "failures_tsv": result_root / "failures.tsv",
     }
+    comparison_fields = COMPARISON_FIELDS
+    if any(row["t1_off"] not in ("", "-", "NA") for row in comparison_rows):
+        comparison_fields += LEGACY_T1_FIELDS
     rendered = {
-        "comparison_tsv": render_table(COMPARISON_FIELDS, comparison_rows, "\t"),
-        "comparison_csv": render_table(COMPARISON_FIELDS, comparison_rows, ","),
+        "comparison_tsv": render_table(comparison_fields, comparison_rows, "\t"),
+        "comparison_csv": render_table(comparison_fields, comparison_rows, ","),
         "comparison_log": render_comparison_log(comparison_rows),
         "summary_tsv": render_table(SUMMARY_FIELDS, summary_rows, "\t"),
         "failures_tsv": render_table(STATUS_FIELDS, failure_rows, "\t"),

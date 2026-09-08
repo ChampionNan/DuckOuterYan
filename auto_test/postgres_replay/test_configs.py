@@ -20,6 +20,7 @@ class PGPlanConfigTest(unittest.TestCase):
             "TPCH_DB",
             "OY_RUNS",
             "OY_THREADS",
+            "OY_THREAD_COUNTS",
             "OY_TIMEOUT_SECS",
             "OY_BATCH_GRACE_SECS",
             "OY_TMPDIR",
@@ -98,7 +99,7 @@ class PGPlanConfigTest(unittest.TestCase):
         env.update({key: str(value) for key, value in overrides.items()})
         shell = """
 source "$1"
-for name in RUN_PGPLAN PYTHON_BIN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM \
+for name in OY_THREADS OY_THREAD_COUNTS RUN_PGPLAN PYTHON_BIN PGPLAN_SETUP PGPLAN_VERSION PGPLAN_VERSION_NUM \
     PGPLAN_ROOT PGPLAN_SOURCE_DIR PGPLAN_INSTALL_DIR PGPLAN_DATA_DIR \
     PGPLAN_HOST PGPLAN_PORT PGPLAN_DATABASE PGPLAN_USER PGPLAN_PASSWORD PGPLAN_PASSWORD_FILE \
     PGPLAN_CONTAINER_PASSWORD PG_REPLAY_PASSWORD PG_REPLAY_CONTAINER_PASSWORD PG_DSN PSQL_BIN \
@@ -241,6 +242,14 @@ done
         self.assertEqual(values["PGPLAN_TIMEOUT_SECS"], "99")
         self.assertEqual(values["PGPLAN_TIMEOUT_GRACE"], "7")
         self.assertEqual(values["PGPLAN_TMPDIR"], "/tmp/duckyan-test")
+
+    def test_default_thread_sweep_and_scalar_override(self):
+        defaults = self.load_config()
+        self.assertEqual(defaults["OY_THREAD_COUNTS"], "16 32")
+        self.assertEqual(defaults["OY_THREADS"], "16")
+        single = self.load_config(OY_THREADS=8)
+        self.assertEqual(single["OY_THREAD_COUNTS"], "8")
+        self.assertEqual(single["OY_THREADS"], "8")
 
     def test_source_mode_ignores_an_unrelated_ambient_libpq_password(self):
         with tempfile.TemporaryDirectory() as temporary:

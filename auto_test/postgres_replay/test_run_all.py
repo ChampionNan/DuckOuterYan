@@ -14,6 +14,7 @@ import unittest
 
 SOURCE_RUN_ALL = Path(__file__).resolve().parents[1] / "run_all.sh"
 SOURCE_CONFIGS = Path(__file__).resolve().parents[1] / "configs.sh"
+SOURCE_THREAD_SWEEP = Path(__file__).resolve().parents[1] / "thread_sweep.sh"
 
 
 class RunAllPGPlanTests(unittest.TestCase):
@@ -30,6 +31,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         )
 
         shutil.copy2(SOURCE_RUN_ALL, self.auto_test / "run_all.sh")
+        shutil.copy2(SOURCE_THREAD_SWEEP, self.auto_test / "thread_sweep.sh")
         self.duckdb = self.repo / "fake-duckdb"
         self.duckdb.touch()
         self.duckdb.chmod(0o755)
@@ -123,6 +125,8 @@ class RunAllPGPlanTests(unittest.TestCase):
             "DUCKDB_BIN",
             "OY_CONFIG_LOADED",
             "OY_CORPUS",
+            "OY_THREADS",
+            "OY_THREAD_COUNTS",
             "RUN_PGPLAN",
             "RUN_PG_REPLAY",
             "PGPLAN_QUERY",
@@ -200,6 +204,34 @@ class RunAllPGPlanTests(unittest.TestCase):
         )
         self.assertNotIn("persistent PGPlan cache", result.stdout)
         self.assertNotIn("Comparison status TSV:", result.stdout)
+
+    def test_thread_sweep_runs_two_configurations_with_separate_outputs(self) -> None:
+        result = self._run("--limit", "1", OY_THREAD_COUNTS="16 32")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 2)
+        for call, threads in zip(calls, (16, 32)):
+            self.assertIn(f"--threads {threads}", call)
+            self.assertIn(f"_t{threads}.txt", call)
+            self.assertIn(f"_t{threads}.csv", result.stdout)
+
+    def test_pgplan_thread_sweep_uses_separate_output_directories(self) -> None:
+        output_base = str(self.repo / "pgplan-results")
+        result = self._run("--out", output_base, RUN_PGPLAN="1", OY_THREAD_COUNTS="16 32")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 2)
+        for call, threads in zip(calls, (16, 32)):
+            self.assertTrue(call.startswith("corpus\t"), call)
+            self.assertTrue(call.endswith(f"--threads {threads} --out {output_base}_t{threads}"), call)
+            self.assertTrue(Path(f"{output_base}_t{threads}/comparison.csv").is_file())
+
+    def test_cli_thread_count_overrides_sweep(self) -> None:
+        result = self._run("--threads", "8", OY_THREAD_COUNTS="16 32")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        calls = self.log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("_t8.txt", calls[0])
 
     def test_explicit_opt_in_runs_corpus_wide_three_way_experiment(self) -> None:
         cli_duckdb = self.repo / "cli-duckdb"

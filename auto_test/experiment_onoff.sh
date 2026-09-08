@@ -11,10 +11,9 @@
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. PHASE PROFILE — one profiled warm-up plus N profiled ON runs at
-#      threads=OY_THREADS. The median native profile supplies wall latency plus
-#      matched R1/R2/R3 active-operator work; OtherCPU closes root CPU_TIME.
-#   5. TIMING — oy_time_median off vs on (OY_THREADS, then threads=1).
+#   4. TIMING — unprofiled OFF/ON medians at the selected multi-thread count.
+# The default sweep runs 16 threads, then 32, with separate result files.
+# No single-thread executions or phase-profile batches are performed.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
@@ -29,7 +28,8 @@
 #      --limit N       cap number of queries (0 = no cap, default 0)
 #      --query-list FILE  ordered corpus-relative SQL paths (requires --only all)
 #      --capture-plans   save OFF/ON EXPLAIN, trace, and detailed cost artifacts
-#   -o,--out FILE     results file (default experiment_onoff_<timestamp>.txt)
+#      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 16 32)
+#   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,11 +37,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Unified config: defines DUCKDB_BIN, GRAPH_DATASET, TPCH_SF/TPCDS_SF,
 # OY_TIMEOUT_SECS, OY_RUNS.
 . "$SCRIPT_DIR/configs.sh"
+. "$SCRIPT_DIR/thread_sweep.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 CORPUS="${OY_CORPUS:-$SCRIPT_DIR/outerjoin_query}"
 
 RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
+THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
+ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do case "$1" in
     -b|--bin) export DUCKDB_BIN="$2"; shift 2;;
     -n|--runs) RUNS="$2"; shift 2;;
@@ -52,6 +55,9 @@ while [ $# -gt 0 ]; do case "$1" in
     --limit) LIMIT="$2"; shift 2;;
     --query-list) QUERY_LIST="$2"; shift 2;;
     --capture-plans) CAPTURE_PLANS=1; shift;;
+    --threads)
+        [ $# -ge 2 ] || { echo "--threads requires a value" >&2; exit 2; }
+        THREAD_COUNTS="$2"; shift 2;;
     -o|--out) OUT="$2"; shift 2;;
     -h|--help) sed -n '2,/^set /p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
@@ -62,6 +68,7 @@ case "$RUNS" in
     ''|*[!0-9]*|0) echo "--runs must be a positive integer (got: $RUNS)" >&2; exit 2;;
 esac
 [ $((RUNS % 2)) -eq 1 ] || { echo "--runs must be odd so one real median execution is selected" >&2; exit 2; }
+oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 # One experiment start timestamp, captured the moment this script begins (before
 # the DB-build phase). Used for BOTH the .txt/.csv filenames AND the in-file
 # header, so the txt, its corresponding csv, and the printed time all agree and
@@ -69,7 +76,40 @@ esac
 # filename form and human form can never straddle a second boundary.
 _now="$(date '+%Y%m%d_%H%M%S|%F %T')"
 START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
-_default_out="$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt"
+if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
+    sweep_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
+    sweep_status=0
+    sweep_pid=""
+    oy_stop_sweep() {
+        trap '' INT TERM
+        if [ -n "$sweep_pid" ]; then
+            kill -TERM "$sweep_pid" 2>/dev/null || true
+            wait "$sweep_pid" 2>/dev/null || true
+        fi
+        exit "$1"
+    }
+    trap 'oy_stop_sweep 130' INT
+    trap 'oy_stop_sweep 143' TERM
+    for thread_count in "${OY_THREAD_VALUES[@]}"; do
+        thread_out="${sweep_out%.txt}_t${thread_count}.txt"
+        echo "--- Running multi-thread configuration: threads=$thread_count ---" >&2
+        OY_THREADS="$thread_count" OY_THREAD_COUNTS="$thread_count" \
+            bash "$SCRIPT_DIR/experiment_onoff.sh" "${ORIGINAL_ARGS[@]}" \
+            --threads "$thread_count" --out "$thread_out" &
+        sweep_pid=$!
+        wait "$sweep_pid"
+        thread_status=$?
+        sweep_pid=""
+        case "$thread_status" in
+            130|143) exit "$thread_status";;
+            0) ;;
+            *) sweep_status="$thread_status";;
+        esac
+    done
+    exit "$sweep_status"
+fi
+export OY_THREADS="${OY_THREAD_VALUES[0]}"
+_default_out="$SCRIPT_DIR/results/experiment_onoff_${START_TS}_t${OY_THREADS}.txt"
 OUT="${OUT:-$_default_out}"
 mkdir -p "$(dirname "$OUT")"
 mkdir -p "$OY_TMPDIR" || { echo "Error: cannot create OY_TMPDIR: $OY_TMPDIR" >&2; exit 1; }
@@ -200,7 +240,7 @@ oy_equiv_check() {
     local db="$1" label="$2" query="$3"
     local off on eoff eon esort sql roff=0 ron=0 rc=0 off_rows=0 on_rows=0
     off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); esort=$(mktemp); sql=$(mktemp)
-    local prag="PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"
+    local prag="CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"
 
     printf '%s\n%s\n%s;\n' "$prag" "$OY_OFF" "${query%;}" > "$sql"
     if oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; then roff=0; else roff=$?; fi
@@ -263,7 +303,7 @@ oy_time_median() {
     local script i
     # Trash mode still executes the bare query and fully drains its result, but
     # avoids charging terminal/result formatting and output I/O to the CLI timer.
-    # T1/TM use fresh CLI processes and explicitly keep DuckDB profiling off.
+    # Each configuration uses a fresh CLI process with DuckDB profiling off.
     # This setup runs before `.timer on`, so it is not part of the measurement.
     script=".timer off"$'\n'".mode trash"$'\n'"CALL disable_profiling();"$'\n'"PRAGMA threads=${threads};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"$'\n'"${set_sql}"$'\n'
     # 1 warm-up run + $runs timed runs (timer on for all). The warm-up primes the
@@ -458,7 +498,8 @@ oy_decision() {
     local trace_was_set trace_saved
     sqlf=$(mktemp); tracef=$(mktemp)
     printf '%s\n%s\nEXPLAIN (FORMAT json) %s;\n' \
-        "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$OY_ON" "${query%;}" > "$sqlf"
+        "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+        "$OY_ON" "${query%;}" > "$sqlf"
 
     # Each probe launches a fresh DuckDB process, so OuterYanTrace's process-wide
     # cached path resolves to this query's private trace file. Preserve a caller's
@@ -566,7 +607,8 @@ oy_capture_plan() {
     local db="$1" setting="$2" query="$3" output="$4" sqlf rc
     sqlf=$(mktemp)
     printf "PRAGMA explain_output='all';\n%s\n%s\nEXPLAIN %s;\n" \
-        "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$setting" "${query%;}" > "$sqlf"
+        "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+        "$setting" "${query%;}" > "$sqlf"
     oy_duck "$db" < "$sqlf" > "$output" 2>&1
     rc=$?
     rm -f "$sqlf"
@@ -587,7 +629,7 @@ oy_kernel() {
     local db="$1" query="$2" sqlf errf nbm nhash label rc
     local nforce nbudget nineligible noverflow reasons="" separator=""
     sqlf=$(mktemp); errf=$(mktemp)
-    printf '%s\n%s\n%s\n' "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+    printf '%s\n%s\n%s\n' "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
         "$OY_ON" "${query%;};" > "$sqlf"
     # Scope the trace to this single run: export before, unset after, so the
     # timing/equivalence oy_duck calls never see the extra stderr.
@@ -629,322 +671,6 @@ oy_kernel_display() {
     b="$(printf '%s' "$detail" | sed -nE 's/^b([0-9]+)h[0-9]+$/\1/p')"
     h="$(printf '%s' "$detail" | sed -nE 's/^b[0-9]+h([0-9]+)$/\1/p')"
     printf '%s(b=%s,h=%s)' "$label" "${b:-0}" "${h:-0}"
-}
-
-oy_profile_percent() {
-    case "$1" in
-        ''|NA|-) printf 'NA';;
-        *) awk -v ratio="$1" 'BEGIN { printf "%.2f%%", 100 * ratio }';;
-    esac
-}
-
-# Format one semi-join round without conflating "no planned work" with a
-# missing/zero profiler measurement. Pair/filter counts come from the exact
-# candidate selected by the optimizer; elapsed time and physical-operator counts
-# come from the separate multi-thread profile execution below.
-oy_round_profile_display() {
-    local label="$1" elapsed="$2" ratio="$3" pairs="$4" filters="$5" operators="$6"
-    local proven_empty="${7:-0}"
-    if [ "$proven_empty" = "1" ] && [ "$operators" = "0" ]; then
-        printf '%s=NA(not-executed-proven-empty,pairs=%s)' "$label" "$pairs"
-        return
-    fi
-    case "$pairs" in
-        0)
-            case "$operators" in
-                0|NA|-|'') printf '%s=NA(no-pairs,pairs=0)' "$label";;
-                *) printf '%s=NA(plan-profile-mismatch,pairs=0,operators=%s)' "$label" "$operators";;
-            esac
-            ;;
-        ''|NA|-|*[!0-9]*)
-            printf '%s=NA(missing-plan-counts)' "$label"
-            ;;
-        *)
-            if [ "$operators" = "0" ]; then
-                printf '%s=NA(profile-missing,pairs=%s,filters=%s)' \
-                    "$label" "$pairs" "$filters"
-            elif [ "$operators" = "NA" ] || [ "$operators" = "-" ] || \
-                 [ -z "$operators" ] || [ "$elapsed" = "NA" ] || [ "$elapsed" = "-" ] || \
-                 [ "$ratio" = "NA" ] || [ "$ratio" = "-" ]; then
-                printf '%s=NA(profile-error,pairs=%s,filters=%s)' \
-                    "$label" "$pairs" "$filters"
-            else
-                printf '%s=%ss(%s,pairs=%s,filters=%s,operators=%s)' \
-                    "$label" "$elapsed" "$(oy_profile_percent "$ratio")" \
-                    "$pairs" "$filters" "$operators"
-            fi
-            ;;
-    esac
-}
-
-# Run the ON plan at the requested thread count with one profiled warm-up and N
-# profiled samples. Every execution has a unique minimal JSON profile.
-# Total-Time is DuckDB's high-resolution root query latency; CPU-Time is the
-# recursive sum of native OPERATOR_TIMING across all workers. R1/R2 sum the
-# corresponding SJ build/probe operator work and R3 sums join-operator work.
-# The complete tuple belonging to the median Total-Time sample is selected, so
-# all values come from one execution. OtherCPU is the exact CPU-Time residual.
-# These are aggregate active operator work-seconds, not contiguous phase wall
-# times; parallel operator work can exceed Total-Time.
-# Echoes: "round1_s round2_s real_join_s total_time_s cpu_time_s r1_ratio
-# r2_ratio sj_ratio real_join_ratio other_s other_ratio round1_operator_count
-# round2_operator_count real_join_operator_count timed_sample_count"
-# (fifteen NA values on failure).
-oy_phase_profile() {
-    local db="$1" query="$2" threads="$3" runs="$4" expected_plan="$5"
-    local expected_r1_pairs="$6" expected_r2_pairs="$7" proven_empty="$8"
-    local sqlf rawf profiledir profilef profile_sql i profile_rc=0
-    sqlf=$(mktemp) || { oy_phase_profile_failure; return 1; }
-    rawf=$(mktemp) || { rm -f "$sqlf"; oy_phase_profile_failure; return 1; }
-    profiledir=$(mktemp -d "$OY_RUN_TMPDIR/oy_profile.XXXXXX") || {
-        rm -f "$sqlf" "$rawf"
-        oy_phase_profile_failure
-        return 1
-    }
-    printf ".timer off\n.mode trash\nPRAGMA threads=%s;\n%s\n%s\n" \
-        "$threads" "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$OY_ON" > "$sqlf"
-    # Index 0 is the warm-up. It is profiled too, so warm-up and timed samples
-    # have the same instrumentation and result-consumption behavior.
-    for ((i=0; i<=runs; i++)); do
-        profilef="$profiledir/profile_${i}.json"
-        profile_sql="${profilef//"'"/"''"}"
-        printf "CALL enable_profiling(format='json', save_location='%s', coverage='select', mode='standard', metrics=['QUERY_NAME','LATENCY','CPU_TIME','OPERATOR_NAME','OPERATOR_TYPE','OPERATOR_TIMING']);\n%s;\nCALL disable_profiling();\n" \
-            "$profile_sql" "${query%;}" >> "$sqlf"
-    done
-
-    # The SQL statement timeout remains per execution; only the external
-    # process watchdog is scaled for warm-up + timed samples.
-    local saved_to="$OY_TIMEOUT_SECS" duck_rc=0
-    [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ] \
-        && OY_TIMEOUT_SECS=$(( OY_TIMEOUT_SECS * (runs + 1) + OY_BATCH_GRACE_SECS ))
-    if oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1; then
-        duck_rc=0
-    else
-        duck_rc=$?
-    fi
-    OY_TIMEOUT_SECS="$saved_to"
-
-    python3 - "$rawf" "$profiledir" "$runs" "${query%;}" "$duck_rc" \
-        "$expected_plan" "$expected_r1_pairs" "$expected_r2_pairs" "$proven_empty" <<'PY' || profile_rc=$?
-import json
-import math
-import os
-import sys
-
-(
-    raw_path,
-    profile_dir,
-    runs_text,
-    expected_query,
-    duck_rc_text,
-    expected_plan,
-    expected_r1_pairs_text,
-    expected_r2_pairs_text,
-    proven_empty_text,
-) = sys.argv[1:]
-runs = int(runs_text)
-failure = "NA " * 14 + "NA"
-
-def normalize_query(value):
-    # DuckDB's QUERY_NAME metric omits leading SQL comments. Generated core
-    # queries carry provenance comments, so remove only the leading comment
-    # block before comparing the profiled statement with the requested query.
-    lines = value.strip().splitlines()
-    while lines and (not lines[0].strip() or lines[0].lstrip().startswith("--")):
-        lines.pop(0)
-    return " ".join("\n".join(lines).strip().rstrip(";").split())
-
-try:
-    with open(raw_path, encoding="utf-8", errors="replace") as f:
-        raw = f.read()
-    if int(duck_rc_text) != 0:
-        error_lines = [line.strip() for line in raw.splitlines() if "Error:" in line]
-        detail = f": {error_lines[-1]}" if error_lines else ""
-        raise ValueError(f"duckdb exited with status {duck_rc_text}{detail}")
-    if "Error:" in raw:
-        raise ValueError("duckdb reported an error")
-
-    if expected_plan not in ("DUCKDB", "OUTERYAN"):
-        raise ValueError(f"unknown selected plan {expected_plan!r}")
-    if proven_empty_text not in ("0", "1"):
-        raise ValueError(f"invalid proven-empty flag {proven_empty_text!r}")
-    proven_empty = proven_empty_text == "1"
-
-    def expected_pairs(value, label):
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid {label} planned pair count {value!r}") from exc
-        if parsed < 0:
-            raise ValueError(f"negative {label} planned pair count")
-        return parsed
-
-    expected_round_pairs = (0, 0)
-    if expected_plan == "OUTERYAN":
-        expected_round_pairs = (
-            expected_pairs(expected_r1_pairs_text, "R1"),
-            expected_pairs(expected_r2_pairs_text, "R2"),
-        )
-    join_operator_types = {
-        "BLOCKWISE_NL_JOIN",
-        "NESTED_LOOP_JOIN",
-        "HASH_JOIN",
-        "CROSS_PRODUCT",
-        "PIECEWISE_MERGE_JOIN",
-        "IE_JOIN",
-        "LEFT_DELIM_JOIN",
-        "RIGHT_DELIM_JOIN",
-        "POSITIONAL_JOIN",
-        "ASOF_JOIN",
-    }
-    round1_operator_names = {"SJ_BUILD_ROUND_1", "SJ_PROBE_ROUND_1"}
-    round2_operator_names = {"SJ_BUILD_ROUND_2", "SJ_PROBE_ROUND_2"}
-
-    def seconds_to_ns(value, label):
-        value = float(value)
-        if not math.isfinite(value) or value < 0.0:
-            raise ValueError(f"invalid {label} value {value!r}")
-        return int(round(value * 1_000_000_000))
-
-    def operator_components(root, profile_index):
-        totals_ns = [0, 0, 0]
-        operator_counts = [0, 0, 0]
-
-        def visit(node):
-            if not isinstance(node, dict):
-                raise ValueError(f"profile {profile_index} contains a non-object operator node")
-            name = node.get("operator_name")
-            operator_type = node.get("operator_type")
-            if not isinstance(name, str) or not isinstance(operator_type, str):
-                raise ValueError(f"profile {profile_index} operator identity is missing")
-            if "operator_timing" not in node:
-                raise ValueError(f"profile {profile_index} operator {name!r} has no timing")
-            elapsed_ns = seconds_to_ns(
-                node["operator_timing"], f"operator_timing for {name!r}"
-            )
-
-            phase = None
-            if name in round1_operator_names:
-                phase = 0
-            elif name in round2_operator_names:
-                phase = 1
-            elif operator_type in join_operator_types:
-                phase = 2
-            if phase is not None:
-                totals_ns[phase] += elapsed_ns
-                operator_counts[phase] += 1
-
-            children = node.get("children", [])
-            if not isinstance(children, list):
-                raise ValueError(f"profile {profile_index} operator {name!r} has invalid children")
-            for child in children:
-                visit(child)
-
-        children = root.get("children")
-        if not isinstance(children, list):
-            raise ValueError(f"profile {profile_index} has no physical-operator tree")
-        for child in children:
-            visit(child)
-        return totals_ns, operator_counts
-
-    samples = []
-    expected = normalize_query(expected_query)
-    for index in range(0, runs + 1):
-        path = os.path.join(profile_dir, f"profile_{index}.json")
-        with open(path, encoding="utf-8") as f:
-            root = json.load(f)
-        missing = sorted({"query_name", "latency", "cpu_time", "children"}.difference(root))
-        if missing:
-            raise ValueError(f"profile {index} is missing keys: {', '.join(missing)}")
-        if normalize_query(root["query_name"]) != expected:
-            raise ValueError(f"profile {index} query_name does not match the timed query")
-
-        profile_wall_ns = seconds_to_ns(root["latency"], "latency")
-        if profile_wall_ns <= 0:
-            raise ValueError(f"profile {index} has non-positive latency")
-        profile_cpu_ns = seconds_to_ns(root["cpu_time"], "cpu_time")
-        if profile_cpu_ns <= 0:
-            raise ValueError(f"profile {index} has non-positive cpu_time")
-
-        totals_ns, operator_counts = operator_components(root, index)
-
-        if expected_plan == "DUCKDB" and any(totals_ns[:2] + operator_counts[:2]):
-            raise ValueError(f"profile {index} DuckDB plan unexpectedly executed a semi-join phase")
-        if not proven_empty and operator_counts[2] == 0:
-            raise ValueError(f"profile {index} non-empty join plan has no R3 operator")
-        if expected_plan == "OUTERYAN" and not proven_empty:
-            for phase, pairs, elapsed_ns, operators in zip(
-                ("R1", "R2"), expected_round_pairs, totals_ns[:2], operator_counts[:2]
-            ):
-                if pairs == 0 and (elapsed_ns != 0 or operators != 0):
-                    raise ValueError(f"profile {index} {phase} ran with zero planned pairs")
-                if pairs > 0 and operators == 0:
-                    raise ValueError(f"profile {index} {phase} has {pairs} planned pairs but did not run")
-
-        component_total_ns = sum(totals_ns)
-        if component_total_ns > profile_cpu_ns:
-            # Root CPU_TIME is rounded once, while each classified operator is
-            # rounded independently. Accept only the maximum possible
-            # nanosecond conversion delta, then normalize CPU-Time upward so
-            # the displayed integer-nanosecond closure remains exact.
-            rounding_tolerance_ns = max(1, sum(operator_counts) + 1)
-            if component_total_ns - profile_cpu_ns > rounding_tolerance_ns:
-                raise ValueError(
-                    f"profile {index} components {component_total_ns}ns exceed "
-                    f"CPU-Time {profile_cpu_ns}ns"
-                )
-            profile_cpu_ns = component_total_ns
-        other_ns = profile_cpu_ns - component_total_ns
-
-        # Profile 0 is the warm-up. It receives every consistency check above,
-        # but is not included in the timed median.
-        if index == 0:
-            continue
-        samples.append(
-            (profile_wall_ns, index, profile_cpu_ns, *totals_ns, other_ns, *operator_counts)
-        )
-
-    if not samples:
-        raise ValueError("no complete timed profile samples")
-    samples.sort(key=lambda sample: (sample[0], sample[1]))
-    wall_ns, _, cpu_ns, r1_ns, r2_ns, real_join_ns, other_ns, r1_operators, r2_operators, real_join_operators = \
-        samples[(len(samples) - 1) // 2]
-
-    def seconds(value_ns):
-        return f"{value_ns / 1_000_000_000:.9f}"
-
-    # Quantize the three classified CPU-work shares downward and give the
-    # remaining units to OtherCPU. The four displayed ratios therefore add to
-    # exactly 1.000000000 while each remains in [0, 1].
-    ratio_scale = 1_000_000_000
-    r1_ratio_units = r1_ns * ratio_scale // cpu_ns
-    r2_ratio_units = r2_ns * ratio_scale // cpu_ns
-    join_ratio_units = real_join_ns * ratio_scale // cpu_ns
-    other_ratio_units = ratio_scale - r1_ratio_units - r2_ratio_units - join_ratio_units
-
-    def ratio(units):
-        return f"{units // ratio_scale}.{units % ratio_scale:09d}"
-
-    print("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}".format(
-        seconds(r1_ns), seconds(r2_ns), seconds(real_join_ns), seconds(wall_ns), seconds(cpu_ns),
-        ratio(r1_ratio_units), ratio(r2_ratio_units), ratio(r1_ratio_units + r2_ratio_units),
-        ratio(join_ratio_units), seconds(other_ns), ratio(other_ratio_units), r1_operators, r2_operators,
-        real_join_operators, len(samples)))
-except Exception as exc:
-    print(f"PROFILE-ERROR: {exc}", file=sys.stderr)
-    print(failure)
-    sys.exit(1)
-PY
-    rm -f "$sqlf" "$rawf"
-    for ((i=0; i<=runs; i++)); do
-        rm -f "$profiledir/profile_${i}.json"
-    done
-    rmdir "$profiledir" 2>/dev/null || true
-    return "$profile_rc"
-}
-
-oy_phase_profile_failure() {
-    echo "NA NA NA NA NA NA NA NA NA NA NA NA NA NA NA"
 }
 
 # ============================================================================
@@ -1006,6 +732,7 @@ LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=()
 oy_relation_count() {
     printf '%s\n' "$1" | awk '
         {
+            sub(/--.*/, "")
             gsub(/[^[:alnum:]_]+/, " ")
             for (i = 1; i <= NF; i++) {
                 token = tolower($i)
@@ -1089,7 +816,7 @@ fi
 SIZES="families=[$FAMS]  graph=$GRAPH_DATASET  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF  job db=$JOB_DB"
 
 # ============================================================================
-# RUN: gate -> decision -> kernel/profile/time, streaming to TXT/CSV
+# RUN: gate -> decision -> kernel/time, streaming to TXT/CSV
 # ============================================================================
 CSV_FINAL="${OUT%.txt}.csv"
 CSV_ATTEMPTS="${OUT%.txt}.attempts.csv"
@@ -1133,13 +860,8 @@ CSV_HEADER=(
     raw_cost_delta raw_cost_ratio gate_lhs gate_rhs gate_margin
     inner_output_weight unmatched_left_weight unmatched_right_weight semijoin_materialize_weight
     semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight semijoin_probe_emit_weight
-    kernel kernel_detail kernel_hash_reasons correct note t1_off t1_on t1_speedup tm_off tm_on tm_speedup
-    profile_round1_operator_s profile_round2_operator_s profile_round3_operator_s
-    profile_round1_operator_count profile_round2_operator_count profile_round3_operator_count
-    profile_total_time_s profile_round1_ratio profile_round2_ratio
-    profile_total_sj_ratio profile_round3_ratio profile_other_elapsed_s profile_other_ratio
-    profile_timed_samples rows effective_pass duckdb_plan enabled_plan trace_file cost_file
-    profile_threads profile_cpu_time_s
+    kernel kernel_detail kernel_hash_reasons correct note timing_threads tm_off tm_on tm_speedup
+    rows effective_pass duckdb_plan enabled_plan trace_file cost_file
 )
 : > "$CSV_FINAL"
 : > "$CSV_ATTEMPTS"
@@ -1153,11 +875,8 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
-    echo "# timing : threads=1+${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
-    echo "# phases : native profile at threads=${OY_THREADS} (1 warm-up + ${RUNS} timed); Total-Time is JSON query latency"
-    echo "#          one median profile tuple is kept whole; R1 + R2 + R3 + OtherCPU = CPU-Time"
-    echo "#          R1/R2/R3/OtherCPU are aggregate active operator work, not wall-clock phases"
-    echo "# overhead: native profiling is enabled only for the phase batch; T1/TM explicitly disable profiling"
+    echo "# timing : threads=${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
+    echo "# overhead: profiling is disabled for every execution; no phase batch"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
@@ -1167,9 +886,9 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# capture : plans=$CAPTURE_PLANS directory=$PLAN_DIR"
     echo
     echo "===================== PER-QUERY RESULT BLOCKS ========================="
-    echo "# Columns: T1 = unprofiled single-thread; Total-Time = profiled TM query latency; TM = threads=${OY_THREADS}"
+    echo "# Columns: TM = unprofiled wall-clock timing at threads=${OY_THREADS}"
     echo "# Each query has exactly two lines after a full-width separator:"
-    echo "#   line 1 = query/result, selected plan, kernel, profile, TM, and T1"
+    echo "#   line 1 = query/result, selected plan, kernel, thread count, and TM"
     echo "#   line 2 = decision, cost/gate inputs, weights, notices, and artifacts"
     echo "#   kernel = not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) | none(b=0,h=0)"
 } > "$OUT"
@@ -1191,18 +910,13 @@ QRAW_DELTA=(); QRAW_RATIO=(); QGATE_LHS=(); QGATE_RHS=(); QGATE_MARGIN=()
 QINNER_WEIGHT=(); QUNMATCHED_LEFT_WEIGHT=(); QUNMATCHED_RIGHT_WEIGHT=()
 QSJ_MATERIALIZE_WEIGHT=(); QSJ_FILTER_BUILD_WEIGHT=(); QSJ_REPLAY_WEIGHT=()
 QSJ_LOOKUP_WEIGHT=(); QSJ_EMIT_WEIGHT=()
-QOFF1=(); QON1=(); QRATIO1=()
 QOFFM=(); QONM=(); QRATIOM=()
-QR1SJ=(); QR2SJ=(); QREALJOIN=(); QPROFILE_WALL=(); QPROFILE_CPU=()
-QR1SJ_OPERATOR_COUNT=(); QR2SJ_OPERATOR_COUNT=(); QREALJOIN_OPERATOR_COUNT=()
-QR1RATIO=(); QR2RATIO=(); QSJRATIO=(); QREALJOIN_RATIO=()
-QOTHER=(); QOTHER_RATIO=(); QPROFILE_SAMPLES=()
 QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FILE=()
 
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
 # process_one <i> — run the full pipeline for query i (gate -> decision -> kernel
-# -> profile -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
@@ -1233,11 +947,7 @@ process_one() {
     local sj_materialize_weight="-" sj_filter_build_weight="-" sj_replay_weight="-"
     local sj_lookup_weight="-" sj_emit_weight="-"
     local ker="not-run" kdetail="b0h0" kreasons="-" kernel_status="not-run" kernel_display="not-run"
-    local offm="-" onm="-" ratiom="-" off1="-" on1="-" ratio1="-"
-    local r1sj="-" r2sj="-" realjoin="-" profile_threads="-" profile_wall="-" profile_cpu="-"
-    local r1sj_operator_count="-" r2sj_operator_count="-" realjoin_operator_count="-"
-    local r1ratio="-" r2ratio="-" sjratio="-" realjoin_ratio="-"
-    local other="-" other_ratio="-" profile_samples="-" profile_display="not-run"
+    local offm="-" onm="-" ratiom="-"
     local duckdb_plan="-" enabled_plan="-" trace_file="-" cost_file="-"
     if [ "$correct" = "TRUE" ]; then
         if [ "$CAPTURE_PLANS" = 1 ]; then
@@ -1320,56 +1030,11 @@ process_one() {
             ker="not-run"; kdetail="b0h0"; kreasons="-"; kernel_status="not-run"
         fi
         kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
-        local praw profile_rc=0
-        local -a profile_fields=()
-        profile_threads="$OY_THREADS"
-        praw="$(oy_phase_profile "$db" "$sql" "${OY_THREADS}" "$RUNS" "$selected_plan" \
-            "$round1_pairs" "$round2_pairs" "$proven_empty")" || profile_rc=$?
-        read -r -a profile_fields <<< "$praw"
-        if [ "${#profile_fields[@]}" -ne 15 ]; then
-            echo "PROFILE-ERROR: profiler helper emitted ${#profile_fields[@]} fields, expected 15" >&2
-            praw="$(oy_phase_profile_failure)"
-            profile_rc=1
-        fi
-        read -r r1sj r2sj realjoin profile_wall profile_cpu r1ratio r2ratio sjratio realjoin_ratio \
-            other other_ratio r1sj_operator_count r2sj_operator_count realjoin_operator_count \
-            profile_samples <<< "$praw"
-        local profile_failed=0
-        if [ "$profile_rc" -ne 0 ] || [ "$profile_wall" = "NA" ]; then
-            note="${note};PROFILE-ERROR"
-            profile_failed=1
-        fi
-        if [ "$selected_plan" != "OUTERYAN" ]; then
-            r1sj="NA"; r2sj="NA"; r1ratio="NA"; r2ratio="NA"; sjratio="NA"
-            r1sj_operator_count="NA"; r2sj_operator_count="NA"
-        fi
-        if [ "$profile_failed" = 1 ]; then
-            profile_display="threads=${OY_THREADS} ERROR"
-        elif [ "$selected_plan" = "OUTERYAN" ]; then
-            local r1_display r2_display
-            r1_display="$(oy_round_profile_display R1 "$r1sj" "$r1ratio" \
-                "$round1_pairs" "$round1_filters" "$r1sj_operator_count" "$proven_empty")"
-            r2_display="$(oy_round_profile_display R2 "$r2sj" "$r2ratio" \
-                "$round2_pairs" "$round2_filters" "$r2sj_operator_count" "$proven_empty")"
-            printf -v profile_display 'threads=%s Total-Time=%ss CPU-Time=%ss %s %s R3=%ss(%s,operators=%s) OtherCPU=%ss(%s)' \
-                "$OY_THREADS" "$profile_wall" "$profile_cpu" "$r1_display" "$r2_display" "$realjoin" \
-                "$(oy_profile_percent "$realjoin_ratio")" "$realjoin_operator_count" \
-                "$other" "$(oy_profile_percent "$other_ratio")"
-        else
-            printf -v profile_display \
-                'threads=%s Total-Time=%ss CPU-Time=%ss R1=NA(no-sj-plan) R2=NA(no-sj-plan) R3=%ss(%s,operators=%s) OtherCPU=%ss(%s)' \
-                "$OY_THREADS" "$profile_wall" "$profile_cpu" "$realjoin" "$(oy_profile_percent "$realjoin_ratio")" \
-                "$realjoin_operator_count" "$other" "$(oy_profile_percent "$other_ratio")"
-        fi
-        local local_rom local_rnm local_ro1 local_rn1
+        local local_rom local_rnm
         local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
         offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
         ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-        local_ro1="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" 1)"
-        local_rn1="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" 1)"
-        off1="$(echo "$local_ro1" | awk '{print $1}')"; on1="$(echo "$local_rn1" | awk '{print $1}')"
-        ratio1="$(awk -v off="$off1" -v on="$on1" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
     fi
     # Store final state for the summary.
     QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
@@ -1399,22 +1064,14 @@ process_one() {
     QSJ_REPLAY_WEIGHT[$i]="$sj_replay_weight"; QSJ_LOOKUP_WEIGHT[$i]="$sj_lookup_weight"
     QSJ_EMIT_WEIGHT[$i]="$sj_emit_weight"
     QOFFM[$i]="$offm"; QONM[$i]="$onm"; QRATIOM[$i]="$ratiom"
-    QOFF1[$i]="$off1"; QON1[$i]="$on1"; QRATIO1[$i]="$ratio1"
-    QR1SJ[$i]="$r1sj"; QR2SJ[$i]="$r2sj"; QREALJOIN[$i]="$realjoin"
-    QR1SJ_OPERATOR_COUNT[$i]="$r1sj_operator_count"; QR2SJ_OPERATOR_COUNT[$i]="$r2sj_operator_count"
-    QREALJOIN_OPERATOR_COUNT[$i]="$realjoin_operator_count"
-    QPROFILE_WALL[$i]="$profile_wall"; QPROFILE_CPU[$i]="$profile_cpu"
-    QR1RATIO[$i]="$r1ratio"; QR2RATIO[$i]="$r2ratio"
-    QSJRATIO[$i]="$sjratio"; QREALJOIN_RATIO[$i]="$realjoin_ratio"
-    QOTHER[$i]="$other"; QOTHER_RATIO[$i]="$other_ratio"; QPROFILE_SAMPLES[$i]="$profile_samples"
     QEFFECTIVE_PASS[$i]="$PASS"; QDUCKDB_PLAN[$i]="$duckdb_plan"; QENABLED_PLAN[$i]="$enabled_plan"
     QTRACE_FILE[$i]="$trace_file"; QCOST_FILE[$i]="$cost_file"
     # ---- append to TXT and CSV ----
     local primary_line detail_line detail_suffix gate_detail
     printf -v primary_line \
-        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s kernel=%s profile=[%s]  TM:off=%s on=%s spd=%s  T1:off=%s on=%s spd=%s' \
+        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s kernel=%s threads=%s  TM:off=%s on=%s spd=%s' \
         "$((i+1))" "${#LABELS[@]}" "$id" "$correct" "$outer_reordered" "$selected_plan" \
-        "$kernel_display" "$profile_display" "$offm" "$onm" "$ratiom" "$off1" "$on1" "$ratio1"
+        "$kernel_display" "$OY_THREADS" "$offm" "$onm" "$ratiom"
     printf -v detail_line \
         '  details: family=%s sql=%s pass=%s timeout=%ss note=%s rows=%s nrel=%s' \
         "$family" "$sql_path" "$PASS" "$OY_TIMEOUT_SECS" "$note" "$rows" "$nrel"
@@ -1488,19 +1145,15 @@ process_one() {
         "$raw_delta" "$raw_ratio" "$gate_lhs" "$gate_rhs" "$gate_margin" \
         "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
         "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" "$sj_lookup_weight" "$sj_emit_weight" \
-        "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$off1" "$on1" "$ratio1" \
-        "$offm" "$onm" "$ratiom" "$r1sj" "$r2sj" "$realjoin" \
-        "$r1sj_operator_count" "$r2sj_operator_count" "$realjoin_operator_count" \
-        "$profile_wall" "$r1ratio" "$r2ratio" "$sjratio" "$realjoin_ratio" \
-        "$other" "$other_ratio" "$profile_samples" "$rows" "$PASS" \
-        "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file" \
-        "$profile_threads" "$profile_cpu"
+        "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$OY_THREADS" \
+        "$offm" "$onm" "$ratiom" "$rows" "$PASS" \
+        "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============
 echo "Temporary result storage: $OY_RUN_TMPDIR" >&2
 echo "Temporary filesystem: $OY_TMP_FREE available on $OY_TMP_MOUNT (base=$OY_TMPDIR)" >&2
-echo "--- Per-query: correctness + multi-thread (TM=${OY_THREADS}) + single-thread (T1=1) ---" >&2
+echo "--- Per-query: correctness + multi-thread timing (TM=${OY_THREADS}) ---" >&2
 for ((i=0; i<${#LABELS[@]}; i++)); do
     process_one "$i"
 done
@@ -1511,13 +1164,10 @@ NCORRECT=0; NTIMED=0; NKBM=0; NKHASH=0; NKMIX=0
 NNO=0; NYES=0; SUMNO=0; SUMYES=0
 NBASELINE=0; NOUTERYAN=0; SUMBASELINE=0; SUMOUTERYAN=0
 NSAME=0; NREJECT=0; NSELECTED=0; NDECISION_UNKNOWN=0; NGATE_APPLIED=0
-NPHASE=0; SUMR1=0; SUMR2=0; SUMJOIN=0
 for ((i=0; i<QN; i++)); do
     [ "${QCORRECT[i]}" = "TRUE" ] || continue
     NCORRECT=$((NCORRECT+1))
-    if [ "${QRATIO1[i]}" != "NA" ] || [ "${QRATIOM[i]}" != "NA" ]; then
-        NTIMED=$((NTIMED+1))
-    fi
+    case "${QRATIOM[i]}" in ''|NA|-) ;; *) NTIMED=$((NTIMED+1));; esac
     case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
     [ "${QGATE[i]}" = "1" ] && NGATE_APPLIED=$((NGATE_APPLIED+1))
     case "${QREORDERED[i]}:${QSELECTED[i]}" in
@@ -1526,16 +1176,7 @@ for ((i=0; i<QN; i++)); do
         0:1|1:1) NSELECTED=$((NSELECTED+1));;
         *)   NDECISION_UNKNOWN=$((NDECISION_UNKNOWN+1));;
     esac
-    case "${QPROFILE_WALL[i]}" in
-        ''|NA|-) ;;
-        *)
-            NPHASE=$((NPHASE+1))
-            case "${QR1SJ[i]}" in ''|NA|-) ;; *) SUMR1="$(awk -v s="$SUMR1" -v v="${QR1SJ[i]}" 'BEGIN{print s+v}')";; esac
-            case "${QR2SJ[i]}" in ''|NA|-) ;; *) SUMR2="$(awk -v s="$SUMR2" -v v="${QR2SJ[i]}" 'BEGIN{print s+v}')";; esac
-            case "${QREALJOIN[i]}" in ''|NA|-) ;; *) SUMJOIN="$(awk -v s="$SUMJOIN" -v v="${QREALJOIN[i]}" 'BEGIN{print s+v}')";; esac
-            ;;
-    esac
-    [ "${QRATIOM[i]}" = "NA" ] && continue
+    case "${QRATIOM[i]}" in ''|NA|-) continue;; esac
     case "${QREG[i]}" in
         No)  NNO=$((NNO+1));   SUMNO="$(awk -v s="$SUMNO" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
         Yes) NYES=$((NYES+1)); SUMYES="$(awk -v s="$SUMYES" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
@@ -1550,15 +1191,12 @@ MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 MBASELINE="$(awk -v s="$SUMBASELINE" -v n="$NBASELINE" 'BEGIN{print (n? s/n : "-")}')"
 MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-")}')"
-MR1="$(awk -v s="$SUMR1" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
-MR2="$(awk -v s="$SUMR2" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
-MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
 {
     echo
     echo "============================== SUMMARY ================================"
     echo "queries=$QN  correct=$NCORRECT  incorrect/skipped=$NSKIP  timed=$NTIMED"
     echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
-    echo "threads: single=1, multi=${OY_THREADS}"
+    echo "threads: multi=${OY_THREADS}"
     echo "OuterYan decisions: same-grouping=$NSAME  changed-rejected=$NREJECT  selected=$NSELECTED  unknown=$NDECISION_UNKNOWN  cost-gate-applied=$NGATE_APPLIED"
     echo "coverage by relation count:"
     while IFS= read -r nrel; do
@@ -1569,9 +1207,7 @@ MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
             nrel_queries=$((nrel_queries+1))
             [ "${QCORRECT[i]}" = "TRUE" ] || continue
             nrel_correct=$((nrel_correct+1))
-            if [ "${QRATIO1[i]}" != "NA" ] || [ "${QRATIOM[i]}" != "NA" ]; then
-                nrel_timed=$((nrel_timed+1))
-            fi
+            case "${QRATIOM[i]}" in ''|NA|-) ;; *) nrel_timed=$((nrel_timed+1));; esac
         done
         echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  timed=$nrel_timed"
     done < <(printf '%s\n' "${QNREL[@]}" | sort -n -u)
@@ -1581,11 +1217,6 @@ MJOIN="$(awk -v s="$SUMJOIN" -v n="$NPHASE" 'BEGIN{print (n? s/n : "-")}')"
     echo "speed-up by outer_yan_selected:"
     echo "  DuckDB baseline: n=$NBASELINE  mean speed-up(TM)=$MBASELINE"
     echo "  OuterYan:        n=$NOUTERYAN  mean speed-up(TM)=$MOUTERYAN"
-    echo "native active-operator work-seconds (n=$NPHASE profiled ON queries, threads=${OY_THREADS}):"
-    echo "  round 1 semi-join: sum=$SUMR1  mean=$MR1"
-    echo "  round 2 semi-join: sum=$SUMR2  mean=$MR2"
-    echo "  round 3 real join: sum=$SUMJOIN  mean=$MJOIN"
-    echo "  Per-query CPU-Time is closed by R1 + R2 + R3 + OtherCPU; Total-Time is wall latency."
 } >> "$OUT"
 
 echo "Results written to $OUT"

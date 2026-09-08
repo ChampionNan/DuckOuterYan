@@ -16,9 +16,11 @@
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 100)
 #   TPCDS_SF         TPC-DS scale factor (default 100)
-#   OY_THREADS       Multi-thread profile/timing count (default 48)
+#   OY_THREAD_COUNTS Sequential timing counts (default "16 32")
+#   OY_THREADS       Override with one multi-thread timing count
+#   --threads LIST   CLI override, e.g. "16 32" or 16,32
 #   OY_RUNS          Legacy timed iterations and PGPLAN_RUNS fallback (default 3)
-#   PGPLAN_RUNS      PGPlan TM measured iterations (default OY_RUNS); T1 is fixed at 1
+#   PGPLAN_RUNS      PGPlan TM measured iterations (default OY_RUNS)
 #   JOBS             Make parallelism (default: nproc)
 #   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
@@ -61,7 +63,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # which must not accidentally activate run_all's custom-corpus mode.
 CALLER_OY_CORPUS="${OY_CORPUS:-}"
 CALLER_DUCKDB_BIN="${DUCKDB_BIN:-}"
+CALLER_PGPLAN_THREADS="${PGPLAN_THREADS:-${PG_REPLAY_THREADS:-}}"
 . "$SCRIPT_DIR/configs.sh"
+. "$SCRIPT_DIR/thread_sweep.sh"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 export PYTHON_BIN
 
@@ -92,9 +96,17 @@ RUN_STATUS=0
 RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}"
 CUSTOM_CORPUS="$CALLER_OY_CORPUS"
 REUSE_SHORTCUT_FROM="${PGPLAN_REUSE_FROM:-}"
+THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
+if [ "$RUN_PGPLAN" = 1 ] && [ -n "$CALLER_PGPLAN_THREADS" ]; then
+    THREAD_COUNTS="$CALLER_PGPLAN_THREADS"
+fi
 argument_index=0
 while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
-    if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--reuse-from" ]; then
+    if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--threads" ]; then
+        [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ] || err "--threads requires a value"
+        THREAD_COUNTS="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
+        argument_index=$((argument_index + 2))
+    elif [ "${EXPERIMENT_ARGS[$argument_index]}" = "--reuse-from" ]; then
         [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ] || \
             err "--reuse-from requires a prior corpus directory"
         REUSE_SHORTCUT_FROM="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
@@ -103,6 +115,7 @@ while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
         argument_index=$((argument_index + 1))
     fi
 done
+oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 if [ -n "$REUSE_SHORTCUT_FROM" ]; then
     for skip_name in SKIP_BUILD SKIP_DATA SKIP_QUERY_GEN; do
         if [ "${!skip_name+x}" = "x" ] && [ "${!skip_name}" != "1" ]; then
@@ -241,6 +254,9 @@ run_pgplan_corpus() {
         correctness_mode="reuse"
         correctness_from="$reuse_from"
     fi
+    if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
+        out_dir="${out_dir}_t${OY_THREADS}"
+    fi
 
     # Record the handoff location before running the corpus. The corpus returns
     # nonzero when any query fails, but its status and aggregate reports are
@@ -268,6 +284,7 @@ run_pgplan_corpus() {
     if [ "${#EXPERIMENT_ARGS[@]}" -gt 0 ]; then
         corpus_command+=("${EXPERIMENT_ARGS[@]}")
     fi
+    corpus_command+=(--threads "$OY_THREADS" --out "$out_dir")
 
     if [ "$comparison_mode" = "none" ]; then
         log "Step 4/5: Checking the persistent PGPlan cache and preparing cache misses (correctness disabled)"
@@ -301,29 +318,41 @@ run_pgplan_corpus() {
 
 # --- Step 5: Run corpus experiments -----------------------------------------
 run_experiment() {
-    local label="$1" corpus="$2" default_only="$3" out
-    out="$SCRIPT_DIR/results/experiment_onoff_${label}_${RUN_TS}.txt"
-    log "Step 5/5: Running $label on/off experiment"
-    OY_CORPUS="$corpus" bash "$SCRIPT_DIR/experiment_onoff.sh" \
-        --only "$default_only" "${EXPERIMENT_ARGS[@]}" -o "$out" \
-        2>&1 | tee -a "$RUN_LOG"
+    local label="$1" corpus="$2" default_only="$3" out experiment_status=0
+    out="$SCRIPT_DIR/results/experiment_onoff_${label}_${RUN_TS}_t${OY_THREADS}.txt"
+    log "Step 5/5: Running $label on/off experiment (threads=$OY_THREADS)"
+    if OY_CORPUS="$corpus" bash "$SCRIPT_DIR/experiment_onoff.sh" \
+        --only "$default_only" "${EXPERIMENT_ARGS[@]}" --threads "$OY_THREADS" -o "$out" \
+        2>&1 | tee -a "$RUN_LOG"; then
+        :
+    else
+        experiment_status=$?
+    fi
     RESULT_TXTS+=("$out")
+    return "$experiment_status"
 }
 
 STEP4_START=$SECONDS
-if [ "$RUN_PGPLAN" = "1" ]; then
-    if run_pgplan_corpus; then
-        RUN_STATUS=0
+for thread_count in "${OY_THREAD_VALUES[@]}"; do
+    export OY_THREADS="$thread_count" OY_THREAD_COUNTS="$thread_count"
+    export PGPLAN_THREADS="$thread_count" PG_REPLAY_THREADS="$thread_count"
+    log "Multi-thread configuration: threads=$thread_count"
+    thread_status=0
+    if [ "$RUN_PGPLAN" = "1" ]; then
+        run_pgplan_corpus || thread_status=$?
+    elif [ -n "$CUSTOM_CORPUS" ]; then
+        log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
+        run_experiment "custom" "$CUSTOM_CORPUS" "all" || thread_status=$?
     else
-        RUN_STATUS=$?
+        log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
+        run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_query" "all" || thread_status=$?
     fi
-elif [ -n "$CUSTOM_CORPUS" ]; then
-    log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
-    run_experiment "custom" "$CUSTOM_CORPUS" "all"
-else
-    log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
-    run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_query" "all"
-fi
+    case "$thread_status" in
+        130|143) exit "$thread_status";;
+        0) ;;
+        *) RUN_STATUS="$thread_status";;
+    esac
+done
 log "Experiments complete ($(elapsed $((SECONDS - STEP4_START))))"
 
 # --- Summary -----------------------------------------------------------------

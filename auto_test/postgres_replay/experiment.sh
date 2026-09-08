@@ -29,7 +29,7 @@ Optional:
   --comparison-mode MODE
                       Fresh correctness work: both, pgplan-only, or none
                       (PGPLAN_COMPARISON_MODE; default: both). All modes still
-                      run settings, EXPLAIN, PGPlan verification, TM, and T1.
+                      run settings, EXPLAIN, PGPlan verification, and TM.
   --reuse-correctness-from PATH
                       Performance-only mode: reuse a sealed, target-scale
                       correctness receipt from a prior per-query experiment
@@ -42,10 +42,9 @@ Optional:
                       Precomputed DuckDB binary SHA-256
                       (PGPLAN_DUCKDB_BIN_SHA256; otherwise computed locally)
   --runs N            Positive odd TM measured-run count after one warm-up
-                      (PGPLAN_RUNS, default: 3). T1 always runs one warm-up
-                      plus one measured execution.
+                      (PGPLAN_RUNS, default: 3).
   --threads N         Positive DuckDB thread count
-                      (PGPLAN_THREADS, default: 1)
+                      (PGPLAN_THREADS, default: 16; run_all.sh sweeps 16/32)
   -h, --help          Show this help
 
 Optional environment controls:
@@ -63,7 +62,7 @@ Optional environment controls:
 The output directory always receives plans, traces, settings, timing logs, and
 copies/hashes of the query and PostgreSQL artifact. Correctness result artifacts
 depend on --comparison-mode or a validated reuse receipt.
-TM and T1 are DuckDB CLI `.timer` real wall-clock samples of the fully drained
+TM uses DuckDB CLI `.timer` real wall-clock samples of the fully drained
 bare query in `.mode trash`; result serialization and filesystem output are not
 charged to the query-execution benchmark.
 EOF
@@ -95,7 +94,7 @@ QUERY_PATH="${PGPLAN_QUERY:-${PG_REPLAY_QUERY:-}}"
 PLAN_PATH="${PGPLAN_PLAN:-${PG_REPLAY_PLAN:-}}"
 OUT_DIR="${PGPLAN_OUT:-${PG_REPLAY_OUT:-}}"
 RUNS="${PGPLAN_RUNS:-${PG_REPLAY_RUNS:-3}}"
-THREADS="${PGPLAN_THREADS:-${PG_REPLAY_THREADS:-1}}"
+THREADS="${PGPLAN_THREADS:-${PG_REPLAY_THREADS:-16}}"
 TIMEOUT_SECS="${PGPLAN_TIMEOUT_SECS:-${PG_REPLAY_TIMEOUT_SECS:-0}}"
 TIMEOUT_GRACE="${PGPLAN_TIMEOUT_GRACE:-${PG_REPLAY_TIMEOUT_GRACE:-30}}"
 KEEP_CORRECTNESS_FILES="${PGPLAN_KEEP_CORRECTNESS_FILES:-1}"
@@ -1278,11 +1277,8 @@ run_timing_suite() {
 printf 'Timing one warm-up plus %s measured runs per configuration at threads=%s...\n' \
 	"$RUNS" "$THREADS"
 run_timing_suite timing "$THREADS" "$RUNS" "$OUT_DIR/timing/summary.tsv" ""
-printf 'Timing one warm-up plus one measured run per configuration at threads=1...\n'
-run_timing_suite timing_t1 1 1 "$OUT_DIR/timing/t1_summary.tsv" "t1_"
 
 FINISHED_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 printf 'finished_utc=%s\nstatus=PASS\n' "$FINISHED_UTC" >> "$OUT_DIR/provenance/manifest.txt"
 printf 'PASS. Artifacts: %s\n' "$OUT_DIR"
 cat "$OUT_DIR/timing/summary.tsv"
-cat "$OUT_DIR/timing/t1_summary.tsv"

@@ -66,7 +66,7 @@ The opt-in `RUN_PGPLAN=1` workflow:
 4. captures missing/stale PGPlan artifacts with plain `EXPLAIN` and publishes
    them to the cache; and
 5. performs the requested correctness mode, then records independent Original,
-   PGPlan, and OuterYan TM and T1 timing batches on target data.
+   PGPlan, and OuterYan TM timing batches on target data.
 
 The default corpus is all 206 queries under `auto_test/outerjoin_query`:
 
@@ -121,7 +121,7 @@ the prior fingerprints cannot be invalidated. The corpus runner also skips
 PostgreSQL setup, sampled PostgreSQL loading, and plain-EXPLAIN capture. For
 each selected query it safely resolves and copies the prior PGPlan artifact,
 validates the sealed target-scale correctness receipt, and then runs the same
-Native/PGPlan/OuterYan EXPLAIN, importer verification, TM, and T1 phases into a
+Native/PGPlan/OuterYan EXPLAIN, importer verification, and TM phases into a
 new result directory.
 
 Reuse is fail-closed and never silently performs fresh correctness or selects a
@@ -168,8 +168,11 @@ never falls back to DuckDB's native tree.
 Despite the historical PGPlan name, this corpus command performs all three
 DuckDB configurations for every successful query: Native, imported PGPlan,
 and normal OuterYan. Each successful run retains its three TM medians in
-`runs/<family>/<query>/timing/summary.tsv` and its three single-thread medians
-in `timing/t1_summary.tsv`. Before returning success or failure,
+`runs/<family>/<query>/timing/summary.tsv`; no single-thread batch is run.
+`run_all.sh` defaults to sequential 16- and 32-thread runs, with separate
+`_t16` / `_t32` directories. Correctness-reuse receipts are thread-specific;
+select `--threads N` matching the source when using `--reuse-from`.
+Before returning success or failure,
 the corpus runner produces `comparison.tsv` and `comparison.csv` with one row
 per selected query, a human-readable `comparison.log`, `summary.tsv` with
 overall and per-family aggregate speedups, and `failures.tsv` with all
@@ -182,7 +185,7 @@ Incomplete rows never inherit partial timing output.
 The CSV/TSV begins with the complete `experiment_onoff.sh` header in its
 original order and with its original meanings. Existing two-way analysis can
 therefore ignore every later column. Every appended field includes `pgplan` in
-its name and covers verification, `tm_pgplan`, `t1_pgplan`, comparison
+its name and covers verification, `tm_pgplan`, comparison
 mode/status, or correctness provenance. Raw plan signatures remain in trace
 artifacts and are not copied into the human log or CSV.
 
@@ -192,16 +195,17 @@ columns state exactly which result checks ran. Reused rows additionally retain
 their source and receipt SHA-256 values. Older artifacts leave new fields empty
 rather than guessing an origin.
 
-For completed performance, the original CSV's `TM:off/on` and `T1:off/on`
-fields retain their Original/OuterYan meanings. Appended `tm_pgplan` and
-`t1_pgplan` fields add PGPlan. Legacy Original/PGPlan speedup fields remain for
+For completed performance, the CSV's `tm_off` / `tm_on` fields retain their
+Original/OuterYan meanings. Appended `tm_pgplan` adds PGPlan.
+Legacy Original/PGPlan speedup fields remain for
 compatibility, while new PGPlan/OuterYan fields provide the direct comparison.
 The human line orders times as Original, PGPlan, OuterYan and prints only
 Original/OuterYan and PGPlan/OuterYan ratios; values above one favor OuterYan.
-The workflow does not collect the legacy phase profile or semi-join kernel
-trace. Their placeholders are omitted from the human log while the original
-CSV columns remain empty/NA for compatibility. The original `rows` column is the complete target-database
-result count by default. TM and T1 use `.mode trash`: DuckDB executes and fully
+The workflow does not collect phase profiles or semi-join kernel traces.
+New reports contain no `profile_*` or `t1_*` columns; old `t1_*` values are
+appended only when re-summarizing real historical T1 artifacts. Kernel fields
+remain unavailable. The `rows` column is the complete target-database result
+count by default. TM uses `.mode trash`: DuckDB executes and fully
 materializes the bare query, while CLI result serialization and filesystem
 output are excluded from the real DuckDB CLI wall-clock timing.
 The correctness-database selected-plan column is blank when summarizing a
@@ -553,8 +557,8 @@ OuterYan on the correctness database. It externally sorts and compares those
 three complete result multisets. The execution database supplies all three
 EXPLAIN plans and semantic diagnostics; only after exact equality passes does
 the harness run independent timing batches. TM has one warm-up plus the
-requested odd number of measured release-build runs; T1 has one warm-up plus
-exactly one measured run for each configuration. `.mode trash` fully
+requested odd number of measured release-build runs; there is no extra
+single-thread batch. `.mode trash` fully
 drains every bare query but excludes CLI result serialization and output I/O
 from DuckDB's real wall-clock samples. It saves plans, traces,
 settings, both database paths, artifact provenance, correctness row counts, and

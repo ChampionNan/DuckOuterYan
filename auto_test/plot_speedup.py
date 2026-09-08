@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Render OuterYan ON/OFF results as one multi-page benchmark PDF.
 
-CSV files that share a ``YYYYMMDD_HHMMSS`` timestamp are one logical run.
+CSV files that share a ``YYYYMMDD_HHMMSS`` timestamp and optional thread suffix
+are one logical run. The ``_t16`` and ``_t32`` configurations remain separate.
 Consequently, historical ``core``, ``custom``, and ``industry_inspired`` CSVs
 from the same invocation are merged before plotting. Attempts files fill rows
 missing from the final CSV; final rows win duplicates.
 
 The PDF contains summary and shape/relation-count pages, compact per-query
 runtime views for all queries, separate JOB and other-benchmark OuterYan-selected
-runtime comparisons with both thread settings, and one vertical phase-breakdown
-figure shared by every family. There is intentionally no
+runtime comparisons (multi-thread only for new runs; both thread settings for
+historical runs), and a shared vertical phase breakdown when profiles exist.
+There is intentionally no
 kernel-speedup view.
 """
 
@@ -157,10 +159,10 @@ def result_source(path: str) -> tuple[str, str, str]:
     if source_kind == "attempts":
         stem = stem[: -len(".attempts")]
     stem = re.sub(r"^experiment_onoff_", "", stem)
-    match = re.search(r"(?:^|_)(\d{8}_\d{6})$", stem)
+    match = re.search(r"(?:^|_)(\d{8}_\d{6})(_t[1-9][0-9]*)?$", stem)
     if not match:
         return stem, source_kind, "custom"
-    run = match.group(1)
+    run = match.group(1) + (match.group(2) or "")
     label = stem[: match.start()].rstrip("_") or "legacy"
     return run, source_kind, label
 
@@ -181,7 +183,7 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
     frame["run"] = run
     numeric = [
         "t1_off", "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup", "rows",
-        "relation_count", "profile_threads", "profile_total_time_s", "profile_cpu_time_s",
+        "relation_count", "timing_threads", "profile_threads", "profile_total_time_s", "profile_cpu_time_s",
         *(seconds for _, seconds, _, _ in PHASES),
         *(ratio for _, _, ratio, _ in PHASES),
     ]
@@ -291,8 +293,9 @@ def load(paths: list[str]) -> pd.DataFrame:
 
 
 def timed(frame: pd.DataFrame) -> pd.DataFrame:
-    correct = frame.get("correct", "TRUE").astype(str).str.upper().eq("TRUE")
-    measured = frame["t1_speedup"].notna() | frame["tm_speedup"].notna()
+    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    missing = pd.Series(np.nan, index=frame.index)
+    measured = frame.get("t1_speedup", missing).notna() | frame.get("tm_speedup", missing).notna()
     return frame.loc[correct & measured].copy()
 
 
@@ -303,9 +306,13 @@ def grouped_box(ax: plt.Axes, frame: pd.DataFrame, column: str, order: list[str]
         return
     width = 0.38
     rng = np.random.default_rng(0)
-    for series_index, (metric, color) in enumerate((("t1_speedup", C_T1), ("tm_speedup", C_TM))):
+    metrics = [
+        (metric, color) for metric, color in (("t1_speedup", C_T1), ("tm_speedup", C_TM))
+        if metric in frame and frame[metric].notna().any()
+    ]
+    for series_index, (metric, color) in enumerate(metrics):
         data = [frame.loc[frame[column].eq(value), metric].dropna().to_numpy() for value in order]
-        positions = [index + (series_index - 0.5) * width for index in range(len(order))]
+        positions = [index + (series_index - (len(metrics) - 1) / 2.0) * width for index in range(len(order))]
         boxes = ax.boxplot(
             data, positions=positions, widths=width * 0.9, patch_artist=True,
             showfliers=False,
@@ -336,8 +343,8 @@ def grouped_box(ax: plt.Axes, frame: pd.DataFrame, column: str, order: list[str]
     ax.set_ylabel("speed-up (×; >1 = faster)")
     ax.set_title(title)
     ax.legend(
-        handles=[Patch(facecolor=C_T1, edgecolor="none", alpha=0.62, label="T1"),
-                 Patch(facecolor=C_TM, edgecolor="none", alpha=0.62, label="TM")], fontsize=8
+        handles=[Patch(facecolor=color, edgecolor="none", alpha=0.62, label=metric[:2].upper())
+                 for metric, color in metrics], fontsize=8
     )
 
 
@@ -561,12 +568,19 @@ def plot_runtime_axis(
     ax.set_title(f"{family} (n={len(sub)})", fontsize=10)
 
 
+def runtime_series(frame: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """New thread-tagged runs have only TM; legacy runs still require both pairs."""
+    if "timing_threads" in frame and frame["timing_threads"].notna().all():
+        return RUNTIME_SERIES[2:]
+    return RUNTIME_SERIES
+
+
 def selected_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
-    """Keep OuterYan-selected queries with all four finite, positive timings."""
+    """Keep selected queries with complete timings for their result schema."""
     plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
     sub = frame.loc[plans.eq("OUTERYAN")].copy()
     complete = pd.Series(True, index=sub.index)
-    for _, column, _ in RUNTIME_SERIES:
+    for _, column, _ in runtime_series(frame):
         values = pd.to_numeric(
             sub.get(column, pd.Series(np.nan, index=sub.index)), errors="coerce"
         )
@@ -578,16 +592,17 @@ def selected_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
 
 def page_selected_runtime_bars(pdf: PdfPages, frame: pd.DataFrame) -> None:
     sub, groups = grouped_query_positions(frame)
+    series = runtime_series(sub)
     x = sub["_x"].to_numpy(float)
-    values = sub[[column for _, column, _ in RUNTIME_SERIES]].to_numpy(float)
+    values = sub[[column for _, column, _ in series]].to_numpy(float)
     positive = values[np.isfinite(values) & (values > 0)]
     floor = 10 ** (np.log10(positive.min()) - 0.25)
     width = min(29.0, max(17.0, 4.0 + 0.44 * len(sub)))
     figure, ax = plt.subplots(figsize=(width, 7.8))
     bar_width = 0.18
-    # A little extra space between thread settings makes each OFF/ON pair clear.
-    offsets = (-0.30, -0.12, 0.12, 0.30)
-    for offset, (label, column, color) in zip(offsets, RUNTIME_SERIES):
+    # Keep each query's bars contiguous and centered on its tick.
+    offsets = (np.arange(len(series)) - (len(series) - 1) / 2.0) * bar_width
+    for offset, (label, column, color) in zip(offsets, series):
         heights = sub[column].to_numpy(float)
         ax.bar(
             x + offset, heights - floor, bottom=floor,
@@ -838,7 +853,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--metric", choices=["t1", "tm"], default="tm",
-        help="thread setting for all-query dots; selected-runtime bars always show both",
+        help="thread setting for all-query dots; selected bars use TM only for new runs, both for legacy runs",
     )
     args = parser.parse_args()
 

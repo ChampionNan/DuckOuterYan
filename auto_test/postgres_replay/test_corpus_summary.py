@@ -41,9 +41,6 @@ PGPLAN_FIELDS = (
     "tm_pgplan",
     "tm_native_vs_pgplan_speedup",
     "tm_pgplan_vs_outer_yan_speedup",
-    "t1_pgplan",
-    "t1_native_vs_pgplan_speedup",
-    "t1_pgplan_vs_outer_yan_speedup",
 )
 COMPARISON_FIELDS = (
     "pgplan_comparison_mode",
@@ -563,7 +560,7 @@ class CorpusSummaryTest(unittest.TestCase):
                 row = next(reader)
                 header = tuple(reader.fieldnames or ())
             self.assertEqual(header[-len(COMPARISON_FIELDS):], COMPARISON_FIELDS)
-            self.assertEqual(len(original_csv_fields()), 88)
+            self.assertEqual(len(original_csv_fields()), 70)
             self.assertEqual(
                 header[:len(original_csv_fields())], original_csv_fields()
             )
@@ -844,9 +841,7 @@ class CorpusSummaryTest(unittest.TestCase):
                 'comparison=NA PGPlan=VERIFIED  '
                 'TM:[Original=10 PGPlan=5 OuterYan=2] '
                 'Speedup:[Original/OuterYan=5.000000000 '
-                'PGPlan/OuterYan=2.500000000]  '
-                'T1:[Original=NA PGPlan=NA OuterYan=NA] '
-                'Speedup:[Original/OuterYan=NA PGPlan/OuterYan=NA]'
+                'PGPlan/OuterYan=2.500000000]'
             )
             self.assertEqual(nonblank_lines[1], expected_outer_main)
             self.assertIn(
@@ -893,7 +888,8 @@ class CorpusSummaryTest(unittest.TestCase):
             self.assertNotIn("kernel_status", outer)
             self.assertNotIn("profile_status", outer)
             self.assertNotIn("t1_status", outer)
-            self.assertEqual(outer["t1_off"], "NA")
+            self.assertFalse(any(field.startswith(("t1_", "profile_")) for field in outer))
+            self.assertEqual(outer["timing_threads"], "8")
             self.assertEqual(outer["selection_mode"], "GATED")
             self.assertEqual(
                 outer["pgplan_comparison_diagnostic_log"], str(outer_log.resolve())

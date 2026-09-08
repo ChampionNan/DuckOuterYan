@@ -70,10 +70,13 @@ export TPCDS_SF="${TPCDS_SF:-100}"
 # ===========================================================================
 # 4) Threading
 # ===========================================================================
-# Multi-thread count for profiling and performance timing in experiment_onoff.sh.
-# Each query is profiled at OY_THREADS and timed at both 1 and OY_THREADS.
-# Must be a positive DuckDB thread count.
-export OY_THREADS="${OY_THREADS:-48}"
+# Sequential multi-thread configurations; no single-thread or profiling batch.
+# OY_THREADS remains a scalar override for a single configuration.
+# Use OY_THREAD_COUNTS="16 32" (or "16,32") for a sweep; CLI --threads wins.
+export OY_THREAD_COUNTS="${OY_THREAD_COUNTS:-${OY_THREADS:-16 32}}"
+_oy_thread_defaults="${OY_THREAD_COUNTS//,/ }"
+export OY_THREADS="${OY_THREADS:-${_oy_thread_defaults%% *}}"
+unset _oy_thread_defaults
 
 # ===========================================================================
 # 5) Timeouts
@@ -81,7 +84,7 @@ export OY_THREADS="${OY_THREADS:-48}"
 # Per-statement timeout (seconds), enforced by DuckDB's max_execution_time.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
 export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-1800}"
-# Extra seconds for CLI startup and profile serialization around a timing batch.
+# Extra seconds for CLI startup and teardown around a timing batch.
 export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 
 # ===========================================================================
@@ -448,6 +451,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  GRAPH_DATASET    = $GRAPH_DATASET"
         echo "  TPCH_SF/TPCDS_SF = $TPCH_SF / $TPCDS_SF"
         echo "  OY_THREADS       = $OY_THREADS"
+        echo "  OY_THREAD_COUNTS = $OY_THREAD_COUNTS (sequential)"
         echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per statement"
         echo "  BATCH GRACE      = ${OY_BATCH_GRACE_SECS}s"
         echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"

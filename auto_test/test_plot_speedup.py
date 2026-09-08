@@ -24,6 +24,29 @@ def result_frame(rows):
 
 
 class PlotSpeedupLoadTest(unittest.TestCase):
+    def test_thread_sweeps_are_distinct_runs(self):
+        for threads in (16, 32):
+            for attempts in (False, True):
+                suffix = ".attempts" if attempts else ""
+                self.assertEqual(
+                    PLOT.result_source(f"experiment_onoff_benchmark_20260908_120000_t{threads}{suffix}.csv"),
+                    (f"20260908_120000_t{threads}", "attempts" if attempts else "final", "benchmark"),
+                )
+
+    def test_multi_thread_only_runs_do_not_require_single_thread_columns(self):
+        sources = {
+            f"experiment_onoff_benchmark_20260908_120000_t{threads}.csv": pd.DataFrame([{
+                "query": "derived__sample", "family": "tpch", "correct": "TRUE",
+                "timing_threads": threads, "tm_off": 10.0, "tm_on": 5.0, "tm_speedup": 2.0,
+            }]) for threads in (16, 32)
+        }
+        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
+            loaded = PLOT.timed(PLOT.load(list(sources)))
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(loaded["run"].nunique(), 2)
+        self.assertEqual(set(loaded["timing_threads"]), {16, 32})
+        self.assertNotIn("t1_off", loaded)
+
     def test_result_source_groups_components_by_timestamp(self):
         self.assertEqual(
             PLOT.result_source("experiment_onoff_core_20260818_011114.csv"),
@@ -192,6 +215,25 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
 
 
 class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
+    def test_multi_thread_only_comparison_has_two_contiguous_bars(self):
+        frame = pd.DataFrame([{
+            "query": "derived__selected", "family": "TPC-H", "topology": "left-deep",
+            "selected_plan": "OUTERYAN", "timing_threads": 16,
+            "tm_off": 10.0, "tm_on": 5.0, "tm_speedup": 2.0,
+        }])
+        captured = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_runtime(object(), frame, "20260908_120000_t16", "tm", selected_only=True)
+        self.assertEqual(len(captured), 1)
+        bars = captured[0].axes[0].patches
+        self.assertEqual(len(bars), 2)
+        self.assertAlmostEqual(bars[0].get_x() + bars[0].get_width(), bars[1].get_x())
+        self.assertEqual(
+            [text.get_text() for text in captured[0].legends[0].get_texts()],
+            [label for label, _, _ in PLOT.RUNTIME_SERIES[2:]],
+        )
+        plt.close(captured[0])
+
     @staticmethod
     def runtime_row(query, family, plan, speedup, offset):
         return {
@@ -259,6 +301,8 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             self.assertEqual(len(axis.patches), 4)
             for bar, seconds in zip(axis.patches, expected):
                 self.assertAlmostEqual(bar.get_y() + bar.get_height(), seconds)
+            for left, right in zip(axis.patches, axis.patches[1:]):
+                self.assertAlmostEqual(left.get_x() + left.get_width(), right.get_x())
             self.assertFalse(axis.collections)
             self.assertEqual(figure._suptitle.get_text(), "Running time Comparison")
             plt.close(figure)

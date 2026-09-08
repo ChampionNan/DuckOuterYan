@@ -18,7 +18,7 @@ synopsis.
 | `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
 | `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
 | `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
-| `experiment_onoff.sh` | ON/OFF equivalence, plan decision, profiling, and timing |
+| `experiment_onoff.sh` | ON/OFF equivalence, plan decision, kernel diagnostics, and multi-thread timing |
 | `audit_cost_gate.py` | Extract changed-grouping candidates and classify normal gate decisions against forced-candidate timings |
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
@@ -26,7 +26,7 @@ synopsis.
 | `outerjoin_benchmark/` | 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
-| `results/` | Generated text, CSV, profile, and trace output |
+| `results/` | Generated text, CSV, and trace output; historical profiles |
 
 `trace_outer_yan.sh` has its own command-line/environment defaults and does not
 source `configs.sh`.
@@ -43,7 +43,8 @@ corresponding environment values.
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
-| `OY_THREADS` | `48` | Multi-thread profiling, timing, and equivalence-check threads |
+| `OY_THREAD_COUNTS` | `16 32` | Sequential multi-thread configurations; comma-separated lists also work |
+| `OY_THREADS` | first configuration (`16`) | Scalar override to run only one thread count |
 | `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
@@ -58,7 +59,7 @@ corresponding environment values.
 | `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
 | `PGPLAN_PLAN_CACHE` | `auto_test/pgplan/plans` | Persistent validated typed-plan cache; override with `--plan-cache` |
 | `PGPLAN_COMPARISON_MODE` | `both` | `both`, `pgplan-only` (`--skip1`), or `none` (`--performance-only`) |
-| `PGPLAN_RUNS` | `OY_RUNS` (`3`) | Positive odd TM measured-run count after one warm-up; T1 always has one warm-up plus one measured run |
+| `PGPLAN_RUNS` | `OY_RUNS` (`3`) | Positive odd TM measured-run count after one warm-up; no single-thread batch |
 | `PGPLAN_CORRECTNESS_MODE` | `target` | `target` compares complete target results; `bounded` is a diagnostic; `reuse` requires a sealed prior target receipt |
 | `PGPLAN_CORRECTNESS_FROM` | empty | Prior corpus root used by correctness-only `reuse` mode |
 | `PGPLAN_REUSE_FROM` | empty | Prior corpus root used to reuse both PGPlan artifacts and sealed correctness receipts |
@@ -201,7 +202,15 @@ component. They remain in `outerjoin_query_old/` solely as historical inputs.
 
 ## Experiment pipeline
 
-For every selected query, `experiment_onoff.sh` performs these operations:
+`experiment_onoff.sh` and `run_all.sh` test 16 threads, then 32 threads by
+default, using separate processes and output files. They do not run the two
+configurations concurrently. Override the sweep with `--threads "16 32"`,
+`OY_THREAD_COUNTS="16 32"`, or use `--threads 16` / `OY_THREADS=16` for one
+configuration. Thread counts must be greater than one; CLI settings take
+precedence. Database setup and query generation in `run_all.sh` happen only
+once before the sweep.
+
+For every selected query at each thread count, `experiment_onoff.sh` performs:
 
 1. Execute the bare query with OuterYan OFF and ON, sort the emitted CSV files
    outside DuckDB, and compare the result multisets. A mismatch, error, or
@@ -209,33 +218,15 @@ For every selected query, `experiment_onoff.sh` performs these operations:
 2. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record.
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
-4. Run one profiled warm-up followed by `--runs N` profiled OuterYan-ON
-   executions at `threads=$OY_THREADS` using `.mode trash`. Keep the complete tuple
-   associated with the median high-resolution JSON query latency. Sum native
-   `OPERATOR_TIMING` values for round-1 semi-join operators, round-2 semi-join
-   operators, and real-join operators. The traced plan supplies planned pair
-   and newly built filter counts for each round.
-5. Time OuterYan OFF and ON at `threads=1` and `threads=$OY_THREADS`. Each batch
+4. Time OuterYan OFF and ON at `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-The profiled wall time is labeled `Total-Time`: the median JSON query latency
-from that profiled multi-thread batch. `CPU-Time` is DuckDB's recursive sum of
-native `OPERATOR_TIMING` across workers. `OtherCPU = CPU-Time - R1 - R2 - R3`,
-so the four active-work components close the same sample. They are aggregate
-operator work-seconds, not contiguous phase wall times, and can exceed
-Total-Time when worker intervals overlap. R1 matches `SJ_BUILD_ROUND_1` and
-`SJ_PROBE_ROUND_1`; R2 matches the round-2 names. R3 matches DuckDB's physical
-join types (`HASH_JOIN`, nested-loop, merge, IE, delim, positional, ASOF, and
-cross-product variants). `OtherCPU` contains unmatched native operator work;
-planning, scheduling, waits, serialization, and profiler overhead are not
-assigned to a phase. Times are converted to integer nanoseconds before
-subtraction. The log renders CPU-work shares as percentages; the CSV retains
-ratios in `[0,1]`.
-Profiling serialization and CLI output are outside Total-Time. Total-Time is
-labeled separately because profiling instrumentation can change its measured
-time. T1/TM run in fresh `-no-init` CLI processes and explicitly disable
-profiling before `.timer on`; no custom production phase instrumentation is
-used.
+
+All executions explicitly set the selected thread count and disable profiling.
+There is no single-thread batch, profiled warm-up, phase-profile execution, or
+profile output. Timing runs in fresh `-no-init` CLI processes using `.mode
+trash`, which fully drains the bare query without measuring CSV formatting or
+file output. Correctness and optional plan/cost diagnostics remain enabled.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -455,6 +446,7 @@ bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration
   -t, --timeout S     per-statement timeout
+      --threads LIST  multi-thread counts (default "16 32"; also accepts 16,32)
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
@@ -471,8 +463,8 @@ is global and follows that family order.
 ### Examples
 
 ```bash
-# Four small graph queries, single-thread smoke run
-GRAPH_DATASET=bitcoin OY_THREADS=1 \
+# Four small graph queries, one 16-thread smoke run
+GRAPH_DATASET=bitcoin OY_THREADS=16 \
 bash auto_test/experiment_onoff.sh \
   --only graph --pattern '*_N3_*_s0[15]' --limit 4 --runs 1 --timeout 60
 
@@ -494,7 +486,7 @@ bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
 
 # P0/P1 representative run using existing databases
 OY_CORPUS=auto_test/outerjoin_query_old \
-SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
+SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=3 bash auto_test/run_all.sh \
   --only all --query-list auto_test/representative_queries.txt --capture-plans
 ```
 
@@ -508,21 +500,25 @@ the report header; rebuild the databases first if they are not already SF1.
 
 ## Output
 
-Without `--out`, one start timestamp is used for the result group:
+Without `--out`, one start timestamp identifies both thread configurations.
+For each `N` in `16`, `32`, the result group is:
 
 ```text
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.txt
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.csv
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.attempts.csv
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS.plans/
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.txt
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.csv
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.attempts.csv
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.plans/
 ```
 
-`run_all.sh` supplies explicit stratum names and writes separate groups such as
-`experiment_onoff_core_YYYYMMDD_HHMMSS.*` and
-`experiment_onoff_industry_inspired_YYYYMMDD_HHMMSS.*`.
+`run_all.sh` includes the corpus label, for example
+`experiment_onoff_benchmark_YYYYMMDD_HHMMSS_t16.csv` and
+`experiment_onoff_benchmark_YYYYMMDD_HHMMSS_t32.csv`.
 
-With `--out path/name.txt`, the text path is exact and the CSV is
-`path/name.csv`. Each CSV contains exactly one row per query. The historical
+With `--out path/name.txt`, a sweep writes `path/name_t16.txt` and
+`path/name_t32.txt`, with matching CSV names. For a single configuration the
+explicit output path is used unchanged. Each CSV contains one row per query
+and records `timing_threads`, `tm_off`, `tm_on`, and `tm_speedup`. New outputs
+contain no `t1_*` or `profile_*` columns. The historical
 attempts CSV is retained for downstream compatibility and is an identical
 single-attempt copy; timed-out queries are not retried.
 
@@ -530,12 +526,12 @@ Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[ 63/265] oy_th_th_bushy4b_v1  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) profile=[threads=48 Total-Time=12.000000000s CPU-Time=45.696000000s R1=NA(no-pairs,pairs=0) R2=0.940435000s(2.06%,pairs=3,filters=3,operators=N) R3=12.297079000s(26.91%,operators=N) OtherCPU=32.458486000s(71.03%)] TM:... T1:...
+[ 63/206] derived__example  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 TM:off=12.000000000 on=6.000000000 spd=2.000
   details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
 ```
 
 The record always uses two lines: line 1 contains the high-level result,
-kernel choice, phase profile, and timing; line 2 contains decision/cost metadata.
+kernel choice, thread count, and timing; line 2 contains decision/cost metadata.
 Applicable queries include the OuterYan and
 DuckDB cost formula, gate comparison, and join/SJ weights on line 2. With plan
 capture enabled, that line also lists the DuckDB-OFF and enabled EXPLAIN files,
@@ -543,18 +539,13 @@ full trace, and per-join/per-SJ cost records.
 
 `pairs` counts planned semi-join applications in that round. `filters` counts
 new filter constructions; a reused filter contributes another pair without
-another filter. `R1=NA(no-pairs,pairs=0)` therefore means that round was not
-scheduled, rather than that its timer incorrectly measured zero. If DuckDB was
-selected, both rounds show `NA(no-sj-plan)`. A missing plan count or profile is
-reported explicitly instead of being displayed as a valid zero. In particular,
-`profile-missing` means the plan expected at least one pair but the runtime
-profile observed no matching physical operator for that round.
+another filter. These are optimizer plan counts, not profile measurements.
 
 Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query/result, selected plan, kernel counts, profiled TM wall time and CPU-work decomposition, and OFF/ON speed-up for TM and T1 |
+| Line 1 | Query/result, selected plan, kernel counts, thread count, and unprofiled OFF/ON timing and speed-up |
 | Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
@@ -569,7 +560,7 @@ gate result:  <candidate-total> <= <threshold> => PASS|FAIL -> <decision>
 For same-grouping, inapplicable, unavailable, or forced-policy cases, the report
 states that the numeric gate was skipped and prints the decision reason.
 
-The CSV exports the same decision, cost, kernel, correctness, timing, and phase
+The CSV exports the same decision, cost, kernel, correctness, and timing
 fields in machine-readable form, including the SQL-derived `relation_count`,
 `default_filter_upper_bound_checked`, `default_filter_upper_bound_selected`,
 `full_reduction_cardinality_lower_bound_applied`,
@@ -579,25 +570,24 @@ fields in machine-readable form, including the SQL-derived `relation_count`,
 `candidate_to_baseline_join_input_ratio`,
 `semijoin_retained_cardinality_ratio`,
 `uncertain_filter_cardinality_amplification`, `round1_pairs`,
-`round1_filters`, `round2_pairs`, `round2_filters`, and the native operator
-counts.
+`round1_filters`, `round2_pairs`, and `round2_filters`.
 `effective_pass` remains `main` for schema compatibility. The final text summary groups speed-ups separately by
 `outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
 counts for every relation depth present in the run.
 
 `plot_speedup.py` writes one multi-page `outeryan_benchmark_figures.pdf` by
-default, with optional standalone figures. Files with the same timestamp are merged
-into one logical run, including older `core` and `industry_inspired` CSV pairs.
+default, with optional standalone figures. Files with the same timestamp and
+thread suffix are merged into one logical run; `_t16` and `_t32` are never
+merged. Historical `core` and `industry_inspired` CSV pairs remain supported.
 Per-query runtimes are shown in three figures. The first is a compact horizontal
 dot view containing all correct and timed queries; it appends `[OuterYan]` or
 `[DuckDB]` to identify the plan selected during the ON run. The two
 `Running time Comparison` figures contain only queries whose ON run selected
 OuterYan: one combines graph, TPC-H, and TPC-DS, and one contains JOB. Each
-query has four vertical bars: single-thread OFF/ON and multi-thread OFF/ON,
-using light blue and peach pairs. The `--metric` setting affects the all-query
-dot view; the selected-query comparisons always show both thread settings.
-Only queries with all four finite, positive timings are included in the
-selected-query comparisons; incomplete queries are omitted. Query IDs are
+new multi-thread-only query has two contiguous OFF/ON bars. Historical result
+files with both thread settings retain their four-bar comparisons, using blue
+and peach pairs. Only queries with complete finite, positive timings for their
+result schema are included; incomplete queries are omitted. Query IDs are
 assigned before this filtering so the remaining labels do not change.
 Benchmark subtitles and separators identify the sections. Query labels and
 legends are enlarged, with the abbreviation key directly below the `Query` axis.
@@ -606,7 +596,7 @@ The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
 There is intentionally no
 speed-up-by-kernel page.
 
-The single `OuterYan Execution Time Details` figure samples up to 20 eligible OuterYan-selected queries per
+For historical results containing profiles, the single `OuterYan Execution Time Details` figure samples up to 20 eligible OuterYan-selected queries per
 benchmark, evenly across each family's shape/runtime-ordered rows. All samples
 share one vertical grouped-bar axis with benchmark subtitles and separators.
 Each query has `Round 1`, `Round 2`, `Round 3`, residual `Other`, and profiled
@@ -708,7 +698,7 @@ RUN_PGPLAN=1 bash auto_test/run_all.sh
 RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
 
 # Skip both correctness comparisons for a manual performance-only rerun.
-# Cached PGPlan artifacts are reused; all EXPLAIN, verification, TM, and T1
+# Cached PGPlan artifacts are reused; all EXPLAIN, verification, and TM
 # performance work still runs.
 RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
 
@@ -729,7 +719,7 @@ RUN_PGPLAN=1 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
 
 # Performance rerun: reuse each query's PGPlan artifact and sealed target-data
 # correctness receipt. PostgreSQL setup/capture and result comparison are
-# skipped; Native, PGPlan, and OuterYan EXPLAIN/TM/T1 tests are otherwise the
+# skipped; Native, PGPlan, and OuterYan EXPLAIN/TM tests are otherwise the
 # same and are written to a new self-contained result directory.
 RUN_PGPLAN=1 bash auto_test/run_all.sh \
   --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
@@ -796,8 +786,10 @@ plans are still desired.
 
 This is one comparison workflow with three timed configurations: Original,
 PGPlan, and OuterYan. Each successful query writes its TM medians under
-`runs/<family>/<query>/timing/summary.tsv`
-and independent single-thread medians under `timing/t1_summary.tsv`.
+`runs/<family>/<query>/timing/summary.tsv`; no single-thread batch is run.
+`run_all.sh` runs the three-way corpus at 16 then 32 threads, with separate
+`_t16` / `_t32` output directories. A correctness-reuse receipt is thread-specific:
+use `--threads N` matching the source run when using `--reuse-from`.
 At corpus completion the runner also writes `comparison.tsv` and
 `comparison.csv` with one row for every selected query, a human-readable
 `comparison.log`, `summary.tsv` with all-family and per-family aggregate
@@ -819,15 +811,16 @@ The provenance columns distinguish `FRESH`, `PARTIAL`, `NOT_RUN`, and `REUSED`
 correctness. Reused rows retain their source/receipt hashes; legacy artifacts
 leave unavailable additive fields empty instead of guessing.
 
-Each successful block orders TM and T1 as Original, PGPlan, OuterYan, then
+Each successful block orders TM as Original, PGPlan, OuterYan, then
 prints only `Original/OuterYan` and `PGPlan/OuterYan` speedups. The original
 CSV `off/on` columns retain their Original/OuterYan meanings, while
-`tm_pgplan` and `t1_pgplan` add PGPlan; legacy Original/PGPlan speedup fields
-remain for compatibility. TM uses one warm-up plus
-`PGPLAN_RUNS` measurements; T1 uses one warm-up plus one measurement. The
-workflow does not collect the legacy kernel-trace or phase-profile batches, so
-their empty/NA compatibility columns remain in the original CSV prefix but the
-human log no longer prints unhelpful placeholders. Its
+`tm_pgplan` adds PGPlan; legacy Original/PGPlan speedup fields remain for
+compatibility. TM uses one warm-up plus `PGPLAN_RUNS` measurements. No
+single-thread or phase-profile columns are emitted for new runs. When
+re-summarizing historical runs with a real `timing/t1_summary.tsv`, the report
+appends their `t1_*` fields and retains the corresponding human-log values.
+The workflow does not collect the legacy kernel-trace batch; its CSV kernel
+fields remain unavailable. Its
 original `rows` column is the complete target-scale result count by default. These
 reports are generated before a failure status is returned, so a mixed run
 remains inspectable without rerunning completed queries.

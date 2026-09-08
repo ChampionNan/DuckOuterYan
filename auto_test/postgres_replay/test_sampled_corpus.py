@@ -2177,7 +2177,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             "--runs",
             "1",
             "--threads",
-            "1",
+            "16",
         ]
         command.extend(extra_args)
         command.extend(["--out", str(out)])
@@ -2217,9 +2217,8 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertEqual(kinds.count("settings"), 3)
         self.assertEqual(kinds.count("explain"), 3)
         self.assertEqual(kinds.count("correctness"), 3)
-        # Multi-thread TM plus an independent single-thread T1 batch for all
-        # three configurations.
-        self.assertEqual(kinds.count("timing"), 6)
+        # One multi-thread batch for each of the three configurations.
+        self.assertEqual(kinds.count("timing"), 3)
         self.assertNotIn("unknown", kinds)
         for kind, database in calls:
             expected = correctness_db if kind == "correctness" else self.database
@@ -2250,16 +2249,17 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertIn("correctness_db={}\n".format(expected), manifest)
         self.assertRegex(manifest, r"execution_db_sha256=[0-9a-f]{64}\n")
         self.assertIn("execution_db_sha256_source=computed\n", manifest)
-        with (out / "timing/t1_summary.tsv").open(
+        with (out / "timing/summary.tsv").open(
             newline="", encoding="utf-8"
         ) as source:
-            t1_rows = list(csv.DictReader(source, delimiter="\t"))
+            timing_rows = list(csv.DictReader(source, delimiter="\t"))
         self.assertEqual(
-            [row["configuration"] for row in t1_rows],
+            [row["configuration"] for row in timing_rows],
             ["native", "pgplan", "outer_yan"],
         )
-        self.assertTrue(all(row["threads"] == "1" for row in t1_rows))
-        self.assertTrue(all(row["measured_runs"] == "1" for row in t1_rows))
+        self.assertTrue(all(row["threads"] == "16" for row in timing_rows))
+        self.assertTrue(all(row["measured_runs"] == "1" for row in timing_rows))
+        self.assertFalse(list((out / "timing").glob("t1_*")))
 
     def test_pgplan_only_runs_two_correctness_queries_but_all_timing_modes(self) -> None:
         call_log = self.root / "pgplan-only-calls.tsv"
@@ -2275,7 +2275,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertEqual(kinds.count("correctness"), 2)
         self.assertEqual(kinds.count("settings"), 3)
         self.assertEqual(kinds.count("explain"), 3)
-        self.assertEqual(kinds.count("timing"), 6)
+        self.assertEqual(kinds.count("timing"), 3)
         with (out / "correctness/row_counts.tsv").open(
             newline="", encoding="utf-8"
         ) as source:
@@ -2324,7 +2324,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertEqual(kinds.count("correctness"), 0)
         self.assertEqual(kinds.count("settings"), 3)
         self.assertEqual(kinds.count("explain"), 3)
-        self.assertEqual(kinds.count("timing"), 6)
+        self.assertEqual(kinds.count("timing"), 3)
         self.assertFalse((out / "correctness/row_counts.tsv").exists())
         self.assertFalse((out / "correctness/pgplan.comparison.txt").exists())
         self.assertFalse((out / "correctness/outer_yan.comparison.txt").exists())
@@ -2454,7 +2454,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             for line in call_log.read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual(kinds.count("correctness"), 0)
-        self.assertEqual(kinds.count("timing"), 6)
+        self.assertEqual(kinds.count("timing"), 3)
         self.assertEqual(kinds.count("explain"), 3)
         manifest = dict(
             line.split("=", 1)
@@ -2480,7 +2480,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             (out / "correctness/sealed_context/outer_yan_decision.snapshot").is_file()
         )
         self.assertFalse((out / "correctness/native.csv").exists())
-        for summary_name in ("summary.tsv", "t1_summary.tsv"):
+        for summary_name in ("summary.tsv",):
             with (out / "timing" / summary_name).open(
                 newline="", encoding="utf-8"
             ) as source_file:
@@ -2499,7 +2499,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
                 (summary_name, summary_rows),
             )
             self.assertTrue(
-                all(row["threads"] == "1" for row in summary_rows),
+                all(row["threads"] == "16" for row in summary_rows),
                 (summary_name, summary_rows),
             )
 
@@ -2603,31 +2603,22 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("must be exactly 64 hexadecimal characters", result.stderr)
 
-    def test_t1_uses_one_measurement_when_tm_uses_three(self) -> None:
+    def test_only_multithread_batch_runs_with_requested_measurements(self) -> None:
         result, out = self.run_experiment(extra_args=("--runs", "3"))
         self.assertEqual(result.returncode, 0, result.stderr)
         with (out / "timing/summary.tsv").open(
             newline="", encoding="utf-8"
         ) as source:
             tm_rows = list(csv.DictReader(source, delimiter="\t"))
-        with (out / "timing/t1_summary.tsv").open(
-            newline="", encoding="utf-8"
-        ) as source:
-            t1_rows = list(csv.DictReader(source, delimiter="\t"))
         self.assertTrue(all(row["measured_runs"] == "3" for row in tm_rows))
-        self.assertTrue(all(row["measured_runs"] == "1" for row in t1_rows))
+        self.assertTrue(all(row["threads"] == "16" for row in tm_rows))
         self.assertEqual(
             (out / "timing/native.log").read_text(encoding="utf-8").count(
                 "Run Time"
             ),
             4,
         )
-        self.assertEqual(
-            (out / "timing/t1_native.log").read_text(encoding="utf-8").count(
-                "Run Time"
-            ),
-            2,
-        )
+        self.assertFalse(list((out / "timing").glob("t1_*")))
 
     def test_three_way_timing_contract_matches_original_harness(self) -> None:
         three_way = EXPERIMENT.read_text(encoding="utf-8")
@@ -2639,7 +2630,7 @@ class ExperimentPostprocessTimeoutTest(unittest.TestCase):
             self.assertIn(token, original)
         self.assertIn("emit_bare_query", three_way)
         self.assertIn('${query%;};', original)
-        self.assertIn('run_timing_suite timing_t1 1 1', three_way)
+        self.assertNotIn('run_timing_suite timing_t1', three_way)
 
     def test_correctness_database_cli_overrides_environment(self) -> None:
         environment_db = self.root / "environment-correctness.db"

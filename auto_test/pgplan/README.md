@@ -42,7 +42,7 @@ RUN_PGPLAN=1 bash auto_test/run_all.sh
 RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
 
 # skip2: do not rerun correctness; still run EXPLAIN, PGPlan verification,
-# and Original/PGPlan/OuterYan TM and T1 performance
+# and Original/PGPlan/OuterYan TM performance
 RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
 ```
 
@@ -96,7 +96,7 @@ RUN_PGPLAN=1 bash auto_test/run_all.sh \
 This one option automatically preserves the existing binary, target databases,
 and query files (Steps 1--3 are skipped), and skips PostgreSQL setup, sampled
 schema preparation, and plan capture. Native, PGPlan, and OuterYan EXPLAIN,
-semantic verification, TM, and T1 run normally in a new self-contained result
+semantic verification and TM run normally in a new self-contained result
 directory. The prior receipt must be a sealed fresh target-mode comparison and
 must match the exact query, PGPlan artifact, DuckDB binary/version, and target
 database hashes. A missing/mismatched receipt or plan, an escaping prior path,
@@ -152,7 +152,7 @@ machine-readable comparison files.
 
 The comparison CSV/TSV preserves the complete `experiment_onoff.sh` CSV header
 as its leading columns, in exactly the original order. PGPlan verification,
-TM/T1, correctness mode, and provenance columns follow that prefix, with
+TM, correctness mode, and provenance columns follow that prefix, with
 `pgplan` in every appended field name. Raw plan signatures are retained only
 in trace artifacts, not in the human log or CSV.
 
@@ -163,20 +163,25 @@ performed a comparison. Reused rows retain their source and receipt SHA-256
 values in `pgplan_correctness_*` columns. Older results remain readable with
 empty fields instead of guessed values.
 
-For every completed performance run, the original CSV's `TM:off/on` and
-`T1:off/on` columns retain their Original/OuterYan meanings. Appended
-`tm_pgplan` and `t1_pgplan` columns add PGPlan. Legacy Original/PGPlan speedup
+For every completed performance run, the CSV's `tm_off` / `tm_on` columns
+retain their Original/OuterYan meanings. Appended `tm_pgplan` adds PGPlan.
+Legacy Original/PGPlan speedup
 fields remain for compatibility, and PGPlan/OuterYan fields provide the direct
 comparison. The human line orders each suite as Original, PGPlan, OuterYan and
 prints exactly `Original/OuterYan` and `PGPlan/OuterYan`. TM uses one warm-up
-plus the configured odd measured-run count; T1 uses one warm-up plus exactly
-one measured run. This workflow does not run the legacy kernel-trace or
-phase-profile batches, so their placeholders are omitted from the human log;
-the original CSV columns remain present but empty/NA for compatibility. The original
-`rows` column refers to the complete target result by default. Both timing
-suites use `.mode trash`, which executes and fully materializes the bare query
+plus the configured odd measured-run count. There is no single-thread batch
+or phase profiling. New reports omit `t1_*` and `profile_*` columns; historical
+`t1_*` values are appended only when re-summarizing actual old T1 artifacts.
+Kernel tracing is not collected; its CSV fields remain unavailable. The
+`rows` column refers to the complete target result by default. Timing
+uses `.mode trash`, which executes and fully materializes the bare query
 while excluding CLI result serialization and filesystem output from the real
 DuckDB CLI wall-clock measurement. Only `PASS` rows have timing values.
+
+`run_all.sh` defaults to sequential 16- and 32-thread configurations, saved in
+separate `_t16` / `_t32` directories. Use `--threads 16` for just one. When
+reusing correctness, select the thread count matching the source receipt;
+receipts are not reusable across thread counts.
 
 To build or rebuild those reports from an existing run without repeating
 PostgreSQL capture, correctness checks, or timing:
