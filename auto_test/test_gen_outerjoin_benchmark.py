@@ -105,7 +105,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
             ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
-                for core_only, count in ((False, 185), (True, 151)):
+                for core_only, count in ((False, 176), (True, 144)):
                     with self.subTest(core_only=core_only):
                         root = scratch / ("core-only" if core_only else "full")
                         argv = ["gen_outerjoin_benchmark.py", "--root", str(root)]
@@ -117,7 +117,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                         self.assertEqual(len(active), count)
                         self.assertEqual(
                             len(csv_rows(root / "active_timeout_exclusions.csv")),
-                            19 if core_only else 21,
+                            26 if core_only else 30,
                         )
                         self.assertEqual(
                             {str(path.relative_to(legacy_root)) for path in legacy_root.glob("*/*.sql")},
@@ -141,13 +141,10 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         active = csv_rows(root / "benchmark" / "manifest.csv")
         excluded = csv_rows(root / "active_timeout_exclusions.csv")
         pins = BENCHMARK.active_timeouts.EXCLUDED_QUERY_HASHES
-        protected = BENCHMARK.active_timeouts.RETAINED_TIMEOUT_QUERY_PATHS
-        self.assertEqual(len(pins), 21)
-        self.assertEqual(len(protected), 7)
-        self.assertTrue(protected.isdisjoint(pins))
+        self.assertEqual(len(pins), 30)
+        self.assertEqual(len(BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES), 9)
         self.assertEqual({row["path"] for row in excluded}, set(pins))
         active_paths = {row["path"] for row in active}
-        self.assertTrue(protected <= active_paths)
         self.assertTrue(active_paths.isdisjoint(pins))
         # Reconstruct the unfiltered union: no missing-T1 or other healthy case
         # may be dropped as an incidental rebalancing step.
@@ -167,7 +164,9 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             if row["path"] in pins:
                 self.assertFalse(target.exists())
                 self.assertEqual(row["content_sha256"], pins[row["path"]])
-                self.assertEqual(row["reference_threads"], "48")
+                reference = BENCHMARK.active_timeouts.reference_metadata(row["path"])
+                self.assertEqual(row["reference_threads"], str(reference["reference_threads"]))
+                self.assertEqual(row["reference_run"], reference["reference_run"])
                 self.assertEqual(row["timeout_seconds"], "1800")
                 self.assertEqual(row["timeout_phase"], "correctness_off")
             else:
@@ -188,13 +187,22 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 BENCHMARK.generate_active_benchmark(root, include_industry=False)
             self.assertEqual(active.read_bytes(), before)
 
-    def test_protected_pattern_removal_is_rejected(self):
+    def test_approved_family_coverage_losses_are_explicit(self):
         root = SCRIPT_DIR / "outerjoin_benchmark"
         core = csv_rows(root / "manifest.csv")
         active = csv_rows(root / "benchmark" / "manifest.csv")
-        for path in BENCHMARK.active_timeouts.RETAINED_TIMEOUT_QUERY_PATHS:
-            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "missing protected"):
-                BENCHMARK.validate_active_coverage(core, [row for row in active if row["path"] != path], True)
+        BENCHMARK.validate_active_coverage(core, active, True)
+        with mock.patch.object(BENCHMARK.active_timeouts, "ALLOWED_MISSING_CORE_FAMILY_PATTERNS", {}):
+            with self.assertRaisesRegex(RuntimeError, "family/topology coverage"):
+                BENCHMARK.validate_active_coverage(core, active, True)
+
+    def test_t32_timeouts_cannot_reappear_in_active_view(self):
+        root = SCRIPT_DIR / "outerjoin_benchmark"
+        active = csv_rows(root / "benchmark" / "manifest.csv")
+        core = csv_rows(root / "manifest.csv")
+        for path in BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES:
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "reappeared"):
+                BENCHMARK.validate_active_coverage(core, active + [{"path": path}], True)
 
     def test_regeneration_preserves_unmanaged_files_and_rejects_local_sql_edits(self):
         with tempfile.TemporaryDirectory(prefix="outeryan-active-view-") as directory:

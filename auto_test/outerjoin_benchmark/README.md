@@ -3,10 +3,10 @@
 This directory contains one provenance-backed benchmark for outer-join query
 optimization plus three auditable component views:
 
-- `benchmark/` is the active 185-query filtered union used by `../outerjoin_query` and
+- `benchmark/` is the active 176-query filtered union used by `../outerjoin_query` and
   the default harness. Query names use only `derived__` and `industry__`.
   Specific evaluation roles remain available in the manifest. The complete
-  components below remain intact; the active subset is 151 core plus 34
+  components below remain intact; the active subset is 144 core plus 32
   evaluation queries.
 
 - `core/` is the 170-query paper benchmark. Every query is derived from a named
@@ -34,10 +34,13 @@ query membership, timeout exclusions, and retained wins are pinned in
 `../legacy_corpus.py`. The result filename is provenance only; generation does
 not read that CSV or require a local `results/` directory.
 
-The active union separately excludes 21 confirmed 48-thread OFF correctness-gate
-timeouts from the August 30 run, pinned in `../benchmark_timeouts.py` and listed
-in `active_timeout_exclusions.csv`. Seven known timeout cases remain active at
-the user's request: two graph bushy queries and all five TPC-H Q9 star variants.
+The active union excludes 21 confirmed 48-thread OFF correctness-gate timeouts
+from the August 30 run and nine additional 32-thread timeouts from the September
+8 invocation, pinned in `../benchmark_timeouts.py` and listed with per-query
+provenance in `active_timeout_exclusions.csv`. The user explicitly authorized
+removing the seven formerly protected cases (two graph bushy and all five TPC-H
+Q9 star variants), plus two TPC-DS Q93 variants. The active set therefore loses
+graph bushy and TPC-H core star coverage; these are documented limitations.
 Missing single-thread timings do not cause exclusions. No component SQL is
 deleted, and the generator does not read the reference results. See
 [`active_corpus_coverage.md`](active_corpus_coverage.md) for the exact policy,
@@ -151,7 +154,7 @@ cases.
 ## Running
 
 The active benchmark retains the harness's `graph/`, `tpch/`, `tpcds/`, and
-`job/` family layout and runs at 16 and 32 threads by default:
+`job/` family layout and runs at 32 threads by default:
 
 ```bash
 OY_CORPUS=auto_test/outerjoin_query \

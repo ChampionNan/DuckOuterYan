@@ -243,10 +243,14 @@ done
         self.assertEqual(values["PGPLAN_TIMEOUT_GRACE"], "7")
         self.assertEqual(values["PGPLAN_TMPDIR"], "/tmp/duckyan-test")
 
-    def test_default_thread_sweep_and_scalar_override(self):
+    def test_default_32_threads_and_explicit_overrides(self):
         defaults = self.load_config()
-        self.assertEqual(defaults["OY_THREAD_COUNTS"], "16 32")
-        self.assertEqual(defaults["OY_THREADS"], "16")
+        self.assertEqual(defaults["OY_THREAD_COUNTS"], "32")
+        self.assertEqual(defaults["OY_THREADS"], "32")
+        self.assertEqual(defaults["PGPLAN_THREADS"], "32")
+        sweep = self.load_config(OY_THREAD_COUNTS="16 32")
+        self.assertEqual(sweep["OY_THREAD_COUNTS"], "16 32")
+        self.assertEqual(sweep["OY_THREADS"], "16")
         single = self.load_config(OY_THREADS=8)
         self.assertEqual(single["OY_THREAD_COUNTS"], "8")
         self.assertEqual(single["OY_THREADS"], "8")

@@ -16,8 +16,9 @@
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 100)
 #   TPCDS_SF         TPC-DS scale factor (default 100)
-#   OY_THREAD_COUNTS Sequential timing counts (default "16 32")
+#   OY_THREAD_COUNTS Sequential timing counts (default "32")
 #   OY_THREADS       Override with one multi-thread timing count
+#   OY_PROFILE       Separate ON phase-profile batch (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
 #   OY_RUNS          Legacy timed iterations and PGPLAN_RUNS fallback (default 3)
 #   PGPLAN_RUNS      PGPlan TM measured iterations (default OY_RUNS)
@@ -29,7 +30,7 @@
 #   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
 #   PGPLAN_SETUP     source (default, auto-installs) | docker | external
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
-#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 185 queries)
+#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 176 queries)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
 #   PGPLAN_PLAN_CACHE  Persistent typed-plan cache (default auto_test/pgplan/plans)
 #   PGPLAN_COMPARISON_MODE  both (default) | pgplan-only | none

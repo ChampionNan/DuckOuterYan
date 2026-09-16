@@ -1,0 +1,505 @@
+% Replacement text for Sections 6 and 7. Do not add a second document environment.
+% Required packages in the main preamble: amsmath, amssymb, booktabs, graphicx.
+% Keep the existing bibliography entries: tpch, tpcds, job, sqlstorm25.
+% Figure paths are relative to the main compilation directory, not this file.
+% Override this command before \input if the figures are copied to another project.
+\providecommand{\DuckOuterYanFigureDir}{auto_test/results/plots/20260908_235240/t32}
+% Data: experiment_onoff_benchmark_20260908_235240_t32.csv + .attempts.csv.
+% The run identifier contains 0908; the t32 log records a 2026-09-10 start.
+% Phase data: experiment_onoff_benchmark_20260830_002656.csv, 48 threads.
+% Implementation checked against outer_yan_optimizer.hpp/.cpp and outer_yan_dp.cpp.
+
+\section{Optimization}
+\label{sec:optimization}
+
+OuterYan compares two alternatives: DuckDB's normally optimized plan and a
+reordered plan with semi-join reduction. It first estimates the reduction,
+then chooses a join order for the reduced inputs, and finally checks whether
+the expected join savings justify the reduction overhead.
+
+\subsection{Cost Model}
+\label{sec:cost-model}
+
+We score a join tree by the sum of its estimated intermediate cardinalities:
+\begin{equation}
+ C_{\mathrm{out}}(T)=\sum_{\text{join }v\in T}\widehat{N}(v).
+ \label{eq:cout}
+\end{equation}
+A leaf contributes zero cost. For an outer join, the output includes both
+matching tuples and unmatched tuples from its preserved sides. The default
+model assigns unit weight to each output tuple. These costs are row-work
+estimates, not predictions of elapsed seconds.
+
+Let $T_D$ denote the normally optimized DuckDB plan and $T_Y$ the OuterYan
+candidate. We compare
+\begin{equation}
+ \begin{aligned}
+ C_D &= C_{\mathrm{out}}(T_D),\\
+ C_Y &= C_{\mathrm{out}}(T_Y)+\lambda C_{\mathrm{SJ}},
+ \end{aligned}
+ \label{eq:plan-costs}
+\end{equation}
+where $C_{\mathrm{SJ}}$ accounts for both reduction rounds and $\lambda=1$
+in the evaluated configuration. Both plans use the same scoring function;
+the baseline is not the unoptimized input tree. The reduction schedule is
+fixed before join enumeration, so its cost is added once to the complete
+candidate rather than to every dynamic-programming state.
+
+\subsection{Cardinality Estimation}
+\label{sec:cardinality-estimation}
+
+For a join with input sizes $N_L,N_R$, let $d_L,d_R$ be the estimated numbers
+of distinct join keys, bounded between one and the corresponding nonempty
+input size. Composite-key estimates multiply the per-column distinct counts
+under an independence assumption. Statistics remain local to each original
+join edge: we do not propagate transitive equalities across outer joins.
+
+Assuming uniform key frequencies and containment of the smaller key domain
+in the larger one, we estimate the matching output $M$ and unmatched tuples
+$U_L,U_R$ as
+\begin{equation}
+ \begin{aligned}
+ M   &= \frac{N_LN_R}{\max(d_L,d_R)},\\
+ U_L &= N_L\max(0,1-d_R/d_L),\\
+ U_R &= N_R\max(0,1-d_L/d_R).
+ \end{aligned}
+ \label{eq:join-cardinality}
+\end{equation}
+An inner join returns $M$; a left, right, or full outer join additionally
+returns $U_L$, $U_R$, or both, respectively. Empty inputs are handled directly
+using the join semantics. Swapping the children also swaps LEFT and RIGHT,
+so the same logical input remains preserved.
+
+\subsection{Reduction and Plan Enumeration}
+\label{sec:two-round-reduction}
+\label{sec:plan-enumeration}
+
+Reduction follows preservation semantics. An inner edge permits filtering
+in both directions. A one-sided outer edge permits only the preserved side
+to filter the non-preserved side; a full outer edge permits neither.
+Provably redundant reductions are omitted. The complete bottom-up round
+precedes the top-down round, and each step uses the estimates updated by
+earlier steps.
+
+For a filter built on $b$ and applied to $p$, we scale each edge-local
+distinct count by that relation's retained fraction, with a floor of one
+for a nonempty input. Using these updated distinct counts, the estimated
+probe size becomes
+\begin{equation}
+ N'_p=N_p\min(1,d_b/d_p).
+ \label{eq:semijoin-update}
+\end{equation}
+An empty build removes all probe tuples; an empty probe remains empty.
+With unit row-work weights, the reduction cost is
+\begin{equation}
+ C_{\mathrm{SJ}}
+ =\sum_{\text{new filters}}3N_b
+  +\sum_{\text{probe steps}}(N_p+N'_p).
+ \label{eq:semijoin-cost}
+\end{equation}
+The three build terms represent materialization, filter construction, and
+replay. Probe work includes one lookup per input tuple and emission of the
+survivors. Reusing a filter does not charge its build work again.
+
+The final reduced sizes initialize the enumeration leaves. After rewriting
+the join expression into an associative form, dynamic programming combines
+connected relation subsets and retains the cheapest tree for each subset.
+A combination costs the two child plans plus the estimated output of their
+join, as in Equation~\ref{eq:cout}. Edge types and predicate orientation are
+preserved, and cross products are never introduced. Output-root preferences
+are tried where applicable; if they prevent a complete plan, the search
+retries without that preference. For 12 or more relations, or after the
+10,000-pair search budget is exhausted, a greedy search repeatedly merges
+the cheapest connected pair.
+
+For an all-inner tree with reductions in both directions on every edge,
+the estimated output of a connected subplan is bounded below by its largest
+reduced leaf. This prevents the uniform-key estimator from predicting fewer
+tuples than full reduction allows. The correction is not applied to general
+outer-join trees.
+
+\subsection{Candidate Selection}
+\label{sec:plan-selection}
+
+We first compare the candidates' join groupings using the sets of stable
+base-relation instances below their join nodes. This comparison ignores
+join type, child orientation, and semi-join wrappers. If the groupings are
+identical, DuckDB's plan is retained. A missing candidate, invalid cost
+comparison, or proof that the baseline eliminates all join work also keeps
+the baseline.
+
+For a genuinely different grouping, the default gate requires $C_Y\leq C_D$.
+If the reductions retain less than 90\% of the estimated input tuples in
+total, the stricter condition $C_Y\leq0.90C_D$ requires additional headroom.
+When a table filter uses a generic selectivity estimate, both candidates
+are also rescored without that estimated filter reduction, and the scenario
+with the larger candidate-to-baseline cost ratio governs selection.
+An additional guard rejects a candidate that retains at least 99\% of its
+input when the largest estimated input is at least 1,000 times the smallest
+unfiltered base relation with such an uncertain filter.
+
+A narrowly scoped stretch gate permits $C_Y\leq1.20C_D$ only when the
+candidate's real-join cost is lower, its summed real-join input cardinality
+is at most 30\% of the baseline's, and the reductions retain at least 95\%
+of the input tuples. This gate is unavailable when the generic-filter
+check, amplification guard, or full-reduction lower-bound correction is
+active. Thus, the relaxed threshold targets benefits from regrouping, not
+candidates that rely on aggressive reduction estimates. These thresholds
+are fixed implementation parameters in the evaluated V7 policy; they are
+heuristics, not guarantees of a runtime improvement.
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate \emph{DuckOuterYan}, our integration of OuterYan into DuckDB,
+using 32 worker threads. We report the performance of enabling the optimizer
+over the complete measured workload, then examine selected plans and their
+execution phases.
+
+\subsection{DuckOuterYan System Design}
+\label{sec:system-design}
+
+DuckOuterYan integrates plan generation, selection, and execution into
+DuckDB's existing vectorized engine. The optimizer operates after filter
+pushdown and builds both alternatives from the same logical input. One
+copy follows DuckDB's native outer-join simplification and join-order
+optimization. The other is converted into an operator-tree representation
+that records relation identities, equality predicates, and preservation
+directions.
+
+The OuterYan path simplifies outer joins where null rejection permits,
+records the legal two-round reduction schedule, and rewrites join types
+into an associative form for enumeration. Recording reductions before this
+rewrite keeps their semantics independent of the subsequently chosen
+grouping. After the cost comparison in Section~\ref{sec:optimization}, a
+selected candidate is resimplified and lowered back to DuckDB operators;
+otherwise the native alternative continues through the normal optimizer.
+The active path handles eligible acyclic equality-join queries. Unsupported
+queries, including queries containing aggregation or DISTINCT, use the
+native optimizer.
+
+At execution time, semi-join build operators materialize their input and
+construct reusable membership filters. Probe operators filter DuckDB
+\texttt{DataChunk}s without adding output columns or changing surviving
+tuple multiplicities. Eligible bounded integer keys use a bitmap; other
+keys, or ranges exceeding the per-filter memory budget, use a hash filter.
+Pipeline dependencies prevent a probe from starting before its filter is
+finalized and preserve the bottom-up/top-down phase boundary. The remaining
+joins and result production use DuckDB's execution engine. Profiling
+attributes work to the two reduction rounds, subsequent joins, and other
+operators separately.
+
+\subsection{Outer-Join Benchmark}
+\label{sec:outerjoin-benchmark}
+
+We derive a controlled core from TPC-H~\cite{tpch}, TPC-DS~\cite{tpcds},
+JOB~\cite{job}, and SQLStorm~\cite{sqlstorm25}. Its 34 traceable seeds comprise
+5 TPC-H, 7 TPC-DS, 10 JOB, and 12 SQLStorm queries. Each seed supplies a
+connected acyclic skeleton of 3--6 relation instances. We retain its join
+graph and emit five deterministic input-tree variants: primary left-deep
+and right-deep trees, two connected bushy alternatives where available,
+and an alternate right-deep traversal. When a bushy split is unavailable,
+the corresponding slot uses a mixed left-deep or secondary right-deep tree.
+The full core contains 170 queries: 46 left-deep, 80 right-deep, and 44 bushy.
+
+Primary and control variants use full outer joins; the 12 mixed alternatives
+retain their declared join types. Every active edge has a plain-column
+equality, and generated selections are null-rejecting predicates in the
+global WHERE clause. Explicit parentheses fix the input grouping. These
+are independently specified outer-join queries derived from source graphs,
+not semantically equivalent rewrites of the original benchmark queries or
+necessarily of one another.
+
+A supplementary component contains 36 normalized synthetic queries:
+9 industry-inspired patterns and 28 historical optimizer stress cases,
+with one overlap. The latter were originally selected for favorable
+performance and are identified as such in the manifest. They are not
+production traces or an unbiased sample of application queries. This
+component includes the graph family and additional queries over the
+TPC-H, TPC-DS, and JOB schemas. SQLStorm queries are grouped by their
+underlying schema, not reported as a fifth family.
+
+The full union has 206 queries. Removing 21 previously recorded
+multithreaded timeouts produced the 185-query input to the reported run.
+That run completed 176 correct timing pairs and encountered 9 further
+timeouts, all during the OFF correctness execution at the 1,800-second
+limit: 2 graph bushy queries, 5 TPC-H Q9 star-graph variants, and 2 TPC-DS
+Q93 chain-graph variants. These nine have since been removed from the
+active execution manifest, leaving 144 core and 32 supplementary queries.
+The original results and source queries remain available. The active set
+loses graph bushy and TPC-H core star coverage, so it is not described as
+fully balanced. No successfully timed regression was removed.
+
+We distinguish \emph{input tree shape} (left-deep, right-deep, or bushy)
+from \emph{join-graph topology} (chain, star, or branch). The plotting category
+\emph{industry} denotes seven industry-inspired queries, not another tree
+shape or all 32 supplementary queries.
+
+\subsection{Experimental Setup}
+\label{sec:experimental-setup}
+
+\paragraph{Environment and data.}
+The reported server configuration is an Intel Xeon Silver 4116 at
+2.10\,GHz, with 24 physical cores, 48 hardware threads, and 192\,GB RAM.
+We use the release build of the DuckDB-based research fork and set
+\texttt{threads=32} for both configurations. TPC-H and TPC-DS use scale
+factor 100. JOB uses the local IMDb/JOB database, and graph queries use
+relations built from the SNAP Bitcoin Alpha edge list.
+% VERIFY before submission: hardware is carried over from the supplied draft.
+% The run log verifies release binary, threads=32, both SF=100, and graph=bitcoin.
+% Supply OS, exact tested commit/version, compiler, storage/memory/spill settings,
+% and JOB/graph snapshot identifiers from the server; do not infer them locally.
+
+\paragraph{Compared configurations.}
+\emph{DuckDB (OFF)} disables only the \texttt{outer\_yan} optimizer.
+\emph{DuckOuterYan (ON)} enables it with the V7 gated policy described above;
+the existing plots label this configuration \emph{OuterYan}.
+An ON execution can still select DuckDB's native plan. Among the 176 valid
+queries, 55 select OuterYan and 121 retain DuckDB. Of the 55 selections,
+54 pass the strict gate and one uses the stretch gate. All 55 are recorded
+as using bitmap filters; this run does not compare bitmap and hash kernels.
+
+\paragraph{Correctness and timing.}
+The harness executes each bare query under OFF and ON and compares the
+sorted serialized result rows, preserving duplicate rows rather than
+checking only cardinality. Sorting is external to the query; no CTAS,
+COPY, or LIMIT wrapper changes the optimized plan. Only successful
+comparisons proceed to timing.
+Each configuration uses a fresh CLI process with one warm-up followed by
+three measured executions. We report their median wall-clock time.
+Queries run in trash-output mode, which fully consumes the result without
+terminal formatting or result-file output. The timer covers query
+processing, including optimization and result consumption, but excludes
+CLI startup and session-setting commands. Profiling is disabled during
+these measurements. No cold-cache reset or randomized OFF/ON ordering is
+claimed.
+
+\paragraph{Reporting.}
+We reconcile the final CSV and attempts file by benchmark family and query
+name: final records take precedence, and attempts supply otherwise missing
+queries. In this run both contain the same 185 records, counted once.
+Statistics use all 176 correct, finite, positive OFF/ON timing pairs,
+including native-plan fallbacks and measured regressions. Timeouts are
+reported separately, never substituted with the time limit. The selected-plan
+subset is reported separately from both the full workload and the display
+sample.
+
+For each query, speedup is $S_q=T_{\mathrm{OFF},q}/T_{\mathrm{ON},q}$.
+We summarize a group of $n$ queries using
+\begin{equation}
+ \begin{aligned}
+ S_{\mathrm{geo}}&=\exp\!\left(\frac{1}{n}\sum_q\log S_q\right),\\
+ S_{\mathrm{total}}&=\frac{\sum_q T_{\mathrm{OFF},q}}
+                          {\sum_q T_{\mathrm{ON},q}}.
+ \end{aligned}
+ \label{eq:reported-speedups}
+\end{equation}
+The geometric mean gives every query equal weight in log space; the total-time
+ratio captures the aggregate elapsed-time change over the same queries.
+We also report arithmetic mean, median, and maximum speedup. These are
+descriptive summaries, not confidence intervals or significance tests.
+
+\subsection{Results}
+\label{sec:experimental-results}
+
+\subsubsection{Overall Performance}
+\label{sec:overall-performance}
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{7pt}
+\caption{32-thread OFF/ON speedups. The upper panel includes all valid
+queries, including native-plan fallbacks; the lower panel includes only
+queries selecting OuterYan. All speedup columns are multiplicative factors.}
+\label{tab:runtime-by-benchmark}
+\begin{tabular}{lrrrrrr}
+\toprule
+Family & $n$ & Geomean & Mean & Median & Max & Total-time ratio \\
+\midrule
+\multicolumn{7}{l}{\textit{All valid queries}} \\
+Graph  &   5 & 3.3503 & 3.3509 & 3.3391 &  3.4550 & 3.3563 \\
+TPC-H  &  48 & 0.9979 & 1.0006 & 0.9986 &  1.5082 & 0.9769 \\
+TPC-DS &  41 & 1.3704 & 5.0319 & 1.0035 & 81.7573 & 1.4295 \\
+JOB    &  82 & 1.1880 & 1.3292 & 1.0231 &  7.9904 & 1.5547 \\
+All    & 176 & 1.2061 & 2.1595 & 1.0066 & 81.7573 & 1.3411 \\
+\midrule
+\multicolumn{7}{l}{\textit{OuterYan-selected queries}} \\
+Graph  &  5 & 3.3503 &  3.3509 & 3.3391 &  3.4550 & 3.3563 \\
+TPC-H  &  5 & 1.0258 &  1.0480 & 0.9677 &  1.5082 & 0.9387 \\
+TPC-DS &  7 & 6.5998 & 24.6548 & 3.1821 & 81.7573 & 4.9506 \\
+JOB    & 38 & 1.4663 &  1.7190 & 1.2504 &  7.9904 & 1.8602 \\
+All    & 55 & 1.8530 &  4.7255 & 1.4691 & 81.7573 & 2.6059 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Table~\ref{tab:runtime-by-benchmark} separates optimizer-enabled performance
+from selected-plan performance. Over all 176 valid queries, DuckOuterYan
+achieves a geometric-mean speedup of $1.2061\times$ and a total-time ratio
+of $1.3411\times$. The sum of query medians falls from 6,243.88 to
+4,655.73 seconds, a 25.44\% reduction. There are 111 speedups and 65 slowdowns;
+113 ratios lie within $[0.95,1.05]$. The median is close to one, whereas the
+arithmetic mean is raised by a small number of large gains.
+
+The 144 completed controlled-core queries alone yield $1.1877\times$
+geometric-mean and $1.3044\times$ total-time speedups. The 32 supplementary
+queries yield $1.2927\times$ and $2.0627\times$, respectively. This separation
+matters because some supplementary sources were performance-selected.
+The combined result characterizes this constructed workload, not the
+unmodified standard benchmarks or an unbiased production workload.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\DuckOuterYanFigureDir/speedup_all_queries.pdf}
+\caption{Speedup of every valid query at 32 threads, including native-plan
+fallbacks. Colors and horizontal regions distinguish benchmark families;
+subgroups distinguish input-tree shapes or the industry category. Points
+are translucent, and the logarithmic vertical axis preserves both gains
+and regressions. The dashed line denotes equal running time.}
+\label{fig:speedup-all-queries}
+\end{figure*}
+
+Figure~\ref{fig:speedup-all-queries} shows the variation within each family.
+The five graph queries improve consistently, while TPC-H is near parity by
+geometric mean and slightly slower by total time. TPC-DS supplies most of
+the absolute savings, approximately 1,278.12 seconds, despite a median
+speedup near one. JOB saves 111.72 seconds. The 55 OuterYan-selected queries
+achieve $1.8530\times$ geometric-mean and $2.6059\times$ total-time speedups,
+but these conditional results do not replace the full-workload scores.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3pt}
+\caption{32-thread results by input category over all valid queries.
+Selected is the number executing an OuterYan plan. Industry is not a tree
+shape. Speedup columns are multiplicative factors.}
+\label{tab:runtime-by-category}
+\begin{tabular}{lrrrrr}
+\toprule
+Category & $n$ & Selected & Geomean & Median & Total \\
+\midrule
+Left-deep  & 45 & 13 & 1.2988 & 1.0062 & 2.1939 \\
+Right-deep & 74 & 26 & 1.2406 & 1.0082 & 1.2112 \\
+Bushy      & 50 & 15 & 1.1061 & 1.0056 & 1.0426 \\
+Industry   &  7 &  1 & 1.0328 & 1.0151 & 1.0160 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:runtime-by-category} shows aggregate gains in all four
+reporting categories, with the largest total-time improvement among
+left-deep inputs. These groups differ in schema, graph topology, and data
+selectivity, so their differences do not isolate a causal effect of tree
+shape. In particular, the large TPC-DS gains occur in left-deep variants
+over star-shaped join graphs, not in the separate graph benchmark family.
+
+\subsubsection{Running Time Comparison}
+\label{sec:runtime-comparison}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\DuckOuterYanFigureDir/runtime_outeryan_queries.pdf}
+\caption{Unprofiled running times of DuckDB and DuckOuterYan at 32 threads
+for 32 OuterYan-selected queries: 5 graph, 5 TPC-H, 7 TPC-DS, and 15 JOB.
+Each pair of adjacent bars represents one query, with seconds on a
+logarithmic axis. G/H/D/J identify the families; LD/RD/B identify input-tree
+shape, and I identifies the industry category.}
+\label{fig:runtime-outeryan-queries}
+\end{figure*}
+
+Figure~\ref{fig:runtime-outeryan-queries} targets up to 15 queries per family,
+using only actual OuterYan selections with complete timing and matching
+profile records. We distribute slots across the available categories and
+choose evenly spaced ranks of OFF running time within each category, not
+ranks of speedup or ON time. The first three families have only 5, 5, and
+7 eligible selections, so all are shown; JOB contributes five queries per
+tree shape. The 32-query display includes six regressions and is not the
+population used to compute the tables.
+
+The TPC-DS Q5 mixed variant D-LD-01 falls from 67.09 to 0.86 seconds
+($77.9108\times$), and the Q80 mixed variant D-LD-03 falls from 654.17 to
+8.00 seconds ($81.7573\times$). Their star graphs combine a selective fact
+or return relation with several optional inputs. The large gains are
+consistent with avoiding expensive intermediate joins, but the current
+measurements do not separate the contributions of reduction and reordering.
+JOB also benefits: J-RD-08 falls from 46.34 to 9.90 seconds, and J-B-08
+from 3.58 to 1.12 seconds. Bushy grouping therefore does not inherently
+prevent a gain.
+
+TPC-H exposes a different outcome. Four of its five selected queries are
+slower: three variants of SQLStorm 25509 and one of 17751. They add
+31.00 seconds in total. H-RD-03, for example, rises from 103.06 to
+121.68 seconds despite passing the estimated-cost gate. JOB has five
+selected regressions, four bushy and one right-deep, adding 1.49 seconds
+in total. The remaining 18 JOB slowdowns retain DuckDB's plan; they cannot
+be attributed to execution of OuterYan's semi-joins. Additional optimizer
+work, final-plan differences, and run-to-run variation require separate
+checks. By absolute time, the TPC-H cases are the higher-priority target.
+
+\subsubsection{Execution Time Details}
+\label{sec:execution-time-details}
+
+The current 32-thread run has no phase profiles. Figure~\ref{fig:phase-breakdown}
+therefore retains the available August 30, 48-thread profiles as an
+\emph{explicitly labeled placeholder}. It uses the same query names, short
+IDs, and plotting order as Figure~\ref{fig:runtime-outeryan-queries}, but not
+the same measurement run. Its baseline is the OFF median from that older
+48-thread experiment, not the current 32-thread baseline. Matching is by
+family and full query name; the archived results do not include SQL hashes
+to verify byte-identical query text across the server runs.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{\DuckOuterYanFigureDir/phase_breakdown_outeryan.pdf}
+\caption{OuterYan execution time details for the same 32 query IDs as
+Figure~\ref{fig:runtime-outeryan-queries}. This is a placeholder using
+August 30 profiles at 48 threads, not current 32-thread measurements.
+Round 1, Round 2, Round 3, and Other are accumulated operator CPU times.
+Total Time is profiled wall latency; Baseline Time is the old experiment's
+unprofiled 48-thread OFF median. CPU components must not be added to the
+wall-time bars.}
+\label{fig:phase-breakdown}
+\end{figure*}
+
+Round 1 and Round 2 contain the bottom-up and top-down semi-join build/probe
+operators, respectively. Round 3 contains the subsequent real joins.
+Other accounts for the remaining operator CPU time, including scans and
+non-join processing. Their sum is accumulated CPU work across threads,
+not end-to-end elapsed time. An absent round has no recorded operator work;
+missing measurements are not replaced by zero. Total Time includes profiling
+overhead and is distinct from the unprofiled ON median.
+
+The older profiles distinguish several execution regimes. In the graph
+sample, Round 1 has no operators and Round 2 contributes less than 0.01\%
+of CPU work; real joins and other processing dominate. For D-LD-01, the
+two reduction rounds together contribute about 35.9\%, while Round 3
+contributes 12.8\%. D-LD-03 spends only 1.5\% in reduction and 15.3\% in
+Round 3, with most CPU work assigned to Other. Thus, neither a large
+reduction fraction nor a small join fraction alone determines net speedup.
+
+For the TPC-H 25509 variants, reduction consumes approximately 17.5--18.3\%
+of the old profiled CPU work and Round 3 consumes 61.2--63.1\%. Both the
+preparatory work and the final joins remain substantial. J-B-09
+(SQLStorm JOB 11914, bushy) spends 33.0\% in reduction and 61.7\% in
+Round 3. In contrast, J-B-12 (the synthetic bushy4a variant) spends only
+1.9\% in reduction, but 58.0\% in Round 3 and 40.0\% in Other. Its
+multi-valued movie relationships produce approximately 41 million result
+rows in the older run, motivating closer inspection of intermediate
+cardinality and output-processing costs rather than only a larger
+semi-join penalty.
+
+These profiles motivate two distinct cost-model questions: whether
+reduction overhead is repaid, and whether the chosen grouping still
+creates expensive intermediate or final results. They do not establish
+the cause of the current 32-thread regressions. Matching 32-thread profiles,
+OFF/ON plans, and targeted ablations are needed to attribute those effects.
+
+\paragraph{Summary.}
+DuckOuterYan reduces aggregate elapsed time on the completed workload,
+with concentrated gains in graph, TPC-DS, and JOB queries. Native-plan
+fallbacks remain part of the evaluation, and selected-plan regressions
+remain visible. The results support reduction-aware outer-join optimization
+while identifying large-output joins and reduction overhead as separate
+targets for improving plan selection.

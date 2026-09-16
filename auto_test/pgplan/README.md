@@ -9,7 +9,7 @@ RUN_PGPLAN=1 bash auto_test/run_all.sh
 
 The default source provider installs and starts pinned PostgreSQL 16.2 under
 the repository when it is missing, prepares minimal plan-selection data, then
-compares native DuckDB, PGPlan, and normal OuterYan across all 185 active queries in
+compares native DuckDB, PGPlan, and normal OuterYan across all 176 active queries in
 `auto_test/outerjoin_query`. Docker is an optional provider selected with
 `PGPLAN_SETUP=docker`. Both managed providers generate and reuse a private
 mode-`0600` password file unless a password is explicitly provided; a legacy
@@ -150,8 +150,8 @@ streamed immediately as a legacy-style, separator-delimited block and retained
 in `comparison.log`, which contains the same ordered records and values as the
 machine-readable comparison files.
 
-The comparison CSV/TSV preserves the complete `experiment_onoff.sh` CSV header
-as its leading columns, in exactly the original order. PGPlan verification,
+The comparison CSV/TSV preserves the `experiment_onoff.sh` decision/timing CSV header
+prefix, excluding its appended `profile_*` fields, in exactly the original order. PGPlan verification,
 TM, correctness mode, and provenance columns follow that prefix, with
 `pgplan` in every appended field name. Raw plan signatures are retained only
 in trace artifacts, not in the human log or CSV.
@@ -178,8 +178,8 @@ uses `.mode trash`, which executes and fully materializes the bare query
 while excluding CLI result serialization and filesystem output from the real
 DuckDB CLI wall-clock measurement. Only `PASS` rows have timing values.
 
-`run_all.sh` defaults to sequential 16- and 32-thread configurations, saved in
-separate `_t16` / `_t32` directories. Use `--threads 16` for just one. When
+`run_all.sh` defaults to 32 threads only. Use `--threads "16 32"` for sequential
+configurations saved in separate `_t16` / `_t32` directories. When
 reusing correctness, select the thread count matching the source receipt;
 receipts are not reusable across thread counts.
 

@@ -44,7 +44,7 @@ Optional:
   --runs N            Positive odd TM measured-run count after one warm-up
                       (PGPLAN_RUNS, default: 3).
   --threads N         Positive DuckDB thread count
-                      (PGPLAN_THREADS, default: 16; run_all.sh sweeps 16/32)
+                      (PGPLAN_THREADS, default: 32; explicit sweeps supported)
   -h, --help          Show this help
 
 Optional environment controls:

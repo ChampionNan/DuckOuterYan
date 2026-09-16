@@ -68,13 +68,13 @@ The opt-in `RUN_PGPLAN=1` workflow:
 5. performs the requested correctness mode, then records independent Original,
    PGPlan, and OuterYan TM timing batches on target data.
 
-The default corpus is all 185 active queries under `auto_test/outerjoin_query`:
+The default corpus is all 176 active queries under `auto_test/outerjoin_query`:
 
 | Family | Queries | PostgreSQL plan-selection data | DuckDB exact-correctness data |
 |---|---:|---|---|
-| graph | 7 | `pgplan_graph`, at most 1000 rows per table | configured target graph DB |
-| TPC-H | 53 | `public`, exact SF0.01 | configured target TPC-H DB |
-| TPC-DS | 43 | `pgplan_tpcds`, at most 1000 rows per table | configured target TPC-DS DB |
+| graph | 5 | `pgplan_graph`, at most 1000 rows per table | configured target graph DB |
+| TPC-H | 48 | `public`, exact SF0.01 | configured target TPC-H DB |
+| TPC-DS | 41 | `pgplan_tpcds`, at most 1000 rows per table | configured target TPC-DS DB |
 | JOB | 82 | `pgplan_job`, at most 1000 rows per table | configured target JOB DB |
 
 Set `PGPLAN_SAMPLE_ROWS` to change the graph/TPC-DS/JOB row cap. The sampled
@@ -169,8 +169,8 @@ Despite the historical PGPlan name, this corpus command performs all three
 DuckDB configurations for every successful query: Native, imported PGPlan,
 and normal OuterYan. Each successful run retains its three TM medians in
 `runs/<family>/<query>/timing/summary.tsv`; no single-thread batch is run.
-`run_all.sh` defaults to sequential 16- and 32-thread runs, with separate
-`_t16` / `_t32` directories. Correctness-reuse receipts are thread-specific;
+`run_all.sh` defaults to 32 threads only. An explicit `--threads "16 32"`
+sweep uses separate `_t16` / `_t32` directories. Correctness-reuse receipts are thread-specific;
 select `--threads N` matching the source when using `--reuse-from`.
 Before returning success or failure,
 the corpus runner produces `comparison.tsv` and `comparison.csv` with one row

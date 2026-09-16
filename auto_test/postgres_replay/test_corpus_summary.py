@@ -89,7 +89,13 @@ def original_csv_fields() -> tuple[str, ...]:
     match = re.search(r"CSV_HEADER=\(\n(.*?)\n\)", source, re.DOTALL)
     if match is None:
         raise AssertionError("could not find experiment_onoff.sh CSV_HEADER")
-    return tuple(match.group(1).split())
+    fields = tuple(match.group(1).split())
+    # The two-way harness appends optional phase-profile fields. PGPlan keeps
+    # the common decision/timing prefix and does not collect phase profiles.
+    profile_start = next((i for i, field in enumerate(fields) if field.startswith("profile_")), len(fields))
+    if any(not field.startswith("profile_") for field in fields[profile_start:]):
+        raise AssertionError("phase-profile fields must remain an appended suffix")
+    return fields[:profile_start]
 
 
 class CorpusSummaryTest(unittest.TestCase):

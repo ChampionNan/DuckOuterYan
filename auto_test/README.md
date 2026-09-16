@@ -23,10 +23,10 @@ synopsis.
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
-| `outerjoin_benchmark/` | 185-query active view, full 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
+| `outerjoin_benchmark/` | 176-query active view, full 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
-| `results/` | Generated text, CSV, and trace output; historical profiles |
+| `results/` | Generated text, CSV, trace output, and native phase profiles |
 
 `trace_outer_yan.sh` has its own command-line/environment defaults and does not
 source `configs.sh`.
@@ -43,11 +43,12 @@ corresponding environment values.
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
-| `OY_THREAD_COUNTS` | `16 32` | Sequential multi-thread configurations; comma-separated lists also work |
-| `OY_THREADS` | first configuration (`16`) | Scalar override to run only one thread count |
+| `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
+| `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
 | `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
+| `OY_PROFILE` | `1` | Separate ON phase profiling for correct OuterYan-selected queries; `0` skips it |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
 | `RUN_PGPLAN` | `0` | Set to `1` to opt into PGPlan generation and three-way comparison |
@@ -120,14 +121,16 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is the timeout-filtered 185-query workload under
+The default corpus is the timeout-filtered 176-query workload under
 `outerjoin_benchmark/benchmark/`. The `outerjoin_query` compatibility link
-points there. It contains 151 benchmark-derived queries and 34 evaluation
+points there. It contains 144 benchmark-derived queries and 32 evaluation
 queries. The complete component views retain 170 core queries and 36 evaluation
 queries (nine industry-inspired patterns plus all 28 pinned legacy OuterYan
-wins, with one overlap). Only 21 confirmed multithread timeout cases are removed
-from the active view; seven other timeout cases remain to protect graph bushy
-and TPC-H core star coverage. See
+wins, with one overlap). Thirty confirmed multithread timeout cases are removed
+from the active view: 21 from the 0830/48-thread run and another nine from the
+0908/32-thread run. The latter include the seven formerly protected graph bushy
+and TPC-H Q9 star cases; those two family/pattern combinations are no longer
+covered by the active set. Successful queries are not removed to improve scores. See
 [`active_corpus_coverage.md`](outerjoin_benchmark/active_corpus_coverage.md)
 for the evidence, exceptions, and before/after distributions.
 Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
@@ -215,13 +218,13 @@ component. They remain in `outerjoin_query_old/` solely as historical inputs.
 
 ## Experiment pipeline
 
-`experiment_onoff.sh` and `run_all.sh` test 16 threads, then 32 threads by
-default, using separate processes and output files. They do not run the two
-configurations concurrently. Override the sweep with `--threads "16 32"`,
-`OY_THREAD_COUNTS="16 32"`, or use `--threads 16` / `OY_THREADS=16` for one
+`experiment_onoff.sh` and `run_all.sh` use **32 threads only** by default.
+Request a sequential sweep explicitly with `--threads "16 32"` or
+`OY_THREAD_COUNTS="16 32"`; each configuration uses separate processes and
+output files. Use `--threads 16` / `OY_THREADS=16` for a different single
 configuration. Thread counts must be greater than one; CLI settings take
 precedence. Database setup and query generation in `run_all.sh` happen only
-once before the sweep.
+once before any requested sweep.
 
 For every selected query at each thread count, `experiment_onoff.sh` performs:
 
@@ -234,12 +237,22 @@ For every selected query at each thread count, `experiment_onoff.sh` performs:
 4. Time OuterYan OFF and ON at `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
+5. For correct queries whose ON plan selects OuterYan, collect a separate native
+   JSON profile batch at the same thread count. This is enabled by default
+   (`OY_PROFILE=1`); `--no-profile` or `OY_PROFILE=0` skips it, and `--profile`
+   explicitly enables it. One profiled warm-up is followed by `--runs N` samples.
+   The complete phase tuple from the median profile wall-latency execution is
+   retained, rather than taking independent medians of its components.
 
-All executions explicitly set the selected thread count and disable profiling.
-There is no single-thread batch, profiled warm-up, phase-profile execution, or
-profile output. Timing runs in fresh `-no-init` CLI processes using `.mode
+All executions explicitly set the selected multi-thread count. Correctness,
+diagnostics, and OFF/ON performance timing disable profiling. There is no
+single-thread batch. Timing runs in fresh `-no-init` CLI processes using `.mode
 trash`, which fully drains the bare query without measuring CSV formatting or
 file output. Correctness and optional plan/cost diagnostics remain enabled.
+Profile work adds a separate ON batch and never contributes to OFF/ON timing
+medians or speed-up. A profile failure leaves valid timing pairs intact and
+records `profile_status=ERROR`, unavailable phase values, and `PROFILE-ERROR`
+in the note; partial JSON files and the CLI log remain available for diagnosis.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -466,7 +479,7 @@ bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration
   -t, --timeout S     per-statement timeout
-      --threads LIST  multi-thread counts (default "16 32"; also accepts 16,32)
+      --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
@@ -520,14 +533,15 @@ the report header; rebuild the databases first if they are not already SF1.
 
 ## Output
 
-Without `--out`, one start timestamp identifies both thread configurations.
-For each `N` in `16`, `32`, the result group is:
+Without `--out`, one start timestamp identifies the run. For each requested
+thread count `N` (only `32` by default), the result group is:
 
 ```text
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.txt
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.csv
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.attempts.csv
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.plans/
+auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.profiles/
 ```
 
 `run_all.sh` includes the corpus label, for example
@@ -538,7 +552,12 @@ With `--out path/name.txt`, a sweep writes `path/name_t16.txt` and
 `path/name_t32.txt`, with matching CSV names. For a single configuration the
 explicit output path is used unchanged. Each CSV contains one row per query
 and records `timing_threads`, `tm_off`, `tm_on`, and `tm_speedup`. New outputs
-contain no `t1_*` or `profile_*` columns. The historical
+contain no `t1_*` columns. Appended `profile_*` columns record status, actual
+thread count, R1/R2/R3 operator work and counts, Other CPU work, wall latency,
+total CPU work, phase shares, sample count, and the raw profile directory.
+When profiling is disabled or skipped, phase measurements remain unavailable.
+Each profiled query has its own subdirectory with `profile_0.json` (warm-up),
+`profile_1.json` through `profile_N.json`, and `duckdb.log`. The historical
 attempts CSV is retained for downstream compatibility and is an identical
 single-attempt copy; timed-out queries are not retried.
 
@@ -551,7 +570,8 @@ Live stderr and the TXT report use one clearly separated block per query:
 ```
 
 The record always uses two lines: line 1 contains the high-level result,
-kernel choice, thread count, and timing; line 2 contains decision/cost metadata.
+kernel choice, thread count, and timing; line 2 contains decision/cost metadata
+and `profile=[status=... threads=... Total-Time=... CPU-Time=... R1=... R2=... R3=... OtherCPU=...]`.
 Applicable queries include the OuterYan and
 DuckDB cost formula, gate comparison, and join/SJ weights on line 2. With plan
 capture enabled, that line also lists the DuckDB-OFF and enabled EXPLAIN files,
@@ -566,7 +586,7 @@ Each query block includes:
 | Field | Meaning |
 |---|---|
 | Line 1 | Query/result, selected plan, kernel counts, thread count, and unprofiled OFF/ON timing and speed-up |
-| Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, hash notices, and optional artifacts |
+| Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, profile status/measurements, hash notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
 gate:
@@ -599,16 +619,39 @@ counts for every relation depth present in the run.
 default, with optional standalone figures. Files with the same timestamp and
 thread suffix are merged into one logical run; `_t16` and `_t32` are never
 merged. Historical `core` and `industry_inspired` CSV pairs remain supported.
-Per-query runtimes are shown in three figures. The first is a compact horizontal
-dot view containing all correct and timed queries; it appends `[OuterYan]` or
-`[DuckDB]` to identify the plan selected during the ON run. The two
-`Running time Comparison` figures contain only queries whose ON run selected
-OuterYan: one combines graph, TPC-H, and TPC-DS, and one contains JOB. Each
-new multi-thread-only query has two contiguous OFF/ON bars. Historical result
+The all-query figure is one shared speed-up scatter axis. Every correct query
+with finite, positive OFF/ON timings contributes one point; the y-value is
+`OFF / ON` on a logarithmic scale. Each benchmark occupies a separate x-axis
+region, subdivided by query-name shape/category (not join-graph topology). Points have 50% opacity and
+deterministic horizontal jitter within their shape slot, so overlaps show
+density without changing speed-up values. The enlarged benchmark legend is one
+horizontal row above the axes. Query names are omitted. The dashed line is `1x`;
+this figure is not sampled.
+
+One `Running time Comparison` figure combines graph, TPC-H, TPC-DS, and JOB.
+By default, `--representative-scope outeryan` samples only correct queries whose
+ON run selected OuterYan, including regressions, with complete timing pairs.
+Use `--representative-scope all` for the optional all-plan view.
+Each family targets `--representatives-per-benchmark`
+(default 15); a family with fewer eligible queries is shown in full, without
+reducing the other families' quotas. Within each family, slots are allocated round-robin over
+available shapes, retaining every shape when the quota permits. Within a shape,
+queries are ordered by DuckDB OFF time and sampled at evenly spaced ranks (the
+middle rank for a single slot). Sampling does not rank speed-up or ON time.
+A family with no eligible queries cannot be represented; no measurements are
+invented to fill its quota. In the all-plan view, an asterisk after a query ID
+means the recorded ON plan selected OuterYan; an unmarked ID means DuckDB was
+selected. A question mark identifies an unavailable plan rather than assuming
+DuckDB. The ON legend reads "OuterYan enabled", which does not imply every ON
+run selected an OuterYan plan. Sampling does not rank or favor plan selection.
+
+Each new multi-thread-only query has two contiguous OFF/ON bars. Historical result
 files with both thread settings retain their four-bar comparisons, using blue
 and peach pairs. Only queries with complete finite, positive timings for their
 result schema are included; incomplete queries are omitted. Query IDs are
-assigned before this filtering so the remaining labels do not change.
+assigned from the full in-scope population before this filtering so the
+remaining labels do not change. IDs can differ between the all-plan and
+OuterYan-only scopes; the adjacent JSON manifest provides the exact mapping.
 Benchmark subtitles and separators identify the sections. Query labels and
 legends are enlarged, with the abbreviation key directly below the `Query` axis.
 The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
@@ -616,25 +659,60 @@ The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
 There is intentionally no
 speed-up-by-kernel page.
 
-For historical results containing profiles, the single `OuterYan Execution Time Details` figure samples up to 20 eligible OuterYan-selected queries per
-benchmark, evenly across each family's shape/runtime-ordered rows. All samples
+When profiles exist, the default OuterYan-selected runtime comparison and
+`OuterYan Execution Time Details` share one sample, short-ID mapping and order.
+Only queries with complete profile data and a same-run, matching-thread OFF
+baseline are eligible for that paired view. All samples
 share one vertical grouped-bar axis with benchmark subtitles and separators.
 Each query has `Round 1`, `Round 2`, `Round 3`, residual `Other`, and profiled
-wall-clock `Total Time` bars on a base-10 logarithmic y-axis. DuckDB-selected
+wall-clock `Total Time`, plus `Baseline Time` (unprofiled DuckDB OFF median)
+bars on a base-10 logarithmic y-axis. DuckDB-selected
 queries and incomplete profiles are omitted rather than represented as zero.
 The phase and `Other` values are aggregate operator CPU work across threads,
 while `Total Time` is wall-clock time; the bars are not an additive wall-time
 decomposition.
 
-The compact selected-only figures label queries as
+The compact representative figures label queries as
 `<benchmark>-<shape>-<index>`: `G/H/D/J` are graph/TPC-H/TPC-DS/JOB and
 `LD/RD/B/S/A/I/O` are left-deep/right-deep/bushy/star/aggregate/industry/other.
 
-Pass `--split-output-dir DIR` to additionally write four standalone report
-figures: `runtime_all_queries.pdf`, `runtime_outeryan_queries.pdf` (graph, TPC-H,
-and TPC-DS), `runtime_outeryan_queries_job.pdf` (JOB), and
-`phase_breakdown_outeryan.pdf`. With multiple logical runs, each run is written
-under its timestamp subdirectory.
+Pass `--split-output-dir DIR` to additionally write `speedup_all_queries.pdf`
+and the merged `runtime_outeryan_queries.pdf` (or
+`runtime_representative_queries.pdf` with `--representative-scope all`). The sampled full query names,
+short labels, shapes, available family counts, and timings are recorded in
+`representative_queries.json`.
+`phase_breakdown_outeryan.pdf` is written only
+when eligible profile data exists. With multiple logical runs, each run is
+written under its timestamp subdirectory.
+
+Keep the current 0908 figure set, previews, manifests, and statistics together
+in `results/plots/20260908_235240/t32/`; `FIGURE.md` there is the gallery.
+Do not create separate `sample` or `balanced` output directories. That 0908 run
+has no profiles. To reproduce its temporary breakdown, explicitly add
+`--phase-placeholder-csv results/experiment_onoff_benchmark_20260830_002656.csv
+results/experiment_onoff_benchmark_20260830_002656.attempts.csv` when invoking
+the plot script from `auto_test/`. This input is used only for the breakdown,
+is visibly labeled with its old date and actual 48-thread count, and never
+enters current timing or statistics. `phase_queries.json` records the exact
+profile samples and placeholder status. When current complete profiles exist,
+they take precedence and the placeholder label disappears; omit the legacy
+flag when regenerating from the new server run.
+
+Complete descriptive statistics are also exported as `STATISTICS.md` and
+`statistics.json`, in the split output directory when provided, otherwise in
+`<output-PDF-stem>_statistics/`. Use `--statistics-dir DIR` to override this.
+Statistics use the full deduplicated run, not the representative sample, and
+report all queries, OuterYan-selected queries, and DuckDB-selected queries
+separately. Each population has overall, benchmark, shape, and benchmark-by-shape
+groups. Outputs include min/max with query names, arithmetic/geometric means,
+median, P05/P10/P25/P75/P90/P95/P99, sample SD/variance (ddof=1), coefficient of
+variation, faster/equal/slower counts, ratio bands, paired OFF/ON runtime
+distributions and totals, total-time speed-up, and saved time. Source paths,
+SHA-256 fingerprints, all per-query timing pairs, and exclusion reasons are
+included in JSON. Markdown displays six decimals; JSON retains calculation precision.
+Timeouts and incomplete/incorrect observations are counted but never imputed.
+These are query-population descriptions, not confidence intervals from repeated
+runs. Shape uses the existing query-name classification, not the optimized physical plan.
 
 Result files are grouped by their filename timestamp before plotting. A paired
 `experiment_onoff_<timestamp>.csv` and
@@ -756,7 +834,7 @@ OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default comparison stage walks all 185 SQL files under `outerjoin_query`:
+The default comparison stage walks all 176 SQL files under `outerjoin_query`:
 7 graph, 53 TPC-H, 43 TPC-DS, and 82 JOB queries. It executes each bare query
 with OuterYan disabled (Original) and enabled, verifies complete result
 equivalence, records the selected DuckDB/OuterYan plan, and then measures both
@@ -807,8 +885,9 @@ plans are still desired.
 This is one comparison workflow with three timed configurations: Original,
 PGPlan, and OuterYan. Each successful query writes its TM medians under
 `runs/<family>/<query>/timing/summary.tsv`; no single-thread batch is run.
-`run_all.sh` runs the three-way corpus at 16 then 32 threads, with separate
-`_t16` / `_t32` output directories. A correctness-reuse receipt is thread-specific:
+`run_all.sh` runs the three-way corpus at 32 threads by default. An explicit
+`--threads "16 32"` sweep creates separate `_t16` / `_t32` output directories.
+A correctness-reuse receipt is thread-specific:
 use `--threads N` matching the source run when using `--reuse-from`.
 At corpus completion the runner also writes `comparison.tsv` and
 `comparison.csv` with one row for every selected query, a human-readable
@@ -821,8 +900,9 @@ rows and values come from the same ordered comparison records as the TSV and
 CSV, so the screen-readable and machine-readable reports stay in parity.
 Timing and speedup fields are populated only for `PASS` rows.
 
-The comparison CSV/TSV starts with the exact `experiment_onoff.sh` CSV header,
-in its original order and with unchanged meanings. Appended fields are all
+The comparison CSV/TSV starts with the `experiment_onoff.sh` decision/timing
+header prefix (excluding its appended `profile_*` fields), in its original
+order and with unchanged meanings. Appended fields are all
 identified by `pgplan` in their names and cover PGPlan verification/timing,
 comparison mode/status, and correctness provenance. Raw plan signatures remain in trace artifacts;
 they are not printed in the human log or copied into the CSV.

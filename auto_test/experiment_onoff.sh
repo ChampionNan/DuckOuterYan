@@ -12,8 +12,9 @@
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
 #   4. TIMING — unprofiled OFF/ON medians at the selected multi-thread count.
-# The default sweep runs 16 threads, then 32, with separate result files.
-# No single-thread executions or phase-profile batches are performed.
+#   5. PROFILE — separate native ON phase samples for OuterYan-selected queries.
+# The default run uses 32 threads; explicit sweeps use separate result files.
+# Profiling defaults to on; no single-thread executions are performed.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
@@ -28,7 +29,9 @@
 #      --limit N       cap number of queries (0 = no cap, default 0)
 #      --query-list FILE  ordered corpus-relative SQL paths (requires --only all)
 #      --capture-plans   save OFF/ON EXPLAIN, trace, and detailed cost artifacts
-#      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 16 32)
+#      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
+#      --profile         collect separate ON phase profiles (default)
+#      --no-profile      skip phase profiles; performance timing stays unprofiled
 #   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
 set -uo pipefail
@@ -38,11 +41,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # OY_TIMEOUT_SECS, OY_RUNS.
 . "$SCRIPT_DIR/configs.sh"
 . "$SCRIPT_DIR/thread_sweep.sh"
+. "$SCRIPT_DIR/phase_profile.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 CORPUS="${OY_CORPUS:-$SCRIPT_DIR/outerjoin_query}"
 
 RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
+PROFILE="${OY_PROFILE:-1}"
 THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do case "$1" in
@@ -55,6 +60,8 @@ while [ $# -gt 0 ]; do case "$1" in
     --limit) LIMIT="$2"; shift 2;;
     --query-list) QUERY_LIST="$2"; shift 2;;
     --capture-plans) CAPTURE_PLANS=1; shift;;
+    --profile) PROFILE=1; shift;;
+    --no-profile) PROFILE=0; shift;;
     --threads)
         [ $# -ge 2 ] || { echo "--threads requires a value" >&2; exit 2; }
         THREAD_COUNTS="$2"; shift 2;;
@@ -68,6 +75,7 @@ case "$RUNS" in
     ''|*[!0-9]*|0) echo "--runs must be a positive integer (got: $RUNS)" >&2; exit 2;;
 esac
 [ $((RUNS % 2)) -eq 1 ] || { echo "--runs must be odd so one real median execution is selected" >&2; exit 2; }
+case "$PROFILE" in 0|1) ;; *) echo "OY_PROFILE must be 0 or 1" >&2; exit 2;; esac
 oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 # One experiment start timestamp, captured the moment this script begins (before
 # the DB-build phase). Used for BOTH the .txt/.csv filenames AND the in-file
@@ -822,6 +830,11 @@ CSV_FINAL="${OUT%.txt}.csv"
 CSV_ATTEMPTS="${OUT%.txt}.attempts.csv"
 PLAN_DIR="${OUT%.txt}.plans"
 [ "$CAPTURE_PLANS" = 1 ] && mkdir -p "$PLAN_DIR"
+PROFILE_DIR="${OUT%.txt}.profiles"
+if [ "$PROFILE" = 1 ]; then
+    mkdir -p "$PROFILE_DIR" || { echo "Cannot create profile directory: $PROFILE_DIR" >&2; exit 1; }
+    PROFILE_DIR="$(cd "$PROFILE_DIR" && pwd)"
+fi
 
 csv_escape() {
     local value="$1"
@@ -862,6 +875,10 @@ CSV_HEADER=(
     semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight semijoin_probe_emit_weight
     kernel kernel_detail kernel_hash_reasons correct note timing_threads tm_off tm_on tm_speedup
     rows effective_pass duckdb_plan enabled_plan trace_file cost_file
+    profile_status profile_threads profile_round1_operator_s profile_round2_operator_s profile_round3_operator_s
+    profile_round1_operator_count profile_round2_operator_count profile_round3_operator_count
+    profile_total_time_s profile_cpu_time_s profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
+    profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
 )
 : > "$CSV_FINAL"
 : > "$CSV_ATTEMPTS"
@@ -876,7 +893,9 @@ csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
     echo "# timing : threads=${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
-    echo "# overhead: profiling is disabled for every execution; no phase batch"
+    echo "# overhead: correctness, diagnostics and TM timing disable profiling; separate ON phase batch enabled=$PROFILE"
+    echo "# phases : OuterYan-selected only, threads=${OY_THREADS}, 1 warm-up + ${RUNS} samples; whole tuple at median profile latency"
+    echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time; raw JSON: $PROFILE_DIR"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
@@ -916,7 +935,7 @@ QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FIL
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
 # process_one <i> — run the full pipeline for query i (gate -> decision -> kernel
-# -> timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# -> timing -> optional profile) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
@@ -949,6 +968,11 @@ process_one() {
     local ker="not-run" kdetail="b0h0" kreasons="-" kernel_status="not-run" kernel_display="not-run"
     local offm="-" onm="-" ratiom="-"
     local duckdb_plan="-" enabled_plan="-" trace_file="-" cost_file="-"
+    local profile_status="disabled" profile_threads="-" profile_directory="-"
+    local r1sj="NA" r2sj="NA" realjoin="NA" profile_wall="NA" profile_cpu="NA"
+    local r1ratio="NA" r2ratio="NA" sjratio="NA" realjoin_ratio="NA" other="NA" other_ratio="NA"
+    local r1_operators="NA" r2_operators="NA" realjoin_operators="NA" profile_samples="NA"
+    [ "$PROFILE" = 0 ] || profile_status="not-correct"
     if [ "$correct" = "TRUE" ]; then
         if [ "$CAPTURE_PLANS" = 1 ]; then
             local artifact_stem="$PLAN_DIR/${family}__${id}.${PASS}"
@@ -1035,6 +1059,37 @@ process_one() {
         local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
         offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
         ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
+        if [ "$PROFILE" = 1 ]; then
+            profile_status="not-selected"
+            if [ "$selected_plan" = "OUTERYAN" ]; then
+                local profile_result profile_rc=0 praw
+                local -a profile_fields=()
+                profile_threads="$OY_THREADS"
+                profile_status="ERROR"
+                profile_directory="$(mktemp -d "$PROFILE_DIR/${family}__${id}.XXXXXX")" || profile_rc=1
+                profile_result="$(mktemp)" || profile_rc=1
+                if [ "$profile_rc" = 0 ]; then
+                    # Direct call keeps DuckDB owned by this shell's PID tracker.
+                    oy_phase_profile "$db" "$sql" "$OY_THREADS" "$RUNS" "$selected_plan" \
+                        "$round1_pairs" "$round2_pairs" "$proven_empty" "$profile_directory" \
+                        > "$profile_result" || profile_rc=$?
+                    praw="$(< "$profile_result")"
+                    read -r -a profile_fields <<< "$praw"
+                    rm -f "$profile_result"
+                fi
+                if [ "$profile_rc" = 0 ] && [ "${#profile_fields[@]}" -eq 15 ] && \
+                   [ "${profile_fields[3]}" != "NA" ]; then
+                    read -r r1sj r2sj realjoin profile_wall profile_cpu r1ratio r2ratio sjratio \
+                        realjoin_ratio other other_ratio r1_operators r2_operators realjoin_operators \
+                        profile_samples <<< "$praw"
+                    profile_status="OK"
+                else
+                    # Do not discard valid unprofiled timing pairs after a profile failure.
+                    note="${note};PROFILE-ERROR"
+                    echo "PROFILE-ERROR: $id; see ${profile_directory:-unavailable}/duckdb.log" >&2
+                fi
+            fi
+        fi
     fi
     # Store final state for the summary.
     QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
@@ -1075,6 +1130,13 @@ process_one() {
     printf -v detail_line \
         '  details: family=%s sql=%s pass=%s timeout=%ss note=%s rows=%s nrel=%s' \
         "$family" "$sql_path" "$PASS" "$OY_TIMEOUT_SECS" "$note" "$rows" "$nrel"
+    if [ "$PROFILE" = 1 ]; then
+        printf -v detail_suffix \
+            ' profile=[status=%s threads=%s Total-Time=%ss CPU-Time=%ss R1=%ss R2=%ss R3=%ss OtherCPU=%ss samples=%s directory=%s]' \
+            "$profile_status" "$profile_threads" "$profile_wall" "$profile_cpu" "$r1sj" "$r2sj" \
+            "$realjoin" "$other" "$profile_samples" "$profile_directory"
+        detail_line+="$detail_suffix"
+    fi
     if [ "$correct" = "TRUE" ]; then
         printf -v detail_suffix \
             ' decision=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
@@ -1147,7 +1209,11 @@ process_one() {
         "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" "$sj_lookup_weight" "$sj_emit_weight" \
         "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$OY_THREADS" \
         "$offm" "$onm" "$ratiom" "$rows" "$PASS" \
-        "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
+        "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file" \
+        "$profile_status" "$profile_threads" "$r1sj" "$r2sj" "$realjoin" \
+        "$r1_operators" "$r2_operators" "$realjoin_operators" \
+        "$profile_wall" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
+        "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============

@@ -1,7 +1,8 @@
 """Pinned active-corpus exclusions; never read machine-local experiment results.
 
-The reference run recorded 28 OFF correctness-gate timeouts at 48 threads.
-Seven remain active to preserve graph bushy and TPC-H core star coverage.
+The August reference excluded 21 OFF correctness-gate timeouts at 48 threads.
+The September 32-thread run confirms nine more, including the seven formerly
+protected graph bushy / TPC-H star cases. The user authorized their removal.
 Hashes pin the checked-in SQL selected for exclusion, not the server SQL:
 the historical result did not record SQL hashes. Component sources stay intact.
 """
@@ -36,13 +37,34 @@ EXCLUDED_QUERY_HASHES = {
     "tpcds/industry__oy_ds_real_store_agg.sql": "101c2683da01730b79cdd82bfbe7f735ffaf41051f1d14e8376ea28b740d9cfd",
 }
 
-# User-requested exceptions: do not remove the only cases in these two patterns.
-RETAINED_TIMEOUT_QUERY_PATHS = frozenset({
-    "graph/derived__bushy_N5_mixA_s01.sql",
-    "graph/derived__bushy_N5_mixC_s01.sql",
-    "tpch/derived__ojb_tpch_q09_supply_chain_alt.sql",
-    "tpch/derived__ojb_tpch_q09_supply_chain_ldmx.sql",
-    "tpch/derived__ojb_tpch_q09_supply_chain_rdax.sql",
-    "tpch/derived__ojb_tpch_q09_supply_chain_rdmx.sql",
-    "tpch/derived__ojb_tpch_q09_supply_chain_rduL.sql",
-})
+T32_REFERENCE_RUN = "experiment_onoff_benchmark_20260908_235240_t32"
+T32_TIMEOUT_QUERY_HASHES = {
+    "tpch/derived__ojb_tpch_q09_supply_chain_ldmx.sql": "cfecc20121acd7cc01982782b9e91be0c9b567f3479ab0e3db81950fa0903b28",
+    "tpch/derived__ojb_tpch_q09_supply_chain_rdmx.sql": "f87e053fe19f3754cef04ef6650ca3789d2f4f85afed1b0dae2e2f0cc29b300c",
+    "tpch/derived__ojb_tpch_q09_supply_chain_alt.sql": "7c97106dad6c5ad9f0dd0bc68f95b4a05e85ccdb883453e13f2390670af6d6d5",
+    "tpch/derived__ojb_tpch_q09_supply_chain_rdax.sql": "a1e6770b4073100a10205f0607cff2a5a156272402e2b44ee6b7affabc967ed3",
+    "tpch/derived__ojb_tpch_q09_supply_chain_rduL.sql": "e35f7098f66138c3b23b5829de189d6085b5214911a58ddb7285cbd14c2d2e5f",
+    "tpcds/derived__ojb_tpcds_q93_return_reason_ldmx.sql": "0d034d4300b049f12ceaee34882a200cd3d7d987fb104720f14f48ca3502677b",
+    "tpcds/derived__ojb_tpcds_q93_return_reason_rdax.sql": "089043de21099191d7c2958b1b13c83ab44029e82a0e73e660d8a769cae00c0f",
+    "graph/derived__bushy_N5_mixA_s01.sql": "e522fad2b536acfcd1bb61fc26d8fabe222f122da35667168bf7640aa0611734",
+    "graph/derived__bushy_N5_mixC_s01.sql": "8410a0ee21196788c62e4a11bd9a5a1eeb981acc80cdcd47cc2d3dba30aa4e0e",
+}
+EXCLUDED_QUERY_HASHES.update(T32_TIMEOUT_QUERY_HASHES)
+
+# Exact core family/category losses caused by the approved Q9 removal.
+# Graph is in the evaluation component, not in the core coverage check.
+ALLOWED_MISSING_CORE_FAMILY_PATTERNS = {
+    "topology": frozenset({("tpch", "star")}),
+    "join_vector": frozenset({("tpch", "FRIL")}),
+}
+
+
+def reference_metadata(path: str) -> dict:
+    """Keep per-query provenance without loading machine-local result files."""
+    is_t32 = path in T32_TIMEOUT_QUERY_HASHES
+    return {
+        "reference_run": T32_REFERENCE_RUN if is_t32 else REFERENCE_RUN,
+        "reference_threads": 32 if is_t32 else REFERENCE_THREADS,
+        "timeout_seconds": TIMEOUT_SECONDS,
+        "timeout_phase": TIMEOUT_PHASE,
+    }

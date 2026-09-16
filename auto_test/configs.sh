@@ -70,10 +70,10 @@ export TPCDS_SF="${TPCDS_SF:-100}"
 # ===========================================================================
 # 4) Threading
 # ===========================================================================
-# Sequential multi-thread configurations; no single-thread or profiling batch.
+# Sequential multi-thread configurations; no single-thread batch.
 # OY_THREADS remains a scalar override for a single configuration.
 # Use OY_THREAD_COUNTS="16 32" (or "16,32") for a sweep; CLI --threads wins.
-export OY_THREAD_COUNTS="${OY_THREAD_COUNTS:-${OY_THREADS:-16 32}}"
+export OY_THREAD_COUNTS="${OY_THREAD_COUNTS:-${OY_THREADS:-32}}"
 _oy_thread_defaults="${OY_THREAD_COUNTS//,/ }"
 export OY_THREADS="${OY_THREADS:-${_oy_thread_defaults%% *}}"
 unset _oy_thread_defaults
@@ -98,6 +98,10 @@ export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 # Higher OY_RUNS therefore increases total experiment time and can expose more
 # timing-phase timeouts on slow (e.g. large-graph) queries.
 export OY_RUNS="${OY_RUNS:-3}"
+
+# Separate ON phase profiles at the same thread count, only for correct queries
+# that select OuterYan. Timing medians remain unprofiled. CLI --no-profile opts out.
+export OY_PROFILE="${OY_PROFILE:-1}"
 
 # Save OFF/ON EXPLAIN plans plus OuterYan trace/cost artifacts. The
 # experiment_onoff.sh --capture-plans flag sets this to 1 for a run.

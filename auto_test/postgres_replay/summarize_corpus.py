@@ -92,8 +92,9 @@ OY_KEYS = (
     "semijoin_probe_emit_weight",
 )
 
-# This prefix is the public CSV contract of experiment_onoff.sh.  Keep the
-# spelling and order byte-for-byte compatible so existing analysis scripts can
+# This prefix is the decision/timing CSV contract of experiment_onoff.sh,
+# excluding its appended profile_* fields (PGPlan does not collect profiles).
+# Keep spelling and order byte-for-byte compatible so existing analysis scripts can
 # read a PGPlan comparison result by ignoring the appended fields.
 ORIGINAL_CSV_FIELDS = (
     "query", "family", "sql_path", "relation_count", "reorder",
