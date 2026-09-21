@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render OuterYan ON/OFF results as one multi-page benchmark PDF.
+"""Render OuterYan ON/OFF results as publication-style benchmark figures.
 
 CSV files that share a ``YYYYMMDD_HHMMSS`` timestamp and optional thread suffix
 are one logical run. The ``_t16`` and ``_t32`` configurations remain separate.
@@ -7,12 +7,16 @@ Consequently, historical ``core``, ``custom``, and ``industry_inspired`` CSVs
 from the same invocation are merged before plotting. Attempts files fill rows
 missing from the final CSV; final rows win duplicates.
 
-The PDF contains summary and shape/relation-count pages, one benchmark-colored
-speed-up scatter for all measured queries, and one shape-stratified runtime
-comparison (OuterYan-selected by default, optionally all plans). New runs
-use multi-thread timings and separate native phase profiles. Historical runs
-can still show both timing pairs. Explicit legacy phase placeholders are
-visibly labeled and never contribute to current runtime statistics.
+The PDF contains summary and shape/relation-count pages, a compact two-panel
+runtime comparison for all measured queries, and a representative round-time
+breakdown. New runs use multi-thread timings and separate native phase profiles.
+Explicit legacy phase placeholders are visibly labeled and never contribute to
+current runtime statistics.
+
+Round 1/2/3 and Other are aggregate operator CPU work. They close against
+``profile_total_time_s`` (also recorded as ``profile_cpu_time_s``). Root query
+latency is recorded separately as ``profile_wall_time_s``. Historical CSVs,
+where ``profile_total_time_s`` meant wall time, remain supported.
 """
 
 from __future__ import annotations
@@ -33,16 +37,23 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.legend_handler import HandlerTuple
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 
 C_T1 = "#4C72B0"
 C_TM = "#DD8452"
 FAMILY_ORDER = ["graph", "TPC-H", "TPC-DS", "JOB"]
-FAMILY_COLORS = {"graph": "#4C72B0", "TPC-H": "#DD8452", "TPC-DS": "#55A868", "JOB": "#8172B3"}
+FAMILY_COLORS = {
+    "graph": "#7A7A7A",
+    "TPC-H": "#E64B35",
+    "TPC-DS": "#315EFB",
+    "JOB": "#00A087",
+}
 REPRESENTATIVE_QUERIES_PER_FAMILY = 15
 TOPOLOGY_ORDER = ["left-deep", "right-deep", "bushy", "star", "aggregate", "industry"]
-CLASS_ORDER = ["derived", "industry", "custom", "legacy"]
+CLASS_ORDER = ["derived", "industry", "selectivity stress", "JOB regression", "custom", "legacy"]
 FAMILY_CODES = {"graph": "G", "TPC-H": "H", "TPC-DS": "D", "JOB": "J"}
 TOPOLOGY_CODES = {
     "left-deep": "LD",
@@ -54,6 +65,9 @@ TOPOLOGY_CODES = {
     "other": "O",
 }
 PHASE_SAMPLE_PER_FAMILY = 20
+PHASE_GROUP_GAP = 0.62
+QUERY_POINT_SIZE = 28
+QUERY_POINT_ALPHA = 0.52
 QUERY_CODE_KEY = (
     "G=graph, H=TPC-H, D=TPC-DS, J=JOB; LD=left-deep, RD=right-deep, "
     "B=bushy, S=star, A=aggregate, I=industry, O=other"
@@ -65,19 +79,34 @@ RUNTIME_SERIES = [
     ("Multi-thread: OuterYan (ON)", "tm_on", "#E59C6D"),
 ]
 PHASES = [
-    ("Round 1", "profile_round1_operator_s", "profile_round1_ratio", "#4C72B0"),
-    ("Round 2", "profile_round2_operator_s", "profile_round2_ratio", "#55A868"),
-    ("Round 3", "profile_round3_operator_s", "profile_round3_ratio", "#DD8452"),
-    ("Other", "profile_other_elapsed_s", "profile_other_ratio", "#999999"),
+    ("Round 1 semi-joins", "profile_round1_operator_s", "profile_round1_ratio", "#3B6FB6"),
+    ("Round 2 semi-joins", "profile_round2_operator_s", "profile_round2_ratio", "#5AAE61"),
+    ("Round 3 real joins", "profile_round3_operator_s", "profile_round3_ratio", "#E08245"),
+    ("Other operators", "profile_other_elapsed_s", "profile_other_ratio", "#A0A0A0"),
 ]
-OUTERYAN_TOTAL_LABEL = "Total Time"
-OUTERYAN_TOTAL_COLOR = "#E2B448"
-BASELINE_LABEL = "Baseline Time"
-BASELINE_COLOR = "#267D8D"
+PROFILE_CPU_TOTAL_LABEL = "Profile CPU total"
+
+ACADEMIC_STYLE = {
+    "font.family": "serif",
+    "font.serif": ["DejaVu Serif"],
+    "mathtext.fontset": "dejavuserif",
+    "axes.edgecolor": "#303030",
+    "axes.linewidth": 0.8,
+    "axes.labelsize": 10,
+    "axes.titlesize": 11,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "legend.fontsize": 9,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "savefig.facecolor": "white",
+}
+plt.rcParams.update(ACADEMIC_STYLE)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUTS = ["results/experiment_onoff_*.csv"]
 DEFAULT_OUTPUT = SCRIPT_DIR / "results" / "plots" / "outeryan_benchmark_figures.pdf"
+STANDALONE_PNG_DPI = 300
 
 
 def gmean(values: pd.Series | np.ndarray) -> float:
@@ -88,7 +117,7 @@ def gmean(values: pd.Series | np.ndarray) -> float:
 
 def strip_provenance_prefix(query: str) -> str:
     return re.sub(
-        r"^(?:derived|industry|industrywin|legacywin|custom)__",
+        r"^(?:derived|industry|industrywin|legacywin|custom|stress|regression)__",
         "",
         str(query),
         flags=re.IGNORECASE,
@@ -104,6 +133,8 @@ def class_from_query(query: str) -> str | None:
         "industrywin": "industry",
         "legacywin": "derived",
         "custom": "custom",
+        "stress": "selectivity stress",
+        "regression": "JOB regression",
     }.get(prefix)
 
 
@@ -120,11 +151,14 @@ def family_from_query(query: str) -> str:
 
 def topology_from_query(query: str) -> str:
     query = strip_provenance_prefix(query).lower()
-    if re.search(r"_(?:ldmx|ldu[lrfi]|alt)$", query):
+    selectivity_suffix = (
+        r"(?:_(?:sel(?:001|01|05)|stress(?:0025|005|02|10|20|50|80)))?$"
+    )
+    if re.search(r"_(?:ldmx|ldu[lrfi]|alt)" + selectivity_suffix, query):
         return "left-deep"
-    if re.search(r"_(?:rdmx|rdax|rdu[lrfi])$", query):
+    if re.search(r"_(?:rdmx|rdax|rdu[lrfi])" + selectivity_suffix, query):
         return "right-deep"
-    if re.search(r"_(?:bmx|bdmx)$", query):
+    if re.search(r"_(?:bmx|bdmx)" + selectivity_suffix, query):
         return "bushy"
     if "_real_" in query:
         return "industry"
@@ -187,13 +221,21 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
     frame["run"] = run
     numeric = [
         "t1_off", "t1_on", "t1_speedup", "tm_off", "tm_on", "tm_speedup", "rows",
-        "relation_count", "timing_threads", "profile_threads", "profile_total_time_s", "profile_cpu_time_s",
+        "relation_count", "timing_threads", "profile_threads", "profile_wall_time_s",
+        "profile_total_time_s", "profile_cpu_time_s",
         *(seconds for _, seconds, _, _ in PHASES),
         *(ratio for _, _, ratio, _ in PHASES),
     ]
     for column in numeric:
         if column in frame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    # Before September 2026 the misleading profile_total_time_s name held root
+    # wall latency. Preserve that input contract while normalizing new data to
+    # the explicit wall/aggregate-CPU schema.
+    if "profile_wall_time_s" not in frame and "profile_total_time_s" in frame:
+        frame["profile_wall_time_s"] = frame["profile_total_time_s"]
+    if "profile_cpu_time_s" not in frame and "profile_total_time_s" in frame:
+        frame["profile_cpu_time_s"] = frame["profile_total_time_s"]
 
     inferred_family = frame["query"].map(family_from_query)
     if "family" in frame:
@@ -357,6 +399,29 @@ def save_page(pdf: PdfPages, figure: plt.Figure) -> None:
     plt.close(figure)
 
 
+class PngPage:
+    """One-page sink with the PdfPages.savefig surface used by page renderers."""
+
+    def __init__(self, path: Path, dpi: int = STANDALONE_PNG_DPI):
+        self.path = path
+        self.dpi = dpi
+
+    def savefig(self, figure: plt.Figure, bbox_inches: str = "tight") -> None:
+        figure.savefig(self.path, dpi=self.dpi, bbox_inches=bbox_inches)
+
+
+def write_figure_pair(output_directory: Path, stem: str, draw) -> Path:
+    """Render one vector PDF and one 300-dpi PNG from the same plotting function."""
+    pdf_path = output_directory / f"{stem}.pdf"
+    with PdfPages(pdf_path) as pdf:
+        draw(pdf)
+    png_path = output_directory / f"{stem}.png"
+    draw(PngPage(png_path))
+    print(f"  wrote standalone figure: {pdf_path}")
+    print(f"  wrote standalone figure: {png_path}")
+    return pdf_path
+
+
 def tighten_mosaic(figure: plt.Figure, rect: tuple[float, float, float, float]) -> None:
     """Apply tight layout while tolerating the intentional row-spanning JOB axis."""
     with warnings.catch_warnings():
@@ -462,7 +527,7 @@ def sample_phase_queries(frame: pd.DataFrame, limit: int = PHASE_SAMPLE_PER_FAMI
     family_sizes = frame["family"].value_counts().to_dict()
     for family in FAMILY_ORDER:
         family_rows = frame.loc[frame["family"].eq(family)].sort_values(
-            ["topology", "profile_total_time_s", "query"], kind="stable"
+            ["topology", "profile_cpu_time_s", "query"], kind="stable"
         )
         if family_rows.empty:
             continue
@@ -473,46 +538,6 @@ def sample_phase_queries(frame: pd.DataFrame, limit: int = PHASE_SAMPLE_PER_FAMI
         family_rows["_family_available"] = family_sizes[family]
         sampled.append(family_rows)
     return pd.concat(sampled, ignore_index=False) if sampled else frame.iloc[0:0].copy()
-
-
-def grouped_query_positions(
-    frame: pd.DataFrame, gap: float = 1.75
-) -> tuple[pd.DataFrame, list[tuple[str, float, float, int, int]]]:
-    """Order query bars by benchmark and shape, leaving gaps for group subtitles."""
-    topology_rank = {name: index for index, name in enumerate(TOPOLOGY_ORDER + ["other"])}
-    parts: list[pd.DataFrame] = []
-    groups: list[tuple[str, float, float, int, int]] = []
-    cursor = 0.0
-    for family in FAMILY_ORDER:
-        family_rows = frame.loc[frame["family"].eq(family)].copy()
-        if family_rows.empty:
-            continue
-        family_rows["_topology_rank"] = family_rows["topology"].map(topology_rank).fillna(99)
-        family_rows = family_rows.sort_values(
-            ["_topology_rank", "short_query"], kind="stable"
-        )
-        positions = cursor + np.arange(len(family_rows), dtype=float)
-        family_rows["_x"] = positions
-        available = int(family_rows.get("_family_available", pd.Series(len(family_rows))).iloc[0])
-        groups.append((family, float(positions[0]), float(positions[-1]), len(family_rows), available))
-        parts.append(family_rows)
-        cursor = float(positions[-1] + 1.0 + gap)
-    return pd.concat(parts, ignore_index=False), groups
-
-
-def add_benchmark_subtitles(
-    ax: plt.Axes, groups: list[tuple[str, float, float, int, int]]
-) -> None:
-    for index, (family, left, right, shown, available) in enumerate(groups):
-        count = f"n={shown}" if shown == available else f"n={shown} of {available}"
-        ax.text(
-            (left + right) / 2.0, 1.015, f"{family} ({count})",
-            transform=ax.get_xaxis_transform(), ha="center", va="bottom",
-            fontsize=13, fontweight="semibold", clip_on=False,
-        )
-        if index:
-            previous_right = groups[index - 1][2]
-            ax.axvline((previous_right + left) / 2.0, color="0.78", linewidth=0.7)
 
 
 def positive_runtime_rows(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -668,8 +693,116 @@ def representative_runtime_rows(
     return pd.concat(sampled, ignore_index=False)
 
 
+def runtime_setting_label(frame: pd.DataFrame, metric: str) -> str:
+    if metric == "tm" and "timing_threads" in frame:
+        threads = pd.to_numeric(frame["timing_threads"], errors="coerce").dropna().unique()
+        if len(threads) == 1:
+            return f"{int(threads[0])} threads"
+    return metric.upper()
+
+
+def format_seconds_label(value: float) -> str:
+    if value >= 100:
+        return f"{value:.0f}s"
+    if value >= 10:
+        return f"{value:.1f}s"
+    if value >= 1:
+        return f"{value:.2g}s"
+    return f"{value:.2f}s"
+
+
+def format_speedup_label(value: float) -> str:
+    if value >= 100:
+        return f"{value:.0f}×"
+    if value >= 10:
+        return f"{value:.1f}×"
+    return f"{value:.2f}×"
+
+
+def style_log_runtime_axis(ax: plt.Axes, lower: float, upper: float) -> None:
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(lower, upper)
+    ax.set_ylim(lower, upper)
+    ax.plot([lower, upper], [lower, upper], color="0.55", linewidth=0.8, zorder=1)
+    ax.tick_params(which="both", direction="in", top=True, right=True, length=3.5)
+    ax.tick_params(which="minor", length=2.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(False)
+
+
+def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str]) -> None:
+    """Draw compact log-speed-up violins with every query and robust summaries."""
+    data = [
+        np.log10(frame.loc[frame["family"].eq(family), "_speedup"].to_numpy(float))
+        for family in families
+    ]
+    density_data = [
+        values if len(values) > 1 and np.ptp(values) > 1e-12
+        else np.asarray([values[0] - 0.015, values[0] + 0.015])
+        for values in data
+    ]
+    positions = np.arange(len(families), dtype=float)
+    violins = ax.violinplot(
+        density_data, positions=positions, orientation="horizontal", widths=0.70,
+        showmeans=False, showmedians=False, showextrema=False,
+    )
+    for body, family in zip(violins["bodies"], families):
+        body.set_facecolor(FAMILY_COLORS[family])
+        body.set_edgecolor(FAMILY_COLORS[family])
+        body.set_alpha(0.18)
+        body.set_linewidth(0.9)
+
+    for position, family, values in zip(positions, families, data):
+        ordered = np.sort(values)
+        # Deterministic low-discrepancy jitter exposes density without suggesting
+        # another measured variable on the y axis.
+        jitter = ((np.arange(len(ordered)) * 0.61803398875) % 1.0 - 0.5) * 0.34
+        color = FAMILY_COLORS[family]
+        ax.scatter(
+            ordered, position + jitter, s=QUERY_POINT_SIZE, color=color, edgecolor="white",
+            linewidth=0.25, alpha=QUERY_POINT_ALPHA, zorder=3,
+        )
+        lower, median, upper = np.quantile(ordered, [0.25, 0.5, 0.75])
+        ax.plot([lower, upper], [position, position], color=color, linewidth=3.0,
+                solid_capstyle="round", zorder=4)
+        ax.scatter(median, position, marker="D", s=25, color="white", edgecolor=color,
+                   linewidth=1.0, zorder=5)
+
+    all_values = np.concatenate(data)
+    padding = max(0.08, (float(all_values.max()) - float(all_values.min())) * 0.04)
+    lower, upper = float(all_values.min() - padding), float(all_values.max() + padding)
+    candidates = np.asarray([0.1, 0.25, 0.5, 1, 2, 4, 10, 25, 100, 250], dtype=float)
+    ticks = np.log10(candidates)
+    visible = (ticks >= lower) & (ticks <= upper)
+    ax.set_xlim(lower, upper)
+    ax.set_xticks(ticks[visible], [f"{value:g}×" for value in candidates[visible]])
+    ax.set_yticks(positions, families)
+    ax.invert_yaxis()
+    ax.axvline(0.0, color="0.45", linewidth=0.8, zorder=1)
+    ax.axvspan(lower, 0.0, color="#F7EEEE", alpha=0.35, zorder=0)
+    # A restrained density-independent gradient makes larger speed-ups read as
+    # progressively stronger improvements without changing the data marks.
+    gradient = np.empty((2, 256, 4), dtype=float)
+    gradient[:, :, :3] = np.asarray([0x78, 0xBE, 0x8C], dtype=float) / 255.0
+    gradient[:, :, 3] = np.linspace(0.02, 0.13, gradient.shape[1])
+    y_limits = ax.get_ylim()
+    ax.imshow(
+        gradient, extent=(0.0, upper, min(y_limits), max(y_limits)), origin="lower",
+        aspect="auto", interpolation="bicubic", zorder=0,
+    )
+    ax.set_ylim(y_limits)
+    ax.set_xlabel("DuckDB vs. OuterYan")
+    ax.tick_params(axis="both", direction="in", top=True, right=True)
+    ax.grid(axis="x", color="0.90", linewidth=0.55, zorder=0)
+    ax.text(0.02, 0.97, "OuterYan slower", transform=ax.transAxes, ha="left", va="top",
+            fontsize=8, color="#8A4E4E")
+    ax.text(0.98, 0.97, "OuterYan faster", transform=ax.transAxes, ha="right", va="top",
+            fontsize=8, color="#3E7351")
+
+
 def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str) -> None:
-    """Benchmark regions with shape clusters; horizontal jitter never alters Y."""
+    """Runtime relationship plus a compact per-benchmark speed-up distribution."""
     correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
     sub = positive_runtime_rows(frame.loc[correct], metric)
     if sub.empty:
@@ -679,135 +812,78 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     sub = sub.loc[np.isfinite(sub["_speedup"]) & sub["_speedup"].gt(0)]
     if sub.empty:
         return
-    figure, ax = plt.subplots(figsize=(14.4, 6.0))
     families = [family for family in FAMILY_ORDER if sub["family"].eq(family).any()]
-    rng = np.random.default_rng(20260908)
-    ticks, labels = [], []
-    region_width = 4.0
-    for family_index, family in enumerate(families):
-        rows = sub.loc[sub["family"].eq(family)].sort_values("query", kind="stable").copy()
-        shapes = [shape for shape in TOPOLOGY_ORDER + ["other"] if rows["topology"].eq(shape).any()]
-        left = family_index * region_width
-        step = region_width / len(shapes)
-        centers = {shape: left + (index + 0.5) * step for index, shape in enumerate(shapes)}
-        jitter = rng.uniform(-min(0.28, step * 0.28), min(0.28, step * 0.28), len(rows))
-        rows["_x"] = rows["topology"].map(centers) + jitter
-        ax.axvspan(left, left + region_width, color=FAMILY_COLORS[family], alpha=0.045, zorder=0)
-        if family_index:
-            ax.axvline(left, color="0.80", linewidth=0.8, zorder=1)
-        ticks.extend(centers.values())
-        labels.extend(TOPOLOGY_CODES[shape] for shape in shapes)
-        ax.scatter(
-            rows["_x"], rows["_speedup"], s=56, color=FAMILY_COLORS[family],
-            edgecolor="none", alpha=0.50,
-            label=f"{family} (n={len(rows)})", zorder=3,
-        )
-        ax.text(left + region_width / 2, -0.095, family, ha="center", va="top",
-                transform=ax.get_xaxis_transform(), fontsize=14, fontweight="semibold")
-    ax.axhline(1, color="0.45", linestyle="--", linewidth=1, zorder=1)
-    ax.set_yscale("log")
-    lower, upper = min(float(sub["_speedup"].min()), 1.0), max(float(sub["_speedup"].max()), 1.0)
-    margin = max(0.06, 0.07 * np.log10(upper / lower))
-    ax.set_ylim(lower / 10 ** margin, upper * 10 ** margin)
-    ax.set_xlim(0, len(families) * region_width)
-    ax.set_xticks(ticks, labels)
-    ax.set_xlabel("Query shape", fontsize=14, labelpad=36)
-    ax.set_ylabel("Speed-up (DuckDB OFF / OuterYan ON, log)", fontsize=14)
-    ax.tick_params(labelsize=13)
-    ax.grid(axis="y", which="major", color="0.90", linewidth=0.6)
-    ax.set_axisbelow(True)
-    ax.spines[["top", "right"]].set_visible(False)
-    handles, legend_labels = ax.get_legend_handles_labels()
-    figure.legend(handles, legend_labels, loc="upper center", bbox_to_anchor=(0.52, 0.92),
-                  ncol=len(families), frameon=False, fontsize=16, markerscale=1.15,
-                  columnspacing=1.8, handletextpad=0.4)
-    setting = metric.upper()
-    if metric == "tm" and "timing_threads" in sub and sub["timing_threads"].nunique() == 1:
-        setting = f"{int(sub['timing_threads'].iloc[0])} threads"
-    figure.suptitle(f"Query Speed-up - {setting}", fontsize=19, y=0.985)
-    figure.text(0.52, 0.017, "LD=left-deep, RD=right-deep, B=bushy, S=star, A=aggregate, I=industry, O=other",
-                ha="center", fontsize=11)
-    figure.subplots_adjust(left=0.075, right=0.985, bottom=0.22, top=0.80)
-    save_page(pdf, figure)
+    off_column, on_column = f"{metric}_off", f"{metric}_on"
+    values = np.concatenate([sub[off_column].to_numpy(float), sub[on_column].to_numpy(float)])
+    log_min, log_max = np.log10(values.min()), np.log10(values.max())
+    pad = max(0.08, (log_max - log_min) * 0.045)
+    lower, upper = 10 ** (log_min - pad), 10 ** (log_max + pad)
 
+    figure, axes = plt.subplots(
+        1, 2, figsize=(11.0, 4.55), gridspec_kw={"width_ratios": [0.72, 1.0]}
+    )
+    family_axis, distribution_axis = axes
 
-def page_selected_runtime_bars(pdf: PdfPages, frame: pd.DataFrame, show_plan: bool = False) -> None:
-    sub, groups = grouped_query_positions(frame)
-    series = runtime_series(sub)
-    x = sub["_x"].to_numpy(float)
-    values = sub[[column for _, column, _ in series]].to_numpy(float)
-    positive = values[np.isfinite(values) & (values > 0)]
-    floor = 10 ** (np.log10(positive.min()) - 0.25)
-    width = min(30.0, max(19.0, 4.0 + 0.44 * len(sub)))
-    figure, ax = plt.subplots(figsize=(width, 7.8))
-    bar_width = 0.18
-    # Keep each query's bars contiguous and centered on its tick.
-    offsets = (np.arange(len(series)) - (len(series) - 1) / 2.0) * bar_width
-    for offset, (label, column, color) in zip(offsets, series):
-        if show_plan and column.endswith("_on"):
-            label = label.replace("OuterYan (ON)", "OuterYan enabled (ON)")
-        heights = sub[column].to_numpy(float)
-        ax.bar(
-            x + offset, heights - floor, bottom=floor,
-            width=bar_width, color=color, edgecolor="none", label=label,
+    for family in families:
+        rows = sub.loc[sub["family"].eq(family)].sort_values("query", kind="stable")
+        faster = rows[on_column].le(rows[off_column])
+        family_axis.scatter(
+            rows.loc[faster, off_column], rows.loc[faster, on_column], marker="o",
+            s=QUERY_POINT_SIZE,
+            color=FAMILY_COLORS[family], edgecolor="white", linewidth=0.25,
+            alpha=QUERY_POINT_ALPHA, zorder=3,
         )
-    ax.set_yscale("log")
-    ax.set_ylim(floor, positive.max() * 1.35)
-    ax.set_xlim(x.min() - 0.8, x.max() + 0.8)
-    ax.set_xticks(x)
-    query_labels = sub["short_query"].copy()
-    if show_plan:
-        plans = sub.get("selected_plan", pd.Series("", index=sub.index)).astype(str).str.upper()
-        markers = plans.map({"OUTERYAN": "*", "DUCKDB": ""}).fillna("?")
-        query_labels += markers
-    ax.set_xticklabels(query_labels, rotation=90, ha="center", fontsize=12 if show_plan else 11)
-    ax.tick_params(axis="y", labelsize=12)
-    ax.set_ylabel("Wall-clock time (seconds, log)", fontsize=14)
-    ax.set_xlabel("Query", fontsize=14, labelpad=8)
-    ax.grid(axis="y", which="major", color="0.88", linewidth=0.6)
-    ax.grid(axis="y", which="minor", color="0.95", linewidth=0.4)
-    ax.set_axisbelow(True)
-    add_benchmark_subtitles(ax, groups)
-    handles, labels = ax.get_legend_handles_labels()
+        family_axis.scatter(
+            rows.loc[~faster, off_column], rows.loc[~faster, on_column], marker="X",
+            s=QUERY_POINT_SIZE, color=FAMILY_COLORS[family], edgecolor="white",
+            linewidth=0.20,
+            alpha=QUERY_POINT_ALPHA, zorder=4,
+        )
+    style_log_runtime_axis(family_axis, lower, upper)
+    family_axis.fill_between(
+        [lower, upper], [lower, lower], [lower, upper], color="#EAF4EE", alpha=0.40, zorder=0,
+    )
+    family_axis.set_xlabel("DuckDB running time (s)")
+    family_axis.set_ylabel("OuterYan running time (s)")
+    legend_handles = [tuple([
+        Line2D([], [], color=FAMILY_COLORS[family], marker="o", linestyle="none",
+               markeredgecolor="white", markeredgewidth=0.25, markersize=6),
+        Line2D([], [], color=FAMILY_COLORS[family], marker="X", linestyle="none",
+               markeredgecolor="white", markeredgewidth=0.20, markersize=5.6),
+    ])
+        for family in families
+    ]
+    legend_labels = families.copy()
+    legend_handles.extend([
+        Line2D([], [], color="0.28", marker="o", linestyle="none", markeredgecolor="white",
+               markeredgewidth=0.25, markersize=6),
+        Line2D([], [], color="0.28", marker="X", linestyle="none", markeredgecolor="white",
+               markeredgewidth=0.20, markersize=5.6),
+    ])
+    legend_labels.extend(["OuterYan faster/equal", "OuterYan slower"])
     figure.legend(
-        handles, labels, loc="upper center", bbox_to_anchor=(0.52, 0.911),
-        ncol=len(handles), frameon=False, fontsize=11,
+        handles=legend_handles, labels=legend_labels,
+        handler_map={tuple: HandlerTuple(ndivide=None, pad=0.18)},
+        ncol=len(legend_handles), loc="upper center",
+        bbox_to_anchor=(0.5, 0.975), frameon=False, borderaxespad=0.0,
+        handlelength=1.7, handletextpad=0.30, columnspacing=0.82,
     )
-    figure.suptitle("Running time Comparison", fontsize=18, y=0.955)
-    if show_plan:
-        plan_key = "ON plan: * = OuterYan selected; unmarked = DuckDB selected"
-        if markers.eq("?").any():
-            plan_key += "; ? = plan unavailable"
-        figure.text(0.52, 0.855, plan_key, ha="center", va="center", fontsize=12)
-    else:
-        figure.text(0.52, 0.855, "OuterYan-selected queries", ha="center", va="center", fontsize=12)
-    figure.text(
-        0.52, 0.050, QUERY_CODE_KEY, ha="center", va="bottom", fontsize=10.5,
-    )
-    figure.subplots_adjust(left=0.055, right=0.99, bottom=0.245, top=0.81)
+    speedup_distribution(distribution_axis, sub, families)
+
+    for label, axis in zip(
+        ("(a) Running Time Comparison", "(b) Speed-up Comparison"), axes
+    ):
+        axis.text(0.5, -0.125, label, transform=axis.transAxes, ha="center", va="top",
+                  fontsize=11, fontweight="semibold")
+    figure.subplots_adjust(left=0.075, right=0.99, bottom=0.16, top=0.895, wspace=0.08)
     save_page(pdf, figure)
-
-
-def page_runtime(
-    pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str, selected_only: bool,
-    sample_per_family: int = REPRESENTATIVE_QUERIES_PER_FAMILY,
-    representative_scope: str = "outeryan",
-) -> None:
-    if selected_only:
-        sub = representative_runtime_rows(frame, sample_per_family, representative_scope)
-        if sub.empty:
-            print(f"  runtime figure omitted for {run}: no complete timings in {representative_scope} scope")
-            return
-        print(f"  representative runtime sample for {run}: {sub.groupby('family').size().to_dict()}")
-        page_selected_runtime_bars(pdf, sub, show_plan=representative_scope == "all")
-        return
-    page_speedup_scatter(pdf, frame, run, metric)
 
 
 def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
     ratio_columns = [ratio for _, _, ratio, _ in PHASES]
-    required = seconds_columns + ratio_columns + ["profile_total_time_s"]
+    wall_column = "profile_wall_time_s" if "profile_wall_time_s" in frame else "profile_total_time_s"
+    required = seconds_columns + ratio_columns + [wall_column]
     if not set(required).issubset(frame.columns):
         return frame.iloc[0:0].copy(), 0
     plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
@@ -815,14 +891,24 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     selected = frame.loc[plans.eq("OUTERYAN") & correct].copy()
     if selected.empty:
         return selected, 0
-    for column in required + ["profile_threads", "profile_cpu_time_s"]:
+    for column in list(dict.fromkeys(
+        required + ["profile_threads", "profile_total_time_s", "profile_cpu_time_s"]
+    )):
         if column in selected:
             selected[column] = pd.to_numeric(selected[column], errors="coerce")
     seconds = selected[seconds_columns]
     ratios = selected[ratio_columns]
-    total_time = selected["profile_total_time_s"]
-    cpu_time = selected.get("profile_cpu_time_s", total_time).where(
-        lambda value: np.isfinite(value) & value.gt(0), total_time
+    wall_time = selected[wall_column]
+    reported_total = selected.get(
+        "profile_total_time_s", pd.Series(np.nan, index=selected.index)
+    )
+    cpu_time = selected.get("profile_cpu_time_s", reported_total).where(
+        lambda value: np.isfinite(value) & value.gt(0), reported_total
+    )
+    new_schema = "profile_wall_time_s" in frame
+    total_matches_cpu = (
+        np.isclose(reported_total, cpu_time, rtol=1e-9, atol=1e-9)
+        if new_schema else np.ones(len(selected), dtype=bool)
     )
     complete = (
         np.isfinite(seconds).all(axis=1)
@@ -830,17 +916,21 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         & np.isfinite(ratios).all(axis=1)
         & ratios.ge(0).all(axis=1)
         & ratios.le(1).all(axis=1)
-        & np.isfinite(total_time)
-        & total_time.gt(0)
+        & np.isfinite(wall_time)
+        & wall_time.gt(0)
         & np.isfinite(cpu_time)
         & cpu_time.gt(0)
+        & total_matches_cpu
         & np.isclose(seconds.sum(axis=1), cpu_time, rtol=1e-6, atol=1e-9)
         & ratios.sum(axis=1).sub(1.0).abs().le(1e-6)
         & np.isclose(
             ratios.to_numpy(float), seconds.div(cpu_time, axis=0).to_numpy(float), atol=1e-6
         ).all(axis=1)
     )
+    selected["_profile_wall_time"] = wall_time
     selected["_profile_cpu_time"] = cpu_time
+    selected["_phase_sum_s"] = seconds.sum(axis=1)
+    selected["_phase_sum_error_s"] = selected["_phase_sum_s"] - cpu_time
     return selected.loc[complete].copy(), int((~complete).sum())
 
 
@@ -923,73 +1013,186 @@ def paired_representative_samples(
     return sample, paired
 
 
+def phase_group_layout(
+    frame: pd.DataFrame, families: list[str], gap: float = PHASE_GROUP_GAP,
+) -> tuple[np.ndarray, dict[str, float], list[float]]:
+    """Return compact row positions with one visible gap between benchmarks."""
+    positions: list[float] = []
+    centers: dict[str, float] = {}
+    separators: list[float] = []
+    cursor = 0.0
+    for family_index, family in enumerate(families):
+        count = int(frame["family"].eq(family).sum())
+        group = cursor + np.arange(count, dtype=float)
+        positions.extend(group.tolist())
+        centers[family] = float((group[0] + group[-1]) / 2.0)
+        cursor = float(group[-1] + 1.0)
+        if family_index < len(families) - 1:
+            separators.append(cursor - 0.5 + gap / 2.0)
+            cursor += gap
+    return np.asarray(positions, dtype=float), centers, separators
+
+
 def page_phase(
     pdf: PdfPages, frame: pd.DataFrame, run: str, notice: str | None = None, preselected: bool = False,
 ) -> None:
     sub, skipped = complete_phase_rows(frame)
-    sub = phase_baseline_rows(sub)
     if sub.empty:
         print(f"  phase breakdown omitted for {run}: no complete selected profiles")
         return
     if not preselected:
         sub = sample_phase_queries(add_short_query_labels(sub))
-    sub, groups = grouped_query_positions(sub)
+    topology_rank = {name: index for index, name in enumerate(TOPOLOGY_ORDER + ["other"])}
+    sub = sub.copy()
+    sub["_topology_rank"] = sub["topology"].map(topology_rank).fillna(99)
+    family_rank = {family: index for index, family in enumerate(FAMILY_ORDER)}
+    sub["_family_rank"] = sub["family"].map(family_rank).fillna(99)
+    sub = sub.sort_values(
+        ["_family_rank", "_topology_rank", "short_query"], kind="stable"
+    )
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
-    totals = sub["profile_total_time_s"].to_numpy(float)
-    phase_values = sub[seconds_columns].to_numpy(float)
-    positive = np.concatenate([phase_values[phase_values > 0], totals, sub["baseline_time_s"].to_numpy(float)])
-    floor = 10 ** (np.log10(positive.min()) - 0.25)
-    x = sub["_x"].to_numpy(float)
-    width = min(30.0, max(19.0, 4.0 + 0.44 * len(sub)))
-    figure, ax = plt.subplots(figsize=(width, 8.2))
-    bar_width = 0.14
-    series = [
-        (label, seconds, color) for label, seconds, _, color in PHASES
-    ] + [(OUTERYAN_TOTAL_LABEL, "profile_total_time_s", OUTERYAN_TOTAL_COLOR),
-         (BASELINE_LABEL, "baseline_time_s", BASELINE_COLOR)]
-    offsets = (np.arange(len(series)) - (len(series) - 1) / 2.0) * bar_width
-    for offset, (label, column, color) in zip(offsets, series):
-        values = sub[column].to_numpy(float)
-        present = values > 0
-        ax.bar(
-            x[present] + offset, values[present] - floor, bottom=floor,
-            width=bar_width, color=color, edgecolor="none", label=label,
+    families = [family for family in FAMILY_ORDER if sub["family"].eq(family).any()]
+    missing = pd.Series(np.nan, index=sub.index)
+    baseline_source = sub["baseline_time_s"] if "baseline_time_s" in sub else sub.get("tm_off", missing)
+    baseline_runtime = pd.to_numeric(baseline_source, errors="coerce").to_numpy(float)
+    outeryan_runtime = pd.to_numeric(sub.get("tm_on", missing), errors="coerce").to_numpy(float)
+    runtime_valid = (
+        np.isfinite(baseline_runtime) & (baseline_runtime > 0)
+        & np.isfinite(outeryan_runtime) & (outeryan_runtime > 0)
+    )
+    has_runtime_comparison = bool(runtime_valid.any())
+    runtime_speedup = np.divide(
+        baseline_runtime, outeryan_runtime,
+        out=np.full_like(baseline_runtime, np.nan), where=runtime_valid,
+    )
+    height = max(6.2, 1.45 + 0.225 * len(sub) + 0.10 * max(len(families) - 1, 0))
+    if has_runtime_comparison:
+        figure, (axis, runtime_axis) = plt.subplots(
+            1, 2, sharey=True, figsize=(15.6, height),
+            gridspec_kw={"width_ratios": [5.15, 1.30], "wspace": 0.075},
         )
-    ax.set_yscale("log")
-    ax.set_ylim(floor, positive.max() * 1.45)
-    ax.set_xlim(x.min() - 0.9, x.max() + 0.9)
-    ax.set_xticks(x)
-    ax.set_xticklabels(sub["short_query"], rotation=90, ha="center", fontsize=11)
-    ax.tick_params(axis="y", labelsize=12)
-    ax.set_ylabel("Time (seconds, log)", fontsize=14)
-    ax.set_xlabel("Query", fontsize=14, labelpad=8)
-    ax.grid(axis="y", which="major", color="0.88", linewidth=0.6)
-    ax.grid(axis="y", which="minor", color="0.95", linewidth=0.4)
-    ax.set_axisbelow(True)
-    add_benchmark_subtitles(ax, groups)
+    else:
+        figure, axis = plt.subplots(figsize=(13.8, height))
+        runtime_axis = None
+    maximum_total = float(sub["_profile_cpu_time"].max())
+    label_space = max(9.0, len(f"{maximum_total:.1f} s") * 1.25)
+    y, family_centers, group_separators = phase_group_layout(sub, families)
+    totals = sub["_profile_cpu_time"].to_numpy(float)
+    phase_values = sub[seconds_columns].to_numpy(float)
+    shares = np.divide(
+        phase_values, totals[:, None], out=np.zeros_like(phase_values), where=totals[:, None] > 0
+    ) * 100.0
+    left = np.zeros(len(sub), dtype=float)
+    for phase_index, (label, _, _, color) in enumerate(PHASES):
+        widths = shares[:, phase_index]
+        axis.barh(
+            y, widths, left=left, height=0.72, color=color, edgecolor="white",
+            linewidth=0.30, label=label,
+        )
+        seconds = phase_values[:, phase_index]
+        for row_y, start, width_value, seconds_value in zip(y, left, widths, seconds):
+            if width_value >= 9.0:
+                axis.text(
+                    start + width_value / 2.0, row_y, format_seconds_label(seconds_value),
+                    ha="center", va="center", fontsize=7,
+                    color="white" if color != "#A0A0A0" else "black",
+                )
+        left += widths
+    for row_y, total in zip(y, totals):
+        axis.text(101.2, row_y, f"{total:.1f} s", ha="left", va="center", fontsize=8)
+
+    for family in families:
+        axis.text(
+            -0.074, family_centers[family], "Graph" if family == "graph" else family,
+            transform=axis.get_yaxis_transform(), rotation=90,
+            ha="center", va="center", fontsize=9.5, fontweight="semibold", clip_on=False,
+        )
+    for separator in group_separators:
+        axis.axhline(separator, color="0.43", linewidth=0.8, zorder=6)
+        if runtime_axis is not None:
+            runtime_axis.axhline(separator, color="0.43", linewidth=0.8, zorder=6)
+
+    axis.set_xlim(0, 100 + label_space)
+    axis.set_yticks(y, sub["short_query"])
+    axis.set_ylim(y[-1] + 0.50, y[0] - 0.50)
+    axis.set_xlabel("CPU Time (%)")
+    axis.set_xticks([0, 25, 50, 75, 100])
+    axis.tick_params(axis="both", direction="in", top=True, right=True)
+    axis.grid(False)
+    axis.text(
+        1.0, 1.015, PROFILE_CPU_TOTAL_LABEL,
+        transform=axis.transAxes, ha="right", va="bottom", fontsize=8, color="0.30",
+    )
+    if runtime_axis is not None:
+        for row_y, baseline, outeryan, valid in zip(
+            y, baseline_runtime, outeryan_runtime, runtime_valid
+        ):
+            if valid:
+                runtime_axis.plot(
+                    [baseline, outeryan], [row_y, row_y], color="0.72", linewidth=1.0, zorder=1,
+                )
+        runtime_axis.scatter(
+            baseline_runtime[runtime_valid], y[runtime_valid], marker="o", s=38,
+            color=C_T1, edgecolor="white", linewidth=0.25, zorder=3,
+        )
+        runtime_axis.scatter(
+            outeryan_runtime[runtime_valid], y[runtime_valid], marker="D", s=42,
+            color=C_TM, edgecolor="white", linewidth=0.25, zorder=4,
+        )
+        runtime_values = np.concatenate([
+            baseline_runtime[runtime_valid], outeryan_runtime[runtime_valid]
+        ])
+        log_min, log_max = np.log10(runtime_values.min()), np.log10(runtime_values.max())
+        pad = max(0.08, (log_max - log_min) * 0.06)
+        runtime_axis.set_xscale("log")
+        runtime_axis.set_xlim(10 ** (log_min - pad), 10 ** (log_max + pad))
+        runtime_axis.set_xlabel("Running time: DuckDB vs. OuterYan")
+        runtime_axis.tick_params(axis="x", which="both", direction="in", top=True)
+        runtime_axis.tick_params(axis="y", left=False, right=True, labelleft=False)
+        runtime_axis.grid(axis="x", which="major", color="0.90", linewidth=0.55)
+        runtime_axis.grid(axis="x", which="minor", color="0.96", linewidth=0.35)
+        for row_y, speedup, valid in zip(y, runtime_speedup, runtime_valid):
+            if valid:
+                runtime_axis.text(
+                    1.040, row_y, format_speedup_label(speedup),
+                    transform=runtime_axis.get_yaxis_transform(), ha="left", va="center",
+                    fontsize=8.0, color="0.25", clip_on=False,
+                )
     if skipped:
         print(f"  phase breakdown for {run}: {skipped} incomplete selected profiles omitted")
-    figure.suptitle(
-        "OuterYan Execution Time Details", fontsize=18, y=0.955,
-    )
     if notice:
-        figure.text(0.52, 0.912, notice, ha="center", va="center", fontsize=12, color="#9A4E16")
+        figure.text(0.52, 0.982, notice, ha="center", va="center", fontsize=10, color="#9A4E16")
     phase_handles = [
         Patch(facecolor=color, edgecolor="none", label=label)
         for label, _, _, color in PHASES
     ]
-    phase_handles.append(
-        Patch(facecolor=OUTERYAN_TOTAL_COLOR, edgecolor="none", label=OUTERYAN_TOTAL_LABEL)
+    axis.legend(
+        handles=phase_handles, ncol=4, fontsize=10.2, loc="lower center", frameon=False,
+        bbox_to_anchor=(0.50, 1.005), borderaxespad=0.15,
     )
-    phase_handles.append(Patch(facecolor=BASELINE_COLOR, edgecolor="none", label=BASELINE_LABEL))
-    figure.legend(
-        handles=phase_handles, ncol=6, fontsize=12, loc="upper center", frameon=False,
-        bbox_to_anchor=(0.52, 0.882 if notice else 0.906),
+    if runtime_axis is not None:
+        runtime_axis.legend(
+            handles=[
+                Line2D([], [], color=C_T1, marker="o", linestyle="none", markersize=5.8,
+                       label="DuckDB baseline"),
+                Line2D([], [], color=C_TM, marker="D", linestyle="none", markersize=6.0,
+                       label="OuterYan enabled"),
+            ],
+            ncol=2, fontsize=9.2, loc="lower center", frameon=False,
+            bbox_to_anchor=(0.50, 1.005), borderaxespad=0.15,
+            columnspacing=0.8, handletextpad=0.35,
+        )
+    figure.text(
+        0.52, 0.045,
+        "(1) Each bar sums to profile_total_time_s (= profile_cpu_time_s); "
+        "segment labels are aggregate operator seconds.",
+        ha="center", va="bottom", fontsize=8.7,
     )
     figure.text(
-        0.52, 0.050, QUERY_CODE_KEY, ha="center", va="bottom", fontsize=10.5,
+        0.52, 0.018, "(2) " + QUERY_CODE_KEY,
+        ha="center", va="bottom", fontsize=8.7,
     )
-    figure.subplots_adjust(left=0.055, right=0.99, bottom=0.235, top=0.790 if notice else 0.815)
+    figure.subplots_adjust(left=0.116, right=0.932, bottom=0.120, top=0.865 if notice else 0.910)
     save_page(pdf, figure)
 
 
@@ -1030,52 +1233,34 @@ def resolve_inputs(patterns: list[str], base_directory: Path) -> list[str]:
     return [path for path in paths if path.lower().endswith(".csv")]
 
 
-def write_representative_runtime_figure(
-    output_directory: Path, frame: pd.DataFrame,
-    sample_per_family: int = REPRESENTATIVE_QUERIES_PER_FAMILY,
-    representative_scope: str = "outeryan",
-    sample: pd.DataFrame | None = None,
-) -> Path | None:
-    """Export a representative comparison and its exact selected-query manifest."""
-    output_directory.mkdir(parents=True, exist_ok=True)
-    if sample is None:
-        sample = representative_runtime_rows(frame, sample_per_family, representative_scope)
-    columns = [
-        column for column in ("run", "short_query", "query", "family", "topology", "timing_threads",
-                              "selected_plan", "_family_available", "tm_off", "tm_on", "t1_off", "t1_on")
-        if column in sample
-    ]
-    (output_directory / "representative_queries.json").write_text(
-        sample[columns].to_json(orient="records", indent=2, double_precision=15) + "\n", encoding="utf-8"
-    )
-    if sample.empty:
-        return None
-    filename = "runtime_representative_queries.pdf" if representative_scope == "all" else "runtime_outeryan_queries.pdf"
-    path = output_directory / filename
-    with PdfPages(path) as pdf:
-        page_selected_runtime_bars(pdf, sample, show_plan=representative_scope == "all")
-    print(f"  wrote representative figure ({len(sample)} queries, scope={representative_scope}): {path}")
-    return path
-
-
 def write_standalone_runtime_figures(
     output_directory: Path, frame: pd.DataFrame, run: str, metric: str,
     sample_per_family: int = REPRESENTATIVE_QUERIES_PER_FAMILY,
     representative_scope: str = "outeryan",
     phase_placeholder: pd.DataFrame | None = None,
 ) -> list[Path]:
-    """Write speed-up dots and one representative comparison, plus optional phases."""
+    """Write the all-query comparison and optional representative phase breakdown."""
     output_directory.mkdir(parents=True, exist_ok=True)
-    outputs = [("speedup_all_queries.pdf", lambda pdf: page_runtime(pdf, frame, run, metric, False))]
+    # Remove files emitted by the retired representative-runtime design so a
+    # rerun in an existing results directory cannot leave obsolete figures.
+    for filename in (
+        "runtime_outeryan_queries.pdf", "runtime_outeryan_queries.png",
+        "runtime_representative_queries.pdf", "runtime_representative_queries.png",
+        "representative_queries.json",
+    ):
+        (output_directory / filename).unlink(missing_ok=True)
+    outputs = [("speedup_all_queries", lambda pdf: page_speedup_scatter(pdf, frame, run, metric))]
     phase_frame, notice = phase_source(frame, phase_placeholder)
-    sample, phases = paired_representative_samples(frame, phase_frame, sample_per_family, representative_scope)
+    _, phases = paired_representative_samples(frame, phase_frame, sample_per_family, representative_scope)
     if not phases.empty:
-        outputs.append(("phase_breakdown_outeryan.pdf", lambda pdf: page_phase(pdf, phases, run, notice, True)))
+        outputs.append(("phase_breakdown_outeryan", lambda pdf: page_phase(pdf, phases, run, notice, True)))
         columns = [column for column in (
             "run", "query", "short_query", "family", "topology", "selected_plan", "profile_threads",
             "profile_round1_operator_s", "profile_round2_operator_s", "profile_round3_operator_s",
-            "profile_other_elapsed_s", "profile_total_time_s", "profile_cpu_time_s",
-            "baseline_time_s", "baseline_threads", "_family_available",
+            "profile_other_elapsed_s", "profile_wall_time_s", "profile_total_time_s",
+            "profile_cpu_time_s",
+            "_phase_sum_s", "_phase_sum_error_s", "baseline_time_s", "tm_on", "baseline_threads",
+            "_family_available",
         ) if column in phases]
         (output_directory / "phase_queries.json").write_text(json.dumps({
             "placeholder": notice is not None,
@@ -1083,17 +1268,8 @@ def write_standalone_runtime_figures(
             "queries": json.loads(phases[columns].to_json(orient="records", double_precision=15)),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     paths: list[Path] = []
-    for filename, draw in outputs:
-        path = output_directory / filename
-        with PdfPages(path) as pdf:
-            draw(pdf)
-        paths.append(path)
-        print(f"  wrote standalone figure: {path}")
-    representative = write_representative_runtime_figure(
-        output_directory, frame, sample_per_family, representative_scope, sample
-    )
-    if representative is not None:
-        paths.insert(1, representative)
+    for stem, draw in outputs:
+        paths.append(write_figure_pair(output_directory, stem, draw))
     return paths
 
 
@@ -1106,9 +1282,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--split-output-dir",
-        help="also write speedup_all_queries.pdf, runtime_outeryan_queries.pdf "
-             "(runtime_representative_queries.pdf for --representative-scope all), "
-             "representative_queries.json, and phase_breakdown_outeryan.pdf only when profiles exist; "
+        help="also write speedup_all_queries.pdf and phase_breakdown_outeryan.pdf "
+             "(the phase figure is emitted only when profiles exist); "
              "multiple runs receive timestamp subdirectories",
     )
     parser.add_argument(
@@ -1173,13 +1348,11 @@ def main() -> None:
             print(f"\n>>> unified run {run}: {len(sub)} timed, {skipped} skipped")
             page_summary(pdf, sub, run)
             page_shape_relations(pdf, sub, run)
-            page_runtime(pdf, population, run, args.metric, selected_only=False)
+            page_speedup_scatter(pdf, population, run, args.metric)
             phase_frame, notice = phase_source(population, placeholder)
-            sample, phases = paired_representative_samples(
+            _, phases = paired_representative_samples(
                 population, phase_frame, args.representatives_per_benchmark, args.representative_scope
             )
-            if not sample.empty:
-                page_selected_runtime_bars(pdf, sample, show_plan=args.representative_scope == "all")
             page_phase(pdf, phases, run, notice, preselected=True)
         page_run_comparison(pdf, measured)
     print(f"\nwrote one PDF: {output}")

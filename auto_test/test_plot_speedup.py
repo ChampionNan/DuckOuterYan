@@ -2,7 +2,6 @@
 
 import importlib.util
 import math
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +118,9 @@ class PlotSpeedupLoadTest(unittest.TestCase):
             "derived__ojb_job_21a_skeleton_bmx": "bushy",
             "derived__ojb_job_21a_skeleton_bdmx": "bushy",
             "industry__oy_th_real_supplier_right": "industry",
+            "stress__ojb_job_30a_skeleton_rduR_stress0025": "right-deep",
+            "stress__ojb_job_30a_skeleton_rduR_stress80": "right-deep",
+            "regression__ojb_sqlstorm_job_11914_bdmx": "bushy",
         }
         self.assertEqual(
             {query: PLOT.topology_from_query(query) for query in cases}, cases
@@ -127,6 +129,14 @@ class PlotSpeedupLoadTest(unittest.TestCase):
     def test_old_win_prefixes_collapse_to_two_reporting_classes(self):
         self.assertEqual(PLOT.class_from_query("industrywin__old_query"), "industry")
         self.assertEqual(PLOT.class_from_query("legacywin__old_query"), "derived")
+        self.assertEqual(
+            PLOT.class_from_query("stress__ojb_job_30a_skeleton_rduR_stress0025"),
+            "selectivity stress",
+        )
+        self.assertEqual(
+            PLOT.class_from_query("regression__ojb_sqlstorm_job_11914_bdmx"),
+            "JOB regression",
+        )
 
     def test_sql_relation_count_ignores_comments_and_overrides_stale_csv(self):
         frame = pd.DataFrame([{
@@ -161,6 +171,7 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
             "profile_round3_ratio": 0.3,
             "profile_other_ratio": 0.4,
             "tm_off": baseline,
+            "tm_on": baseline / 2.0,
             "t1_off": 99.0,
         }
 
@@ -174,37 +185,77 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
             PLOT.page_phase(object(), frame, "20260818_011114")
 
         self.assertEqual(len(captured), 1)
-        self.assertEqual(len(captured[0].axes), 1)
-        labels = [label.get_text() for label in captured[0].axes[0].get_xticklabels()]
+        self.assertEqual(len(captured[0].axes), 2)
+        axis, runtime_axis = captured[0].axes
+        labels = [label.get_text() for label in axis.get_yticklabels()]
         self.assertEqual(labels, ["H-LD-01", "J-RD-01"])
-        subtitles = [text.get_text() for text in captured[0].axes[0].texts]
-        self.assertIn("TPC-H (n=1)", subtitles)
-        self.assertIn("JOB (n=1)", subtitles)
-        legend = [text.get_text() for text in captured[0].legends[0].get_texts()]
-        self.assertIn(PLOT.OUTERYAN_TOTAL_LABEL, legend)
-        self.assertEqual(legend, [label for label, _, _, _ in PLOT.PHASES] + ["Total Time", "Baseline Time"])
+        benchmark_labels = [text for text in axis.texts if text.get_text() in {"TPC-H", "JOB"}]
+        self.assertEqual([text.get_text() for text in benchmark_labels], ["TPC-H", "JOB"])
+        self.assertTrue(all(text.get_rotation() == 90 for text in benchmark_labels))
+        self.assertTrue(all(text.get_position()[0] == -0.074 for text in benchmark_labels))
+        self.assertEqual(len(axis.lines), 1)
+        legend = [text.get_text() for text in axis.get_legend().get_texts()]
+        self.assertEqual(legend, [label for label, _, _, _ in PLOT.PHASES])
+        self.assertEqual(axis.get_xlabel(), "CPU Time (%)")
+        self.assertEqual(runtime_axis.get_xscale(), "log")
+        self.assertEqual(runtime_axis.get_xlabel(), "Running time: DuckDB vs. OuterYan")
         self.assertEqual(
-            captured[0].axes[0].get_xlabel(), "Query"
+            [text.get_text() for text in runtime_axis.get_legend().get_texts()],
+            ["DuckDB baseline", "OuterYan enabled"],
         )
-        patches = [patch for axis in captured[0].axes for patch in axis.patches]
+        runtime_points = [
+            collection.get_offsets().tolist() for collection in runtime_axis.collections
+            if collection.__class__.__name__ == "PathCollection"
+        ]
+        expected_y = 1.0 + PLOT.PHASE_GROUP_GAP
+        self.assertEqual(
+            runtime_points,
+            [[[3.0, 0.0], [4.0, expected_y]], [[1.5, 0.0], [2.0, expected_y]]],
+        )
+        self.assertGreater(expected_y, 1.0)
+        self.assertEqual(
+            [collection.get_sizes().tolist() for collection in runtime_axis.collections],
+            [[38], [42]],
+        )
+        self.assertEqual(
+            [text.get_text() for text in runtime_axis.texts],
+            ["2.00×", "2.00×"],
+        )
+        self.assertTrue(all(text.get_position()[0] == 1.040 for text in runtime_axis.texts))
+        patches = axis.patches
         self.assertTrue(all(patch.get_hatch() is None for patch in patches))
         self.assertTrue(all(not patch.get_path_effects() for patch in patches))
-        self.assertNotIn("20260818_011114", captured[0]._suptitle.get_text())
+        self.assertIsNone(captured[0]._suptitle)
         plt.close(captured[0])
 
-    def test_phase_draws_matching_thread_duckdb_baseline(self):
+    def test_v2_selectivity_suffix_preserves_tree_shape_label(self):
+        self.assertEqual(
+            PLOT.topology_from_query("derived__ojb_tpch_q08_ldmx_sel001"),
+            "left-deep",
+        )
+        self.assertEqual(
+            PLOT.topology_from_query("derived__ojb_job_21a_rduR_sel01"),
+            "right-deep",
+        )
+        self.assertEqual(
+            PLOT.topology_from_query("derived__ojb_tpcds_q72_bdmx_sel05"),
+            "bushy",
+        )
+
+    def test_phase_uses_cpu_total_and_component_closure(self):
         frame = pd.DataFrame([
             self.phase_row("derived__ojb_tpch_q08_ldmx", "TPC-H", 2.0, 3.0),
         ])
         captured = []
         with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
             PLOT.page_phase(object(), frame, "20260818_011114")
-        total_bar, baseline_bar = captured[0].axes[0].patches[-2:]
-        endpoint = total_bar.get_y() + total_bar.get_height()
-        self.assertTrue(math.isclose(endpoint, 2.0))
-        self.assertAlmostEqual(baseline_bar.get_y() + baseline_bar.get_height(), 3.0)
-        legend = [text.get_text() for text in captured[0].legends[0].get_texts()]
-        self.assertIn("Baseline Time", legend)
+        axis = captured[0].axes[0]
+        self.assertAlmostEqual(sum(patch.get_width() for patch in axis.patches), 100.0)
+        self.assertIn("10.0 s", [text.get_text() for text in axis.texts])
+        complete, skipped = PLOT.complete_phase_rows(frame)
+        self.assertEqual(skipped, 0)
+        self.assertAlmostEqual(complete.iloc[0]["_phase_sum_s"], 10.0)
+        self.assertAlmostEqual(complete.iloc[0]["_phase_sum_error_s"], 0.0)
         plt.close(captured[0])
 
     def test_phase_baseline_never_uses_a_mismatched_thread_count(self):
@@ -290,25 +341,6 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
 
 
 class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
-    def test_multi_thread_only_comparison_has_two_contiguous_bars(self):
-        frame = pd.DataFrame([{
-            "query": "derived__selected", "family": "TPC-H", "topology": "left-deep",
-            "selected_plan": "OUTERYAN", "timing_threads": 16,
-            "tm_off": 10.0, "tm_on": 5.0, "tm_speedup": 2.0,
-        }])
-        captured = []
-        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
-            PLOT.page_runtime(object(), frame, "20260908_120000_t16", "tm", selected_only=True)
-        self.assertEqual(len(captured), 1)
-        bars = captured[0].axes[0].patches
-        self.assertEqual(len(bars), 2)
-        self.assertAlmostEqual(bars[0].get_x() + bars[0].get_width(), bars[1].get_x())
-        self.assertEqual(
-            [text.get_text() for text in captured[0].legends[0].get_texts()],
-            [label for label, _, _ in PLOT.runtime_series(frame)],
-        )
-        plt.close(captured[0])
-
     @staticmethod
     def runtime_row(query, family, plan, speedup, offset):
         return {
@@ -325,7 +357,7 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             "tm_speedup": speedup,
         }
 
-    def test_all_queries_share_one_speedup_axis_without_query_names(self):
+    def test_all_queries_use_compact_runtime_pair_without_query_names(self):
         frame = pd.DataFrame([
             self.runtime_row(
                 "derived__ojb_tpch_q08_ldmx", "TPC-H", "OUTERYAN", 1.2, 0.0
@@ -339,56 +371,67 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
         ])
         captured = []
         with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
-            PLOT.page_runtime(object(), frame, "20260818_011114", "tm", selected_only=False)
+            PLOT.page_speedup_scatter(object(), frame, "20260818_011114", "tm")
 
         self.assertEqual(len(captured), 1)
-        self.assertEqual(len(captured[0].axes), 1)
-        axis = captured[0].axes[0]
-        self.assertEqual(len(axis.patches), 2)  # Tinted benchmark regions.
-        self.assertEqual(len(axis.collections), 2)
-        points = [point for collection in axis.collections for point in collection.get_offsets().tolist()]
-        self.assertEqual(sorted(point[1] for point in points), [1.0, 1.2, 1.4])
-        self.assertTrue(all(0 < point[0] < 4 for point in axis.collections[0].get_offsets()))
-        self.assertTrue(all(4 < point[0] < 8 for point in axis.collections[1].get_offsets()))
-        self.assertTrue(all(collection.get_alpha() == 0.5 for collection in axis.collections))
-        self.assertEqual([text.get_text() for text in axis.get_xticklabels()], ["LD", "I", "RD"])
-        self.assertEqual(axis.get_yscale(), "log")
-        labels = [text.get_text() for text in axis.texts + axis.get_xticklabels() + axis.get_yticklabels()]
+        self.assertEqual(len(captured[0].axes), 2)
+        family_axis, distribution_axis = captured[0].axes
+        points = [
+            point
+            for collection in family_axis.collections
+            if collection.__class__.__name__ == "PathCollection"
+            for point in collection.get_offsets().tolist()
+        ]
+        self.assertEqual(sorted(points), sorted([[8.0, 8.0 / 1.2], [9.0, 9.0], [10.0, 10.0 / 1.4]]))
+        self.assertEqual(family_axis.get_xscale(), "log")
+        self.assertEqual(family_axis.get_yscale(), "log")
+        self.assertEqual([text.get_text() for text in distribution_axis.get_yticklabels()], ["TPC-H", "JOB"])
+        labels = [
+            text.get_text()
+            for axis in captured[0].axes
+            for text in axis.texts + axis.get_xticklabels() + axis.get_yticklabels()
+        ]
         self.assertFalse(any(query in " ".join(labels) for query in frame["query"]))
-        legend = captured[0].legends[0]
-        self.assertEqual([text.get_text() for text in legend.get_texts()], ["TPC-H (n=2)", "JOB (n=1)"])
-        self.assertEqual(legend._ncols, 2)
-        self.assertTrue(all(text.get_fontsize() >= 16 for text in legend.get_texts()))
-        self.assertNotEqual(
-            axis.collections[0].get_facecolors().tolist(), axis.collections[1].get_facecolors().tolist()
+        self.assertIsNone(family_axis.get_legend())
+        self.assertIsNone(distribution_axis.get_legend())
+        self.assertEqual(len(captured[0].legends), 1)
+        figure_legend = captured[0].legends[0]
+        self.assertEqual(figure_legend.get_title().get_text(), "")
+        all_text = [text.get_text() for text in figure_legend.get_texts()]
+        self.assertEqual(
+            all_text,
+            ["TPC-H", "JOB", "OuterYan faster/equal", "OuterYan slower"],
         )
+        self.assertFalse(any("(n=" in text for text in all_text))
+        self.assertIsNone(captured[0]._suptitle)
+        self.assertLess(
+            distribution_axis.get_position().x0 - family_axis.get_position().x1, 0.08
+        )
+        panel_labels = [text for axis in captured[0].axes for text in axis.texts if text.get_text().startswith("(")]
+        self.assertTrue(all(text.get_position()[1] > -0.15 for text in panel_labels))
+        self.assertEqual(
+            [text.get_text() for text in panel_labels],
+            ["(a) Running Time Comparison", "(b) Speed-up Comparison"],
+        )
+        self.assertEqual(distribution_axis.get_xlabel(), "DuckDB vs. OuterYan")
+        scatter = [
+            collection for collection in family_axis.collections
+            if collection.__class__.__name__ == "PathCollection" and len(collection.get_offsets())
+        ]
+        self.assertNotEqual(scatter[0].get_facecolors().tolist(), scatter[-1].get_facecolors().tolist())
+        self.assertTrue(all(collection.get_sizes().tolist() == [PLOT.QUERY_POINT_SIZE]
+                            for collection in scatter))
+        self.assertTrue(all(collection.get_alpha() == PLOT.QUERY_POINT_ALPHA
+                            for collection in scatter))
+        distribution_points = [
+            collection for collection in distribution_axis.collections
+            if collection.__class__.__name__ == "PathCollection"
+            and collection.get_alpha() == PLOT.QUERY_POINT_ALPHA
+        ]
+        self.assertEqual(len(distribution_points), 2)
+        self.assertTrue(all(collection.get_sizes().tolist() == [PLOT.QUERY_POINT_SIZE]
+                            for collection in distribution_points))
         plt.close(captured[0])
-
-    def test_outeryan_runtime_merges_job_and_preserves_legacy_timing_pairs(self):
-        frame = pd.DataFrame([
-            self.runtime_row("derived__selected", "TPC-H", "OUTERYAN", 1.2, 0.0),
-            self.runtime_row("derived__not_selected", "TPC-H", "DUCKDB", 1.0, 1.0),
-            self.runtime_row("derived__job_selected", "JOB", "OUTERYAN", 2.0, 4.0),
-        ])
-        captured = []
-        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
-            PLOT.page_runtime(object(), frame, "20260818_011114", "tm", selected_only=True)
-        self.assertEqual(len(captured), 1)
-        figure = captured[0]
-        axis = figure.axes[0]
-        self.assertEqual([text.get_text() for text in axis.get_xticklabels()], ["H-O-01", "J-O-01"])
-        self.assertEqual(len(axis.patches), 8)
-        for query_index, expected in enumerate(
-            [[10.0, 10.0 / 1.2, 8.0, 8.0 / 1.2], [14.0, 7.0, 12.0, 6.0]]
-        ):
-            bars = axis.patches[query_index::2]
-            for bar, seconds in zip(bars, expected):
-                self.assertAlmostEqual(bar.get_y() + bar.get_height(), seconds)
-            for left, right in zip(bars, bars[1:]):
-                self.assertAlmostEqual(left.get_x() + left.get_width(), right.get_x())
-        self.assertFalse(axis.collections)
-        self.assertEqual(figure._suptitle.get_text(), "Running time Comparison")
-        plt.close(figure)
 
     def test_representatives_balance_families_and_cover_shapes_deterministically(self):
         rows = []
@@ -458,37 +501,6 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
         sample = PLOT.representative_runtime_rows(frame, scope="all")
         self.assertEqual(sample["query"].tolist(), ["derived__good"])
 
-    def test_all_plan_labels_mark_recorded_outeryan_not_optimizer_enabled(self):
-        frame = pd.DataFrame([
-            self.runtime_row("derived__a", "TPC-H", "OUTERYAN", 2, 0),
-            self.runtime_row("derived__b", "TPC-H", "DUCKDB", 1, 0),
-            self.runtime_row("derived__c", "TPC-H", "UNKNOWN", 1, 0),
-        ])
-        captured = []
-        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
-            PLOT.page_runtime(object(), frame, "test", "tm", True, representative_scope="all")
-        figure = captured[0]
-        self.assertEqual([text.get_text() for text in figure.axes[0].get_xticklabels()],
-                         ["H-O-01*", "H-O-02", "H-O-03?"])
-        legend = " ".join(text.get_text() for text in figure.legends[0].get_texts())
-        self.assertIn("OuterYan enabled (ON)", legend)
-        self.assertIn("? = plan unavailable", " ".join(text.get_text() for text in figure.texts))
-        plt.close(figure)
-
-    def test_all_plan_standalone_name_and_manifest_identify_mixed_population(self):
-        frame = pd.DataFrame([
-            self.runtime_row("derived__a", "TPC-H", "OUTERYAN", 2, 0),
-            self.runtime_row("derived__b", "TPC-H", "DUCKDB", 1, 0),
-        ])
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(PLOT, "PdfPages"), \
-                mock.patch.object(PLOT, "page_selected_runtime_bars") as draw:
-            output = PLOT.write_representative_runtime_figure(Path(directory), frame, representative_scope="all")
-            self.assertEqual(output.name, "runtime_representative_queries.pdf")
-            self.assertTrue(draw.call_args.kwargs["show_plan"])
-            manifest = json.loads((Path(directory) / "representative_queries.json").read_text())
-            self.assertEqual({row["selected_plan"] for row in manifest}, {"OUTERYAN", "DUCKDB"})
-            self.assertEqual(len(manifest), 2)
-
     def test_speedup_scatter_rejects_failed_and_missing_data(self):
         good = self.runtime_row("derived__good", "TPC-H", "OUTERYAN", 2.0, 0.0)
         rows = [good, dict(good, query="missing", tm_on=float("nan")),
@@ -500,11 +512,10 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             PLOT.page_speedup_scatter(object(), frame, "test", "tm")
         points = captured[0].axes[0].collections[0].get_offsets().tolist()
         self.assertEqual(len(points), 1)
-        self.assertEqual(points[0][1], 2.0)
-        self.assertTrue(0 < points[0][0] < 4)
+        self.assertEqual(points[0], [8.0, 4.0])
         plt.close(captured[0])
 
-    def test_scatter_jitter_is_stable_and_keeps_shapes_separate(self):
+    def test_runtime_scatter_order_is_stable(self):
         frame = pd.DataFrame([
             self.runtime_row(f"derived__{index}_{suffix}", family, "OUTERYAN", 1 + index / 10, 0)
             for index, (family, suffix) in enumerate([
@@ -515,12 +526,16 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
         with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
             PLOT.page_speedup_scatter(object(), frame, "test", "tm")
             PLOT.page_speedup_scatter(object(), frame.sample(frac=1, random_state=8), "test", "tm")
-        points = [collection.get_offsets().tolist() for collection in captured[0].axes[0].collections]
-        self.assertEqual(captured[0].axes[0].get_xlabel(), "Query shape")
-        self.assertEqual(points, [collection.get_offsets().tolist() for collection in captured[1].axes[0].collections])
-        # First benchmark has three equal-width shape slots, each point stays in its slot.
-        expected = [0, 1, 2, 0]
-        self.assertEqual([int(point[0] / (4 / 3)) for point in points[0]], expected)
+        points = [
+            collection.get_offsets().tolist() for collection in captured[0].axes[0].collections
+            if collection.__class__.__name__ == "PathCollection"
+        ]
+        self.assertEqual(captured[0].axes[0].get_xlabel(), "DuckDB running time (s)")
+        self.assertEqual(points, [
+            collection.get_offsets().tolist() for collection in captured[1].axes[0].collections
+            if collection.__class__.__name__ == "PathCollection"
+        ])
+        self.assertEqual([point[0] for point in points[0]], [8.0, 8.0, 8.0, 8.0])
         for figure in captured:
             plt.close(figure)
 
@@ -530,12 +545,18 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             self.runtime_row("derived__j_bmx", "JOB", "OUTERYAN", 1.2, 0.0),
         ])
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(PLOT, "PdfPages"), \
-                mock.patch.object(PLOT, "page_runtime"), mock.patch.object(PLOT, "page_selected_runtime_bars") as draw:
+                mock.patch.object(PLOT, "page_speedup_scatter"):
+            output_directory = Path(directory)
+            obsolete = [
+                "runtime_outeryan_queries.pdf", "runtime_outeryan_queries.png",
+                "runtime_representative_queries.pdf", "runtime_representative_queries.png",
+                "representative_queries.json",
+            ]
+            for filename in obsolete:
+                (output_directory / filename).write_text("obsolete")
             paths = PLOT.write_standalone_runtime_figures(Path(directory), frame, "test", "tm")
-            self.assertEqual([path.name for path in paths], ["speedup_all_queries.pdf", "runtime_outeryan_queries.pdf"])
-            self.assertEqual(set(draw.call_args.args[1]["family"]), {"TPC-H", "JOB"})
-            manifest = json.loads((Path(directory) / "representative_queries.json").read_text())
-            self.assertEqual(len(manifest), 2)
+            self.assertEqual([path.name for path in paths], ["speedup_all_queries.pdf"])
+            self.assertTrue(all(not (output_directory / filename).exists() for filename in obsolete))
 
     def test_selected_runtime_requires_all_four_valid_timings(self):
         valid = self.runtime_row("derived__valid", "TPC-H", "OUTERYAN", 1.2, 0.0)
@@ -549,31 +570,6 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             with self.subTest(column=column, absent=True):
                 frame = pd.DataFrame([valid]).drop(columns=[column])
                 self.assertTrue(PLOT.selected_runtime_rows(frame).empty)
-
-    def test_selected_runtime_omits_incomplete_queries_without_renumbering(self):
-        incomplete = self.runtime_row("derived__a_missing", "TPC-H", "OUTERYAN", 1.2, 0.0)
-        incomplete["t1_on"] = float("nan")
-        valid = self.runtime_row("derived__b_valid", "TPC-H", "OUTERYAN", 1.2, 0.0)
-        captured = []
-        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
-            PLOT.page_runtime(
-                object(), pd.DataFrame([incomplete, valid]), "test", "tm", selected_only=True
-            )
-        self.assertEqual(len(captured), 1)
-        axis = captured[0].axes[0]
-        self.assertEqual([text.get_text() for text in axis.get_xticklabels()], ["H-O-02"])
-        self.assertEqual(len(axis.patches), 4)
-        self.assertFalse(axis.collections)
-        legend = [text.get_text() for text in captured[0].legends[0].get_texts()]
-        self.assertEqual(legend, [label for label, _, _ in PLOT.RUNTIME_SERIES])
-        plt.close(captured[0])
-
-    def test_selected_runtime_omits_figure_when_all_queries_are_incomplete(self):
-        row = self.runtime_row("derived__incomplete", "TPC-H", "OUTERYAN", 1.2, 0.0)
-        row["tm_on"] = float("nan")
-        with mock.patch.object(PLOT, "save_page") as save:
-            PLOT.page_runtime(object(), pd.DataFrame([row]), "test", "tm", selected_only=True)
-        save.assert_not_called()
 
     def test_summary_uses_short_titles_without_timestamp(self):
         frame = pd.DataFrame([

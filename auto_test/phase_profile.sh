@@ -2,7 +2,9 @@
 # Sourced by experiment_onoff.sh; uses its tracked oy_duck and timeout helpers.
 # Separate native ON profiling: one warm-up plus N samples at the timing thread
 # count. This does not contribute to the unprofiled OFF/ON timing medians.
-# The optional ninth argument retains raw profiles and the CLI log for auditing.
+# The optional ninth argument exposes raw profiles and the CLI log to the
+# caller. experiment_onoff.sh deletes them after success and retains them only
+# when profiling fails.
 # Parser restored from the validated multi-thread profiler in 6ff227865e.
 # Total-Time is DuckDB's high-resolution root query latency; CPU-Time is the
 # recursive sum of native OPERATOR_TIMING across all workers. R1/R2 sum the

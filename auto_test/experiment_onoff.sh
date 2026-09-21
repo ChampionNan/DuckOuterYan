@@ -28,9 +28,13 @@
 #      --exclude GLOB  skip labels matching any '|'-separated glob
 #      --limit N       cap number of queries (0 = no cap, default 0)
 #      --query-list FILE  ordered corpus-relative SQL paths (requires --only all)
+#      --corpus-version V  v1 (default) or expanded selectivity-sweep v2
+#      --corpus-scope S    benchmark (default), selectivity-stress, or
+#                          job-regressions; non-benchmark scopes require v2
+#      --all             run both corpus versions in order: v1, then v2
 #      --capture-plans   save OFF/ON EXPLAIN, trace, and detailed cost artifacts
 #      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
-#      --profile         collect separate ON phase profiles (default)
+#      --profile         collect ON phase metrics; keep raw files only on error (default)
 #      --no-profile      skip phase profiles; performance timing stays unprofiled
 #   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
@@ -43,7 +47,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/thread_sweep.sh"
 . "$SCRIPT_DIR/phase_profile.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
-CORPUS="${OY_CORPUS:-$SCRIPT_DIR/outerjoin_query}"
+CORPUS="${OY_CORPUS:-}"
+CORPUS_VERSION="${OY_CORPUS_VERSION:-v1}"
+CORPUS_VERSION_CLI=0
+CORPUS_SCOPE="${OY_CORPUS_SCOPE:-benchmark}"
+ALL_CORPORA=0
 
 RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
@@ -59,6 +67,9 @@ while [ $# -gt 0 ]; do case "$1" in
     --exclude) EXCLUDE="$2"; shift 2;;
     --limit) LIMIT="$2"; shift 2;;
     --query-list) QUERY_LIST="$2"; shift 2;;
+    --corpus-version) CORPUS_VERSION="$2"; CORPUS_VERSION_CLI=1; shift 2;;
+    --corpus-scope) CORPUS_SCOPE="$2"; shift 2;;
+    --all) ALL_CORPORA=1; shift;;
     --capture-plans) CAPTURE_PLANS=1; shift;;
     --profile) PROFILE=1; shift;;
     --no-profile) PROFILE=0; shift;;
@@ -70,6 +81,52 @@ while [ $# -gt 0 ]; do case "$1" in
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
 [ -z "$QUERY_LIST" ] || [ "$ONLY" = "all" ] || {
     echo "--query-list requires --only all" >&2; exit 2;
+}
+[ "$ALL_CORPORA" = 0 ] || [ "$CORPUS_VERSION_CLI" = 0 ] || {
+    echo "--all cannot be combined with --corpus-version" >&2; exit 2;
+}
+[ "$ALL_CORPORA" = 0 ] || [ "$CORPUS_SCOPE" = "benchmark" ] || {
+    echo "--all runs the headline-eligible benchmark scope only" >&2; exit 2;
+}
+if [ "$ALL_CORPORA" = 1 ]; then
+    [ -z "$QUERY_LIST" ] || { echo "--all cannot be combined with --query-list" >&2; exit 2; }
+    CORPUS_VERSION="v1"
+    CORPUS="$SCRIPT_DIR/outerjoin_query"
+    [ -d "$SCRIPT_DIR/outerjoin_benchmark/v2/benchmark" ] || {
+        echo "V2 corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version v2" >&2
+        exit 2
+    }
+else
+    [ "$CORPUS_VERSION_CLI" = 0 ] || CORPUS=""
+    case "$CORPUS_VERSION" in
+        v1)
+            [ "$CORPUS_SCOPE" = "benchmark" ] || {
+                echo "--corpus-scope $CORPUS_SCOPE requires --corpus-version v2" >&2; exit 2;
+            }
+            [ -n "$CORPUS" ] || CORPUS="$SCRIPT_DIR/outerjoin_query"
+            ;;
+        v2)
+            if [ -z "$CORPUS" ]; then
+                case "$CORPUS_SCOPE" in
+                    benchmark) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/benchmark";;
+                    selectivity-stress|advantage-stress)
+                        CORPUS_SCOPE="selectivity-stress"
+                        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/selectivity_stress"
+                        ;;
+                    job-regressions) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/job_regressions";;
+                    *)
+                        echo "--corpus-scope must be benchmark, selectivity-stress, or job-regressions (got: $CORPUS_SCOPE)" >&2
+                        exit 2
+                        ;;
+                esac
+            fi
+            ;;
+        *) echo "--corpus-version must be v1 or v2 (got: $CORPUS_VERSION)" >&2; exit 2;;
+    esac
+fi
+[ -d "$CORPUS" ] || {
+    echo "Corpus directory not found: $CORPUS (generate with: python3 auto_test/gen_outerjoin_benchmark.py --version $CORPUS_VERSION)" >&2
+    exit 2
 }
 case "$RUNS" in
     ''|*[!0-9]*|0) echo "--runs must be a positive integer (got: $RUNS)" >&2; exit 2;;
@@ -84,6 +141,47 @@ oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 # filename form and human form can never straddle a second boundary.
 _now="$(date '+%Y%m%d_%H%M%S|%F %T')"
 START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
+if [ "$ALL_CORPORA" = 1 ]; then
+    all_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
+    all_status=0
+    all_pid=""
+    all_forward_args=()
+    for ((arg_index=0; arg_index<${#ORIGINAL_ARGS[@]}; arg_index++)); do
+        arg="${ORIGINAL_ARGS[$arg_index]}"
+        case "$arg" in
+            --all) ;;
+            -o|--out) arg_index=$((arg_index + 1));;
+            *) all_forward_args+=("$arg");;
+        esac
+    done
+    oy_stop_all_corpora() {
+        trap '' INT TERM
+        if [ -n "$all_pid" ]; then
+            kill -TERM "$all_pid" 2>/dev/null || true
+            wait "$all_pid" 2>/dev/null || true
+        fi
+        exit "$1"
+    }
+    trap 'oy_stop_all_corpora 130' INT
+    trap 'oy_stop_all_corpora 143' TERM
+    for corpus_version in v1 v2; do
+        version_out="${all_out%.txt}_${corpus_version}.txt"
+        echo "--- Running corpus version: $corpus_version ---" >&2
+        OY_CORPUS="" OY_CORPUS_VERSION="$corpus_version" \
+            bash "$SCRIPT_DIR/experiment_onoff.sh" "${all_forward_args[@]}" \
+            --corpus-version "$corpus_version" --out "$version_out" &
+        all_pid=$!
+        wait "$all_pid"
+        version_status=$?
+        all_pid=""
+        case "$version_status" in
+            130|143) exit "$version_status";;
+            0) ;;
+            *) all_status="$version_status";;
+        esac
+    done
+    exit "$all_status"
+fi
 if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
     sweep_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
     sweep_status=0
@@ -117,7 +215,9 @@ if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
     exit "$sweep_status"
 fi
 export OY_THREADS="${OY_THREAD_VALUES[0]}"
-_default_out="$SCRIPT_DIR/results/experiment_onoff_${START_TS}_t${OY_THREADS}.txt"
+_scope_suffix=""
+[ "$CORPUS_SCOPE" = "benchmark" ] || _scope_suffix="_${CORPUS_VERSION}_${CORPUS_SCOPE}"
+_default_out="$SCRIPT_DIR/results/experiment_onoff${_scope_suffix}_${START_TS}_t${OY_THREADS}.txt"
 OUT="${OUT:-$_default_out}"
 mkdir -p "$(dirname "$OUT")"
 mkdir -p "$OY_TMPDIR" || { echo "Error: cannot create OY_TMPDIR: $OY_TMPDIR" >&2; exit 1; }
@@ -827,7 +927,6 @@ SIZES="families=[$FAMS]  graph=$GRAPH_DATASET  tpch sf=$TPCH_SF  tpcds sf=$TPCDS
 # RUN: gate -> decision -> kernel/time, streaming to TXT/CSV
 # ============================================================================
 CSV_FINAL="${OUT%.txt}.csv"
-CSV_ATTEMPTS="${OUT%.txt}.attempts.csv"
 PLAN_DIR="${OUT%.txt}.plans"
 [ "$CAPTURE_PLANS" = 1 ] && mkdir -p "$PLAN_DIR"
 PROFILE_DIR="${OUT%.txt}.profiles"
@@ -855,7 +954,6 @@ csv_row() {
 
 csv_result_row() {
     csv_row "$CSV_FINAL" "$@"
-    csv_row "$CSV_ATTEMPTS" "$@"
 }
 
 CSV_HEADER=(
@@ -877,25 +975,25 @@ CSV_HEADER=(
     rows effective_pass duckdb_plan enabled_plan trace_file cost_file
     profile_status profile_threads profile_round1_operator_s profile_round2_operator_s profile_round3_operator_s
     profile_round1_operator_count profile_round2_operator_count profile_round3_operator_count
-    profile_total_time_s profile_cpu_time_s profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
+    profile_wall_time_s profile_total_time_s profile_cpu_time_s
+    profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
     profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
 )
 : > "$CSV_FINAL"
-: > "$CSV_ATTEMPTS"
 csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
-csv_row "$CSV_ATTEMPTS" "${CSV_HEADER[@]}"
 
 # Header (truncate + write)
 {
     echo "# OuterYan on/off experiment   started $START_HUMAN"
     echo "# binary : $DUCKDB_BIN"
-    echo "# corpus : $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
+    echo "# corpus : version=$CORPUS_VERSION, scope=$CORPUS_SCOPE, $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
     echo "# timing : threads=${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
     echo "# overhead: correctness, diagnostics and TM timing disable profiling; separate ON phase batch enabled=$PROFILE"
     echo "# phases : OuterYan-selected only, threads=${OY_THREADS}, 1 warm-up + ${RUNS} samples; whole tuple at median profile latency"
-    echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time; raw JSON: $PROFILE_DIR"
+    echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time"
+    echo "#          successful raw profiles are deleted; failure artifacts, if any: $PROFILE_DIR"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
@@ -1083,6 +1181,18 @@ process_one() {
                         realjoin_ratio other other_ratio r1_operators r2_operators realjoin_operators \
                         profile_samples <<< "$praw"
                     profile_status="OK"
+                    # Successful JSON profiles are intermediate measurements, not
+                    # error artifacts. Keep only the values written to the main CSV.
+                    local profile_index
+                    for ((profile_index=0; profile_index<=RUNS; profile_index++)); do
+                        rm -f "$profile_directory/profile_${profile_index}.json"
+                    done
+                    rm -f "$profile_directory/duckdb.log"
+                    if rmdir "$profile_directory" 2>/dev/null; then
+                        profile_directory="-"
+                    else
+                        echo "PROFILE-CLEANUP-WARNING: could not remove $profile_directory" >&2
+                    fi
                 else
                     # Do not discard valid unprofiled timing pairs after a profile failure.
                     note="${note};PROFILE-ERROR"
@@ -1212,7 +1322,7 @@ process_one() {
         "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file" \
         "$profile_status" "$profile_threads" "$r1sj" "$r2sj" "$realjoin" \
         "$r1_operators" "$r2_operators" "$realjoin_operators" \
-        "$profile_wall" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
+        "$profile_wall" "$profile_cpu" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
         "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory"
 }
 
@@ -1287,13 +1397,18 @@ MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-
 
 echo "Results written to $OUT"
 echo "Final CSV written to $CSV_FINAL"
-echo "Attempts CSV written to $CSV_ATTEMPTS (single attempt; no retries)"
+if [ "$PROFILE" = 1 ]; then
+    if rmdir "$PROFILE_DIR" 2>/dev/null; then
+        echo "No profile error artifacts retained"
+    else
+        echo "Profile error artifacts written to $PROFILE_DIR"
+    fi
+fi
 if [ "$CAPTURE_PLANS" = 1 ]; then
     echo "Plan artifacts written to $PLAN_DIR"
 fi
 echo "RESULT_TXT=$OUT"
 echo "RESULT_CSV=$CSV_FINAL"
-echo "RESULT_ATTEMPTS_CSV=$CSV_ATTEMPTS"
 if [ "$CAPTURE_PLANS" = 1 ]; then
     echo "RESULT_PLAN_DIR=$PLAN_DIR"
 fi

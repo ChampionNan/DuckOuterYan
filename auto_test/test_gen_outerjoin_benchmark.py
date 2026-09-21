@@ -221,6 +221,116 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 BENCHMARK.generate_active_benchmark(root, include_industry=False)
             self.assertEqual(target.read_text(encoding="utf-8"), modified)
 
+    def test_v2_is_a_complete_bounded_selectivity_sweep_with_paired_controls(self):
+        with tempfile.TemporaryDirectory(prefix="outeryan-v2-") as directory, forbid_result_access():
+            root = Path(directory)
+            self.assertEqual(BENCHMARK.generate_v2_core(root), 510)
+            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 542)
+            self.assertEqual(BENCHMARK.generate_v2_selectivity_stress(root), 84)
+            self.assertEqual(BENCHMARK.generate_v2_job_regressions(root), 2)
+            BENCHMARK.validate_v2_generated(root)
+            core = csv_rows(root / "manifest.csv")
+            active = csv_rows(root / "benchmark" / "manifest.csv")
+            stress = csv_rows(root / "selectivity_stress" / "manifest.csv")
+            regressions = csv_rows(root / "job_regressions" / "manifest.csv")
+            self.assertEqual(
+                {row["selectivity_tier"] for row in core},
+                {"sel001", "sel01", "sel05"},
+            )
+            self.assertEqual(
+                {row["selectivity_modulus"] for row in core},
+                {"1000", "100", "20"},
+            )
+            self.assertEqual(
+                {row["pattern_role"] for row in core},
+                {
+                    "v1_advantage_hypothesis",
+                    "paired_structural_control",
+                    "job_regression_guard",
+                },
+            )
+            base_counts = {}
+            for row in core:
+                base_counts[row["base_query_id"]] = base_counts.get(row["base_query_id"], 0) + 1
+                sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
+                self.assertIn("-- corpus_version: v2", sql)
+                self.assertIn(f"hash({row['selectivity_anchor']})", sql)
+            self.assertEqual(set(base_counts.values()), {3})
+            self.assertEqual(
+                sum(row["evaluation_role"] != "benchmark_derived_v2" for row in active),
+                32,
+            )
+            self.assertEqual({row["headline_eligible"] for row in stress}, {"false"})
+            self.assertEqual({row["performance_selected"] for row in stress}, {"false"})
+            self.assertEqual({row["query_class"] for row in stress}, {"selectivity_stress"})
+            self.assertTrue(all("observed_base_tm_speedup" not in row for row in stress))
+            self.assertEqual(
+                {row["selectivity_hash_buckets"] for row in stress},
+                {"4000"},
+            )
+            self.assertEqual(
+                {row["selectivity_bucket_threshold"] for row in stress},
+                {"1", "2", "8", "400", "800", "2000", "3200"},
+            )
+            self.assertEqual(
+                {row["target_fraction"] for row in stress},
+                {
+                    "0.000250", "0.000500", "0.002000", "0.100000",
+                    "0.200000", "0.500000", "0.800000",
+                },
+            )
+            self.assertEqual(
+                {row["tier_balance"] for row in stress}, {"12 queries per tier"}
+            )
+            self.assertEqual(
+                {row["distribution_claim"] for row in stress},
+                {
+                    "balanced tier counts; numeric levels and realized selectivity "
+                    "are not claimed to be uniform"
+                },
+            )
+            base_rows = {row["base_query_id"]: row for row in stress}
+            self.assertEqual(
+                set(base_rows),
+                {
+                    "ojb_sqlstorm_tpch_25509_ldmx",
+                    "ojb_tpch_q07_trade_flow_rdmx",
+                    "ojb_tpch_q08_market_share_bdmx",
+                    "ojb_sqlstorm_tpch_17751_rduL",
+                    "ojb_tpcds_q05_web_channel_ldmx",
+                    "ojb_sqlstorm_tpcds_14368_rduR",
+                    "ojb_sqlstorm_tpcds_28643_bmx",
+                    "ojb_tpcds_q40_catalog_returns_rdmx",
+                    "ojb_job_21a_skeleton_ldmx",
+                    "ojb_job_16a_skeleton_rduF",
+                    "ojb_job_11a_skeleton_bmx",
+                    "ojb_sqlstorm_job_15596_rduF",
+                },
+            )
+            self.assertEqual(
+                {row["join_vector"].replace("F", "") for row in stress}, {""}
+            )
+            self.assertTrue(all(int(row["relation_count"]) >= 4 for row in stress))
+            self.assertEqual(
+                {family: sum(row["family"] == family for row in base_rows.values())
+                 for family in ("tpch", "tpcds", "job")},
+                {"tpch": 4, "tpcds": 4, "job": 4},
+            )
+            for family in ("tpch", "tpcds", "job"):
+                shapes = {
+                    row["tree_shape"] for row in base_rows.values()
+                    if row["family"] == family
+                }
+                self.assertTrue({"left_deep", "right_deep", "bushy"} <= shapes)
+            self.assertEqual(
+                {row["base_query_id"] for row in regressions},
+                {"ojb_sqlstorm_job_11914_bdmx", "oy_jb_jb_bushy4a_v2"},
+            )
+            self.assertEqual(
+                {row["disposition"] for row in regressions},
+                {"retain_in_main_benchmark_and_fix_optimizer"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

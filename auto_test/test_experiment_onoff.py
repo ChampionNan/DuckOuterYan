@@ -27,6 +27,22 @@ class MultiThreadExperimentTest(unittest.TestCase):
         corpus = self.root / "corpus" / "tpch"
         corpus.mkdir(parents=True)
         (corpus / "sample.sql").write_text("SELECT * FROM example;\n", encoding="utf-8")
+        v1_corpus = self.scripts / "outerjoin_query" / "tpch"
+        v1_corpus.mkdir(parents=True)
+        (v1_corpus / "sample.sql").write_text(
+            "SELECT * FROM example;\n", encoding="utf-8"
+        )
+        v2_corpus = self.scripts / "outerjoin_benchmark" / "v2" / "benchmark" / "tpch"
+        v2_corpus.mkdir(parents=True)
+        (v2_corpus / "sample.sql").write_text(
+            "SELECT * FROM example;\n", encoding="utf-8"
+        )
+        for scope in ("selectivity_stress", "job_regressions"):
+            scoped_corpus = self.scripts / "outerjoin_benchmark" / "v2" / scope / "tpch"
+            scoped_corpus.mkdir(parents=True)
+            (scoped_corpus / "sample.sql").write_text(
+                "SELECT * FROM example;\n", encoding="utf-8"
+            )
         self.database = self.root / "tpch.db"
         self.database.touch()
         self.calls = self.root / "calls.jsonl"
@@ -127,7 +143,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["timing_threads"], str(threads))
         self.assertEqual(row["correct"], expected_correct)
         self.assertEqual(row["tm_speedup"], expected_speedup)
-        self.assertEqual(path.read_bytes(), path.with_suffix(".attempts.csv").read_bytes())
+        self.assertFalse(path.with_suffix(".attempts.csv").exists())
         report = path.with_suffix(".txt").read_text()
         self.assertNotIn("T1:", report)
         return report
@@ -135,7 +151,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
     def test_default_profiles_only_on_separately_at_32_threads(self):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assert_result(self.root / "result.csv", 32)
+        report = self.assert_result(self.root / "result.csv", 32)
+        self.assertIn("# corpus : version=v1", report)
         self.assertFalse((self.root / "result_t16.csv").exists())
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertEqual({call["threads"] for call in calls}, {32})
@@ -153,15 +170,60 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["profile_threads"], "32")
         self.assertEqual(row["profile_timed_samples"], "3")
         # Sample 3 is the median latency (6), not the mean of independently selected phases.
-        self.assertEqual(float(row["profile_total_time_s"]), 6)
+        self.assertEqual(float(row["profile_wall_time_s"]), 6)
         self.assertEqual(float(row["profile_round1_operator_s"]), 9)
         self.assertEqual(float(row["profile_round2_operator_s"]), 0)
         self.assertEqual(float(row["profile_round3_operator_s"]), 9)
+        self.assertEqual(float(row["profile_total_time_s"]), 30)
         self.assertEqual(float(row["profile_cpu_time_s"]), 30)
         self.assertEqual(float(row["profile_other_elapsed_s"]), 12)
-        raw = Path(row["profile_directory"])
-        self.assertEqual(len(list(raw.glob("profile_*.json"))), 4)
-        self.assertTrue((raw / "duckdb.log").is_file())
+        self.assertEqual(row["profile_directory"], "-")
+        self.assertFalse((self.root / "result.profiles").exists())
+
+    def test_explicit_v2_version_is_recorded_and_invalid_versions_fail_early(self):
+        result = self.run_harness("--corpus-version", "v2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = self.assert_result(self.root / "result.csv", 32)
+        self.assertIn("# corpus : version=v2", report)
+
+        self.calls.unlink()
+        invalid = self.run_harness("--corpus-version", "v3")
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("--corpus-version must be v1 or v2", invalid.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_v2_scopes_are_explicit_and_v1_rejects_them(self):
+        result = self.run_harness(
+            "--corpus-version", "v2", "--corpus-scope", "selectivity-stress"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = self.assert_result(self.root / "result.csv", 32)
+        self.assertIn("scope=selectivity-stress", report)
+        self.assertIn("/v2/selectivity_stress", report)
+
+        self.calls.unlink()
+        invalid = self.run_harness("--corpus-scope", "job-regressions")
+        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
+        self.assertIn("requires --corpus-version v2", invalid.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_all_runs_v1_then_v2_into_separate_result_files(self):
+        result = self.run_harness("--all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        v1_report = self.assert_result(self.root / "result_v1.csv", 32)
+        v2_report = self.assert_result(self.root / "result_v2.csv", 32)
+        self.assertIn("# corpus : version=v1", v1_report)
+        self.assertIn("# corpus : version=v2", v2_report)
+        self.assertLess(
+            result.stderr.index("Running corpus version: v1"),
+            result.stderr.index("Running corpus version: v2"),
+        )
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len([call for call in calls if call["timing"]]), 4)
+
+        conflict = self.run_harness("--all", "--corpus-version", "v2")
+        self.assertEqual(conflict.returncode, 2, conflict.stdout + conflict.stderr)
+        self.assertIn("--all cannot be combined with --corpus-version", conflict.stderr)
 
     def test_explicit_sweep_runs_16_then_32(self):
         result = self.run_harness("--threads", "16,32")
@@ -218,6 +280,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertFalse(any(call["profiling"] for call in calls))
         row = self.read_row()
         self.assertEqual(row["profile_status"], "disabled")
+        self.assertEqual(row["profile_wall_time_s"], "NA")
         self.assertEqual(row["profile_total_time_s"], "NA")
         self.assertFalse((self.root / "result.profiles").exists())
 
@@ -245,8 +308,10 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 report = self.assert_result(self.root / "result.csv", 32)
                 row = self.read_row()
                 self.assertEqual(row["profile_status"], "ERROR")
+                self.assertEqual(row["profile_wall_time_s"], "NA")
                 self.assertEqual(row["profile_total_time_s"], "NA")
                 self.assertEqual(row["profile_round1_operator_s"], "NA")
+                self.assertTrue(Path(row["profile_directory"]).is_dir())
                 self.assertIn("PROFILE-ERROR", report)
 
     def test_invalid_profile_setting_does_not_execute_queries(self):

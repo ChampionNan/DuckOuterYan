@@ -1,0 +1,9 @@
+-- source: JOB 17a
+-- transformation: connected join-subgraph adaptation; secondary right-deep FULL-outer control
+-- business_semantics: Movie annotation coverage: title/cast/name records form the backbone, while keyword and company annotations are optional.
+-- corpus_version: v2
+-- selectivity_sweep: sel01; approximately 1% of the v1 anchor domain; anchor=mk.movie_id; predicate=hash(anchor) % 100 = 0
+SELECT t.id AS title_id, t.title, n.id AS person_id, n.name, mk.keyword_id, k.keyword
+FROM (name n FULL OUTER JOIN (cast_info ci FULL OUTER JOIN (title t FULL OUTER JOIN (movie_keyword mk FULL OUTER JOIN keyword k ON mk.keyword_id = k.id) ON t.id = mk.movie_id) ON t.id = ci.movie_id) ON ci.person_id = n.id)
+WHERE (t.id % 1000 = 0)
+  AND hash(mk.movie_id) % 100 = 0;

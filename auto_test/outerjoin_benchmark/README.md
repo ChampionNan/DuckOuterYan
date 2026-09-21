@@ -1,7 +1,12 @@
 # OuterJoin benchmark design
 
-This directory contains one provenance-backed benchmark for outer-join query
-optimization plus three auditable component views:
+This directory contains two versioned, provenance-backed workloads for
+outer-join query optimization. The existing workload is **v1** and remains the
+default. The expanded **v2** workload is generated under `v2/` only when it is
+explicitly requested.
+
+The v1 layout contains one active benchmark plus three auditable component
+views:
 
 - `benchmark/` is the active 176-query filtered union used by `../outerjoin_query` and
   the default harness. Query names use only `derived__` and `industry__`.
@@ -60,7 +65,11 @@ seeds and five predetermined transformations per seed:
 ## Generation
 
 ```bash
+# Reproduce v1 (the default).
 python3 auto_test/gen_outerjoin_benchmark.py
+
+# Generate the expanded v2 workload without changing v1.
+python3 auto_test/gen_outerjoin_benchmark.py --version v2
 ```
 
 Generation is deterministic. The script verifies that every core query:
@@ -153,12 +162,63 @@ cases.
 
 ## Running
 
-The active benchmark retains the harness's `graph/`, `tpch/`, `tpcds/`, and
-`job/` family layout and runs at 32 threads by default:
+The harness defaults to v1, retains the `graph/`, `tpch/`, `tpcds/`, and `job/`
+family layout, and runs at 32 threads by default:
 
 ```bash
-OY_CORPUS=auto_test/outerjoin_query \
-  bash auto_test/experiment_onoff.sh --only all
+bash auto_test/experiment_onoff.sh --only all
+
+# Full expanded workload (must be generated first).
+bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
+
+# Both versions in order, with separate _v1 and _v2 result files.
+bash auto_test/experiment_onoff.sh --all
+```
+
+## Expanded v2 design
+
+V2 expands all 170 v1 benchmark-derived structural variants at three additional
+hash-sampling tiers on a central join key: approximately 0.1%, 1%, and 5% of
+the v1 anchor domain. The highest tier is deliberately capped at 5%; every v2
+query adds a filter to its v1 form, so it does not broaden the original input.
+This produces 510 benchmark-derived queries. V2 also carries forward the 32
+timeout-filtered v1 evaluation controls, for 542 queries in total.
+
+The `pattern_role` manifest field marks star/branch plus alternate, bushy, or
+right-start strata as a `v1_advantage_hypothesis`, reflecting the 0916 design
+observation. That tag never controls membership: every v1 seed and tree variant
+is present at every selectivity tier, and the remaining cases are retained as
+`paired_structural_control`. This keeps the workload useful for testing the
+low-selectivity hypothesis without constructing a corpus only from favorable
+OuterYan cases. SQL comments and the v2 manifests record the source query,
+transformation, selectivity tier, modulus, anchor column, and pattern role.
+
+V2 also generates two deliberately separate diagnostic views. The
+`selectivity_stress/` view contains 84 variants of 12 metadata-selected v1
+structures from a static target domain: all-FULL joins with at least four
+relations and an applicable null-rejecting predicate. Four distinct source
+queries come from each of TPC-H, TPC-DS, and JOB. Every family covers
+left-deep, right-deep, and bushy trees, and its fourth structure broadens
+source-benchmark and relation-count coverage. A fixed salted
+SHA-256 ranking makes membership deterministic without reading timings or
+speed-ups. Each base appears once at 0.025%, 0.05%, 0.2%, 10%, 20%, 50%, and
+80% target selectivity, giving equal representation per predeclared tier. It
+is a correlated selectivity ablation rather than an independent 84-query
+headline sample, so every row is marked `headline_eligible=false` and
+`performance_selected=false`. The
+`job_regressions/` view pins the two OuterYan-selected JOB cases whose 0916
+speed-up was below 0.95x. Those queries remain in the main benchmark; the
+focused view makes them cheap to reproduce rather than hiding them from the
+reported distribution.
+
+```bash
+# Selectivity ablation: plot/report separately from the 542-query benchmark.
+bash auto_test/experiment_onoff.sh --corpus-version v2 \
+  --corpus-scope selectivity-stress --only all
+
+# The two confirmed JOB regressions.
+bash auto_test/experiment_onoff.sh --corpus-version v2 \
+  --corpus-scope job-regressions --only job
 ```
 
 The following component command is for focused diagnostics, not the default

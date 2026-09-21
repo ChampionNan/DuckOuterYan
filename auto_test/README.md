@@ -51,6 +51,7 @@ corresponding environment values.
 | `OY_PROFILE` | `1` | Separate ON phase profiling for correct OuterYan-selected queries; `0` skips it |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
+| `OY_CORPUS_SCOPE` | `benchmark` | V2 view: `benchmark`, `selectivity-stress`, or `job-regressions` |
 | `RUN_PGPLAN` | `0` | Set to `1` to opt into PGPlan generation and three-way comparison |
 | `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
 | `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
@@ -121,7 +122,7 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is the timeout-filtered 176-query workload under
+The default corpus is **v1**, the timeout-filtered 176-query workload under
 `outerjoin_benchmark/benchmark/`. The `outerjoin_query` compatibility link
 points there. It contains 144 benchmark-derived queries and 32 evaluation
 queries. The complete component views retain 170 core queries and 36 evaluation
@@ -137,10 +138,52 @@ Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
 entire label using shell-glob syntax.
 
 ```bash
+# Regenerate or test v1 (default).
 python3 auto_test/gen_outerjoin_benchmark.py
-OY_CORPUS=auto_test/outerjoin_query \
-  bash auto_test/experiment_onoff.sh --only all
+bash auto_test/experiment_onoff.sh --only all
+
+# Generate and test the 542-query expanded v2 corpus.
+python3 auto_test/gen_outerjoin_benchmark.py --version v2
+bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
+
+# Run v1 and v2 sequentially; results receive _v1 and _v2 suffixes.
+bash auto_test/experiment_onoff.sh --all
+
+# Metadata-selected balanced selectivity ablation; report separately.
+bash auto_test/experiment_onoff.sh --corpus-version v2 \
+  --corpus-scope selectivity-stress --only all
+
+# Reproduce the two confirmed JOB regressions only.
+bash auto_test/experiment_onoff.sh --corpus-version v2 \
+  --corpus-scope job-regressions --only job
 ```
+
+V2 is stored under `outerjoin_benchmark/v2/` and does not replace v1. It applies
+three bounded deterministic selectivity tiers (approximately 0.1%, 1%, and 5%)
+to every one of the 170 v1 core structures, then adds the 32 already
+timeout-filtered v1 evaluation controls. The manifest records which strata are
+motivated by the 0916 advantage hypothesis, but all seeds, tree variants, and
+paired controls remain included independently of measured speed. See
+`outerjoin_benchmark/README.md` for the design and provenance fields.
+
+The generated `v2/selectivity_stress/` directory contains 84 variants of 12
+metadata-selected v1 structures at approximately 0.025%, 0.05%, 0.2%, 10%,
+20%, 50%, and 80% target selectivity. The ablation domain is declared from
+static metadata: all-FULL joins with at least four relations and an applicable
+null-rejecting predicate. Four distinct source queries are selected from each
+of TPC-H, TPC-DS, and JOB; every family covers left-deep, right-deep, and bushy
+trees, while the fourth structure broadens source-benchmark and relation-count
+coverage. Selection uses a fixed salted SHA-256 rank over query identifiers and
+never reads measured runtimes. Every tier contains 12 queries
+and uses a common deterministic 4,000-bucket hash sample. This is equal
+representation per tier, not a claim of numerically uniform or realized
+selectivity. The manifest records `performance_selected=false` and marks every
+query `headline_eligible=false`; keep this correlated selectivity ablation
+separate from the 542-query headline score.
+The separate `v2/job_regressions/` directory retains the two
+OuterYan-selected JOB cases below 0.95x as focused regression guards. Their
+original copies remain in the main benchmark so slow cases are not removed to
+improve the result.
 
 Generation is deterministic and writes query-level provenance manifests. Active
 query names use only `derived__` and `industry__`. In the complete components,

@@ -44,6 +44,7 @@ from legacy_corpus import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_ROOT = SCRIPT_DIR / "outerjoin_benchmark"
+DEFAULT_V2_ROOT = DEFAULT_ROOT / "v2"
 LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
 TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
 CORE_QUERY_COUNT = 170
@@ -55,6 +56,37 @@ ACTIVE_BENCHMARK_QUERY_COUNT = (
     CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
     - len(active_timeouts.EXCLUDED_QUERY_HASHES)
 )
+V2_SELECTIVITY_TIERS: tuple[tuple[str, int, str], ...] = (
+    ("sel001", 1000, "approximately 0.1% of the v1 anchor domain"),
+    ("sel01", 100, "approximately 1% of the v1 anchor domain"),
+    ("sel05", 20, "approximately 5% of the v1 anchor domain"),
+)
+V2_CORE_QUERY_COUNT = CORE_QUERY_COUNT * len(V2_SELECTIVITY_TIERS)
+V2_EVALUATION_QUERY_COUNT = ACTIVE_BENCHMARK_QUERY_COUNT - ACTIVE_CORE_QUERY_COUNT
+V2_BENCHMARK_QUERY_COUNT = V2_CORE_QUERY_COUNT + V2_EVALUATION_QUERY_COUNT
+V2_0916_REFERENCE_RUN = "experiment_onoff_benchmark_20260916_211812_t32.csv"
+V2_STRESS_HASH_BUCKETS = 4000
+V2_STRESS_TIERS: tuple[tuple[str, int, float, str], ...] = (
+    ("stress0025", 1, 0.00025, "approximately 0.025% of hash buckets"),
+    ("stress005", 2, 0.0005, "approximately 0.05% of hash buckets"),
+    ("stress02", 8, 0.002, "approximately 0.2% of hash buckets"),
+    ("stress10", 400, 0.10, "approximately 10% of hash buckets"),
+    ("stress20", 800, 0.20, "approximately 20% of hash buckets"),
+    ("stress50", 2000, 0.50, "approximately 50% of hash buckets"),
+    ("stress80", 3200, 0.80, "approximately 80% of hash buckets"),
+)
+V2_STRESS_FAMILIES = ("tpch", "tpcds", "job")
+V2_STRESS_TREE_SHAPES = ("left_deep", "right_deep", "bushy")
+V2_STRESS_BASES_PER_FAMILY = 4
+V2_STRESS_MIN_RELATIONS = 4
+V2_STRESS_BASE_COUNT = len(V2_STRESS_FAMILIES) * V2_STRESS_BASES_PER_FAMILY
+V2_STRESS_QUERY_COUNT = V2_STRESS_BASE_COUNT * len(V2_STRESS_TIERS)
+V2_STRESS_SELECTION_SALT = "outeryan-v2-balanced-selectivity-v1"
+V2_JOB_REGRESSIONS: tuple[tuple[str, str, str], ...] = (
+    ("ojb_sqlstorm_job_11914_bdmx", "1af32617cb10164c5f999a0f99f196b23232059a40dd8f0f2ff5e1eb81af7836", "0.772"),
+    ("oy_jb_jb_bushy4a_v2", "6dca40cd9267b67ea297a5245c6cd0d9b0fe7bf8653d1d6c6a643f89e9a82103", "0.857"),
+)
+V2_JOB_REGRESSION_COUNT = len(V2_JOB_REGRESSIONS)
 # Approved 32-thread timeouts move topology/scale/vector shares by up to 2.66 pp.
 # Tree-shape shares still satisfy the original 2 pp bound. Do not remove healthy
 # queries merely to rebalance counts; retain explicit coverage-loss accounting.
@@ -1293,6 +1325,56 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
     )
 
 
+def selectivity_anchor(seed: Seed) -> str:
+    """Choose a deterministic, usually high-cardinality central join key."""
+    aliases = [relation_alias(relation) for relation in seed.relations]
+    alias_order = {alias: index for index, alias in enumerate(aliases)}
+    degrees: Counter[str] = Counter()
+    columns: dict[str, list[str]] = {alias: [] for alias in aliases}
+    for predicate in seed.predicates:
+        match = SIMPLE_EDGE_EQUALITY.search(active_edge_predicate(predicate))
+        if not match:
+            raise ValueError(f"{seed.seed_id}: no equality column for selectivity anchor")
+        for reference in match.groups():
+            alias = reference.split(".", 1)[0]
+            degrees[alias] += 1
+            columns.setdefault(alias, []).append(reference)
+    anchor_alias = max(aliases, key=lambda alias: (degrees[alias], alias_order[alias]))
+    frequency = Counter(columns[anchor_alias])
+    first_seen = {column: index for index, column in enumerate(columns[anchor_alias])}
+    return max(frequency, key=lambda column: (frequency[column], -first_seen[column]))
+
+
+def v2_pattern_role(seed: Seed, suffix: str) -> str:
+    """Tag the v1 strata motivating the sweep without selecting membership by speed."""
+    if f"ojb_{seed.seed_id}_{suffix}" == "ojb_sqlstorm_job_11914_bdmx":
+        return "job_regression_guard"
+    hypothesis_variant = suffix in {"alt", "bmx", "bdmx"} or suffix.startswith("rdu")
+    if seed.topology in {"star", "branch"} and hypothesis_variant:
+        return "v1_advantage_hypothesis"
+    return "paired_structural_control"
+
+
+def add_v2_selectivity(
+    sql: str, seed: Seed, tier: str, modulus: int, description: str,
+) -> tuple[str, str]:
+    """Add a reproducible selectivity sweep to an existing v1 variant."""
+    anchor = selectivity_anchor(seed)
+    where = f"WHERE {seed.where};\n"
+    if sql.count(where) != 1:
+        raise ValueError(f"{seed.seed_id}: generated SQL has an unexpected WHERE clause")
+    metadata = (
+        f"-- corpus_version: v2\n"
+        f"-- selectivity_sweep: {tier}; {description}; anchor={anchor}; "
+        f"predicate=hash(anchor) % {modulus} = 0\n"
+    )
+    filtered = sql.replace(
+        where,
+        f"WHERE ({seed.where})\n  AND hash({anchor}) % {modulus} = 0;\n",
+    )
+    return filtered.replace("SELECT ", metadata + "SELECT ", 1), anchor
+
+
 def reset_generated_dir(root: Path) -> None:
     if root.exists():
         shutil.rmtree(root)
@@ -1899,29 +1981,589 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
             raise RuntimeError(f"{relative_path}: active join is not FULL OUTER")
 
 
+def generate_v2_core(root: Path) -> int:
+    """Expand every v1 structural variant across three bounded selectivity tiers."""
+    core = root / "core"
+    reset_generated_dir(core)
+    rows: list[dict[str, str]] = []
+    design_basis = (
+        "v1 0916 strata motivate the hypothesis tag; all v1 seeds, tree variants, "
+        "and paired controls remain included independent of measured speed"
+    )
+    for seed_index, seed in enumerate(SEEDS):
+        seed.validate()
+        verify_source(seed)
+        family_dir = core / seed.family
+        family_dir.mkdir(parents=True, exist_ok=True)
+        expected_graph = Counter(
+            tuple(sorted(predicate_aliases(predicate))) for predicate in seed.predicates
+        )
+        for suffix, vector, tree_shape, variant_semantics, base_sql in variant_rows(
+            seed, seed_index
+        ):
+            base_query_id = f"ojb_{seed.seed_id}_{suffix}"
+            for tier, modulus, description in V2_SELECTIVITY_TIERS:
+                query_id = f"{base_query_id}_{tier}"
+                relative_path = f"{seed.family}/{query_id}.sql"
+                sql, anchor = add_v2_selectivity(
+                    base_sql, seed, tier, modulus, description
+                )
+                if sql_join_graph(sql) != expected_graph:
+                    raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
+                (core / relative_path).write_text(sql, encoding="utf-8")
+                rows.append(
+                    {
+                        "query_id": query_id,
+                        "path": relative_path,
+                        "corpus_version": "v2",
+                        "base_query_id": base_query_id,
+                        "stratum": "benchmark_derived_v2_core",
+                        "family": seed.family,
+                        "source_benchmark": seed.source_benchmark,
+                        "source_version": seed.source_version,
+                        "source_query": seed.source_query,
+                        "source_location": seed.source_location,
+                        "source_sha256": seed.source_hash,
+                        "transformation": (
+                            "connected_join_subgraph_adaptation+"
+                            "deterministic_hash_selectivity_sweep"
+                        ),
+                        "topology": seed.topology,
+                        "tree_shape": tree_shape,
+                        "join_vector": vector,
+                        "relation_count": str(len(seed.relations)),
+                        "predicate_class": "null_rejecting_outeryan_applicable",
+                        "semantic_role": variant_semantics,
+                        "semantics": seed.semantics,
+                        "selectivity_tier": tier,
+                        "target_fraction": f"{1.0 / modulus:.4f}",
+                        "selectivity_modulus": str(modulus),
+                        "selectivity_anchor": anchor,
+                        "pattern_role": v2_pattern_role(seed, suffix),
+                        "design_basis": design_basis,
+                    }
+                )
+    fields = list(rows[0])
+    with (root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    if len(rows) != V2_CORE_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v2 core count: {len(rows)}")
+    return len(rows)
+
+
+def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
+    """Materialize v2 core plus the timeout-filtered v1 evaluation controls."""
+    destination_root = root / "benchmark"
+    reset_generated_dir(destination_root)
+    rows: list[dict[str, str]] = []
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    for row in core_rows:
+        source = root / "core" / row["path"]
+        query_id = f"derived__{row['query_id']}"
+        destination_path = f"{row['family']}/{query_id}.sql"
+        rows.append(
+            {
+                "query_id": query_id,
+                "path": destination_path,
+                "query_class": "derived",
+                "evaluation_role": "benchmark_derived_v2",
+                "family": row["family"],
+                "source_component": "core",
+                "source_path": f"core/{row['path']}",
+                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "corpus_version": "v2",
+                "base_query_id": row["base_query_id"],
+                "selectivity_tier": row["selectivity_tier"],
+                "target_fraction": row["target_fraction"],
+                "selectivity_modulus": row["selectivity_modulus"],
+                "selectivity_anchor": row["selectivity_anchor"],
+                "pattern_role": row["pattern_role"],
+            }
+        )
+
+    v1_active = v1_root / "benchmark"
+    with (v1_active / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        evaluation_rows = [
+            row for row in csv.DictReader(handle)
+            if row["evaluation_role"] != "benchmark_derived"
+        ]
+    if len(evaluation_rows) != V2_EVALUATION_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v1 evaluation-control count: {len(evaluation_rows)}")
+    for row in evaluation_rows:
+        source = v1_active / row["path"]
+        rows.append(
+            {
+                "query_id": row["query_id"],
+                "path": row["path"],
+                "query_class": row["query_class"],
+                "evaluation_role": row["evaluation_role"],
+                "family": row["family"],
+                "source_component": "v1_active_evaluation",
+                "source_path": f"../benchmark/{row['path']}",
+                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "corpus_version": "v2",
+                "base_query_id": row["query_id"],
+                "selectivity_tier": "existing_v1_filter",
+                "target_fraction": "",
+                "selectivity_modulus": "",
+                "selectivity_anchor": "",
+                "pattern_role": (
+                    "job_regression_guard"
+                    if row["query_id"] == "derived__oy_jb_jb_bushy4a_v2"
+                    else "evaluation_control"
+                ),
+            }
+        )
+
+    if len(rows) != V2_BENCHMARK_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v2 benchmark count: {len(rows)}")
+    paths = [row["path"] for row in rows]
+    if len(paths) != len(set(paths)):
+        raise RuntimeError("v2 benchmark contains duplicate paths")
+    for row in rows:
+        if row["source_component"] == "core":
+            source = root / row["source_path"]
+        else:
+            source = v1_active / row["path"]
+        destination = destination_root / row["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    fields = list(rows[0])
+    with (destination_root / "manifest.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def v1_active_rows(v1_root: Path) -> dict[str, dict[str, str]]:
+    manifest = v1_root / "benchmark" / "manifest.csv"
+    with manifest.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    return {row["query_id"]: row for row in rows}
+
+
+V2_STRESS_SOURCE_FILTER = re.compile(
+    r"^WHERE (?P<anchor>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*) "
+    r"% (?P<source_modulus>[0-9]+) = 0;$",
+    re.MULTILINE,
+)
+
+
+def v2_stress_selection_rank(query_id: str) -> str:
+    material = f"{V2_STRESS_SELECTION_SALT}:{query_id}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def select_v2_stress_bases(v1_root: Path = DEFAULT_ROOT) -> list[dict[str, str]]:
+    """Select balanced v1 bases from metadata only, never measured performance."""
+    active_rows = v1_active_rows(v1_root)
+    with (v1_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = {row["query_id"]: row for row in csv.DictReader(handle)}
+    candidates: list[dict[str, str]] = []
+    for source_row in active_rows.values():
+        if source_row["evaluation_role"] != "benchmark_derived":
+            continue
+        base_query_id = Path(source_row["source_path"]).stem
+        metadata = core_rows.get(base_query_id)
+        if metadata is None or metadata["family"] not in V2_STRESS_FAMILIES:
+            continue
+        if (
+            set(metadata["join_vector"]) != {"F"}
+            or int(metadata["relation_count"]) < V2_STRESS_MIN_RELATIONS
+            or metadata["predicate_class"] != "null_rejecting_outeryan_applicable"
+        ):
+            continue
+        source = v1_root / "benchmark" / source_row["path"]
+        source_sql = source.read_text(encoding="utf-8")
+        matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
+        if len(matches) != 1:
+            continue
+        candidate = dict(metadata)
+        candidate.update(
+            {
+                "active_query_id": source_row["query_id"],
+                "active_path": source_row["path"],
+                "content_sha256": source_row["content_sha256"],
+                "selectivity_anchor": matches[0].group("anchor"),
+                "source_selectivity_modulus": matches[0].group("source_modulus"),
+                "selection_rank": v2_stress_selection_rank(base_query_id),
+            }
+        )
+        candidates.append(candidate)
+
+    selected: list[dict[str, str]] = []
+    for family in V2_STRESS_FAMILIES:
+        family_selected: list[dict[str, str]] = []
+        used_sources: set[str] = set()
+        for tree_shape in V2_STRESS_TREE_SHAPES:
+            eligible = [
+                row for row in candidates
+                if row["family"] == family
+                and row["tree_shape"] == tree_shape
+                and row["source_location"] not in used_sources
+            ]
+            if not eligible:
+                raise RuntimeError(f"no v2 selectivity-stress candidate for {family}/{tree_shape}")
+            chosen = min(eligible, key=lambda row: row["selection_rank"])
+            chosen = dict(chosen, selection_slot=f"tree_shape:{tree_shape}")
+            family_selected.append(chosen)
+            used_sources.add(chosen["source_location"])
+
+        remaining = [
+            row for row in candidates
+            if row["family"] == family and row["source_location"] not in used_sources
+        ]
+        if not remaining:
+            raise RuntimeError(f"no v2 selectivity-stress coverage supplement for {family}")
+        selected_benchmarks = {row["source_benchmark"] for row in family_selected}
+        selected_relation_counts = [int(row["relation_count"]) for row in family_selected]
+
+        def coverage_score(row: dict[str, str]) -> tuple[int, int]:
+            return (
+                int(row["source_benchmark"] not in selected_benchmarks),
+                min(
+                    abs(int(row["relation_count"]) - relation_count)
+                    for relation_count in selected_relation_counts
+                ),
+            )
+
+        best_score = max(coverage_score(row) for row in remaining)
+        supplement = min(
+            (row for row in remaining if coverage_score(row) == best_score),
+            key=lambda row: row["selection_rank"],
+        )
+        family_selected.append(dict(supplement, selection_slot="coverage_supplement"))
+        selected.extend(family_selected)
+
+    if len(selected) != V2_STRESS_BASE_COUNT:
+        raise RuntimeError(f"unexpected v2 selectivity-stress base count: {len(selected)}")
+    return selected
+
+
+def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
+    """Generate a metadata-selected, balanced-tier selectivity ablation."""
+    legacy_root = root / "advantage_stress"
+    if legacy_root.exists():
+        shutil.rmtree(legacy_root)
+    destination_root = root / "selectivity_stress"
+    reset_generated_dir(destination_root)
+    rows: list[dict[str, str]] = []
+    selection_policy = (
+        "v1 active benchmark-derived core in the static OuterYan target domain "
+        "(all-FULL join vector, at least four relations, applicable predicate); "
+        "four bases per TPC-H/TPC-DS/JOB; "
+        "one distinct source query per left-deep/right-deep/bushy stratum by salted "
+        "SHA-256 rank, plus one distinct-source coverage supplement favoring a new "
+        "source benchmark and relation-count distance; no timing or result input"
+    )
+    for base in select_v2_stress_bases(v1_root):
+        base_query_id = base["query_id"]
+        family = base["family"]
+        source = v1_root / "benchmark" / base["active_path"]
+        source_sql = source.read_text(encoding="utf-8")
+        if hashlib.sha256(source.read_bytes()).hexdigest() != base["content_sha256"]:
+            raise RuntimeError(f"v1 selectivity-stress base changed: {base_query_id}")
+        matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
+        if len(matches) != 1:
+            raise RuntimeError(f"stress base needs one simple modulo filter: {base_query_id}")
+        anchor = matches[0].group("anchor")
+        for tier, bucket_threshold, target_fraction, description in V2_STRESS_TIERS:
+            query_id = f"stress__{base_query_id}_{tier}"
+            relative_path = f"{family}/{query_id}.sql"
+            predicate = (
+                f"WHERE hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
+                f"< {bucket_threshold};"
+            )
+            sql = V2_STRESS_SOURCE_FILTER.sub(predicate, source_sql, count=1)
+            metadata = (
+                "-- corpus_version: v2\n"
+                "-- workload_role: metadata-selected balanced selectivity ablation\n"
+                f"-- selectivity_stress: {tier}; {description}; anchor={anchor}; "
+                f"predicate=hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
+                f"< {bucket_threshold}\n"
+            )
+            sql = sql.replace("SELECT ", metadata + "SELECT ", 1)
+            destination = destination_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(sql, encoding="utf-8")
+            rows.append(
+                {
+                    "query_id": query_id,
+                    "path": relative_path,
+                    "query_class": "selectivity_stress",
+                    "family": family,
+                    "corpus_version": "v2",
+                    "base_query_id": base_query_id,
+                    "source_path": f"../benchmark/{base['active_path']}",
+                    "source_content_sha256": base["content_sha256"],
+                    "content_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                    "headline_eligible": "false",
+                    "reporting_role": "selectivity_ablation",
+                    "performance_selected": "false",
+                    "selection_reference": (
+                        "outerjoin_benchmark/manifest.csv and benchmark/manifest.csv"
+                    ),
+                    "selection_policy": selection_policy,
+                    "selection_salt": V2_STRESS_SELECTION_SALT,
+                    "selection_rank": base["selection_rank"],
+                    "selection_slot": base["selection_slot"],
+                    "source_benchmark": base["source_benchmark"],
+                    "source_query": base["source_query"],
+                    "source_location": base["source_location"],
+                    "topology": base["topology"],
+                    "tree_shape": base["tree_shape"],
+                    "join_vector": base["join_vector"],
+                    "predicate_class": base["predicate_class"],
+                    "relation_count": base["relation_count"],
+                    "eligibility_domain": (
+                        "static metadata only: all-FULL, relation_count>=4, "
+                        "null-rejecting OuterYan-applicable predicate"
+                    ),
+                    "selectivity_tier": tier,
+                    "target_fraction": f"{target_fraction:.6f}",
+                    "selectivity_hash_buckets": str(V2_STRESS_HASH_BUCKETS),
+                    "selectivity_bucket_threshold": str(bucket_threshold),
+                    "selectivity_anchor": anchor,
+                    "source_selectivity_modulus": base["source_selectivity_modulus"],
+                    "tier_balance": f"{V2_STRESS_BASE_COUNT} queries per tier",
+                    "distribution_claim": (
+                        "balanced tier counts; numeric levels and realized selectivity "
+                        "are not claimed to be uniform"
+                    ),
+                    "benefit_hypothesis": (
+                        "seven paired selectivity levels measure where intermediate-result "
+                        "reduction helps, plateaus, or becomes overhead"
+                    ),
+                }
+            )
+    if len(rows) != V2_STRESS_QUERY_COUNT:
+        raise RuntimeError(f"unexpected selectivity-stress count: {len(rows)}")
+    fields = list(rows[0])
+    with (destination_root / "manifest.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
+    """Pin confirmed JOB regressions for focused optimizer work without hiding them."""
+    destination_root = root / "job_regressions"
+    reset_generated_dir(destination_root)
+    active_rows = v1_active_rows(v1_root)
+    rows: list[dict[str, str]] = []
+    for base_query_id, expected_hash, observed_speedup in V2_JOB_REGRESSIONS:
+        source_query_id = f"derived__{base_query_id}"
+        source_row = active_rows.get(source_query_id)
+        if source_row is None or source_row["family"] != "job":
+            raise RuntimeError(f"missing v1 JOB regression: {source_query_id}")
+        if source_row["content_sha256"] != expected_hash:
+            raise RuntimeError(f"v1 JOB regression changed: {source_query_id}")
+        source = v1_root / "benchmark" / source_row["path"]
+        query_id = f"regression__{base_query_id}"
+        relative_path = f"job/{query_id}.sql"
+        destination = destination_root / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        rows.append(
+            {
+                "query_id": query_id,
+                "path": relative_path,
+                "query_class": "job_regression",
+                "family": "job",
+                "corpus_version": "v2",
+                "base_query_id": base_query_id,
+                "source_path": f"../benchmark/{source_row['path']}",
+                "content_sha256": expected_hash,
+                "headline_eligible": "false",
+                "selection_reference": V2_0916_REFERENCE_RUN,
+                "observed_tm_speedup": observed_speedup,
+                "selection_policy": (
+                    "selected_plan=OUTERYAN and tm_speedup<0.95 in the 0916 run"
+                ),
+                "disposition": "retain_in_main_benchmark_and_fix_optimizer",
+                "rationale": (
+                    "performance-only removal would bias the benchmark; this focused "
+                    "view makes the regression cheap to reproduce"
+                ),
+            }
+        )
+    fields = list(rows[0])
+    with (destination_root / "manifest.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
+def validate_v2_generated(root: Path) -> None:
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    core_paths = {
+        str(path.relative_to(root / "core")) for path in (root / "core").glob("*/*.sql")
+    }
+    if len(core_rows) != V2_CORE_QUERY_COUNT or {row["path"] for row in core_rows} != core_paths:
+        raise RuntimeError("v2 core manifest does not match generated SQL")
+    tier_counts = Counter(row["selectivity_tier"] for row in core_rows)
+    if tier_counts != Counter({tier: CORE_QUERY_COUNT for tier, _, _ in V2_SELECTIVITY_TIERS}):
+        raise RuntimeError(f"unexpected v2 selectivity distribution: {tier_counts}")
+    base_counts = Counter(row["base_query_id"] for row in core_rows)
+    if set(base_counts.values()) != {len(V2_SELECTIVITY_TIERS)} or len(base_counts) != CORE_QUERY_COUNT:
+        raise RuntimeError("v2 must contain every v1 core variant at every selectivity tier")
+    for row in core_rows:
+        sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
+        predicate = (
+            f"hash({row['selectivity_anchor']}) % {row['selectivity_modulus']} = 0"
+        )
+        if predicate not in sql or "-- corpus_version: v2" not in sql:
+            raise RuntimeError(f"{row['path']}: missing v2 selectivity provenance")
+        if " ON 1=1" in sql.upper():
+            raise RuntimeError(f"{row['path']}: cross product")
+
+    active_root = root / "benchmark"
+    with (active_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        active_rows = list(csv.DictReader(handle))
+    active_paths = {
+        str(path.relative_to(active_root)) for path in active_root.glob("*/*.sql")
+    }
+    if len(active_rows) != V2_BENCHMARK_QUERY_COUNT or {
+        row["path"] for row in active_rows
+    } != active_paths:
+        raise RuntimeError("v2 benchmark manifest does not match generated SQL")
+    roles = Counter(row["evaluation_role"] for row in active_rows)
+    if roles["benchmark_derived_v2"] != V2_CORE_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v2 benchmark roles: {roles}")
+    regression_roles = {
+        row["base_query_id"]: row["pattern_role"]
+        for row in active_rows
+        if row["pattern_role"] == "job_regression_guard"
+    }
+    if regression_roles != {
+        "ojb_sqlstorm_job_11914_bdmx": "job_regression_guard",
+        "derived__oy_jb_jb_bushy4a_v2": "job_regression_guard",
+    }:
+        raise RuntimeError(f"unexpected v2 JOB regression tags: {regression_roles}")
+
+    stress_root = root / "selectivity_stress"
+    with (stress_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        stress_rows = list(csv.DictReader(handle))
+    stress_paths = {
+        str(path.relative_to(stress_root)) for path in stress_root.glob("*/*.sql")
+    }
+    if len(stress_rows) != V2_STRESS_QUERY_COUNT or {
+        row["path"] for row in stress_rows
+    } != stress_paths:
+        raise RuntimeError("v2 selectivity-stress manifest does not match generated SQL")
+    if any(row["headline_eligible"] != "false" for row in stress_rows):
+        raise RuntimeError("selectivity-stress queries must not enter the main headline score")
+    stress_base_counts = Counter(row["base_query_id"] for row in stress_rows)
+    if (
+        len(stress_base_counts) != V2_STRESS_BASE_COUNT
+        or set(stress_base_counts.values()) != {len(V2_STRESS_TIERS)}
+    ):
+        raise RuntimeError("every selectivity-stress base must have all selectivity tiers")
+    family_counts = Counter(row["family"] for row in stress_rows)
+    expected_family_count = V2_STRESS_BASES_PER_FAMILY * len(V2_STRESS_TIERS)
+    if family_counts != Counter(
+        {family: expected_family_count for family in V2_STRESS_FAMILIES}
+    ):
+        raise RuntimeError(f"unexpected selectivity-stress family balance: {family_counts}")
+    if any(row["performance_selected"] != "false" for row in stress_rows):
+        raise RuntimeError("selectivity-stress membership must not use measured performance")
+    if any(
+        set(row["join_vector"]) != {"F"}
+        or int(row["relation_count"]) < V2_STRESS_MIN_RELATIONS
+        or row["predicate_class"] != "null_rejecting_outeryan_applicable"
+        for row in stress_rows
+    ):
+        raise RuntimeError("selectivity-stress base is outside the static target domain")
+    base_rows = {
+        row["base_query_id"]: row
+        for row in stress_rows
+    }
+    for family in V2_STRESS_FAMILIES:
+        family_bases = [row for row in base_rows.values() if row["family"] == family]
+        if {row["tree_shape"] for row in family_bases} < set(V2_STRESS_TREE_SHAPES):
+            raise RuntimeError(f"selectivity-stress misses a tree shape for {family}")
+        if len({row["source_location"] for row in family_bases}) != len(family_bases):
+            raise RuntimeError(f"selectivity-stress repeats a source query for {family}")
+    for row in stress_rows:
+        sql = (stress_root / row["path"]).read_text(encoding="utf-8")
+        predicate = (
+            f"hash({row['selectivity_anchor']}) % {row['selectivity_hash_buckets']} "
+            f"< {row['selectivity_bucket_threshold']}"
+        )
+        if predicate not in sql or "workload_role: metadata-selected" not in sql:
+            raise RuntimeError(f"{row['path']}: missing selectivity-stress provenance")
+
+    regression_root = root / "job_regressions"
+    with (regression_root / "manifest.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        regression_rows = list(csv.DictReader(handle))
+    regression_paths = {
+        str(path.relative_to(regression_root))
+        for path in regression_root.glob("*/*.sql")
+    }
+    if len(regression_rows) != V2_JOB_REGRESSION_COUNT or {
+        row["path"] for row in regression_rows
+    } != regression_paths:
+        raise RuntimeError("v2 JOB regression manifest does not match generated SQL")
+    if any(row["headline_eligible"] != "false" for row in regression_rows):
+        raise RuntimeError("focused regression copies must not be counted as new samples")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--version", choices=("v1", "v2"), default="v1")
+    parser.add_argument("--root", type=Path)
     parser.add_argument("--core-only", action="store_true")
     args = parser.parse_args()
 
-    args.root.mkdir(parents=True, exist_ok=True)
-    core_count = generate_core(args.root)
+    root = args.root or (DEFAULT_ROOT if args.version == "v1" else DEFAULT_V2_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    if args.version == "v2":
+        if args.core_only:
+            parser.error("--core-only is only supported for v1")
+        core_count = generate_v2_core(root)
+        benchmark_count = generate_v2_benchmark(root)
+        stress_count = generate_v2_selectivity_stress(root)
+        regression_count = generate_v2_job_regressions(root)
+        validate_v2_generated(root)
+        print(
+            f"generated v2 with {benchmark_count} active queries: {core_count} "
+            f"selectivity-sweep core and {V2_EVALUATION_QUERY_COUNT} v1 evaluation controls "
+            f"under {root}; also generated {stress_count} selectivity-ablation "
+            f"queries and {regression_count} focused JOB regression guards"
+        )
+        return
+
+    core_count = generate_core(root)
     if not args.core_only:
         regenerate_legacy_sources()
-    supplemental_count = 0 if args.core_only else generate_supplemental(args.root)
-    industry_count = 0 if args.core_only else generate_industry_inspired(args.root)
-    benchmark_count = generate_active_benchmark(args.root, include_industry=not args.core_only)
-    timeout_count = generate_timeout_manifest(args.root)
-    legacy_count = classify_legacy(args.root)
-    validate_generated(args.root, include_industry=not args.core_only)
+    supplemental_count = 0 if args.core_only else generate_supplemental(root)
+    industry_count = 0 if args.core_only else generate_industry_inspired(root)
+    benchmark_count = generate_active_benchmark(root, include_industry=not args.core_only)
+    timeout_count = generate_timeout_manifest(root)
+    legacy_count = classify_legacy(root)
+    validate_generated(root, include_industry=not args.core_only)
     print(
         f"generated {benchmark_count} active benchmark, {core_count} derived core, "
         f"{industry_count} industry-evaluation, and {supplemental_count} supplemental queries; "
         f"excluded {core_count + industry_count - benchmark_count} pinned active timeouts "
         f"(approved coverage losses documented); "
         f"archived {timeout_count} historical timeouts and classified {legacy_count} legacy queries "
-        f"under {args.root}"
+        f"under {root}"
     )
 
 
