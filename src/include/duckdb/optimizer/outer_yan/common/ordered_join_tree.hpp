@@ -66,10 +66,10 @@ struct OJTEdge {
 	//! Resimplification uses this to revert back to the original join type when
 	//! the chosen ordering makes the rewrite redundant.
 	OuterYanJoinKind original_kind = JoinType::INNER;
-	//! Build order of the underlying join in the original logical plan.
+	//! Build order of the underlying join in the currently materialized plan.
 	//! 1-based, starting from the bottommost join (`order = 1`) up to the
-	//! root join (`order = n`). Derived from a post-order walk of the
-	//! original plan during `LogicalPlanToOJT`. 0 means uninitialised.
+	//! root join (`order = n`). Initially derived from the input tree; DP rebuilds
+	//! and renumbers it in post-order for the chosen candidate. 0 is uninitialised.
 	idx_t order = 0;
 	//! `relation_id` of the OJTNode that owns this edge. Set in BuildOJT
 	//! when the edge is attached to its parent; lets OJTToLogicalPlan

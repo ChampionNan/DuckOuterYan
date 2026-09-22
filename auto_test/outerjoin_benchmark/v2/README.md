@@ -2,27 +2,57 @@
 
 V2 is the expanded workload. V1 remains the default harness corpus.
 
-- 510 benchmark-derived queries: all 170 v1 core structures at deterministic
-  hash-filter tiers of approximately 0.1%, 1%, and 5%.
-- 32 timeout-filtered v1 evaluation controls.
-- 542 active queries in `benchmark/`.
+- 510 benchmark-derived queries: 170 mixed-join source structures at
+  deterministic hash-filter tiers of approximately 0.1%, 1%, and 5%.
+- 36 Graph, industry, and schema-synthetic controls, relabeled
+  with deterministic mixed join vectors while retaining their relation graph.
+- 546 active queries in `benchmark/`.
 - 84 balanced-tier, metadata-selected selectivity-ablation queries in
   `selectivity_stress/`. These are explicitly **not** headline-eligible.
-- Two confirmed JOB regressions in `job_regressions/` for fast focused retests.
+- Two mixed counterparts of historical v1 JOB regressions in
+  `job_regressions/`; both require fresh v2 measurement.
 
 The 5% upper tier is intentionally conservative. Each v2 core query adds its
-hash predicate to the v1 filter, so the expanded workload never makes the v1
-input less selective. The `manifest.csv` fields record the source query,
-structural transformation, anchor column, tier, modulus, and pattern role.
+hash predicate to the source-derived filter. The `manifest.csv` fields record
+the source query, structural transformation, anchor column, tier, modulus,
+join vector, and pattern role.
+
+## Join-type design
+
+V2 uses the same deterministic mixed-join design as the current v1: a blocked
+rotation over INNER, LEFT, RIGHT, and FULL. Each of the 34 source queries contributes
+five shapes. A base shape uses one join vector at all three selectivity tiers,
+so selectivity comparisons do not also change join semantics. Across the 170
+base structures, the 625 join edges are distributed as 157 INNER and 156 each
+LEFT, RIGHT, and FULL. Family/shape strata differ by at most three edges per
+kind. Queries with at least four edges contain all four kinds; shorter queries
+contain mixed two- or three-kind slices. This intentionally includes both
+all-outer (`L/R/F`) cases and cases that mix INNER with outer joins, but no v2
+main query is an all-FULL or other single-kind vector.
+The counts apply to the SQL input expression. They do not assert that every
+label survives logical simplification or maps one-to-one to a physical join.
+
+The 36 retained controls use the same balancing objective without changing
+their relations, equality predicates, or parentheses. Across the complete 546
+queries, the 2,003 join edges contain 501 INNER, 501 LEFT, 501 RIGHT, and 500
+FULL labels. Sixty-seven queries are all-outer and 479 contain INNER plus outer
+joins.
+
+Every structural-core query retains the relation instances and connected
+equality graph of a pinned TPC-H, TPC-DS, JOB, or SQLStorm source query. The
+seven Graph controls, nine industry controls, and 20 schema-synthetic controls
+are retained as explicitly labeled control strata; they are not described as
+source-derived benchmark queries.
 
 `v1_advantage_hypothesis` identifies star/branch cases with alternate, bushy,
 or right-start groupings motivated by the 0916 observations. It is an analysis
 tag, not an inclusion rule. Every seed and tree variant is generated at every
 tier, and `paired_structural_control` cases remain in the same workload.
 
-The separate selectivity-stress suite starts from 12 v1 benchmark-derived core
-structures selected without measured performance. Its static target domain is
-all-FULL joins with at least four relations and an applicable null-rejecting
+The separate selectivity-stress suite starts from 12 mixed v2 counterparts of
+feasibility-screened v1 source-derived structures, selected without measured
+speed. Its static target domain is
+mixed joins with at least four relations and an applicable null-rejecting
 predicate. It uses four distinct source queries from each of TPC-H, TPC-DS,
 and JOB. Within every family, the first three slots cover left-deep, right-deep,
 and bushy trees; the fourth favors a new source benchmark and greater
@@ -35,14 +65,16 @@ deterministic samples. This is balanced representation across seven
 predeclared tiers, not a claim that the numerical selectivity values or
 realized output cardinalities are uniformly distributed. Because the seven
 variants of a base are correlated, this ablation is reported separately from
-the 542-query benchmark. The manifest records the source hashes, selection
+the 546-query benchmark. The manifest records the source hashes, selection
 rule, `performance_selected=false`, and `headline_eligible=false`.
 
-The JOB regression suite pins the two OuterYan-selected 0916 cases below the
-objective 0.95x threshold: `ojb_sqlstorm_job_11914_bdmx` (0.772x) and
-`oy_jb_jb_bushy4a_v2` (0.857x). They remain in the main benchmark; the focused
-copies are not additional samples. Removing them only because they are slow
-would bias the benchmark.
+The JOB guard suite contains mixed-v2 counterparts of two queries that were
+below the objective 0.95x threshold in the retired FULL-heavy revision:
+`ojb_sqlstorm_job_11914_bdmx` (historically 0.772x) and
+`oy_jb_jb_bushy4a_v2` (historically 0.857x). They remain in the main benchmark;
+the focused copies are not additional samples. Since their join labels have
+changed, the historical values are not v2 measurements, and the manifest marks
+both counterparts `requires_v2_remeasurement`.
 
 ```bash
 python3 auto_test/gen_outerjoin_benchmark.py --version v2

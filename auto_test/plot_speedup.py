@@ -109,6 +109,32 @@ DEFAULT_OUTPUT = SCRIPT_DIR / "results" / "plots" / "outeryan_benchmark_figures.
 STANDALONE_PNG_DPI = 300
 
 
+def benchmark_provenance() -> pd.DataFrame:
+    """Return auditable v1/v2 active-corpus roles keyed by emitted query id."""
+    manifests = [
+        SCRIPT_DIR / "outerjoin_benchmark" / "benchmark" / "manifest.csv",
+        SCRIPT_DIR / "outerjoin_benchmark" / "v2" / "benchmark" / "manifest.csv",
+    ]
+    frames = []
+    for path in manifests:
+        if not path.exists():
+            continue
+        manifest = pd.read_csv(path)
+        required = {"query_id", "source_component", "evaluation_role"}
+        if not required.issubset(manifest.columns):
+            continue
+        frames.append(manifest[["query_id", "source_component", "evaluation_role"]])
+    if not frames:
+        return pd.DataFrame(
+            columns=["query_id", "source_component", "evaluation_role", "workload_component"]
+        )
+    provenance = pd.concat(frames, ignore_index=True).drop_duplicates("query_id", keep="last")
+    provenance["workload_component"] = provenance["source_component"].map(
+        {"core": "structural", "industry_inspired": "evaluation"}
+    ).fillna("evaluation")
+    return provenance
+
+
 def gmean(values: pd.Series | np.ndarray) -> float:
     data = np.asarray(values, dtype=float)
     data = data[np.isfinite(data) & (data > 0)]
@@ -285,6 +311,10 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
         frame["relation_count"] = sql_relations.fillna(fallback_relations)
 
     frame["display_query"] = frame["query"].astype(str)
+    provenance = benchmark_provenance().set_index("query_id")
+    for column in ("source_component", "evaluation_role", "workload_component"):
+        if column not in frame:
+            frame[column] = frame["query"].map(provenance[column])
     return frame
 
 
@@ -772,7 +802,7 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
     all_values = np.concatenate(data)
     padding = max(0.08, (float(all_values.max()) - float(all_values.min())) * 0.04)
     lower, upper = float(all_values.min() - padding), float(all_values.max() + padding)
-    candidates = np.asarray([0.1, 0.25, 0.5, 1, 2, 4, 10, 25, 100, 250], dtype=float)
+    candidates = np.asarray([0.1, 0.25, 0.5, 1, 2, 4, 10, 25, 50, 100, 250], dtype=float)
     ticks = np.log10(candidates)
     visible = (ticks >= lower) & (ticks <= upper)
     ax.set_xlim(lower, upper)
@@ -1184,8 +1214,7 @@ def page_phase(
         )
     figure.text(
         0.52, 0.045,
-        "(1) Each bar sums to profile_total_time_s (= profile_cpu_time_s); "
-        "segment labels are aggregate operator seconds.",
+        "(1) Each bar sums to profiled CPU time; segment labels are accumulated operator seconds.",
         ha="center", va="bottom", fontsize=8.7,
     )
     figure.text(

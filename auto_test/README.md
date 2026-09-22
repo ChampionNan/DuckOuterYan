@@ -23,7 +23,7 @@ synopsis.
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
 | `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
-| `outerjoin_benchmark/` | 176-query active view, full 170-query core, 36-query industry evaluation, 28-query supplemental suite, manifests, and paper text |
+| `outerjoin_benchmark/` | 206-query mixed v1 view, 170-query source-derived core, 36-query evaluation-control suite, 28-query historical supplemental suite, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
 | `results/` | Generated text, CSV, trace output, and native phase profiles |
@@ -122,18 +122,16 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is **v1**, the timeout-filtered 176-query workload under
-`outerjoin_benchmark/benchmark/`. The `outerjoin_query` compatibility link
-points there. It contains 144 benchmark-derived queries and 32 evaluation
-queries. The complete component views retain 170 core queries and 36 evaluation
-queries (nine industry-inspired patterns plus all 28 pinned legacy OuterYan
-wins, with one overlap). Thirty confirmed multithread timeout cases are removed
-from the active view: 21 from the 0830/48-thread run and another nine from the
-0908/32-thread run. The latter include the seven formerly protected graph bushy
-and TPC-H Q9 star cases; those two family/pattern combinations are no longer
-covered by the active set. Successful queries are not removed to improve scores. See
-[`active_corpus_coverage.md`](outerjoin_benchmark/active_corpus_coverage.md)
-for the evidence, exceptions, and before/after distributions.
+The default corpus is **v1-mixed** (`corpus_revision=v1-mixed-20260922`), the
+206-query workload under `outerjoin_benchmark/benchmark/`. The
+`outerjoin_query` compatibility link points there. It contains all 170
+source-derived structures and all 36 Graph/industry/schema-synthetic controls.
+The retired FULL-heavy v1 timeout hashes do not filter this corpus: changing
+join labels changes the SQL and invalidates both the old timing and timeout
+observations. `active_timeout_exclusions.csv` is therefore empty. Historical
+exclusions remain documented in `benchmark_timeouts.py` and
+[`active_corpus_coverage.md`](outerjoin_benchmark/active_corpus_coverage.md),
+but must not be interpreted as measurements of the current revision.
 Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
 entire label using shell-glob syntax.
 
@@ -142,7 +140,7 @@ entire label using shell-glob syntax.
 python3 auto_test/gen_outerjoin_benchmark.py
 bash auto_test/experiment_onoff.sh --only all
 
-# Generate and test the 542-query expanded v2 corpus.
+# Generate and test the 546-query expanded v2 corpus.
 python3 auto_test/gen_outerjoin_benchmark.py --version v2
 bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
 
@@ -160,16 +158,37 @@ bash auto_test/experiment_onoff.sh --corpus-version v2 \
 
 V2 is stored under `outerjoin_benchmark/v2/` and does not replace v1. It applies
 three bounded deterministic selectivity tiers (approximately 0.1%, 1%, and 5%)
-to every one of the 170 v1 core structures, then adds the 32 already
-timeout-filtered v1 evaluation controls. The manifest records which strata are
-motivated by the 0916 advantage hypothesis, but all seeds, tree variants, and
-paired controls remain included independently of measured speed. See
+to 170 source-derived structures, then adds the 36 v1 evaluation controls. Both
+v1 and v2 use the same mixed-join design. Every
+source seed still contributes the same five graph-preserving shapes, but their
+join edges use a deterministic cyclic assignment of `I/L/R/F`. Across the 170
+base structures, the 625 join edges contain 157 INNER and 156 each LEFT,
+RIGHT, and FULL labels. The three selectivity copies retain the same vector for
+each base. The 36 Graph, industry, and schema-synthetic controls are retained,
+but their existing relations, predicates, and grouping are relabeled with the
+same balancing rule. In the complete 206-query v1 union, the 753 edge
+occurrences contain 188 INNER, 188 LEFT, 189 RIGHT, and 188 FULL labels.
+Consequently, the complete 546-query v2 main workload has
+501 INNER, 501 LEFT, 501 RIGHT, and 500 FULL edge occurrences. It includes 67
+all-outer queries (using two or more of LEFT/RIGHT/FULL) and 479 queries that
+also contain INNER; no v2 main query has a single-kind vector such as all-FULL.
+These are input-expression labels; optimizer simplification and physical join
+selection are measured outcomes, not part of the corpus-balancing rule.
+
+The 170 structural bases remain traceable to 34 source queries from TPC-H,
+TPC-DS, JOB, and SQLStorm. Their relation instances and equality-edge graph are
+retained. Graph and industry/schema-synthetic queries are explicitly labeled
+as control strata in `benchmark/manifest.csv`, rather than being presented as
+source-derived benchmark queries. The manifest also records which strata are
+motivated by the 0916 advantage hypothesis, but all seeds, shapes, join-label
+rotations, and paired controls remain included independently of measured speed. See
 `outerjoin_benchmark/README.md` for the design and provenance fields.
 
 The generated `v2/selectivity_stress/` directory contains 84 variants of 12
-metadata-selected v1 structures at approximately 0.025%, 0.05%, 0.2%, 10%,
+metadata-selected mixed v2 counterparts of feasibility-screened v1 structures
+at approximately 0.025%, 0.05%, 0.2%, 10%,
 20%, 50%, and 80% target selectivity. The ablation domain is declared from
-static metadata: all-FULL joins with at least four relations and an applicable
+static metadata: mixed joins with at least four relations and an applicable
 null-rejecting predicate. Four distinct source queries are selected from each
 of TPC-H, TPC-DS, and JOB; every family covers left-deep, right-deep, and bushy
 trees, while the fourth structure broadens source-benchmark and relation-count
@@ -179,11 +198,12 @@ and uses a common deterministic 4,000-bucket hash sample. This is equal
 representation per tier, not a claim of numerically uniform or realized
 selectivity. The manifest records `performance_selected=false` and marks every
 query `headline_eligible=false`; keep this correlated selectivity ablation
-separate from the 542-query headline score.
-The separate `v2/job_regressions/` directory retains the two
-OuterYan-selected JOB cases below 0.95x as focused regression guards. Their
-original copies remain in the main benchmark so slow cases are not removed to
-improve the result.
+separate from the 546-query headline score.
+The separate `v2/job_regressions/` directory contains the mixed-v2 counterparts
+of two historical FULL-heavy v1 JOB cases below 0.95x. Their structure remains in the
+main benchmark so difficult cases are not silently removed. Because changing
+join labels changes the query, the old v1 speedups are provenance only; both
+v2 counterparts are marked `requires_v2_remeasurement`.
 
 Generation is deterministic and writes query-level provenance manifests. Active
 query names use only `derived__` and `industry__`. In the complete components,
@@ -193,17 +213,17 @@ business-role patterns use `industry__`, including the one that is also a
 pinned legacy win. Exact roles remain in the manifest rather than being encoded
 as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
 TPC-DS 35, JOB 50, and SQLStorm 60), including 46 left-deep, 80 right-deep,
-and 44 genuinely bushy graph-preserving applicability inputs. Of these, 158
-use all-FULL vectors and 12 use mixed `alt` vectors. The evaluation under
+and 44 genuinely bushy graph-preserving applicability inputs. Its 625 join
+edges contain 157 INNER and 156 each LEFT, RIGHT, and FULL. The evaluation under
 `outerjoin_benchmark/industry_inspired/` is the
 union of nine explainable legacy business patterns and all 28 correct queries
 where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
-query belongs to both groups, so the corpus contains 36 unique queries. Its
+query belongs to both groups, so the corpus contains 36 unique controls. Its
 manifest labels the two roles separately; performance-selected entries are not
-claimed to be industry-derived. Before active timeout filtering, the full
-206-query union contains 62 left-deep, 88 right-deep, and 56 bushy inputs. The
-filtered core retains 41 left-deep, 70 right-deep, and 40 bushy inputs; all core
-pattern categories remain covered, but benchmark family weights change.
+claimed to be industry-derived. Their historical speedups are selection
+provenance only and are marked as requiring a mixed-v1 rerun. The active
+206-query union contains all 46 left-deep, 80 right-deep, and 44 bushy core
+inputs plus the 36 controls.
 Run the complete component (which bypasses active timeout filtering)
 with:
 
@@ -220,10 +240,9 @@ regeneration works on a fresh checkout or another server. The same 28
 performance-selected synthetic stress cases are also available as a focused
 component view under `outerjoin_benchmark/supplemental`. See
 `outerjoin_benchmark/README.md` for the transformation and terminology rules.
-The active view additionally applies `benchmark_timeouts.py`, with exclusions
-recorded in `outerjoin_benchmark/active_timeout_exclusions.csv`. This is a
-separate policy from the 84 older historical exclusions and also requires no
-local results file. Excluded SQL remains in its component source directory.
+`benchmark_timeouts.py` now documents only the retired FULL-heavy revision.
+The current active view applies none of those exclusions; any timeout policy
+must be rebuilt from a completed mixed-v1 run and pinned under a new revision.
 
 Query traversal is deterministic. Families are visited in the order selected by
 the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
@@ -233,26 +252,32 @@ emits `bdmx`, `bmx`, `ldmx`, `rdmx`, and `rduX`; a bushy-ineligible seed emits
 this is only filename order, not a semantic progression. A `--query-list` file
 overrides this order and is processed line by line.
 
-### Core query variants
+### Mixed v1/v2 core query variants
 
-The suffix records the binary join-tree traversal. Primary/control vectors are
-FULL (`F...F`) so they survive pre-OuterYan simplification; the 12 `alt`
-queries retain mixed vectors. Older suffix stems remain for result-file continuity.
+The suffix records the binary join-tree traversal and remains stable for result
+continuity; it does not encode the join vector. Both current corpus versions
+assign every shape a deterministic mixed vector. For a query with four or more
+join edges, the vector contains all four join kinds; shorter queries contain
+consecutive two- or three-kind slices of the `I/L/R/F` cycle. This produces both
+all-outer (`L/R/F`) queries and queries that mix INNER with outer joins while
+keeping aggregate edge frequencies balanced. The manifest's `join_vector` is
+authoritative.
 
 | Suffix | Tree and join labeling | Meaning |
 |---|---|---|
-| `ldmx` | Primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
-| `rdmx` | Primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
-| `bmx` | Connected bushy FULL tree | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
-| `bdmx` | Secondary connected bushy FULL tree | Uses another connected split/orientation of the same fixed graph. |
+| `ldmx` | Primary left-deep mixed tree | Primary left-deep traversal of the fixed graph. |
+| `rdmx` | Primary right-deep mixed tree | Primary right-deep traversal of the fixed graph. |
+| `bmx` | Connected bushy mixed tree | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
+| `bdmx` | Secondary connected bushy mixed tree | Uses another connected split/orientation of the same fixed graph. |
 | `alt` | Alternate left-deep mixed tree | Replaces `bmx` when a true cross-product-free bushy tree is unavailable. |
-| `rdax` | Secondary right-deep FULL tree | Replaces `bdmx` when the graph cannot form a true bushy root. |
-| `rduX` | Alternate right-deep FULL tree | Starts at the opposite graph side; `X` is a legacy filename label and the manifest records the actual all-`F` vector. |
+| `rdax` | Secondary right-deep mixed tree | Replaces `bdmx` when the graph cannot form a true bushy root. |
+| `rduX` | Alternate right-deep mixed tree | Starts at the opposite graph side; `X` is a legacy filename label and does not override the manifest vector. |
 
 The core contains 46 left-deep, 80 right-deep, and 44 bushy queries. Every
 grouping is independently specified because outer joins are not generally
-associative. Global NULL-rejecting predicates remain selective, while the FULL
-input labels ensure at least one outer edge remains when filter pushdown runs.
+associative. Every input contains at least two join kinds and at least one outer
+join. Global NULL-rejecting predicates remain selective, while the mixed
+vectors exercise both simplification and applicability boundaries.
 The two historical aggregate patterns in the active evaluation set are emitted
 as detail projections so they do not bypass OuterYan.
 
@@ -658,113 +683,60 @@ fields in machine-readable form, including the SQL-derived `relation_count`,
 `outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
 counts for every relation depth present in the run.
 
-`plot_speedup.py` writes one multi-page `outeryan_benchmark_figures.pdf` by
-default, with optional standalone figures. Files with the same timestamp and
-thread suffix are merged into one logical run; `_t16` and `_t32` are never
-merged. Historical `core` and `industry_inspired` CSV pairs remain supported.
-The all-query figure is one shared speed-up scatter axis. Every correct query
-with finite, positive OFF/ON timings contributes one point; the y-value is
-`OFF / ON` on a logarithmic scale. Each benchmark occupies a separate x-axis
-region, subdivided by query-name shape/category (not join-graph topology). Points have 50% opacity and
-deterministic horizontal jitter within their shape slot, so overlaps show
-density without changing speed-up values. The enlarged benchmark legend is one
-horizontal row above the axes. Query names are omitted. The dashed line is `1x`;
-this figure is not sampled.
+`plot_speedup.py` writes one multi-page review PDF and, with
+`--split-output-dir`, the two publication figures used by the paper:
 
-One `Running time Comparison` figure combines graph, TPC-H, TPC-DS, and JOB.
-By default, `--representative-scope outeryan` samples only correct queries whose
-ON run selected OuterYan, including regressions, with complete timing pairs.
-Use `--representative-scope all` for the optional all-plan view.
-Each family targets `--representatives-per-benchmark`
-(default 15); a family with fewer eligible queries is shown in full, without
-reducing the other families' quotas. Within each family, slots are allocated round-robin over
-available shapes, retaining every shape when the quota permits. Within a shape,
-queries are ordered by DuckDB OFF time and sampled at evenly spaced ranks (the
-middle rank for a single slot). Sampling does not rank speed-up or ON time.
-A family with no eligible queries cannot be represented; no measurements are
-invented to fill its quota. In the all-plan view, an asterisk after a query ID
-means the recorded ON plan selected OuterYan; an unmarked ID means DuckDB was
-selected. A question mark identifies an unavailable plan rather than assuming
-DuckDB. The ON legend reads "OuterYan enabled", which does not imply every ON
-run selected an OuterYan plan. Sampling does not rank or favor plan selection.
+- `speedup_all_queries.pdf`: panel (a) maps DuckDB runtime to the x-axis and
+  DuckOuterYan runtime to the y-axis for every valid query; panel (b) shows the
+  per-family distribution of `DuckDB / DuckOuterYan` on a log axis. Family is
+  encoded by color. In panel (a), a circle denotes faster/equal and an `X`
+  denotes slower. The diagonal and `1x` line denote parity. This figure is not
+  sampled.
+- `phase_breakdown_outeryan.pdf`: the left panel shows the Round 1, Round 2,
+  Round 3, and Other shares of accumulated profile CPU work. The right panel
+  directly pairs the unprofiled DuckDB and DuckOuterYan wall times for the same
+  query and prints the speed-up at the outer edge. Benchmark blocks are
+  separated by horizontal rules.
 
-Each new multi-thread-only query has two contiguous OFF/ON bars. Historical result
-files with both thread settings retain their four-bar comparisons, using blue
-and peach pairs. Only queries with complete finite, positive timings for their
-result schema are included; incomplete queries are omitted. Query IDs are
-assigned from the full in-scope population before this filtering so the
-remaining labels do not change. IDs can differ between the all-plan and
-OuterYan-only scopes; the adjacent JSON manifest provides the exact mapping.
-Benchmark subtitles and separators identify the sections. Query labels and
-legends are enlarged, with the abbreviation key directly below the `Query` axis.
-The shape parser recognizes the generated `bdmx`, `bmx`, `ldmx`, `rdax`,
-`rdmx`, `rduX`, and `alt` suffixes, plus `lduX` in historical result files.
-There is intentionally no
-speed-up-by-kernel page.
+The retired `runtime_outeryan_queries` and `representative_queries.json` files
+are removed on regeneration. The phase figure is emitted only when complete
+profiles exist. By default, it samples OuterYan-selected queries, including
+regressions. Each family receives up to `--representatives-per-benchmark`
+(default 15) slots; shapes are allocated round-robin and OFF-runtime ranks are
+sampled evenly within each shape. Sampling never ranks speed-up. The exact
+displayed query names, short IDs, order, phase values, and unprofiled baselines
+are written to `phase_queries.json`.
 
-When profiles exist, the default OuterYan-selected runtime comparison and
-`OuterYan Execution Time Details` share one sample, short-ID mapping and order.
-Only queries with complete profile data and a same-run, matching-thread OFF
-baseline are eligible for that paired view. All samples
-share one vertical grouped-bar axis with benchmark subtitles and separators.
-Each query has `Round 1`, `Round 2`, `Round 3`, residual `Other`, and profiled
-wall-clock `Total Time`, plus `Baseline Time` (unprofiled DuckDB OFF median)
-bars on a base-10 logarithmic y-axis. DuckDB-selected
-queries and incomplete profiles are omitted rather than represented as zero.
-The phase and `Other` values are aggregate operator CPU work across threads,
-while `Total Time` is wall-clock time; the bars are not an additive wall-time
-decomposition.
+Phase components are aggregate operator CPU work across threads. They sum to
+`profile_cpu_time_s`, not to `profile_wall_time_s`; parallel CPU work may exceed
+elapsed wall time. The plot therefore normalizes the left bars to CPU percent
+and keeps the wall-time comparison in a separate right panel. Short IDs use
+`G/H/D/J` for graph/TPC-H/TPC-DS/JOB and
+`LD/RD/B/S/A/I/O` for left-deep/right-deep/bushy/star/aggregate/industry/other.
 
-The compact representative figures label queries as
-`<benchmark>-<shape>-<index>`: `G/H/D/J` are graph/TPC-H/TPC-DS/JOB and
-`LD/RD/B/S/A/I/O` are left-deep/right-deep/bushy/star/aggregate/industry/other.
+Complete descriptive statistics are exported as `STATISTICS.md` and
+`statistics.json`, in the split output directory unless `--statistics-dir`
+overrides it. Statistics use the full deduplicated run, not the displayed phase
+sample, and report all queries, OuterYan-selected queries, and DuckDB-selected
+queries separately. Generated groups include benchmark, input shape,
+benchmark-by-shape, and manifest-backed structural/evaluation components.
+Outputs include exact coverage, min/max queries, arithmetic/geometric means,
+median and percentiles, sample dispersion, faster/slower bands, paired runtime
+totals, total-time speed-up, saved time, and complete phase-profile summaries.
+The JSON retains calculation precision; Markdown rounds to six decimals.
 
-Pass `--split-output-dir DIR` to additionally write `speedup_all_queries.pdf`
-and the merged `runtime_outeryan_queries.pdf` (or
-`runtime_representative_queries.pdf` with `--representative-scope all`). The sampled full query names,
-short labels, shapes, available family counts, and timings are recorded in
-`representative_queries.json`.
-`phase_breakdown_outeryan.pdf` is written only
-when eligible profile data exists. With multiple logical runs, each run is
-written under its timestamp subdirectory.
+Result files are grouped by filename timestamp before plotting. A final CSV and
+its `.attempts.csv` companion form one logical run, not two. Duplicate
+`(family, query)` rows use the final CSV value; attempts only fill missing final
+queries. `_t16` and `_t32` runs remain separate. An explicit
+`--phase-placeholder-csv` is supported for historical results without current
+profiles, is visibly labeled, and never contributes to current runtime
+statistics.
 
-Keep the current 0908 figure set, previews, manifests, and statistics together
-in `results/plots/20260908_235240/t32/`; `FIGURE.md` there is the gallery.
-Do not create separate `sample` or `balanced` output directories. That 0908 run
-has no profiles. To reproduce its temporary breakdown, explicitly add
-`--phase-placeholder-csv results/experiment_onoff_benchmark_20260830_002656.csv
-results/experiment_onoff_benchmark_20260830_002656.attempts.csv` when invoking
-the plot script from `auto_test/`. This input is used only for the breakdown,
-is visibly labeled with its old date and actual 48-thread count, and never
-enters current timing or statistics. `phase_queries.json` records the exact
-profile samples and placeholder status. When current complete profiles exist,
-they take precedence and the placeholder label disappears; omit the legacy
-flag when regenerating from the new server run.
-
-Complete descriptive statistics are also exported as `STATISTICS.md` and
-`statistics.json`, in the split output directory when provided, otherwise in
-`<output-PDF-stem>_statistics/`. Use `--statistics-dir DIR` to override this.
-Statistics use the full deduplicated run, not the representative sample, and
-report all queries, OuterYan-selected queries, and DuckDB-selected queries
-separately. Each population has overall, benchmark, shape, and benchmark-by-shape
-groups. Outputs include min/max with query names, arithmetic/geometric means,
-median, P05/P10/P25/P75/P90/P95/P99, sample SD/variance (ddof=1), coefficient of
-variation, faster/equal/slower counts, ratio bands, paired OFF/ON runtime
-distributions and totals, total-time speed-up, and saved time. Source paths,
-SHA-256 fingerprints, all per-query timing pairs, and exclusion reasons are
-included in JSON. Markdown displays six decimals; JSON retains calculation precision.
-Timeouts and incomplete/incorrect observations are counted but never imputed.
-These are query-population descriptions, not confidence intervals from repeated
-runs. Shape uses the existing query-name classification, not the optimized physical plan.
-
-Result files are grouped by their filename timestamp before plotting. A paired
-`experiment_onoff_<timestamp>.csv` and
-`experiment_onoff_<timestamp>.attempts.csv` therefore produce one figure set,
-not two runs. Duplicate `(family, query)` rows use the final CSV value; an
-attempts row is retained only when the final CSV is missing, empty, or lacks
-that query. This preserves partial interrupted runs without double-counting the
-compatibility copy. Component names do not create separate logical runs when
-their timestamps match.
+The September 16 plots and statistics were produced from the retired FULL-heavy
+revision and are historical artifacts only. Regenerate figures and tables only
+after a complete `v1-mixed-20260922` run; do not combine its SQL with those old
+timings.
 
 ## Optimizer trace
 
@@ -877,8 +849,8 @@ OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default comparison stage walks all 176 SQL files under `outerjoin_query`:
-7 graph, 53 TPC-H, 43 TPC-DS, and 82 JOB queries. It executes each bare query
+The default comparison stage walks all 206 SQL files under `outerjoin_query`:
+7 Graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It executes each bare query
 with OuterYan disabled (Original) and enabled, verifies complete result
 equivalence, records the selected DuckDB/OuterYan plan, and then measures both
 configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture

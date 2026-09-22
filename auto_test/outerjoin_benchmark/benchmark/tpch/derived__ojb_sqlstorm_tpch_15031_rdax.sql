@@ -1,6 +1,7 @@
 -- source: SQLStorm v1.0/tpch/queries/15031.sql
--- transformation: connected join-subgraph adaptation; secondary right-deep FULL-outer applicability form
+-- transformation: connected join-subgraph adaptation; balanced mixed secondary right-deep source-derived form
 -- business_semantics: A SQLStorm tpch query pattern whose source relation graph is retained; the anchor sample is enriched under controlled preservation semantics.
+-- corpus_revision: v1-mixed-20260922
 SELECT *
-FROM (supplier s FULL OUTER JOIN (part p FULL OUTER JOIN partsupp ps ON p.p_partkey = ps.ps_partkey) ON ps.ps_suppkey = s.s_suppkey)
+FROM (supplier s LEFT OUTER JOIN (part p INNER JOIN partsupp ps ON p.p_partkey = ps.ps_partkey) ON ps.ps_suppkey = s.s_suppkey)
 WHERE p.p_partkey % 1000 = 0;

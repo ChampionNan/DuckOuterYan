@@ -49,13 +49,9 @@ LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
 TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
 CORE_QUERY_COUNT = 170
 INDUSTRY_EVALUATION_QUERY_COUNT = 36
-ACTIVE_CORE_QUERY_COUNT = CORE_QUERY_COUNT - sum(
-    Path(path).name.startswith("derived__ojb_") for path in active_timeouts.EXCLUDED_QUERY_HASHES
-)
-ACTIVE_BENCHMARK_QUERY_COUNT = (
-    CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
-    - len(active_timeouts.EXCLUDED_QUERY_HASHES)
-)
+V1_CORPUS_REVISION = "v1-mixed-20260922"
+ACTIVE_CORE_QUERY_COUNT = CORE_QUERY_COUNT
+ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
 V2_SELECTIVITY_TIERS: tuple[tuple[str, int, str], ...] = (
     ("sel001", 1000, "approximately 0.1% of the v1 anchor domain"),
     ("sel01", 100, "approximately 1% of the v1 anchor domain"),
@@ -164,6 +160,13 @@ JOIN_SQL = {
     "R": "RIGHT OUTER JOIN",
     "F": "FULL OUTER JOIN",
 }
+
+MIXED_JOIN_CYCLE: tuple[str, ...] = ("I", "L", "R", "F")
+JOIN_KEYWORD_PATTERN = re.compile(
+    r"\b(?:INNER|LEFT(?:\s+OUTER)?|RIGHT(?:\s+OUTER)?|FULL(?:\s+OUTER)?)\s+JOIN\b",
+    re.IGNORECASE,
+)
+SOURCE_BENCHMARKS = frozenset({"TPC-H", "TPC-DS", "JOB", "SQLStorm"})
 
 ACTIVE_JOIN_SQL = "FULL OUTER JOIN"
 SIMPLE_EDGE_EQUALITY = re.compile(
@@ -971,10 +974,16 @@ def build_right_mirror(seed: Seed, kinds: Sequence[str]) -> str:
     return build_right_deep(seed, tuple(flip_join_kind(kind) for kind in kinds))
 
 
-def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
+def build_alternate_deep(
+    seed: Seed,
+    kinds: Sequence[str] | None = None,
+    *,
+    right_deep: bool,
+) -> str:
     """Build a second cross-product-free deep traversal from the last relation."""
     return build_connected_deep(
         seed,
+        kinds=kinds,
         right_deep=right_deep,
         start_index=len(seed.relations) - 1,
         prefer_max_edge=True,
@@ -984,11 +993,15 @@ def build_alternate_deep(seed: Seed, *, right_deep: bool) -> str:
 def build_connected_deep(
     seed: Seed,
     *,
+    kinds: Sequence[str] | None = None,
     right_deep: bool,
     start_index: int,
     prefer_max_edge: bool,
 ) -> str:
-    """Build a connected all-FULL traversal from a selected relation."""
+    """Build a connected labeled traversal from a selected relation."""
+    edge_kinds = tuple(kinds or ("F",) * len(seed.predicates))
+    if len(edge_kinds) != len(seed.predicates):
+        raise ValueError(f"{seed.seed_id}: join-vector length mismatch")
     aliases = [relation_alias(relation) for relation in seed.relations]
     relation_by_alias = dict(zip(aliases, seed.relations))
     edges = [(*predicate_aliases(predicate), index) for index, predicate in enumerate(seed.predicates)]
@@ -1007,19 +1020,27 @@ def build_connected_deep(
         relation = relation_by_alias[new_alias]
         predicate = active_edge_predicate(seed.predicates[edge_index])
         if right_deep:
-            expression = f"({relation} {ACTIVE_JOIN_SQL} {expression} ON {predicate})"
+            expression = (
+                f"({relation} {JOIN_SQL[edge_kinds[edge_index]]} "
+                f"{expression} ON {predicate})"
+            )
         else:
-            expression = f"({expression} {ACTIVE_JOIN_SQL} {relation} ON {predicate})"
+            expression = (
+                f"({expression} {JOIN_SQL[edge_kinds[edge_index]]} "
+                f"{relation} ON {predicate})"
+            )
         visited.add(new_alias)
     return expression
 
 
-def build_secondary_right_deep(seed: Seed) -> str:
-    """Build a third syntactically distinct connected right-deep FULL tree."""
-    full_vector = ("F",) * len(seed.predicates)
+def build_secondary_right_deep(
+    seed: Seed, kinds: Sequence[str] | None = None
+) -> str:
+    """Build a third syntactically distinct connected right-deep tree."""
+    edge_kinds = tuple(kinds or ("F",) * len(seed.predicates))
     existing = {
-        build_right_mirror(seed, full_vector),
-        build_alternate_deep(seed, right_deep=True),
+        build_right_deep(seed, edge_kinds),
+        build_alternate_deep(seed, edge_kinds, right_deep=True),
     }
     middle = len(seed.relations) // 2
     start_order = [middle, *range(len(seed.relations))]
@@ -1027,6 +1048,7 @@ def build_secondary_right_deep(seed: Seed) -> str:
         for prefer_max_edge in (False, True):
             candidate = build_connected_deep(
                 seed,
+                kinds=edge_kinds,
                 right_deep=True,
                 start_index=start_index,
                 prefer_max_edge=prefer_max_edge,
@@ -1146,8 +1168,6 @@ def bushy_root_partition(seed: Seed) -> tuple[set[str], set[str], int] | None:
 
 def build_bushy_mixed(seed: Seed, kinds: Sequence[str], *, alternate: bool = False) -> str:
     """Build a balanced connected tree without introducing cross products."""
-    if alternate and any(kind != "F" for kind in kinds):
-        raise ValueError("alternate bushy orientation currently requires all-FULL joins")
     aliases = [relation_alias(relation) for relation in seed.relations]
     alias_order = {alias: index for index, alias in enumerate(aliases)}
     relation_by_alias = dict(zip(aliases, seed.relations))
@@ -1325,6 +1345,133 @@ def variant_rows(seed: Seed, seed_index: int) -> Iterable[tuple[str, str, str, s
     )
 
 
+def balanced_mixed_vector(
+    seed_index: int, variant_index: int, edge_count: int
+) -> tuple[str, ...]:
+    """Assign a mixed vector while balancing I/L/R/F over the whole v2 core."""
+    if edge_count < 2:
+        raise ValueError("a mixed join vector requires at least two edges")
+    prior_edge_slots = sum(
+        len(previous.predicates) * 5 for previous in SEEDS[:seed_index]
+    )
+    offset = (prior_edge_slots + variant_index) % len(MIXED_JOIN_CYCLE)
+    return tuple(
+        MIXED_JOIN_CYCLE[(offset + edge_index) % len(MIXED_JOIN_CYCLE)]
+        for edge_index in range(edge_count)
+    )
+
+
+def balanced_variant_rows(
+    seed: Seed, seed_index: int
+) -> Iterable[tuple[str, str, str, str, str]]:
+    """Emit five shapes with deterministic, balanced mixed join labels."""
+    edge_count = len(seed.predicates)
+    vectors = [
+        balanced_mixed_vector(seed_index, variant_index, edge_count)
+        for variant_index in range(5)
+    ]
+    legacy_suffix_kinds = ("L", "R", "F")
+    right_suffix_kind = legacy_suffix_kinds[(2 * seed_index + 1) % len(legacy_suffix_kinds)]
+
+    left_vector, right_vector, third_vector, fourth_vector, fifth_vector = vectors
+    yield (
+        "ldmx",
+        "".join(left_vector),
+        "left_deep",
+        "balanced mixed left-deep source-derived form",
+        query_sql(
+            seed,
+            build_left_deep(seed, left_vector),
+            "ldmx",
+            "balanced INNER/LEFT/RIGHT/FULL left-deep source-derived form",
+        ),
+    )
+    yield (
+        "rdmx",
+        "".join(right_vector),
+        "right_deep",
+        "balanced mixed right-deep source-derived form",
+        query_sql(
+            seed,
+            build_right_deep(seed, right_vector),
+            "rdmx",
+            "balanced INNER/LEFT/RIGHT/FULL right-deep source-derived form",
+        ),
+    )
+
+    bushy_eligible = bushy_root_partition(seed) is not None
+    if bushy_eligible:
+        yield (
+            "bmx",
+            "".join(third_vector),
+            "bushy",
+            "balanced mixed connected bushy source-derived form",
+            query_sql(
+                seed,
+                build_bushy_mixed(seed, third_vector),
+                "bmx",
+                "balanced INNER/LEFT/RIGHT/FULL connected bushy source-derived form",
+            ),
+        )
+    else:
+        yield (
+            "alt",
+            "".join(third_vector),
+            "left_deep",
+            "balanced mixed alternate left-deep source-derived form",
+            query_sql(
+                seed,
+                build_left_deep(seed, third_vector),
+                "alt",
+                "balanced mixed alternate form; bushy grouping is structurally ineligible",
+            ),
+        )
+
+    if bushy_eligible:
+        primary_bushy = build_bushy_mixed(seed, fourth_vector)
+        alternate_bushy = build_bushy_mixed(seed, fourth_vector, alternate=True)
+        if alternate_bushy == primary_bushy:
+            raise ValueError(f"{seed.seed_id}: secondary bushy tree duplicates the primary tree")
+        yield (
+            "bdmx",
+            "".join(fourth_vector),
+            "bushy",
+            "balanced mixed secondary connected bushy source-derived form",
+            query_sql(
+                seed,
+                alternate_bushy,
+                "bdmx",
+                "balanced mixed secondary connected bushy source-derived form",
+            ),
+        )
+    else:
+        yield (
+            "rdax",
+            "".join(fourth_vector),
+            "right_deep",
+            "balanced mixed secondary right-deep source-derived form",
+            query_sql(
+                seed,
+                build_secondary_right_deep(seed, fourth_vector),
+                "rdax",
+                "balanced mixed secondary right-deep source-derived form",
+            ),
+        )
+
+    yield (
+        f"rdu{right_suffix_kind}",
+        "".join(fifth_vector),
+        "right_deep",
+        "balanced mixed alternate right-deep source-derived form",
+        query_sql(
+            seed,
+            build_alternate_deep(seed, fifth_vector, right_deep=True),
+            f"rdu{right_suffix_kind}",
+            "balanced mixed alternate right-deep source-derived form",
+        ),
+    )
+
+
 def selectivity_anchor(seed: Seed) -> str:
     """Choose a deterministic, usually high-cardinality central join key."""
     aliases = [relation_alias(relation) for relation in seed.relations]
@@ -1424,7 +1571,9 @@ def generate_core(root: Path) -> int:
         verify_source(seed)
         family_dir = core / seed.family
         family_dir.mkdir(parents=True, exist_ok=True)
-        for suffix, vector, tree_shape, variant_semantics, sql in variant_rows(seed, seed_index):
+        for suffix, vector, tree_shape, variant_semantics, sql in balanced_variant_rows(
+            seed, seed_index
+        ):
             query_id = f"ojb_{seed.seed_id}_{suffix}"
             relative_path = f"{seed.family}/{query_id}.sql"
             expected_graph = Counter(
@@ -1432,11 +1581,17 @@ def generate_core(root: Path) -> int:
             )
             if sql_join_graph(sql) != expected_graph:
                 raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
+            sql = sql.replace(
+                "SELECT ",
+                f"-- corpus_revision: {V1_CORPUS_REVISION}\nSELECT ",
+                1,
+            )
             (core / relative_path).write_text(sql, encoding="utf-8")
             manifest_rows.append(
                 {
                     "query_id": query_id,
                     "path": relative_path,
+                    "corpus_revision": V1_CORPUS_REVISION,
                     "stratum": "benchmark_derived_core",
                     "family": seed.family,
                     "source_benchmark": seed.source_benchmark,
@@ -1502,10 +1657,35 @@ def generate_supplemental(root: Path) -> int:
 
 
 def generate_industry_inspired(root: Path) -> int:
-    """Materialize graph-preserving, OuterYan-applicable evaluation queries."""
+    """Materialize graph-preserving evaluation controls with mixed join labels."""
     destination_root = root / "industry_inspired"
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    join_counts: Counter[str] = Counter()
+    for row in core_rows:
+        join_counts.update(row["join_vector"])
+    control_index = 0
+
+    def relabel_control(source_sql: str, *, flatten_aggregate: bool) -> tuple[str, str, int]:
+        nonlocal control_index
+        normalized = normalize_active_sql(
+            source_sql,
+            flatten_aggregate=flatten_aggregate,
+        )
+        edge_count = sql_join_keyword_count(normalized)
+        vector = next_balanced_control_vector(edge_count, join_counts, control_index)
+        control_index += 1
+        join_counts.update(vector)
+        mixed = rewrite_join_types(normalized, vector)
+        metadata = (
+            f"-- corpus_revision: {V1_CORPUS_REVISION}\n"
+            "-- workload_role: retained evaluation control with deterministic mixed joins\n"
+            f"-- join_vector: {''.join(vector)}; relation and predicate structure unchanged\n"
+        )
+        return metadata + mixed, "".join(vector), edge_count
+
     wins = {
         (family, filename): speedup
         for family, filename, speedup in LEGACY_OUTERYAN_WINS
@@ -1521,8 +1701,9 @@ def generate_industry_inspired(root: Path) -> int:
             raise FileNotFoundError(f"industry-inspired source query not found: {source}")
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        normalized_sql = normalize_active_sql(
-            source.read_text(encoding="utf-8"),
+        source_sql = source.read_text(encoding="utf-8")
+        normalized_sql, join_vector, edge_count = relabel_control(
+            source_sql,
             flatten_aggregate=(family, filename) in ACTIVE_AGGREGATE_SOURCES,
         )
         destination.write_text(normalized_sql, encoding="utf-8")
@@ -1531,6 +1712,7 @@ def generate_industry_inspired(root: Path) -> int:
             {
                 "query_id": source.stem,
                 "path": f"{family}/{filename}",
+                "corpus_revision": V1_CORPUS_REVISION,
                 "evaluation_role": (
                     "industry_pattern_and_legacy_performance_win"
                     if observed_speedup
@@ -1546,8 +1728,13 @@ def generate_industry_inspired(root: Path) -> int:
                 "selection_policy": (
                     ACTIVE_LEGACY_SOURCE_SELECTION_POLICY if observed_speedup else ""
                 ),
-                "observed_tm_speedup": observed_speedup,
-                "active_transformation": "graph_preserving_outeryan_applicability_normalization",
+                "historical_full_join_tm_speedup": observed_speedup,
+                "measurement_status": "requires_v1_mixed_rerun",
+                "provenance_class": "industry_synthetic_control",
+                "join_vector": join_vector,
+                "relation_count": str(edge_count + 1),
+                "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
+                "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
                 "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
             }
         )
@@ -1560,12 +1747,17 @@ def generate_industry_inspired(root: Path) -> int:
             raise FileNotFoundError(f"legacy performance-win query not found: {source}")
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
-        normalized_sql = normalize_active_sql(source.read_text(encoding="utf-8"))
+        source_sql = source.read_text(encoding="utf-8")
+        normalized_sql, join_vector, edge_count = relabel_control(
+            source_sql,
+            flatten_aggregate=False,
+        )
         destination.write_text(normalized_sql, encoding="utf-8")
         rows.append(
             {
                 "query_id": source.stem,
                 "path": f"{family}/{filename}",
+                "corpus_revision": V1_CORPUS_REVISION,
                 "evaluation_role": "legacy_performance_win",
                 "stratum": "synthetic_optimizer_stress",
                 "family": family,
@@ -1578,8 +1770,17 @@ def generate_industry_inspired(root: Path) -> int:
                 "industry_status": "not_industry_derived",
                 "production_source_id": "none",
                 "selection_policy": ACTIVE_LEGACY_SOURCE_SELECTION_POLICY,
-                "observed_tm_speedup": speedup,
-                "active_transformation": "graph_preserving_outeryan_applicability_normalization",
+                "historical_full_join_tm_speedup": speedup,
+                "measurement_status": "requires_v1_mixed_rerun",
+                "provenance_class": (
+                    "graph_synthetic_control"
+                    if family == "graph"
+                    else "schema_synthetic_control"
+                ),
+                "join_vector": join_vector,
+                "relation_count": str(edge_count + 1),
+                "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
+                "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
                 "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
             }
         )
@@ -1599,6 +1800,10 @@ def generate_industry_inspired(root: Path) -> int:
             f"missing={sorted(expected_paths - actual_paths)}, "
             f"unexpected={sorted(actual_paths - expected_paths)}"
         )
+    if any(len(set(row["join_vector"])) < 2 for row in rows):
+        raise RuntimeError("v1 evaluation control contains a single-kind join vector")
+    if max(join_counts.values()) - min(join_counts.values()) > 1:
+        raise RuntimeError(f"v1 benchmark join labels are imbalanced: {join_counts}")
 
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1609,7 +1814,7 @@ def generate_industry_inspired(root: Path) -> int:
 
 
 def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
-    """Materialize the filtered harness corpus, keeping component sources intact."""
+    """Materialize the current mixed v1 corpus without obsolete timeout filtering."""
     destination_root = root / "benchmark"
     rows: list[dict[str, str]] = []
 
@@ -1619,6 +1824,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
         family = row["family"]
         source = root / "core" / row["path"]
         query_id = f"derived__{row['query_id']}"
+        content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         rows.append(
             {
                 "query_id": query_id,
@@ -1628,7 +1834,18 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                 "family": family,
                 "source_component": "core",
                 "source_path": f"core/{row['path']}",
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "source_content_sha256": content_sha256,
+                "content_sha256": content_sha256,
+                "corpus_revision": V1_CORPUS_REVISION,
+                "provenance_class": "benchmark_source_derived",
+                "source_benchmark": row["source_benchmark"],
+                "source_query": row["source_query"],
+                "source_location": row["source_location"],
+                "topology": row["topology"],
+                "tree_shape": row["tree_shape"],
+                "join_vector": row["join_vector"],
+                "relation_count": row["relation_count"],
+                "predicate_class": row["predicate_class"],
             }
         )
 
@@ -1653,6 +1870,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
             family = row["family"]
             source = root / "industry_inspired" / row["path"]
             query_id = f"{prefix}__{row['query_id']}"
+            content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
             rows.append(
                 {
                     "query_id": query_id,
@@ -1662,7 +1880,18 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                     "family": family,
                     "source_component": "industry_inspired",
                     "source_path": f"industry_inspired/{row['path']}",
-                    "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                    "source_content_sha256": row["source_content_sha256"],
+                    "content_sha256": content_sha256,
+                    "corpus_revision": V1_CORPUS_REVISION,
+                    "provenance_class": row["provenance_class"],
+                    "source_benchmark": "",
+                    "source_query": "",
+                    "source_location": row["source"],
+                    "topology": "",
+                    "tree_shape": "",
+                    "join_vector": row["join_vector"],
+                    "relation_count": row["relation_count"],
+                    "predicate_class": "evaluation_control",
                 }
             )
 
@@ -1674,20 +1903,10 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
             f"expected={expected_count}, rows={len(rows)}, unique_paths={len(paths)}"
         )
 
-    excluded_paths = {
-        path
-        for path in active_timeouts.EXCLUDED_QUERY_HASHES
-        if include_industry or Path(path).name.startswith("derived__ojb_")
-    }
-    if not excluded_paths <= paths:
-        raise RuntimeError(f"unknown pinned timeout queries: {sorted(excluded_paths - paths)}")
-    excluded_rows = [row for row in rows if row["path"] in excluded_paths]
-    for row in excluded_rows:
-        if row["content_sha256"] != active_timeouts.EXCLUDED_QUERY_HASHES[row["path"]]:
-            raise RuntimeError(
-                f"timeout SQL changed; review exclusion before regenerating: {row['path']}"
-            )
-    rows = [row for row in rows if row["path"] not in excluded_paths]
+    # The pinned exclusions refer to the retired FULL-heavy SQL. Relabeling the
+    # joins changes both the query and its content hash, so those observations
+    # cannot be used to exclude any current v1-mixed query.
+    excluded_rows: list[dict[str, str]] = []
     expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else ACTIVE_CORE_QUERY_COUNT
     if len(rows) != expected_active_count:
         raise RuntimeError(f"unexpected filtered benchmark count: {len(rows)}")
@@ -1758,10 +1977,8 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
 def validate_active_coverage(
     core_rows: list[dict[str, str]], active_rows: list[dict[str, str]], include_industry: bool
 ) -> None:
-    """Enforce bounded core distribution changes and only approved coverage losses."""
+    """Require complete current-revision coverage; old timeout pins are obsolete."""
     paths = {row["path"] for row in active_rows}
-    if paths & active_timeouts.EXCLUDED_QUERY_HASHES.keys():
-        raise RuntimeError("excluded timeout query reappeared in active corpus")
     retained_core = [
         row for row in core_rows if f"{row['family']}/derived__{row['query_id']}.sql" in paths
     ]
@@ -1770,21 +1987,11 @@ def validate_active_coverage(
     for dimension in ("tree_shape", "topology", "relation_count", "join_vector"):
         before = Counter(row[dimension] for row in core_rows)
         after = Counter(row[dimension] for row in retained_core)
-        if before.keys() != after.keys():
-            raise RuntimeError(f"active core lost {dimension} coverage")
-        share_limit = 0.02 if dimension == "tree_shape" else MAX_CORE_PATTERN_SHARE_SHIFT
-        if any(
-            abs(after[key] / len(retained_core) - before[key] / len(core_rows)) > share_limit
-            for key in before
-        ):
-            raise RuntimeError(
-                f"active core {dimension} share shifted by more than "
-                f"{100 * share_limit:g} percentage points"
-            )
+        if before != after:
+            raise RuntimeError(f"active core changed {dimension} coverage")
         before_family = {(row["family"], row[dimension]) for row in core_rows}
         after_family = {(row["family"], row[dimension]) for row in retained_core}
-        allowed_missing = active_timeouts.ALLOWED_MISSING_CORE_FAMILY_PATTERNS.get(dimension, frozenset())
-        if before_family - after_family != allowed_missing or after_family - before_family:
+        if before_family != after_family:
             raise RuntimeError(f"active core lost family/{dimension} coverage")
 
 
@@ -1912,16 +2119,28 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     if rdu_count != len(SEEDS):
         raise RuntimeError(f"every seed must have exactly one rduX variant: {suffix_counts}")
 
+    if any(row["corpus_revision"] != V1_CORPUS_REVISION for row in manifest_rows):
+        raise RuntimeError("v1 core manifest has a stale corpus revision")
+    if {row["source_benchmark"] for row in manifest_rows} != SOURCE_BENCHMARKS:
+        raise RuntimeError("v1 core source provenance is incomplete")
+    if any(len(set(row["join_vector"])) < 2 for row in manifest_rows):
+        raise RuntimeError("v1 core contains a single-kind join vector")
+    if any(
+        int(row["relation_count"]) >= 5
+        and set(row["join_vector"]) != set(MIXED_JOIN_CYCLE)
+        for row in manifest_rows
+    ):
+        raise RuntimeError("a v1 query with at least four edges does not cover I/L/R/F")
+    join_counts: Counter[str] = Counter()
+    grouped_join_counts: dict[tuple[str, str], Counter[str]] = {}
     for row in manifest_rows:
-        suffix = row["query_id"].rsplit("_", 1)[-1]
-        expected_vector = "F" * (int(row["relation_count"]) - 1)
-        if suffix != "alt" and row["join_vector"] != expected_vector:
-            raise RuntimeError(
-                f"{row['query_id']}: active join vector must be {expected_vector}, "
-                f"got {row['join_vector']}"
-            )
-        if suffix == "alt" and set(row["join_vector"]) == {"I"}:
-            raise RuntimeError(f"{row['query_id']}: alternate vector has no outer join")
+        join_counts.update(row["join_vector"])
+        group = (row["family"], row["tree_shape"])
+        grouped_join_counts.setdefault(group, Counter()).update(row["join_vector"])
+    if max(join_counts.values()) - min(join_counts.values()) > 1:
+        raise RuntimeError(f"v1 core join labels are imbalanced: {join_counts}")
+    if any(max(counts.values()) - min(counts.values()) > 3 for counts in grouped_join_counts.values()):
+        raise RuntimeError(f"v1 family/shape join labels are imbalanced: {grouped_join_counts}")
     all_shapes = Counter(row["tree_shape"] for row in manifest_rows)
     if all_shapes != Counter({"left_deep": 46, "right_deep": 80, "bushy": 44}):
         raise RuntimeError(f"unexpected core shape distribution: {all_shapes}")
@@ -1937,10 +2156,6 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         )
         if "OUTER JOIN" not in upper:
             raise RuntimeError(f"{relative_path}: no outer join")
-        if not relative_path.endswith("_alt.sql") and any(
-            token in statement for token in (" INNER JOIN", " LEFT OUTER JOIN", " RIGHT OUTER JOIN")
-        ):
-            raise RuntimeError(f"{relative_path}: active core join is not FULL OUTER")
         if " ON 1=1" in upper:
             raise RuntimeError(f"{relative_path}: cross product")
         if any(token in upper for token in ("GROUP BY", "SELECT DISTINCT", " OVER (")):
@@ -1952,6 +2167,11 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         )
         if any(re.search(pattern, statement) for pattern in null_tolerant_patterns):
             raise RuntimeError(f"{relative_path}: NULL-tolerant predicate is not allowed in the core")
+        row = next(row for row in manifest_rows if row["path"] == relative_path)
+        if f"-- corpus_revision: {V1_CORPUS_REVISION}" not in sql:
+            raise RuntimeError(f"{relative_path}: missing corpus revision")
+        if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
+            raise RuntimeError(f"{relative_path}: SQL and manifest join labels differ")
 
     active_root = root / "benchmark"
     with (active_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
@@ -1968,37 +2188,51 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     valid_prefixes = ("derived__", "industry__")
     if any(not row["query_id"].startswith(valid_prefixes) for row in active_rows):
         raise RuntimeError("active benchmark query is missing its provenance prefix")
-    for relative_path in sorted(active_paths):
+    active_join_counts: Counter[str] = Counter()
+    for row in active_rows:
+        relative_path = row["path"]
         sql = (active_root / relative_path).read_text(encoding="utf-8")
         statement = "\n".join(
             line for line in sql.upper().splitlines() if not line.lstrip().startswith("--")
         )
         if any(token in statement for token in ("GROUP BY", "SELECT DISTINCT", " OVER (")):
             raise RuntimeError(f"{relative_path}: active query bypasses OuterYan")
-        if "derived__ojb_" not in relative_path and any(
-            token in statement for token in (" INNER JOIN", " LEFT OUTER JOIN", " RIGHT OUTER JOIN")
-        ):
-            raise RuntimeError(f"{relative_path}: active join is not FULL OUTER")
+        if row["corpus_revision"] != V1_CORPUS_REVISION:
+            raise RuntimeError(f"{relative_path}: stale active corpus revision")
+        if len(set(row["join_vector"])) < 2:
+            raise RuntimeError(f"{relative_path}: single-kind active join vector")
+        if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
+            raise RuntimeError(f"{relative_path}: SQL and active manifest join labels differ")
+        if hashlib.sha256(sql.encode("utf-8")).hexdigest() != row["content_sha256"]:
+            raise RuntimeError(f"{relative_path}: active content hash mismatch")
+        active_join_counts.update(row["join_vector"])
+    if max(active_join_counts.values()) - min(active_join_counts.values()) > 1:
+        raise RuntimeError(f"v1 active join labels are imbalanced: {active_join_counts}")
 
 
 def generate_v2_core(root: Path) -> int:
-    """Expand every v1 structural variant across three bounded selectivity tiers."""
+    """Expand every source-derived mixed structural variant across three tiers."""
     core = root / "core"
     reset_generated_dir(core)
     rows: list[dict[str, str]] = []
     design_basis = (
-        "v1 0916 strata motivate the hypothesis tag; all v1 seeds, tree variants, "
-        "and paired controls remain included independent of measured speed"
+        "all source seeds and five tree variants are included without timing-based "
+        "selection; I/L/R/F labels follow a deterministic balanced rotation and each "
+        "base keeps the same vector at every selectivity tier"
     )
     for seed_index, seed in enumerate(SEEDS):
         seed.validate()
+        if seed.source_benchmark not in SOURCE_BENCHMARKS:
+            raise RuntimeError(
+                f"{seed.seed_id}: unsupported v2 source benchmark {seed.source_benchmark}"
+            )
         verify_source(seed)
         family_dir = core / seed.family
         family_dir.mkdir(parents=True, exist_ok=True)
         expected_graph = Counter(
             tuple(sorted(predicate_aliases(predicate))) for predicate in seed.predicates
         )
-        for suffix, vector, tree_shape, variant_semantics, base_sql in variant_rows(
+        for suffix, vector, tree_shape, variant_semantics, base_sql in balanced_variant_rows(
             seed, seed_index
         ):
             base_query_id = f"ojb_{seed.seed_id}_{suffix}"
@@ -2053,17 +2287,101 @@ def generate_v2_core(root: Path) -> int:
     return len(rows)
 
 
+def sql_join_keyword_count(sql: str) -> int:
+    """Count emitted join keywords while ignoring full-line SQL comments."""
+    statement = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    return len(JOIN_KEYWORD_PATTERN.findall(statement))
+
+
+def sql_join_kind_counts(sql: str) -> Counter[str]:
+    """Count emitted I/L/R/F labels while ignoring full-line SQL comments."""
+    statement = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    counts: Counter[str] = Counter()
+    for match in JOIN_KEYWORD_PATTERN.finditer(statement):
+        keyword = match.group(0).upper()
+        if keyword.startswith("INNER"):
+            counts["I"] += 1
+        elif keyword.startswith("LEFT"):
+            counts["L"] += 1
+        elif keyword.startswith("RIGHT"):
+            counts["R"] += 1
+        else:
+            counts["F"] += 1
+    return counts
+
+
+def rewrite_join_types(sql: str, kinds: Sequence[str]) -> str:
+    """Relabel an existing control tree without changing relations, edges, or grouping."""
+    replacements = iter(kinds)
+    replaced = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal replaced
+        replaced += 1
+        return JOIN_SQL[next(replacements)]
+
+    output: list[str] = []
+    for line in sql.splitlines(keepends=True):
+        if line.lstrip().startswith("--"):
+            output.append(line)
+        else:
+            output.append(JOIN_KEYWORD_PATTERN.sub(replace, line))
+    if replaced != len(kinds):
+        raise ValueError(
+            f"join-vector length {len(kinds)} does not match {replaced} emitted joins"
+        )
+    return "".join(output)
+
+
+def next_balanced_control_vector(
+    edge_count: int, current_counts: Counter[str], control_index: int
+) -> tuple[str, ...]:
+    """Choose a mixed cyclic vector that minimizes the current global imbalance."""
+    if edge_count < 2:
+        raise ValueError("a mixed control requires at least two join edges")
+
+    def candidate(offset: int) -> tuple[str, ...]:
+        return tuple(
+            MIXED_JOIN_CYCLE[(offset + edge_index) % len(MIXED_JOIN_CYCLE)]
+            for edge_index in range(edge_count)
+        )
+
+    def score(offset: int) -> tuple[float, float, int]:
+        counts = current_counts.copy()
+        counts.update(candidate(offset))
+        values = [counts[kind] for kind in MIXED_JOIN_CYCLE]
+        mean = sum(values) / len(values)
+        return (
+            float(max(values) - min(values)),
+            sum((value - mean) ** 2 for value in values),
+            (offset - control_index) % len(MIXED_JOIN_CYCLE),
+        )
+
+    best_offset = min(range(len(MIXED_JOIN_CYCLE)), key=score)
+    return candidate(best_offset)
+
+
 def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
-    """Materialize v2 core plus the timeout-filtered v1 evaluation controls."""
+    """Materialize the mixed v2 core and mixed Graph/industry/schema controls."""
     destination_root = root / "benchmark"
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
     with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
         core_rows = list(csv.DictReader(handle))
+    join_counts: Counter[str] = Counter()
     for row in core_rows:
         source = root / "core" / row["path"]
         query_id = f"derived__{row['query_id']}"
         destination_path = f"{row['family']}/{query_id}.sql"
+        content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        join_counts.update(row["join_vector"])
+        destination = destination_root / destination_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
         rows.append(
             {
                 "query_id": query_id,
@@ -2073,9 +2391,19 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
                 "family": row["family"],
                 "source_component": "core",
                 "source_path": f"core/{row['path']}",
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "source_content_sha256": content_sha256,
+                "content_sha256": content_sha256,
                 "corpus_version": "v2",
                 "base_query_id": row["base_query_id"],
+                "provenance_class": "benchmark_source_derived",
+                "source_benchmark": row["source_benchmark"],
+                "source_query": row["source_query"],
+                "source_location": row["source_location"],
+                "topology": row["topology"],
+                "tree_shape": row["tree_shape"],
+                "join_vector": row["join_vector"],
+                "relation_count": row["relation_count"],
+                "predicate_class": row["predicate_class"],
                 "selectivity_tier": row["selectivity_tier"],
                 "target_fraction": row["target_fraction"],
                 "selectivity_modulus": row["selectivity_modulus"],
@@ -2092,8 +2420,33 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
         ]
     if len(evaluation_rows) != V2_EVALUATION_QUERY_COUNT:
         raise RuntimeError(f"unexpected v1 evaluation-control count: {len(evaluation_rows)}")
-    for row in evaluation_rows:
+    for control_index, row in enumerate(evaluation_rows):
         source = v1_active / row["path"]
+        source_bytes = source.read_bytes()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        if source_sha256 != row["content_sha256"]:
+            raise RuntimeError(f"v1 evaluation control changed: {row['query_id']}")
+        source_sql = source_bytes.decode("utf-8")
+        edge_count = sql_join_keyword_count(source_sql)
+        vector = next_balanced_control_vector(edge_count, join_counts, control_index)
+        join_counts.update(vector)
+        metadata = (
+            "-- corpus_version: v2\n"
+            "-- workload_role: retained evaluation control with deterministic mixed joins\n"
+            f"-- join_vector: {''.join(vector)}; relation and predicate structure unchanged\n"
+        )
+        mixed_sql = rewrite_join_types(source_sql, vector)
+        mixed_sql = metadata + mixed_sql
+        destination = destination_root / row["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(mixed_sql, encoding="utf-8")
+        content_sha256 = hashlib.sha256(mixed_sql.encode("utf-8")).hexdigest()
+        if row["family"] == "graph":
+            provenance_class = "graph_synthetic_control"
+        elif row["query_id"].startswith("industry__"):
+            provenance_class = "industry_synthetic_control"
+        else:
+            provenance_class = "schema_synthetic_control"
         rows.append(
             {
                 "query_id": row["query_id"],
@@ -2103,9 +2456,19 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
                 "family": row["family"],
                 "source_component": "v1_active_evaluation",
                 "source_path": f"../benchmark/{row['path']}",
-                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "source_content_sha256": source_sha256,
+                "content_sha256": content_sha256,
                 "corpus_version": "v2",
                 "base_query_id": row["query_id"],
+                "provenance_class": provenance_class,
+                "source_benchmark": "",
+                "source_query": "",
+                "source_location": row["source_path"],
+                "topology": "",
+                "tree_shape": "",
+                "join_vector": "".join(vector),
+                "relation_count": str(edge_count + 1),
+                "predicate_class": "evaluation_control",
                 "selectivity_tier": "existing_v1_filter",
                 "target_fraction": "",
                 "selectivity_modulus": "",
@@ -2123,14 +2486,8 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
     paths = [row["path"] for row in rows]
     if len(paths) != len(set(paths)):
         raise RuntimeError("v2 benchmark contains duplicate paths")
-    for row in rows:
-        if row["source_component"] == "core":
-            source = root / row["source_path"]
-        else:
-            source = v1_active / row["path"]
-        destination = destination_root / row["path"]
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+    if max(join_counts.values()) - min(join_counts.values()) > 1:
+        raise RuntimeError(f"v2 benchmark join labels are imbalanced: {join_counts}")
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open(
         "w", newline="", encoding="utf-8"
@@ -2149,7 +2506,7 @@ def v1_active_rows(v1_root: Path) -> dict[str, dict[str, str]]:
 
 
 V2_STRESS_SOURCE_FILTER = re.compile(
-    r"^WHERE (?P<anchor>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*) "
+    r"^\s*AND hash\((?P<anchor>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\) "
     r"% (?P<source_modulus>[0-9]+) = 0;$",
     re.MULTILINE,
 )
@@ -2160,26 +2517,32 @@ def v2_stress_selection_rank(query_id: str) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def select_v2_stress_bases(v1_root: Path = DEFAULT_ROOT) -> list[dict[str, str]]:
-    """Select balanced v1 bases from metadata only, never measured performance."""
-    active_rows = v1_active_rows(v1_root)
-    with (v1_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
-        core_rows = {row["query_id"]: row for row in csv.DictReader(handle)}
+def select_v2_stress_bases(
+    root: Path, v1_root: Path = DEFAULT_ROOT
+) -> list[dict[str, str]]:
+    """Select balanced mixed v2 bases from metadata only, never performance."""
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    active_v1_base_ids = {
+        Path(row["source_path"]).stem
+        for row in v1_active_rows(v1_root).values()
+        if row["evaluation_role"] == "benchmark_derived"
+    }
     candidates: list[dict[str, str]] = []
-    for source_row in active_rows.values():
-        if source_row["evaluation_role"] != "benchmark_derived":
+    for metadata in core_rows:
+        if metadata["selectivity_tier"] != V2_SELECTIVITY_TIERS[0][0]:
             continue
-        base_query_id = Path(source_row["source_path"]).stem
-        metadata = core_rows.get(base_query_id)
-        if metadata is None or metadata["family"] not in V2_STRESS_FAMILIES:
+        if metadata["base_query_id"] not in active_v1_base_ids:
+            continue
+        if metadata["family"] not in V2_STRESS_FAMILIES:
             continue
         if (
-            set(metadata["join_vector"]) != {"F"}
+            len(set(metadata["join_vector"])) < 2
             or int(metadata["relation_count"]) < V2_STRESS_MIN_RELATIONS
             or metadata["predicate_class"] != "null_rejecting_outeryan_applicable"
         ):
             continue
-        source = v1_root / "benchmark" / source_row["path"]
+        source = root / "core" / metadata["path"]
         source_sql = source.read_text(encoding="utf-8")
         matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
         if len(matches) != 1:
@@ -2187,12 +2550,12 @@ def select_v2_stress_bases(v1_root: Path = DEFAULT_ROOT) -> list[dict[str, str]]
         candidate = dict(metadata)
         candidate.update(
             {
-                "active_query_id": source_row["query_id"],
-                "active_path": source_row["path"],
-                "content_sha256": source_row["content_sha256"],
+                "core_query_id": metadata["query_id"],
+                "core_path": metadata["path"],
+                "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "selectivity_anchor": matches[0].group("anchor"),
                 "source_selectivity_modulus": matches[0].group("source_modulus"),
-                "selection_rank": v2_stress_selection_rank(base_query_id),
+                "selection_rank": v2_stress_selection_rank(metadata["base_query_id"]),
             }
         )
         candidates.append(candidate)
@@ -2246,7 +2609,7 @@ def select_v2_stress_bases(v1_root: Path = DEFAULT_ROOT) -> list[dict[str, str]]
     return selected
 
 
-def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
+def generate_v2_selectivity_stress(root: Path) -> int:
     """Generate a metadata-selected, balanced-tier selectivity ablation."""
     legacy_root = root / "advantage_stress"
     if legacy_root.exists():
@@ -2255,20 +2618,21 @@ def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> 
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
     selection_policy = (
-        "v1 active benchmark-derived core in the static OuterYan target domain "
-        "(all-FULL join vector, at least four relations, applicable predicate); "
+        "mixed v2 counterparts of feasibility-screened active v1 source-derived core; "
+        "static target domain "
+        "(at least two join kinds, at least four relations, applicable predicate); "
         "four bases per TPC-H/TPC-DS/JOB; "
         "one distinct source query per left-deep/right-deep/bushy stratum by salted "
         "SHA-256 rank, plus one distinct-source coverage supplement favoring a new "
         "source benchmark and relation-count distance; no timing or result input"
     )
-    for base in select_v2_stress_bases(v1_root):
-        base_query_id = base["query_id"]
+    for base in select_v2_stress_bases(root):
+        base_query_id = base["base_query_id"]
         family = base["family"]
-        source = v1_root / "benchmark" / base["active_path"]
+        source = root / "core" / base["core_path"]
         source_sql = source.read_text(encoding="utf-8")
         if hashlib.sha256(source.read_bytes()).hexdigest() != base["content_sha256"]:
-            raise RuntimeError(f"v1 selectivity-stress base changed: {base_query_id}")
+            raise RuntimeError(f"v2 selectivity-stress base changed: {base_query_id}")
         matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
         if len(matches) != 1:
             raise RuntimeError(f"stress base needs one simple modulo filter: {base_query_id}")
@@ -2277,12 +2641,18 @@ def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> 
             query_id = f"stress__{base_query_id}_{tier}"
             relative_path = f"{family}/{query_id}.sql"
             predicate = (
-                f"WHERE hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
+                f"  AND hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
                 f"< {bucket_threshold};"
             )
             sql = V2_STRESS_SOURCE_FILTER.sub(predicate, source_sql, count=1)
+            sql = re.sub(
+                r"^-- selectivity_sweep:.*\n",
+                "",
+                sql,
+                count=1,
+                flags=re.MULTILINE,
+            )
             metadata = (
-                "-- corpus_version: v2\n"
                 "-- workload_role: metadata-selected balanced selectivity ablation\n"
                 f"-- selectivity_stress: {tier}; {description}; anchor={anchor}; "
                 f"predicate=hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
@@ -2300,15 +2670,13 @@ def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> 
                     "family": family,
                     "corpus_version": "v2",
                     "base_query_id": base_query_id,
-                    "source_path": f"../benchmark/{base['active_path']}",
+                    "source_path": f"../core/{base['core_path']}",
                     "source_content_sha256": base["content_sha256"],
                     "content_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
                     "headline_eligible": "false",
                     "reporting_role": "selectivity_ablation",
                     "performance_selected": "false",
-                    "selection_reference": (
-                        "outerjoin_benchmark/manifest.csv and benchmark/manifest.csv"
-                    ),
+                    "selection_reference": "outerjoin_benchmark/v2/manifest.csv",
                     "selection_policy": selection_policy,
                     "selection_salt": V2_STRESS_SELECTION_SALT,
                     "selection_rank": base["selection_rank"],
@@ -2322,7 +2690,7 @@ def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> 
                     "predicate_class": base["predicate_class"],
                     "relation_count": base["relation_count"],
                     "eligibility_domain": (
-                        "static metadata only: all-FULL, relation_count>=4, "
+                        "static metadata only: mixed I/L/R/F, relation_count>=4, "
                         "null-rejecting OuterYan-applicable predicate"
                     ),
                     "selectivity_tier": tier,
@@ -2355,19 +2723,33 @@ def generate_v2_selectivity_stress(root: Path, v1_root: Path = DEFAULT_ROOT) -> 
 
 
 def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
-    """Pin confirmed JOB regressions for focused optimizer work without hiding them."""
+    """Expose mixed v2 counterparts of the two historical v1 JOB regressions."""
     destination_root = root / "job_regressions"
     reset_generated_dir(destination_root)
-    active_rows = v1_active_rows(v1_root)
+    with (root / "benchmark" / "manifest.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        benchmark_rows = list(csv.DictReader(handle))
     rows: list[dict[str, str]] = []
     for base_query_id, expected_hash, observed_speedup in V2_JOB_REGRESSIONS:
-        source_query_id = f"derived__{base_query_id}"
-        source_row = active_rows.get(source_query_id)
-        if source_row is None or source_row["family"] != "job":
-            raise RuntimeError(f"missing v1 JOB regression: {source_query_id}")
-        if source_row["content_sha256"] != expected_hash:
-            raise RuntimeError(f"v1 JOB regression changed: {source_query_id}")
-        source = v1_root / "benchmark" / source_row["path"]
+        expected_base_id = (
+            base_query_id
+            if base_query_id.startswith("ojb_")
+            else f"derived__{base_query_id}"
+        )
+        candidates = [
+            row for row in benchmark_rows
+            if row["base_query_id"] == expected_base_id
+            and row["family"] == "job"
+            and row["selectivity_tier"] in {"sel01", "existing_v1_filter"}
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError(f"missing mixed v2 JOB counterpart: {expected_base_id}")
+        source_row = candidates[0]
+        source = root / "benchmark" / source_row["path"]
+        content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        if content_sha256 != source_row["content_sha256"]:
+            raise RuntimeError(f"mixed v2 JOB counterpart changed: {expected_base_id}")
         query_id = f"regression__{base_query_id}"
         relative_path = f"job/{query_id}.sql"
         destination = destination_root / relative_path
@@ -2382,17 +2764,21 @@ def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int
                 "corpus_version": "v2",
                 "base_query_id": base_query_id,
                 "source_path": f"../benchmark/{source_row['path']}",
-                "content_sha256": expected_hash,
+                "content_sha256": content_sha256,
+                "join_vector": source_row["join_vector"],
                 "headline_eligible": "false",
                 "selection_reference": V2_0916_REFERENCE_RUN,
-                "observed_tm_speedup": observed_speedup,
+                "historical_v1_content_sha256": expected_hash,
+                "historical_v1_observed_tm_speedup": observed_speedup,
                 "selection_policy": (
+                    "mixed v2 counterpart of an all-FULL v1 query with "
                     "selected_plan=OUTERYAN and tm_speedup<0.95 in the 0916 run"
                 ),
-                "disposition": "retain_in_main_benchmark_and_fix_optimizer",
+                "measurement_status": "requires_v2_remeasurement",
+                "disposition": "retain_mixed_counterpart_in_main_benchmark",
                 "rationale": (
-                    "performance-only removal would bias the benchmark; this focused "
-                    "view makes the regression cheap to reproduce"
+                    "changing join labels invalidates the old speedup, but retaining the "
+                    "counterpart avoids silently dropping historically difficult structure"
                 ),
             }
         )
@@ -2419,7 +2805,36 @@ def validate_v2_generated(root: Path) -> None:
         raise RuntimeError(f"unexpected v2 selectivity distribution: {tier_counts}")
     base_counts = Counter(row["base_query_id"] for row in core_rows)
     if set(base_counts.values()) != {len(V2_SELECTIVITY_TIERS)} or len(base_counts) != CORE_QUERY_COUNT:
-        raise RuntimeError("v2 must contain every v1 core variant at every selectivity tier")
+        raise RuntimeError("v2 must contain every structural variant at every selectivity tier")
+    base_vectors: dict[str, set[str]] = {}
+    for row in core_rows:
+        base_vectors.setdefault(row["base_query_id"], set()).add(row["join_vector"])
+    if any(len(vectors) != 1 for vectors in base_vectors.values()):
+        raise RuntimeError("selectivity tiers changed a base query's join vector")
+    if {row["source_benchmark"] for row in core_rows} != SOURCE_BENCHMARKS:
+        raise RuntimeError("v2 core source provenance is incomplete")
+    if any(len(set(row["join_vector"])) < 2 for row in core_rows):
+        raise RuntimeError("v2 core contains a single-kind join vector")
+    if any(
+        int(row["relation_count"]) >= 5
+        and set(row["join_vector"]) != set(MIXED_JOIN_CYCLE)
+        for row in core_rows
+    ):
+        raise RuntimeError("a v2 query with at least four edges does not cover I/L/R/F")
+    unique_base_rows = [
+        row for row in core_rows
+        if row["selectivity_tier"] == V2_SELECTIVITY_TIERS[0][0]
+    ]
+    base_join_counts: Counter[str] = Counter()
+    grouped_join_counts: dict[tuple[str, str], Counter[str]] = {}
+    for row in unique_base_rows:
+        base_join_counts.update(row["join_vector"])
+        group = (row["family"], row["tree_shape"])
+        grouped_join_counts.setdefault(group, Counter()).update(row["join_vector"])
+    if max(base_join_counts.values()) - min(base_join_counts.values()) > 1:
+        raise RuntimeError(f"v2 core join labels are imbalanced: {base_join_counts}")
+    if any(max(counts.values()) - min(counts.values()) > 3 for counts in grouped_join_counts.values()):
+        raise RuntimeError(f"v2 family/shape join labels are imbalanced: {grouped_join_counts}")
     for row in core_rows:
         sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
         predicate = (
@@ -2429,6 +2844,8 @@ def validate_v2_generated(root: Path) -> None:
             raise RuntimeError(f"{row['path']}: missing v2 selectivity provenance")
         if " ON 1=1" in sql.upper():
             raise RuntimeError(f"{row['path']}: cross product")
+        if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
+            raise RuntimeError(f"{row['path']}: SQL and manifest join labels differ")
 
     active_root = root / "benchmark"
     with (active_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
@@ -2453,6 +2870,23 @@ def validate_v2_generated(root: Path) -> None:
         "derived__oy_jb_jb_bushy4a_v2": "job_regression_guard",
     }:
         raise RuntimeError(f"unexpected v2 JOB regression tags: {regression_roles}")
+    if any(len(set(row["join_vector"])) < 2 for row in active_rows):
+        raise RuntimeError("v2 benchmark contains a single-kind join vector")
+    active_join_counts: Counter[str] = Counter()
+    for row in active_rows:
+        active_join_counts.update(row["join_vector"])
+        sql = (active_root / row["path"]).read_text(encoding="utf-8")
+        if hashlib.sha256(sql.encode("utf-8")).hexdigest() != row["content_sha256"]:
+            raise RuntimeError(f"{row['path']}: output content hash mismatch")
+        if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
+            raise RuntimeError(f"{row['path']}: SQL and benchmark join labels differ")
+        if (
+            row["provenance_class"] == "benchmark_source_derived"
+            and row["source_benchmark"] not in SOURCE_BENCHMARKS
+        ):
+            raise RuntimeError(f"{row['path']}: invalid source benchmark provenance")
+    if max(active_join_counts.values()) - min(active_join_counts.values()) > 1:
+        raise RuntimeError(f"v2 benchmark join labels are imbalanced: {active_join_counts}")
 
     stress_root = root / "selectivity_stress"
     with (stress_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
@@ -2481,7 +2915,7 @@ def validate_v2_generated(root: Path) -> None:
     if any(row["performance_selected"] != "false" for row in stress_rows):
         raise RuntimeError("selectivity-stress membership must not use measured performance")
     if any(
-        set(row["join_vector"]) != {"F"}
+        len(set(row["join_vector"])) < 2
         or int(row["relation_count"]) < V2_STRESS_MIN_RELATIONS
         or row["predicate_class"] != "null_rejecting_outeryan_applicable"
         for row in stress_rows
@@ -2521,6 +2955,12 @@ def validate_v2_generated(root: Path) -> None:
         raise RuntimeError("v2 JOB regression manifest does not match generated SQL")
     if any(row["headline_eligible"] != "false" for row in regression_rows):
         raise RuntimeError("focused regression copies must not be counted as new samples")
+    if any(
+        len(set(row["join_vector"])) < 2
+        or row["measurement_status"] != "requires_v2_remeasurement"
+        for row in regression_rows
+    ):
+        raise RuntimeError("v2 JOB counterparts must be mixed and marked for remeasurement")
 
 
 def main() -> None:
@@ -2560,8 +3000,7 @@ def main() -> None:
     print(
         f"generated {benchmark_count} active benchmark, {core_count} derived core, "
         f"{industry_count} industry-evaluation, and {supplemental_count} supplemental queries; "
-        f"excluded {core_count + industry_count - benchmark_count} pinned active timeouts "
-        f"(approved coverage losses documented); "
+        "applied no historical timeout exclusions because the mixed-join SQL is new; "
         f"archived {timeout_count} historical timeouts and classified {legacy_count} legacy queries "
         f"under {root}"
     )

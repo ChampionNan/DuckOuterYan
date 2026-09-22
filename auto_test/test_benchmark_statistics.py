@@ -84,6 +84,20 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             self.assertEqual(sum(row["counts"]["valid"] for row in groups), summary["counts"]["valid"])
             self.assertAlmostEqual(sum(row["totals"]["off_s"] for row in groups), summary["totals"]["off_s"])
 
+    def test_workload_components_are_reported_when_provenance_is_available(self):
+        frame = self.frame()
+        frame["workload_component"] = ["structural", "structural", "evaluation"]
+        report = STATS.build_statistics(frame)
+        components = {
+            group["workload_component"]: group
+            for group in report["groups"]
+            if group["subset"] == "all" and group["scope"] == "workload_component"
+        }
+        self.assertEqual(components["structural"]["counts"]["valid"], 2)
+        self.assertEqual(components["evaluation"]["counts"]["valid"], 1)
+        self.assertEqual(components["evaluation"]["totals"]["speedup"], 2)
+        self.assertIn("Workload-component breakdown", STATS.markdown_report(report))
+
     def test_duplicate_or_mixed_thread_data_is_rejected(self):
         frame = self.frame()
         with self.assertRaisesRegex(ValueError, "deduplicate"):
@@ -113,7 +127,8 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             self.assertEqual(report["input_rows"], 3)
             self.assertEqual(len(report["sources"][0]["sha256"]), 64)
             markdown = (root / "STATISTICS.md").read_text()
-            for text in ("Geomean", "Percentiles", "OFF/ON runtime", "Shape breakdown", "Extreme queries", "Sources"):
+            for text in ("Geomean", "Percentiles", "OFF/ON runtime", "Shape breakdown", "Extreme queries",
+                         "Phase-profile statistics", "Sources"):
                 self.assertIn(text, markdown)
             self.assertNotIn("nan", markdown)
             # All Markdown tables must have matching header/separator/data widths.
@@ -126,6 +141,27 @@ class BenchmarkStatisticsTest(unittest.TestCase):
                     self.assertEqual(count, width, line)
                 else:
                     width = None
+
+    def test_phase_profiles_are_separate_cpu_work_and_wall_latency(self):
+        frame = self.frame()
+        frame["profile_status"] = ["OK", "not-selected", "OK"]
+        frame["profile_threads"] = 32
+        frame["profile_wall_time_s"] = [2, None, 4]
+        frame["profile_cpu_time_s"] = [10, None, 20]
+        frame["profile_round1_operator_s"] = [1, None, 4]
+        frame["profile_round2_operator_s"] = [2, None, 4]
+        frame["profile_round3_operator_s"] = [3, None, 6]
+        frame["profile_other_elapsed_s"] = [4, None, 6]
+        report = STATS.build_statistics(frame)
+        phase = report["phase_profiles"]
+        self.assertTrue(phase["available"])
+        self.assertEqual(len(phase["queries"]), 2)
+        overall = phase["groups"][0]
+        self.assertEqual(overall["cpu_total_s"], 30)
+        self.assertAlmostEqual(overall["cpu_weighted_fraction"]["round1"], 5 / 30)
+        self.assertAlmostEqual(overall["cpu_weighted_fraction"]["other"], 10 / 30)
+        self.assertEqual(overall["profile_wall_s"]["median"], 3)
+        self.assertEqual(overall["unprofiled_speedup"]["median"], 1.25)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,14 @@ import numpy as np
 import pandas as pd
 
 
+PHASE_COMPONENTS = (
+    ("round1", "profile_round1_operator_s"),
+    ("round2", "profile_round2_operator_s"),
+    ("round3", "profile_round3_operator_s"),
+    ("other", "profile_other_elapsed_s"),
+)
+
+
 def distribution(values: pd.Series) -> dict:
     """Sample SD/variance; linear-interpolated percentiles; no empty-set zeros."""
     if values.empty:
@@ -44,8 +52,10 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         raise ValueError("statistics require one timing thread count")
     if frame.duplicated(["family", "query"]).any():
         raise ValueError("deduplicate final and attempts rows before computing statistics")
-    columns = [column for column in ("query", "family", "topology", "selected_plan", "correct", "note",
-                                      "timing_threads", "sql_path") if column in frame]
+    columns = [column for column in (
+        "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
+        "selected_plan", "correct", "note", "timing_threads", "sql_path",
+    ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
     detail["selected_plan"] = detail.get("selected_plan", pd.Series("UNKNOWN", index=detail.index)).fillna(
         "UNKNOWN").astype(str).str.upper()
@@ -101,6 +111,126 @@ def summarize(rows: pd.DataFrame) -> dict:
     }
 
 
+def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
+    """Summarize complete same-run phase profiles without treating CPU work as wall time."""
+    required = {
+        "query", "family", "selected_plan", "profile_status", "profile_wall_time_s",
+        "profile_cpu_time_s", *(column for _, column in PHASE_COMPONENTS),
+    }
+    if not required.issubset(frame.columns):
+        return {
+            "available": False,
+            "reason": "input has no complete phase-profile schema",
+            "method": {},
+            "groups": [],
+            "queries": [],
+        }
+
+    detail = frame[[column for column in (
+        "query", "family", "topology", "selected_plan", "profile_status", "profile_threads",
+        "profile_wall_time_s", "profile_cpu_time_s", *(column for _, column in PHASE_COMPONENTS),
+        f"{metric}_off", f"{metric}_on",
+    ) if column in frame]].copy().reset_index(drop=True)
+    numeric_columns = [
+        "profile_threads", "profile_wall_time_s", "profile_cpu_time_s",
+        *(column for _, column in PHASE_COMPONENTS), f"{metric}_off", f"{metric}_on",
+    ]
+    for column in numeric_columns:
+        if column in detail:
+            detail[column] = pd.to_numeric(detail[column], errors="coerce")
+    selected = detail["selected_plan"].fillna("").astype(str).str.upper().eq("OUTERYAN")
+    complete = detail["profile_status"].fillna("").astype(str).str.upper().eq("OK")
+    finite = np.isfinite(detail["profile_wall_time_s"]) & detail["profile_wall_time_s"].gt(0)
+    finite &= np.isfinite(detail["profile_cpu_time_s"]) & detail["profile_cpu_time_s"].gt(0)
+    for _, column in PHASE_COMPONENTS:
+        finite &= np.isfinite(detail[column]) & detail[column].ge(0)
+    detail = detail.loc[selected & complete & finite].copy()
+    if detail.empty:
+        return {
+            "available": False,
+            "reason": "no complete OuterYan-selected phase profiles",
+            "method": {},
+            "groups": [],
+            "queries": [],
+        }
+
+    detail["phase_sum_s"] = sum(detail[column] for _, column in PHASE_COMPONENTS)
+    tolerance = np.maximum(1e-9, detail["profile_cpu_time_s"].abs() * 1e-8)
+    consistent = (detail["phase_sum_s"] - detail["profile_cpu_time_s"]).abs().le(tolerance)
+    detail = detail.loc[consistent].copy()
+    if detail.empty:
+        return {
+            "available": False,
+            "reason": "phase components do not reconcile with profiled CPU time",
+            "method": {},
+            "groups": [],
+            "queries": [],
+        }
+
+    for name, column in PHASE_COMPONENTS:
+        detail[f"{name}_fraction"] = detail[column] / detail["profile_cpu_time_s"]
+    off_column, on_column = f"{metric}_off", f"{metric}_on"
+    if off_column in detail and on_column in detail:
+        valid_pair = (
+            np.isfinite(detail[off_column]) & detail[off_column].gt(0)
+            & np.isfinite(detail[on_column]) & detail[on_column].gt(0)
+        )
+        detail["unprofiled_speedup"] = (detail[off_column] / detail[on_column]).where(valid_pair)
+    else:
+        detail["unprofiled_speedup"] = np.nan
+
+    def phase_group(family: str, rows: pd.DataFrame) -> dict:
+        cpu_total = float(rows["profile_cpu_time_s"].sum())
+        component_seconds = {
+            name: float(rows[column].sum()) for name, column in PHASE_COMPONENTS
+        }
+        speedups = rows["unprofiled_speedup"].dropna()
+        valid_pairs = rows.loc[rows["unprofiled_speedup"].notna()]
+        return {
+            "family": family,
+            "profiles": len(rows),
+            "profile_threads": sorted(rows["profile_threads"].dropna().astype(int).unique().tolist())
+            if "profile_threads" in rows else [],
+            "cpu_total_s": cpu_total,
+            "component_seconds": component_seconds,
+            "cpu_weighted_fraction": {
+                name: value / cpu_total for name, value in component_seconds.items()
+            },
+            "median_query_fraction": {
+                name: float(rows[f"{name}_fraction"].median()) for name, _ in PHASE_COMPONENTS
+            },
+            "profile_wall_s": distribution(rows["profile_wall_time_s"]),
+            "unprofiled_speedup": distribution(speedups),
+            "unprofiled_total_speedup": (
+                float(valid_pairs[off_column].sum() / valid_pairs[on_column].sum())
+                if len(valid_pairs) else None
+            ),
+        }
+
+    groups = [phase_group("all", detail)]
+    groups.extend(phase_group(family, rows) for family, rows in detail.groupby("family", sort=True))
+    query_columns = [column for column in (
+        "query", "family", "topology", "profile_threads", "profile_wall_time_s",
+        "profile_cpu_time_s", "phase_sum_s", "unprofiled_speedup",
+        *(column for _, column in PHASE_COMPONENTS),
+        *(f"{name}_fraction" for name, _ in PHASE_COMPONENTS),
+    ) if column in detail]
+    return {
+        "available": True,
+        "reason": None,
+        "method": {
+            "population": "Complete same-run profiles for queries whose ON run selected OuterYan",
+            "components": "Accumulated operator CPU seconds; components sum to profile_cpu_time_s",
+            "wall_time": "profile_wall_time_s is elapsed latency and is not added to CPU components",
+            "cpu_weighted_fraction": "sum(component CPU seconds) / sum(profile CPU seconds)",
+            "median_query_fraction": "median of each query's component / profile CPU time",
+            "speedup": "Unprofiled OFF / ON timing for the same queries",
+        },
+        "groups": groups,
+        "queries": json.loads(detail[query_columns].to_json(orient="records", double_precision=15)),
+    }
+
+
 def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str] | None = None) -> dict:
     detail = prepare_queries(frame, metric)
     groups = []
@@ -109,14 +239,23 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                          ("duckdb_selected", detail.loc[detail["selected_plan"].eq("DUCKDB")])):
         groups.append({"subset": subset, "scope": "overall", "family": "all", "topology": "all",
                        **summarize(rows)})
-        for scope, keys in (("benchmark", ["family"]), ("shape", ["topology"]),
-                            ("benchmark_shape", ["family", "topology"])):
+        group_specs = [("benchmark", ["family"]), ("shape", ["topology"]),
+                       ("benchmark_shape", ["family", "topology"])]
+        if "workload_component" in detail:
+            group_specs.append(("workload_component", ["workload_component"]))
+        for scope, keys in group_specs:
             for group_keys, group_rows in rows.groupby(keys, sort=True):
                 if not isinstance(group_keys, tuple):
                     group_keys = (group_keys,)
                 identity = dict(zip(keys, group_keys))
-                groups.append({"subset": subset, "scope": scope, "family": identity.get("family", "all"),
-                               "topology": identity.get("topology", "all"), **summarize(group_rows)})
+                groups.append({
+                    "subset": subset,
+                    "scope": scope,
+                    "family": identity.get("family", "all"),
+                    "topology": identity.get("topology", "all"),
+                    "workload_component": identity.get("workload_component", "all"),
+                    **summarize(group_rows),
+                })
     source_info = []
     for source in sources or []:
         path = Path(source).resolve()
@@ -141,6 +280,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
             "uncertainty": "Descriptive query-level statistics, not confidence intervals over repeated runs",
         },
         "groups": groups,
+        "phase_profiles": build_phase_statistics(frame, metric),
         "queries": json.loads(detail.to_json(orient="records", double_precision=15)),
     }
 
@@ -208,11 +348,45 @@ def markdown_report(report: dict) -> str:
                 lines.append(f"| {row['family']} | {row['topology']} | {row['counts']['valid']} / "
                              f"{row['counts']['total']} | " + " | ".join(number(value) for value in
                              values + [row["totals"]["speedup"]]) + " |")
+        component_rows = [row for row in report["groups"]
+                          if row["subset"] == subset and row["scope"] == "workload_component"]
+        if component_rows:
+            lines.extend(["", "### Workload-component breakdown", "",
+                          "| Component | Valid / total | Geomean | Mean | Median | Max | Total-time speed-up |",
+                          "|---|---:|---:|---:|---:|---:|---:|"])
+            for row in component_rows:
+                stats, counts = row["speedup"], row["counts"]
+                values = [stats[key] for key in ("geomean", "mean", "median", "max")]
+                lines.append(
+                    f"| {row['workload_component']} | {counts['valid']} / {counts['total']} | "
+                    + " | ".join(number(value) for value in values + [row["totals"]["speedup"]])
+                    + " |"
+                )
         lines.extend(["", "### Extreme queries", ""])
         for row in rows:
             for extreme in ("min", "max"):
                 names = ", ".join(f"`{query}`" for query in row["speedup"][f"{extreme}_queries"]) or "NA"
                 lines.append(f"- {row['family']} {extreme} = {number(row['speedup'][extreme])}: {names}.")
+        lines.append("")
+    phase = report["phase_profiles"]
+    lines.extend(["## Phase-profile statistics", ""])
+    if not phase["available"]:
+        lines.extend([f"Unavailable: {phase['reason']}.", ""])
+    else:
+        lines.extend(f"- {name}: {definition}." for name, definition in phase["method"].items())
+        lines.extend(["", "CPU shares below are work-weighted across the displayed population; they are not wall-time shares.", "",
+                      "| Benchmark | Profiles | Round 1 CPU (%) | Round 2 CPU (%) | Round 3 CPU (%) | Other CPU (%) | Median unprofiled speed-up | Total-time speed-up |",
+                      "|---|---:|---:|---:|---:|---:|---:|---:|"])
+        phase_order = {name: index for index, name in enumerate(("all", "graph", "TPC-H", "TPC-DS", "JOB"))}
+        for row in sorted(phase["groups"], key=lambda item: phase_order.get(item["family"], 99)):
+            shares = row["cpu_weighted_fraction"]
+            median = row["unprofiled_speedup"]["median"]
+            values = [shares[name] * 100 for name, _ in PHASE_COMPONENTS]
+            lines.append(
+                f"| {row['family']} | {row['profiles']} | "
+                + " | ".join(number(value) for value in values + [median, row["unprofiled_total_speedup"]])
+                + " |"
+            )
         lines.append("")
     lines.extend(["## Excluded queries", "", "| Benchmark | Query | Reason | Recorded note |", "|---|---|---|---|"])
     for row in report["queries"]:

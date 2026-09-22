@@ -1,10 +1,17 @@
-# Active corpus: multithread timeout exclusions
+# Retired FULL-heavy corpus: multithread timeout exclusions
 
-The default corpus contains **176 queries**, down from 206 originally and 185
-after the first timeout filter. This update removes only nine explicit
-32-thread timeouts. No successful query, including an OuterYan regression or a
-DuckDB-selected control, is removed to improve the score or rebalance counts.
-The full 170-query core and 36-query evaluation components retain all source SQL.
+> Historical record only. The current default revision is
+> `v1-mixed-20260922`, contains all **206 queries**, and has no active timeout
+> exclusions. Changing join labels changed the SQL and invalidated the timeout
+> and performance observations below. A complete mixed-v1 run is required
+> before defining any new exclusions.
+
+The retired FULL-heavy active corpus contained 176 queries, down from 206
+originally and 185 after the first timeout filter. This record explains the
+nine explicit 32-thread removals. No successful query, including an OuterYan
+regression or a DuckDB-selected control, was removed to improve the score or
+rebalance counts. The full 170-query core and 36-query evaluation components
+retained all source SQL.
 
 ## Evidence and scope
 
@@ -91,12 +98,10 @@ nine newly confirmed 32-thread exclusions separately. Generation never reads
 machine-local result files. The historical logs contain no SQL hashes; the
 pins protect the current local source bytes, not proof of server byte identity.
 
-`active_timeout_exclusions.csv` records the removed active path, preserved
-component source path, current content hash, reference run, thread count,
-timeout budget and phase. This is separate from the 84 older historical
-exclusions in `timeout_exclusions.csv`. No source SQL or raw result is deleted.
-To restore cases after a fix, update the checked-in pins and coverage policy,
-then regenerate; the complete component views can also be run explicitly.
+The historical exclusion metadata remains in `../benchmark_timeouts.py`.
+`active_timeout_exclusions.csv` is intentionally empty for the current mixed
+revision. The 84 still older historical exclusions remain in
+`timeout_exclusions.csv`. No source SQL or raw result was deleted.
 
 This update used generation, hash validation and lightweight tests only.
 No large-data query or new performance experiment was run on the laptop.

@@ -8,11 +8,10 @@ explicitly requested.
 The v1 layout contains one active benchmark plus three auditable component
 views:
 
-- `benchmark/` is the active 176-query filtered union used by `../outerjoin_query` and
+- `benchmark/` is the active 206-query union used by `../outerjoin_query` and
   the default harness. Query names use only `derived__` and `industry__`.
-  Specific evaluation roles remain available in the manifest. The complete
-  components below remain intact; the active subset is 144 core plus 32
-  evaluation queries.
+  Specific evaluation roles remain available in the manifest. It contains the
+  complete 170-query core plus all 36 evaluation controls.
 
 - `core/` is the 170-query paper benchmark. Every query is derived from a named
   TPC-H, TPC-DS, JOB, or SQLStorm query skeleton and has a row in
@@ -39,17 +38,15 @@ query membership, timeout exclusions, and retained wins are pinned in
 `../legacy_corpus.py`. The result filename is provenance only; generation does
 not read that CSV or require a local `results/` directory.
 
-The active union excludes 21 confirmed 48-thread OFF correctness-gate timeouts
-from the August 30 run and nine additional 32-thread timeouts from the September
-8 invocation, pinned in `../benchmark_timeouts.py` and listed with per-query
-provenance in `active_timeout_exclusions.csv`. The user explicitly authorized
-removing the seven formerly protected cases (two graph bushy and all five TPC-H
-Q9 star variants), plus two TPC-DS Q93 variants. The active set therefore loses
-graph bushy and TPC-H core star coverage; these are documented limitations.
-Missing single-thread timings do not cause exclusions. No component SQL is
-deleted, and the generator does not read the reference results. See
-[`active_corpus_coverage.md`](active_corpus_coverage.md) for the exact policy,
-coverage limits, distribution changes, and recovery procedure.
+The earlier FULL-heavy revision excluded 30 queries using August 30 and
+September 8 timeout observations. Those observations do not apply after join
+labels changed: the SQL, semantics, and execution plans are different.
+`active_timeout_exclusions.csv` is therefore empty for
+`v1-mixed-20260922`, and the current active union restores complete family,
+shape, and source coverage. `../benchmark_timeouts.py` and
+[`active_corpus_coverage.md`](active_corpus_coverage.md) retain the retired
+policy only as historical provenance. A new timeout policy, if needed, must be
+derived from a complete mixed-v1 run and pinned under a new corpus revision.
 
 The core size is deliberately comparable to the 170 completed legacy cases,
 but core membership is not copied from that experiment. It contains 34 source
@@ -72,42 +69,46 @@ python3 auto_test/gen_outerjoin_benchmark.py
 python3 auto_test/gen_outerjoin_benchmark.py --version v2
 ```
 
-Generation is deterministic. The script verifies that every core query:
+Generation is deterministic. For both corpus versions, the script verifies that every core query:
 
 - has at least three relations and at least one outer join;
 - uses a connected sequence of source-derived equality predicates;
 - contains no cross product (`ON 1=1`);
-- uses `FULL OUTER JOIN` in every primary/control slot (the `alt` slot is an
-  applicability-checked mixed vector), with one plain equality per graph edge;
+- uses at least two join kinds, includes at least one outer join, and has one
+  plain equality per graph edge;
 - stays inside the current applicability envelope (no aggregate, `DISTINCT`,
   or window operator); and
 - has an exact manifest entry.
 
+V2 additionally verifies source provenance, paired vectors across selectivity
+tiers, and workload-level I/L/R/F balance.
+
 The generated SQL has also been `EXPLAIN`-validated against the local TPC-H,
 TPC-DS, and JOB databases with OuterYan both enabled and disabled.
 
-## Transformation variants
+## Mixed transformation variants
 
 For each normalized source skeleton, the generator emits five tree-grouping
 variants. The suffixes are retained for continuity with earlier result files;
-the manifest's `join_vector` is authoritative. Primary/control slots are
-all-`F`, while the structurally necessary `alt` slot remains mixed.
+the manifest's `join_vector` is authoritative. A deterministic blocked rotation
+assigns `I/L/R/F` labels independently of measured performance.
 
 | Suffix | Transformation | Purpose |
 |---|---|---|
-| `ldmx` | primary left-deep FULL tree | Primary left-deep traversal of the fixed graph. |
-| `rdmx` | primary right-deep FULL tree | Primary right-deep traversal of the fixed graph. |
-| `bmx` | connected bushy FULL tree | Exercise bushy grouping when the graph admits two nontrivial connected root subplans. |
-| `bdmx` | secondary connected bushy FULL tree | Use another connected split/orientation of the fixed graph. |
+| `ldmx` | primary left-deep mixed tree | Primary left-deep traversal of the fixed graph. |
+| `rdmx` | primary right-deep mixed tree | Primary right-deep traversal of the fixed graph. |
+| `bmx` | connected bushy mixed tree | Exercise bushy grouping when the graph admits two nontrivial connected root subplans. |
+| `bdmx` | secondary connected bushy mixed tree | Use another connected split/orientation of the fixed graph. |
 | `alt` | alternate left-deep mixed tree | Replace `bmx` when a true cross-product-free bushy tree is unavailable. |
-| `rdax` | secondary right-deep FULL tree | Replace `bdmx` when a true bushy root is structurally unavailable. |
-| `rduX` | alternate right-deep FULL tree | Start from the opposite graph side; `X` is a legacy filename label and the manifest still records an all-`F` vector. |
+| `rdax` | secondary right-deep mixed tree | Replace `bdmx` when a true bushy root is structurally unavailable. |
+| `rduX` | alternate right-deep mixed tree | Start from the opposite graph side; `X` is a legacy filename label, not the actual join vector. |
 
 The 170-query core comprises 34 `ldmx`, 34 `rdmx`, 22 `bmx`, 22 `bdmx`, 12
-`alt`, 12 `rdax`, and 34 `rduX` cases. The 158 non-`alt` entries are all-FULL;
-the 12 `alt` entries retain mixed labels. It contains 46 left-deep, 80
-right-deep, and 44 bushy inputs. Regrouped outer joins are independently
-specified queries; no cross-grouping semantic-equivalence claim is made.
+`alt`, 12 `rdax`, and 34 `rduX` cases. It contains 46 left-deep, 80
+right-deep, and 44 bushy inputs. Its 625 edge occurrences contain 157 INNER
+and 156 each LEFT, RIGHT, and FULL. No query uses a single-kind vector.
+Regrouped outer joins are independently specified queries; no cross-grouping
+semantic-equivalence claim is made.
 
 The transformation extracts a connected subgraph of relation instances,
 aliases, and equality edges from the named source query. That graph is fixed
@@ -124,18 +125,22 @@ relation it references. NULL-tolerant guards such as `P(x) OR x IS NULL`, as
 well as `COALESCE` and `IS [NOT] DISTINCT FROM`, are excluded from the core.
 This keeps the performance workload within OuterYan's null-rejection envelope;
 separate correctness tests cover safe handling of NULL-tolerant predicates.
-Primary/control joins are initially FULL so filter pushdown may simplify
-direction without collapsing the complete graph to a pure inner query; the 12
-mixed `alt` cases are separately applicability-checked. The `predicate_class`
-manifest value is `null_rejecting_outeryan_applicable`.
+Mixed join vectors are assigned without consulting runtime and then checked for
+the current applicability envelope. The `predicate_class` manifest value is
+`null_rejecting_outeryan_applicable`.
 
-The 36-query evaluation view receives the same graph-preserving FULL-join
+The 36-query evaluation view receives the same graph-preserving mixed-join
 normalization. Its two historical aggregate patterns are emitted as detail
 projections because the active optimizer deliberately bypasses aggregate
 queries. `supplemental/` remains the exact, unnormalized 28-query legacy-win
 view for historical comparison. Historical speedups in the active evaluation
 manifest describe source-selection provenance; they do not transfer to the
 normalized SQL.
+
+Across the complete 206-query v1 union, the 753 input join-edge occurrences
+contain 188 INNER, 188 LEFT, 189 RIGHT, and 188 FULL labels. Twenty-six queries
+use only multiple outer-join kinds and 180 combine INNER with outer joins; no
+query has a single-kind vector.
 
 ## Provenance terminology
 
@@ -177,16 +182,31 @@ bash auto_test/experiment_onoff.sh --all
 
 ## Expanded v2 design
 
-V2 expands all 170 v1 benchmark-derived structural variants at three additional
-hash-sampling tiers on a central join key: approximately 0.1%, 1%, and 5% of
-the v1 anchor domain. The highest tier is deliberately capped at 5%; every v2
-query adds a filter to its v1 form, so it does not broaden the original input.
-This produces 510 benchmark-derived queries. V2 also carries forward the 32
-timeout-filtered v1 evaluation controls, for 542 queries in total.
+V2 uses the same 34 provenance-backed source graphs, five structural slots per
+source, and mixed-join assignment as the current v1. It adds three selectivity
+tiers while assigning join edges by the same deterministic cyclic rotation
+over INNER, LEFT, RIGHT, and FULL.
+Across the 170 base structures, the 625 edges contain 157 INNER and 156 each
+LEFT, RIGHT, and FULL. A query with at least four edges contains all four join
+kinds; shorter vectors contain two or three kinds. This gives both pure
+outer-join cases using multiple outer kinds and cases that mix INNER with outer
+joins, with no all-FULL or other single-kind main query.
+This is a balance over input-expression labels; optimizer simplification and
+physical join selection are evaluated rather than assumed.
+
+Each base is instantiated at three hash-sampling tiers on a central join key:
+approximately 0.1%, 1%, and 5% of the source-derived anchor domain. A base uses
+the same join vector at all three tiers. This produces 510 benchmark-derived
+queries. V2 also carries forward all 36 Graph, industry, and schema-synthetic
+evaluation controls. Their relations, predicates, and
+parentheses are retained while join labels are deterministically rebalanced.
+Across all 546 main queries, the 2,003 edge occurrences contain 501 INNER, 501
+LEFT, 501 RIGHT, and 500 FULL labels. The benchmark manifest explicitly
+distinguishes the 510 source-derived queries from the synthetic controls.
 
 The `pattern_role` manifest field marks star/branch plus alternate, bushy, or
 right-start strata as a `v1_advantage_hypothesis`, reflecting the 0916 design
-observation. That tag never controls membership: every v1 seed and tree variant
+observation. That tag never controls membership: every seed and tree variant
 is present at every selectivity tier, and the remaining cases are retained as
 `paired_structural_control`. This keeps the workload useful for testing the
 low-selectivity hypothesis without constructing a corpus only from favorable
@@ -194,8 +214,9 @@ OuterYan cases. SQL comments and the v2 manifests record the source query,
 transformation, selectivity tier, modulus, anchor column, and pattern role.
 
 V2 also generates two deliberately separate diagnostic views. The
-`selectivity_stress/` view contains 84 variants of 12 metadata-selected v1
-structures from a static target domain: all-FULL joins with at least four
+`selectivity_stress/` view contains 84 variants of 12 metadata-selected mixed
+v2 counterparts of feasibility-screened v1 structures from a static target
+domain: mixed joins with at least four
 relations and an applicable null-rejecting predicate. Four distinct source
 queries come from each of TPC-H, TPC-DS, and JOB. Every family covers
 left-deep, right-deep, and bushy trees, and its fourth structure broadens
@@ -206,17 +227,17 @@ speed-ups. Each base appears once at 0.025%, 0.05%, 0.2%, 10%, 20%, 50%, and
 is a correlated selectivity ablation rather than an independent 84-query
 headline sample, so every row is marked `headline_eligible=false` and
 `performance_selected=false`. The
-`job_regressions/` view pins the two OuterYan-selected JOB cases whose 0916
-speed-up was below 0.95x. Those queries remain in the main benchmark; the
-focused view makes them cheap to reproduce rather than hiding them from the
-reported distribution.
+`job_regressions/` view exposes mixed-v2 counterparts of two cases that
+regressed in the retired FULL-heavy revision. Those structures remain in the
+main benchmark. Their historical speed-ups are provenance only; both current
+mixed-v1 and v2 counterparts require fresh measurement.
 
 ```bash
-# Selectivity ablation: plot/report separately from the 542-query benchmark.
+# Selectivity ablation: plot/report separately from the 546-query benchmark.
 bash auto_test/experiment_onoff.sh --corpus-version v2 \
   --corpus-scope selectivity-stress --only all
 
-# The two confirmed JOB regressions.
+# Mixed counterparts of the two historical v1 JOB regressions.
 bash auto_test/experiment_onoff.sh --corpus-version v2 \
   --corpus-scope job-regressions --only job
 ```

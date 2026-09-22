@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -105,7 +106,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
             ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
-                for core_only, count in ((False, 176), (True, 144)):
+                for core_only, count in ((False, 206), (True, 170)):
                     with self.subTest(core_only=core_only):
                         root = scratch / ("core-only" if core_only else "full")
                         argv = ["gen_outerjoin_benchmark.py", "--root", str(root)]
@@ -117,7 +118,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                         self.assertEqual(len(active), count)
                         self.assertEqual(
                             len(csv_rows(root / "active_timeout_exclusions.csv")),
-                            26 if core_only else 30,
+                            0,
                         )
                         self.assertEqual(
                             {str(path.relative_to(legacy_root)) for path in legacy_root.glob("*/*.sql")},
@@ -136,18 +137,15 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                                 manifest,
                             )
 
-    def test_active_exclusions_preserve_sources_and_all_other_queries(self):
+    def test_historical_timeout_exclusions_do_not_filter_mixed_v1(self):
         root = SCRIPT_DIR / "outerjoin_benchmark"
         active = csv_rows(root / "benchmark" / "manifest.csv")
         excluded = csv_rows(root / "active_timeout_exclusions.csv")
         pins = BENCHMARK.active_timeouts.EXCLUDED_QUERY_HASHES
         self.assertEqual(len(pins), 30)
         self.assertEqual(len(BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES), 9)
-        self.assertEqual({row["path"] for row in excluded}, set(pins))
+        self.assertEqual(excluded, [])
         active_paths = {row["path"] for row in active}
-        self.assertTrue(active_paths.isdisjoint(pins))
-        # Reconstruct the unfiltered union: no missing-T1 or other healthy case
-        # may be dropped as an incidental rebalancing step.
         expected = {
             f"{row['family']}/derived__{row['query_id']}.sql"
             for row in csv_rows(root / "manifest.csv")
@@ -156,53 +154,63 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             prefix = "derived" if row["evaluation_role"] == "legacy_performance_win" else "industry"
             expected.add(f"{row['family']}/{prefix}__{row['query_id']}.sql")
         self.assertEqual(len(expected), 206)
-        self.assertEqual(active_paths, expected - pins.keys())
-        for row in active + excluded:
+        self.assertEqual(active_paths, expected)
+        self.assertTrue(set(pins) <= active_paths)
+        self.assertEqual(
+            {row["corpus_revision"] for row in active},
+            {BENCHMARK.V1_CORPUS_REVISION},
+        )
+        self.assertTrue(all(len(set(row["join_vector"])) >= 2 for row in active))
+        active_join_counts = Counter()
+        for row in active:
+            active_join_counts.update(row["join_vector"])
+        self.assertLessEqual(
+            max(active_join_counts.values()) - min(active_join_counts.values()), 1
+        )
+        active_by_path = {row["path"]: row for row in active}
+        self.assertTrue(
+            all(active_by_path[path]["content_sha256"] != digest for path, digest in pins.items())
+        )
+        for row in active:
             source_bytes = (root / row["source_path"]).read_bytes()
             self.assertEqual(hashlib.sha256(source_bytes).hexdigest(), row["content_sha256"])
             target = root / "benchmark" / row["path"]
-            if row["path"] in pins:
-                self.assertFalse(target.exists())
-                self.assertEqual(row["content_sha256"], pins[row["path"]])
-                reference = BENCHMARK.active_timeouts.reference_metadata(row["path"])
-                self.assertEqual(row["reference_threads"], str(reference["reference_threads"]))
-                self.assertEqual(row["reference_run"], reference["reference_run"])
-                self.assertEqual(row["timeout_seconds"], "1800")
-                self.assertEqual(row["timeout_phase"], "correctness_off")
-            else:
-                self.assertEqual(target.read_bytes(), source_bytes)
+            self.assertEqual(target.read_bytes(), source_bytes)
         BENCHMARK.validate_generated(root)
 
-    def test_changed_timeout_source_fails_before_replacing_active_view(self):
-        with tempfile.TemporaryDirectory(prefix="outeryan-timeout-pin-") as directory:
+    def test_local_active_edit_fails_before_replacing_mixed_view(self):
+        with tempfile.TemporaryDirectory(prefix="outeryan-active-pin-") as directory:
             root = Path(directory)
             BENCHMARK.generate_core(root)
             BENCHMARK.generate_active_benchmark(root, include_industry=False)
             active = root / "benchmark" / "manifest.csv"
             before = active.read_bytes()
-            excluded = csv_rows(root / "active_timeout_exclusions.csv")[0]
-            source = root / excluded["source_path"]
-            source.write_text(source.read_text(encoding="utf-8") + "\n-- changed\n", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "timeout SQL changed"), forbid_result_access():
+            row = csv_rows(active)[0]
+            target = root / "benchmark" / row["path"]
+            target.write_text(target.read_text(encoding="utf-8") + "\n-- changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "locally modified active SQL"), forbid_result_access():
                 BENCHMARK.generate_active_benchmark(root, include_industry=False)
             self.assertEqual(active.read_bytes(), before)
 
-    def test_approved_family_coverage_losses_are_explicit(self):
+    def test_mixed_v1_requires_complete_core_coverage(self):
         root = SCRIPT_DIR / "outerjoin_benchmark"
         core = csv_rows(root / "manifest.csv")
         active = csv_rows(root / "benchmark" / "manifest.csv")
         BENCHMARK.validate_active_coverage(core, active, True)
-        with mock.patch.object(BENCHMARK.active_timeouts, "ALLOWED_MISSING_CORE_FAMILY_PATTERNS", {}):
-            with self.assertRaisesRegex(RuntimeError, "family/topology coverage"):
-                BENCHMARK.validate_active_coverage(core, active, True)
+        removed = next(row for row in active if row["evaluation_role"] == "benchmark_derived")
+        with self.assertRaisesRegex(RuntimeError, "unexpected active core count"):
+            BENCHMARK.validate_active_coverage(
+                core, [row for row in active if row is not removed], True
+            )
 
-    def test_t32_timeouts_cannot_reappear_in_active_view(self):
+    def test_old_timeout_paths_reappear_only_with_new_content(self):
         root = SCRIPT_DIR / "outerjoin_benchmark"
         active = csv_rows(root / "benchmark" / "manifest.csv")
-        core = csv_rows(root / "manifest.csv")
-        for path in BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES:
-            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "reappeared"):
-                BENCHMARK.validate_active_coverage(core, active + [{"path": path}], True)
+        active_by_path = {row["path"]: row for row in active}
+        for path, old_hash in BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES.items():
+            with self.subTest(path=path):
+                self.assertIn(path, active_by_path)
+                self.assertNotEqual(active_by_path[path]["content_sha256"], old_hash)
 
     def test_regeneration_preserves_unmanaged_files_and_rejects_local_sql_edits(self):
         with tempfile.TemporaryDirectory(prefix="outeryan-active-view-") as directory:
@@ -225,7 +233,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="outeryan-v2-") as directory, forbid_result_access():
             root = Path(directory)
             self.assertEqual(BENCHMARK.generate_v2_core(root), 510)
-            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 542)
+            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 546)
             self.assertEqual(BENCHMARK.generate_v2_selectivity_stress(root), 84)
             self.assertEqual(BENCHMARK.generate_v2_job_regressions(root), 2)
             BENCHMARK.validate_v2_generated(root)
@@ -250,15 +258,53 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 },
             )
             base_counts = {}
+            base_vectors = {}
             for row in core:
                 base_counts[row["base_query_id"]] = base_counts.get(row["base_query_id"], 0) + 1
+                base_vectors.setdefault(row["base_query_id"], set()).add(row["join_vector"])
                 sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
                 self.assertIn("-- corpus_version: v2", sql)
                 self.assertIn(f"hash({row['selectivity_anchor']})", sql)
+                self.assertGreaterEqual(len(set(row["join_vector"])), 2)
+                if int(row["relation_count"]) >= 5:
+                    self.assertEqual(set(row["join_vector"]), {"I", "L", "R", "F"})
             self.assertEqual(set(base_counts.values()), {3})
+            self.assertEqual({len(vectors) for vectors in base_vectors.values()}, {1})
+            self.assertEqual(
+                {row["source_benchmark"] for row in core},
+                {"TPC-H", "TPC-DS", "JOB", "SQLStorm"},
+            )
+            unique_core = {
+                row["base_query_id"]: row for row in core
+            }
+            core_join_counts = Counter()
+            for row in unique_core.values():
+                core_join_counts.update(row["join_vector"])
+            self.assertLessEqual(
+                max(core_join_counts.values()) - min(core_join_counts.values()), 1
+            )
             self.assertEqual(
                 sum(row["evaluation_role"] != "benchmark_derived_v2" for row in active),
-                32,
+                36,
+            )
+            self.assertTrue(all(len(set(row["join_vector"])) >= 2 for row in active))
+            active_join_counts = Counter()
+            for row in active:
+                active_join_counts.update(row["join_vector"])
+            self.assertLessEqual(
+                max(active_join_counts.values()) - min(active_join_counts.values()), 1
+            )
+            self.assertEqual(
+                {
+                    row["provenance_class"]
+                    for row in active
+                    if row["evaluation_role"] != "benchmark_derived_v2"
+                },
+                {
+                    "graph_synthetic_control",
+                    "industry_synthetic_control",
+                    "schema_synthetic_control",
+                },
             )
             self.assertEqual({row["headline_eligible"] for row in stress}, {"false"})
             self.assertEqual({row["performance_selected"] for row in stress}, {"false"})
@@ -290,25 +336,16 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 },
             )
             base_rows = {row["base_query_id"]: row for row in stress}
+            self.assertEqual(len(base_rows), 12)
             self.assertEqual(
-                set(base_rows),
                 {
-                    "ojb_sqlstorm_tpch_25509_ldmx",
-                    "ojb_tpch_q07_trade_flow_rdmx",
-                    "ojb_tpch_q08_market_share_bdmx",
-                    "ojb_sqlstorm_tpch_17751_rduL",
-                    "ojb_tpcds_q05_web_channel_ldmx",
-                    "ojb_sqlstorm_tpcds_14368_rduR",
-                    "ojb_sqlstorm_tpcds_28643_bmx",
-                    "ojb_tpcds_q40_catalog_returns_rdmx",
-                    "ojb_job_21a_skeleton_ldmx",
-                    "ojb_job_16a_skeleton_rduF",
-                    "ojb_job_11a_skeleton_bmx",
-                    "ojb_sqlstorm_job_15596_rduF",
+                    row["base_query_id"]
+                    for row in BENCHMARK.select_v2_stress_bases(root)
                 },
+                set(base_rows),
             )
-            self.assertEqual(
-                {row["join_vector"].replace("F", "") for row in stress}, {""}
+            self.assertTrue(
+                all(len(set(row["join_vector"])) >= 2 for row in stress)
             )
             self.assertTrue(all(int(row["relation_count"]) >= 4 for row in stress))
             self.assertEqual(
@@ -328,7 +365,14 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             )
             self.assertEqual(
                 {row["disposition"] for row in regressions},
-                {"retain_in_main_benchmark_and_fix_optimizer"},
+                {"retain_mixed_counterpart_in_main_benchmark"},
+            )
+            self.assertEqual(
+                {row["measurement_status"] for row in regressions},
+                {"requires_v2_remeasurement"},
+            )
+            self.assertTrue(
+                all(len(set(row["join_vector"])) >= 2 for row in regressions)
             )
 
 

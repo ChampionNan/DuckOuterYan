@@ -1,10 +1,20 @@
-# DuckOuterYan：Section 6 / Section 7
+# DuckOuterYan：论文实验部分
 
-`sections_6_7.tex` 是可直接替换原两节的英文 LaTeX 正文片段，不含
-`\documentclass` 或 `document` 环境，不改原论文其它章节，也不强制章节编号。
-放在前五节之后即可成为第 6、7 节。
+[`sections_6_7.tex`](sections_6_7.tex) 是可直接接入论文的英文 LaTeX 片段，
+其中实验部分已按以下四个小节组织：
 
-## 接入
+1. Overall Performance：总览图、按 benchmark 汇总表和分析；
+2. Representative Phase-Time Breakdown：阶段图、全量 phase 汇总表和案例分析；
+3. Effect of Input-Tree Shape：shape 汇总表和分析；
+4. Optimization Time：与 Yannakakis+ 相近的表格结构和待采集指标。
+
+当前 v1 已更新为 `v1-mixed-20260922`：206 条 query（170 条
+benchmark-derived structures + 36 条 controls），join labels 不再沿用旧的
+FULL-heavy 设计。V2 有 546 条主 workload，另有 84 条单独报告的 wide-range
+selectivity ablation。三者都尚无与当前 SQL 对应的完整结果，因此正文结果区暂不引用
+任何性能数字。
+
+## 接入论文
 
 主文件导言区需要：
 
@@ -18,85 +28,108 @@
 \input{auto_test/paper/sections_6_7}
 ```
 
-默认引用现有 `auto_test/results/plots/20260908_235240/t32/` 中的三张 PDF，
-没有复制图或另建 sample 目录。若移入 Overleaf，将该目录中的
-`speedup_all_queries.pdf`、`runtime_outeryan_queries.pdf`、
-`phase_breakdown_outeryan.pdf` 上传至论文的 `figures/`，并在 `\input` 前加：
+下面的目录只保存旧版图形，当前正文不会引用它：
+
+```text
+auto_test/results/plots/20260916_211812/t32/
+```
+
+旧目录包含两张曾使用的投稿图：
+
+- `speedup_all_queries.pdf`：旧 FULL-heavy 版本 176 条有效 query 的 overall performance；
+- `phase_breakdown_outeryan.pdf`：32 条代表 query 的 phase 与 runtime 对照。
+
+`runtime_outeryan_queries` 已取消，不再被论文引用。若把文件复制到 Overleaf，上传
+上述两张 PDF，并在 `\input` 前覆盖图目录：
 
 ```latex
 \newcommand{\DuckOuterYanFigureDir}{figures}
 \input{sections_6_7}
 ```
 
-沿用原稿的 `tpch`、`tpcds`、`job`、`sqlstorm25` 四个 BibTeX key。
-没有杜撰新的文献条目。主文件需要已有的对应 `.bib`。
+正文继续使用原稿的 `tpch`、`tpcds`、`job`、`sqlstorm25` BibTeX key。
 
-## 修改内容
+## 每次实验的统计信息在哪里
 
-- Section 6：用 5 个核心公式代替递归状态、集合签名和多层步骤符号；
-  保留基数假设、两轮更新顺序、成本项、连接树枚举和当前 V7 选择逻辑。
-  当前源代码的门限为普通 1.0、低保留率 0.9、受限 stretch 1.2；
-  stretch 的 real-join input ratio 上限是 **0.30**，不是较早说明里的 0.75。
-- Section 7 第一小节新增 **DuckOuterYan System Design**，说明候选生成、
-  决策、下放执行、bitmap/hash 筛选和流水线依赖。OuterYan 保留为算法名称，
-  DuckOuterYan 是集成系统名；正文解释现有图中的 ON 标签 OuterYan。
-- 只报告当前 32 线程；删除旧的单线程表格和错误的 178 selected 口径。
-  176 条有效查询与 55 条 selected 分开报告，32 条图中样本不用于总体统计。
-- 统计表不列 min。保留 geomean、mean、median、max、total-time ratio，
-  并解释加速比聚合方式。shape 表保留计数、选择数与主要汇总指标。
-- 更新 170 core、36 supplementary、206 full union、185 run input、
-  176 completed、144 completed core + 32 supplementary 的关系。
-  不再将补充集误写成 170 条真实工业查询，披露历史 performance-selected 来源。
-- 核心集独立结果：geomean 1.1877093914、total-time ratio 1.3044014876。
-  补充集独立结果：1.2926688942、2.0626781995。混合集不是标准原生 benchmark。
-- 9 个 32 线程超时仍作为原始运行的失败覆盖披露；不把活动清单删减写成
-  原实验没有超时，也不声称 graph bushy / TPC-H star 覆盖仍然完整。
+一次完整画图会在对应 run 目录同时写出四类可追溯结果：
 
-## 证据与版本范围
+| 文件 | 内容 | 用途 |
+|---|---|---|
+| `experiment_onoff_*.csv` | 每条 query 的 OFF/ON median、selected plan、profile 字段 | 原始事实来源 |
+| `STATISTICS.md` | 自动生成的可读汇总，包括 family、shape、selected/fallback、phase 表 | 人工检查和填写论文表格 |
+| `statistics.json` | 与 Markdown 相同口径的完整精确数值和方法元数据 | 程序化制表，避免从图片抄数 |
+| `phase_queries.json` | phase 图中具体 query、短名、顺序、CPU 分段、wall time 与 baseline | 核对代表案例和 caption |
 
-- 计时数据：`../results/experiment_onoff_benchmark_20260908_235240_t32.csv`
-  和同名 `.attempts.csv`。两份都是 185 条且内容相同，按 family + query 去重。
-  SHA-256 均为 `13da9290087eafe71634dae2ff8a30d88acceccaf3e7930d68137517616c5cfc`。
-- 文件名包含 0908，但 `.txt` 首行记载此 t32 批次启动于 **2026-09-10 07:56:12**。
-  正文因此称“32-thread run”，不把文件名当作精确测量日期。
-- 日志直接确认 release 路径、32 threads、TPC-H/TPC-DS SF=100、graph=bitcoin、
-  1 warm-up + 3 timed、未开启 profile、1800 秒限额、无重试。
-- `../build_db.sh` 将 bitcoin 映射为 SNAP Bitcoin Alpha，取 src/dst 建立各图关系。
-  当前日志没有数据文件哈希，正文不虚构 snapshot 或精确边数。
-- `../outerjoin_benchmark/benchmark/manifest.csv` 用于核对 144/32 来源及 selected 统计。
-- 样本与旧 profile 来自 `../results/plots/20260908_235240/t32/` 的
-  `representative_queries.json`、`phase_queries.json`，已按完整查询名核对。
-- 实现依据：`src/optimizer/outer_yan/pipeline/outer_yan_{pre,dp,optimizer,post}.cpp`、
-  对应头文件、`physical_sj_{build,probe}.cpp` 和实际实验日志。
+旧版文件的具体位置是（仅用于 provenance，不可填写当前论文表格）：
 
-## 投稿前仍需补齐
+- 原始数据：`auto_test/results/experiment_onoff_benchmark_20260916_211812_t32.csv`；
+- 可读统计：`auto_test/results/plots/20260916_211812/t32/STATISTICS.md`；
+- 机器可读统计：`auto_test/results/plots/20260916_211812/t32/statistics.json`；
+- phase 样本映射：`auto_test/results/plots/20260916_211812/t32/phase_queries.json`。
 
-1. **当前 32 线程 profile 尚不存在。** Breakdown 的图、正文和 caption
-   都明确为 2026-08-30、48 线程的历史占位。Baseline 也来自同次旧 48 线程实验，
-   不与当前 32 线程 timing 拼接。旧/新记录仅按名称对齐，不能证明服务器 SQL
-   字节一致。新 profile 到达后需同步替换图与分段分析。
-2. 原稿的 Xeon Silver 4116 / 24 核 / 48 硬件线程 / 192 GB 作为
-   “reported server configuration”保留；需确认仍对应当前服务器。
-   OS、实际测试 commit/patch version、编译器、存储、memory limit/spill、
-   JOB/graph snapshot 未记录，不能从笔记本环境补写。
-3. 本机没有发现 LaTeX 编译器；本轮做源码、数值、标签/图引用和结构检查，
-   不声称已完成整篇论文的排版编译。图沿用已渲染检查的当前 t32 输出。
+旧版数值来自上述 `STATISTICS.md`/`statistics.json`。它们已从当前可编译结果区
+移除；完成 mixed-v1 实验后，需要把新统计同步到 `sections_6_7.tex`。图本身由脚本
+直接刷新。
 
-## 引用兼容性
+## 旧结果的复现命令（不可作为 mixed-v1 结果）
 
-保留原主要 section/table/figure labels。`sec:two-round-reduction` 和
-`sec:plan-enumeration` 现在指向合并后的同一小节。
-删除旧 `fig:runtime-outeryan-job`，JOB 已并入 `fig:runtime-outeryan-queries`。
-原 `fig:outerjoin-benchmark-construction` 改为 benchmark 小节中的构造说明，
-外部引用改指 `sec:outerjoin-benchmark`。
-新增 `sec:system-design`、`sec:plan-selection`、`fig:speedup-all-queries`。
-新的 `eq:join-cardinality` 合并旧的 inner/unmatched/outer cardinality 公式；
-若其它章节引用原细分公式标签，应改为这个标签。删除的 DP 状态、递推和 grouping
-signature 公式改为文字，外部引用应改指 `sec:plan-enumeration` 或
-`sec:plan-selection`。`eq:edge-ndv` 改指 `sec:cardinality-estimation`，
-`eq:semijoin-ndv` 改指 `sec:two-round-reduction`，`eq:plan-selection`
-改指 `sec:plan-selection`。源码未保留 `\fix`、`\bingnan` 或旧的注释算法。
+在仓库根目录执行：
 
-本轮核对了全部 10 行 family 表、4 行 category 表、核心/补充集独立统计、
-32 个样本的 profile 身份，以及 25 个唯一标签、内部引用和三张图的路径。
-其它章节的交叉引用需在原论文工程中按上述映射检查。
+```bash
+MPLCONFIGDIR=/tmp/outeryan-mpl python3 auto_test/plot_speedup.py \
+  auto_test/results/experiment_onoff_benchmark_20260916_211812_t32.csv \
+  -o auto_test/results/plots/20260916_211812/t32/outeryan_benchmark_figures_t32.pdf \
+  --split-output-dir auto_test/results/plots/20260916_211812/t32 \
+  --statistics-dir auto_test/results/plots/20260916_211812/t32
+```
+
+该命令同时更新两张独立 PDF/PNG、合并预览 PDF、`STATISTICS.md`、
+`statistics.json` 和 `phase_queries.json`。脚本会优先使用主 CSV；只有主文件缺 query
+时才从 `.attempts.csv` 补齐，并以 family + query 去重，主 CSV 的最终行优先。
+
+## 当前实验口径
+
+- OFF：仅禁用 `outer_yan`；ON：启用 V7 gated policy，其余设置相同；
+- 每个配置先执行 1 次不计时 warm-up，再执行 3 次计时，报告 median wall time；
+- 计时覆盖 optimization、execution 和完整结果消费，但不含进程启动及 session 设置；
+- runtime 测量关闭 profiler；phase 使用单独的 ON profile 批次；
+- phase 的 Round 1/2/3/Other 是跨线程累积 operator CPU work，和等于 profile CPU
+  total，不能与 wall time 直接相加或解释为 wall-time 百分比；
+- speed-up 为 DuckDB / DuckOuterYan；geomean 对 query 等权，Total 为
+  `sum(OFF) / sum(ON)`。
+
+这与 Yannakakis+ 的 warm-cache、重复执行取 median 的原则一致，但当前数据是
+1 warm-up + 3 measured，而 Yannakakis+ 原文使用 10 次执行。因此正文只称 measurement
+principle 一致，不宣称重复次数完全相同。若论文要求逐项复现其 10 次口径，需要修改
+harness 对奇数 `--runs` 的限制并重新运行，不能从现有三次结果补算。
+
+当前 CSV 只保存 runtime median，没有保存三个 runtime sample；phase 列中的
+`profile_timed_samples=3` 可核对 profile 重复数。今后的结果若要逐次审计，应同时保留
+harness `.txt` 日志或把每次 runtime sample 增加为 CSV/JSON 字段。
+
+## 已作废的旧结果快照
+
+- 这些数字仅对应 0916 FULL-heavy SQL，不对应当前 v1；
+- 176 条有效 query；55 条选择 OuterYan，121 条保留 native plan；
+- 全 workload：geomean `1.205132×`，total-time speed-up `1.335485×`；
+- OFF/ON median 总和：`6303.561926 s / 4720.055300 s`，节省
+  `1583.506625 s`（25.120823%）；
+- 55 条 selected query：geomean `1.835706×`，total `2.609079×`；
+- 当前 CSV SHA-256：
+  `afbd92a0f3c8c82b420999f241711e468fd0a5f83ecae4a44aca75531d8bf470`。
+
+## 尚未完成的 Optimization Time
+
+0916 CSV 没有 `CUMULATIVE_OPTIMIZER_TIMING` 与 `OPTIMIZER_OUTER_YAN` 的独立采样，
+所以不能从 end-to-end runtime 反推 optimizer latency。论文中的 optimization-time 表
+保留为明确的 `--`，而不是填入估计值。后续应对 OFF/ON 分别运行 detailed profiler，
+记录总 optimizer time，并在 ON 下额外记录 OuterYan pass time；仍采用 warm-up 后三次
+测量取 median，并与 runtime/phase profiling 分开执行。
+
+## 投稿前核对
+
+- 确认论文服务器仍是 Xeon Silver 4116、24 cores/48 hardware threads、192 GB；
+- 补齐 OS、commit、compiler、storage、memory/spill 设置及 JOB/graph snapshot；
+- 生成 optimization-time CSV 后填充 Table `tab:optimization-time`；
+- V2 和 selectivity ablation 完整跑完后，再新增对应结果表或 ablation 图；
+- 在论文主工程中编译并检查浮动体位置、跨页表格和外部交叉引用。
