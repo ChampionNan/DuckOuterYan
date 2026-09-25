@@ -1,9 +1,9 @@
 -- corpus_version: v2
 -- workload_role: retained evaluation control with deterministic mixed joins
--- join_vector: LRF; relation and predicate structure unchanged
--- corpus_revision: v1-mixed-20260922
+-- join_vector: FIL; relation and predicate structure unchanged
+-- corpus_revision: v1-mixed-graph25-20260925
 -- workload_role: retained evaluation control with deterministic mixed joins
--- join_vector: LRF; relation and predicate structure unchanged
+-- join_vector: RFI; relation and predicate structure unchanged
 SELECT *
-FROM (( region LEFT OUTER JOIN nation ON r_regionkey = n_regionkey) RIGHT OUTER JOIN ( supplier FULL OUTER JOIN partsupp ON s_suppkey = ps_suppkey) ON n_nationkey = s_nationkey)
+FROM (( region FULL OUTER JOIN nation ON r_regionkey = n_regionkey) INNER JOIN ( supplier LEFT OUTER JOIN partsupp ON s_suppkey = ps_suppkey) ON n_nationkey = s_nationkey)
 WHERE n_nationkey < 50000;

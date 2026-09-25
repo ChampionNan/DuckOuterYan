@@ -257,9 +257,9 @@ void Optimizer::RunBuiltInOptimizers() {
 
 	// OuterYan owns both candidate construction and the final policy decision.
 	// When it handles an applicable query it also builds DuckDB's normal plan,
-	// selects one, and lowers the winner. Aggregate and DISTINCT queries bypass
-	// OuterYan entirely, as do inapplicable/disabled queries, and continue
-	// through the unchanged normal path below.
+	// selects one, and lowers the winner. Supported root aggregates and DISTINCT
+	// participate in that policy; nested/unsupported aggregates and other
+	// inapplicable or disabled queries continue through the normal path below.
 	bool outer_yan_applied = false;
 	if (!postgres_replay_applied && !OptimizerDisabled(OptimizerType::OUTER_YAN)) {
 		OuterYanOptimizer outer_yan_optimizer(*this);

@@ -8,10 +8,11 @@
 3. Effect of Input-Tree Shape：shape 汇总表和分析；
 4. Optimization Time：与 Yannakakis+ 相近的表格结构和待采集指标。
 
-当前 v1 已更新为 `v1-mixed-20260922`：206 条 query（170 条
-benchmark-derived structures + 36 条 controls），join labels 不再沿用旧的
-FULL-heavy 设计。V2 有 546 条主 workload，另有 84 条单独报告的 wide-range
-selectivity ablation。三者都尚无与当前 SQL 对应的完整结果，因此正文结果区暂不引用
+当前 v1 已更新为 `v1-mixed-graph25-20260925`：224 条 query（170 条
+benchmark-derived structures + 54 条 controls，其中包含全部 25 条 Graph
+patterns），join labels 不再沿用旧的 FULL-heavy 设计。V2 有 564 条主 workload，
+V3 包含 102 条 aggregation 和 42 条单独报告的 wide-range selectivity
+ablation。它们都尚无与当前 SQL 对应的完整结果，因此正文结果区暂不引用
 任何性能数字。
 
 ## 接入论文

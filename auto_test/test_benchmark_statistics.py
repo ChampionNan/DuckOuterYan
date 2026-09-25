@@ -144,14 +144,16 @@ class BenchmarkStatisticsTest(unittest.TestCase):
 
     def test_phase_profiles_are_separate_cpu_work_and_wall_latency(self):
         frame = self.frame()
-        frame["profile_status"] = ["OK", "not-selected", "OK"]
+        timeout = frame.iloc[[0]].assign(query="profile_timeout", correct=False, note="TIMEOUT")
+        frame = pd.concat([frame, timeout], ignore_index=True)
+        frame["profile_status"] = ["OK", "not-selected", "OK", "OK"]
         frame["profile_threads"] = 32
-        frame["profile_wall_time_s"] = [2, None, 4]
-        frame["profile_cpu_time_s"] = [10, None, 20]
-        frame["profile_round1_operator_s"] = [1, None, 4]
-        frame["profile_round2_operator_s"] = [2, None, 4]
-        frame["profile_round3_operator_s"] = [3, None, 6]
-        frame["profile_other_elapsed_s"] = [4, None, 6]
+        frame["profile_wall_time_s"] = [2, None, 4, 100]
+        frame["profile_cpu_time_s"] = [10, None, 20, 100]
+        frame["profile_round1_operator_s"] = [1, None, 4, 25]
+        frame["profile_round2_operator_s"] = [2, None, 4, 25]
+        frame["profile_round3_operator_s"] = [3, None, 6, 25]
+        frame["profile_other_elapsed_s"] = [4, None, 6, 25]
         report = STATS.build_statistics(frame)
         phase = report["phase_profiles"]
         self.assertTrue(phase["available"])
@@ -162,6 +164,52 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertAlmostEqual(overall["cpu_weighted_fraction"]["other"], 10 / 30)
         self.assertEqual(overall["profile_wall_s"]["median"], 3)
         self.assertEqual(overall["unprofiled_speedup"]["median"], 1.25)
+
+    def test_optimizer_totals_and_workflow_phases_are_exported(self):
+        frame = self.frame()
+        frame["workload_category"] = ["v1", "v1", "v3_aggregation"]
+        frame["optimizer_profile_status"] = "OK"
+        frame["optimizer_timed_samples"] = 1
+        frame["optimizer_duckdb_total_s"] = [1.0, 2.0, 4.0]
+        frame["optimizer_outeryan_total_s"] = [1.5, 2.2, 5.0]
+        frame["optimizer_overhead_s"] = [0.5, 0.2, 1.0]
+        frame["optimizer_outeryan_to_duckdb_ratio"] = [1.5, 1.1, 1.25]
+        frame["optimizer_duckdb_measured_phase_s"] = [0.9, 1.8, 3.6]
+        frame["optimizer_outeryan_measured_phase_s"] = [1.35, 1.98, 4.5]
+        frame["optimizer_duckdb_other_s"] = [0.1, 0.2, 0.4]
+        frame["optimizer_outeryan_other_s"] = [0.15, 0.22, 0.5]
+        frame["optimizer_duckdb_phases_json"] = [
+            json.dumps({"duckdb_join_reorder": value, "desimplification": 0.0})
+            for value in (0.4, 0.8, 1.6)
+        ]
+        frame["optimizer_outeryan_phases_json"] = [
+            json.dumps({"duckdb_join_reorder": value, "desimplification": phase})
+            for value, phase in ((0.4, 0.2), (0.8, 0.3), (1.6, 0.8))
+        ]
+        frame["optimizer_phase_delta_json"] = "{}"
+        report = STATS.build_statistics(frame)
+        optimizer = report["optimizer_profiles"]
+        self.assertTrue(optimizer["available"])
+        overall = [row for row in optimizer["groups"]
+                   if row["subset"] == "all" and row["scope"] == "overall"][0]
+        self.assertEqual(overall["profiles"], 3)
+        self.assertEqual(overall["duckdb_s"]["median"], 2)
+        self.assertAlmostEqual(overall["totals"]["outeryan_to_duckdb_ratio"], 8.7 / 7)
+        self.assertEqual(len(optimizer["phases"]), 6)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            STATS.write_statistics(root, frame)
+            benchmark = pd.read_csv(root / "benchmark_statistics.csv")
+            self.assertTrue({"all", "outeryan_selected"}.issubset(set(benchmark["subset"])))
+            self.assertTrue({"min", "max", "geomean", "median", "stddev"}.issubset(benchmark.columns))
+            optimizer_summary = pd.read_csv(root / "optimizer_summary.csv")
+            self.assertIn("ratio_median", optimizer_summary.columns)
+            optimizer_phases = pd.read_csv(root / "optimizer_phases.csv")
+            self.assertEqual(
+                set(optimizer_phases["phase"]), {"duckdb_join_reorder", "desimplification"}
+            )
+            optimizer_phase_summary = pd.read_csv(root / "optimizer_phase_summary.csv")
+            self.assertIn("delta_median", optimizer_phase_summary.columns)
 
 
 if __name__ == "__main__":

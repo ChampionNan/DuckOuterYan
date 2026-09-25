@@ -48,6 +48,9 @@ OY_KEYS = (
     "uncertain_filter_amplification_guard",
     "stretch_cost_gate_eligible",
     "stretch_cost_gate_selected",
+    "unary_filter_selectivity",
+    "low_selectivity_cost_gate_eligible",
+    "low_selectivity_cost_gate_selected",
     "selected_plan",
     "outer_reordered",
     "cost_gate_applied",
@@ -67,6 +70,7 @@ OY_KEYS = (
     "semijoin_cost_ratio",
     "weighted_semijoin_cost",
     "candidate_total",
+    "low_selectivity_cost_ratio_limit",
     "cost_ratio_limit",
     "baseline_threshold",
     "round1_build",
@@ -97,14 +101,17 @@ OY_KEYS = (
 # Keep spelling and order byte-for-byte compatible so existing analysis scripts can
 # read a PGPlan comparison result by ignoring the appended fields.
 ORIGINAL_CSV_FIELDS = (
-    "query", "family", "sql_path", "relation_count", "reorder",
+    "experiment_group", "corpus_version", "corpus_scope", "workload_category",
+    "query_class", "query", "family", "sql_path", "relation_count", "reorder",
     "outer_reordered", "cost_gate_applied", "outer_yan_selected",
     "selected_plan", "baseline_proven_empty", "decision_reason", "formula_id",
     "selection_mode", "raw_cost_winner", "gate_result",
     "default_filter_upper_bound_checked", "default_filter_upper_bound_selected",
     "full_reduction_cardinality_lower_bound_applied",
     "uncertain_filter_amplification_guard", "stretch_cost_gate_eligible",
-    "stretch_cost_gate_selected", "baseline_join_input_rows",
+    "stretch_cost_gate_selected", "unary_filter_selectivity",
+    "low_selectivity_cost_gate_eligible", "low_selectivity_cost_gate_selected",
+    "low_selectivity_cost_ratio_limit", "baseline_join_input_rows",
     "candidate_join_input_rows", "candidate_to_baseline_join_input_ratio",
     "semijoin_retained_cardinality_ratio",
     "uncertain_filter_cardinality_amplification", "baseline_cost",
@@ -119,6 +126,13 @@ ORIGINAL_CSV_FIELDS = (
     "semijoin_probe_lookup_weight", "semijoin_probe_emit_weight", "kernel",
     "kernel_detail", "kernel_hash_reasons", "correct", "note",
     "timing_threads", "tm_off", "tm_on", "tm_speedup",
+    "optimizer_profile_status", "optimizer_timed_samples",
+    "optimizer_duckdb_total_s", "optimizer_outeryan_total_s",
+    "optimizer_overhead_s", "optimizer_outeryan_to_duckdb_ratio",
+    "optimizer_duckdb_measured_phase_s", "optimizer_outeryan_measured_phase_s",
+    "optimizer_duckdb_other_s", "optimizer_outeryan_other_s",
+    "optimizer_duckdb_phases_json", "optimizer_outeryan_phases_json",
+    "optimizer_phase_delta_json", "optimizer_profile_directory",
     "rows", "effective_pass", "duckdb_plan", "enabled_plan", "trace_file",
     "cost_file",
 )
@@ -195,6 +209,10 @@ LEGACY_OY_FIELD_MAP = {
     "uncertain_filter_amplification_guard": "uncertain_filter_amplification_guard",
     "stretch_cost_gate_eligible": "stretch_cost_gate_eligible",
     "stretch_cost_gate_selected": "stretch_cost_gate_selected",
+    "unary_filter_selectivity": "unary_filter_selectivity",
+    "low_selectivity_cost_gate_eligible": "low_selectivity_cost_gate_eligible",
+    "low_selectivity_cost_gate_selected": "low_selectivity_cost_gate_selected",
+    "low_selectivity_cost_ratio_limit": "low_selectivity_cost_ratio_limit",
     "baseline_join_input_rows": "baseline_join_input_rows",
     "candidate_join_input_rows": "candidate_join_input_rows",
     "candidate_to_baseline_join_input_ratio": (
@@ -1572,7 +1590,9 @@ def render_comparison_block(row, index, total):
     risk = (
         "[default_filter_upper_checked={0} selected={1} retained={2} "
         "amplification={3} guard={4} full_reduction_bound={5} "
-        "stretch_eligible={6} stretch_selected={7} join_input_ratio={8}]"
+        "stretch_eligible={6} stretch_selected={7} unary_selectivity={8} "
+        "low_selectivity_eligible={9} low_selectivity_selected={10} "
+        "low_selectivity_limit={11} join_input_ratio={12}]"
     ).format(
         display(row["default_filter_upper_bound_checked"]),
         display(row["default_filter_upper_bound_selected"]),
@@ -1582,6 +1602,10 @@ def render_comparison_block(row, index, total):
         display(row["full_reduction_cardinality_lower_bound_applied"]),
         display(row["stretch_cost_gate_eligible"]),
         display(row["stretch_cost_gate_selected"]),
+        display(row["unary_filter_selectivity"]),
+        display(row["low_selectivity_cost_gate_eligible"]),
+        display(row["low_selectivity_cost_gate_selected"]),
+        display(row["low_selectivity_cost_ratio_limit"]),
         display(row["candidate_to_baseline_join_input_ratio"]),
     )
     if row["candidate_total"] in ("", "-", "NA") or row["baseline_cost"] in (

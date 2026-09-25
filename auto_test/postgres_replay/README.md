@@ -68,7 +68,8 @@ The opt-in `RUN_PGPLAN=1` workflow:
 5. performs the requested correctness mode, then records independent Original,
    PGPlan, and OuterYan TM timing batches on target data.
 
-The default corpus is all 176 active queries under `auto_test/outerjoin_query`:
+The default corpus is all 224 active v1 queries under
+`auto_test/outerjoin_benchmark/benchmark`:
 
 | Family | Queries | PostgreSQL plan-selection data | DuckDB exact-correctness data |
 |---|---:|---|---|
@@ -333,7 +334,7 @@ auto_test/pgplan/prepare_correctness_db.sh \
   --family tpcds \
   --source-db /absolute/path/to/tpcds_db \
   --out /absolute/path/to/tpcds-correctness.duckdb \
-  --query-dir /absolute/path/to/outerjoin_query/tpcds \
+  --query-dir /absolute/path/to/outerjoin_benchmark/benchmark/tpcds \
   --max-result-rows 2000000 \
   --query-timeout 30 \
   --manifest /absolute/path/to/tpcds-correctness.tsv

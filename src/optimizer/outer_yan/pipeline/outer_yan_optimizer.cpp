@@ -15,6 +15,7 @@
 #include "duckdb/optimizer/statistics_propagator.hpp"
 
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
@@ -163,6 +164,31 @@ bool HasDefaultFilterUpperBound(const OuterYanTree &tree) {
 	return false;
 }
 
+struct UnaryFilterSelectivity {
+	double minimum = 0.0;
+	bool available = false;
+};
+
+UnaryFilterSelectivity InspectUnaryFilterSelectivity(const OuterYanTree &tree) {
+	UnaryFilterSelectivity result;
+	for (const auto *relation : tree.ot_relations_by_id) {
+		if (!relation || !relation->stats.stats_initialized || relation->stats.base_cardinality == 0 ||
+		    relation->stats.cardinality >= relation->stats.base_cardinality) {
+			continue;
+		}
+		const auto selectivity = static_cast<double>(relation->stats.cardinality) /
+		                         static_cast<double>(relation->stats.base_cardinality);
+		if (!ValidCost(selectivity) || selectivity > 1.0) {
+			continue;
+		}
+		if (!result.available || selectivity < result.minimum) {
+			result.minimum = selectivity;
+			result.available = true;
+		}
+	}
+	return result;
+}
+
 struct UncertainFilterAmplification {
 	double retained_cardinality_ratio = 0.0;
 	double cardinality_amplification = 0.0;
@@ -228,7 +254,8 @@ OuterYanOptimizer::OuterYanOptimizer(Optimizer &optimizer_p)
     : optimizer(optimizer_p), context(optimizer_p.context) {
 }
 
-OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanDecisionCosts &costs) {
+OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanDecisionCosts &costs,
+                                                                 bool aggregate_query) {
 	OuterYanCostGatePolicyResult result;
 	if (!costs.available || !ValidCost(costs.baseline_cost) || !ValidCost(costs.candidate_join_cost) ||
 	    !ValidCost(costs.candidate_total) || !ValidCost(costs.baseline_join_input_rows) ||
@@ -241,16 +268,23 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	     !ValidCost(costs.candidate_to_baseline_join_input_ratio))) {
 		return result;
 	}
+	if (costs.unary_filter_selectivity_available &&
+	    (!ValidCost(costs.unary_filter_selectivity) || costs.unary_filter_selectivity > 1.0)) {
+		return result;
+	}
 
-	const auto strict_ratio_limit =
+	auto strict_ratio_limit =
 	    costs.semijoin_retained_cardinality_ratio < LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO
 	        ? LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO
 	        : MAX_CANDIDATE_TO_BASELINE_RATIO;
+	if (aggregate_query) {
+		strict_ratio_limit = MinValue(strict_ratio_limit, AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO);
+	}
 	const auto strict_threshold = strict_ratio_limit * costs.baseline_cost;
 	if (!ValidCost(strict_threshold)) {
 		return result;
 	}
-	result.stretch_eligible =
+	result.stretch_eligible = !aggregate_query &&
 	    !costs.default_filter_upper_bound_checked && !costs.uncertain_filter_amplification_guard &&
 	    !costs.full_reduction_cardinality_lower_bound_applied &&
 	    costs.candidate_to_baseline_join_input_ratio_available &&
@@ -258,8 +292,17 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	    costs.candidate_to_baseline_join_input_ratio <= STRETCH_MAX_JOIN_INPUT_RATIO &&
 	    costs.semijoin_retained_cardinality_ratio >=
 	        STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO;
+	result.low_selectivity_eligible = !aggregate_query &&
+	    costs.unary_filter_selectivity_available &&
+	    costs.unary_filter_selectivity <= LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD &&
+	    !costs.default_filter_upper_bound_checked && !costs.uncertain_filter_amplification_guard &&
+	    !costs.full_reduction_cardinality_lower_bound_applied &&
+	    costs.candidate_to_baseline_join_input_ratio_available &&
+	    costs.candidate_join_cost < costs.baseline_cost &&
+	    costs.candidate_to_baseline_join_input_ratio <= LOW_SELECTIVITY_MAX_JOIN_INPUT_RATIO;
 	result.available = true;
 	result.cost_ratio_limit = strict_ratio_limit;
+	result.low_selectivity_cost_ratio_limit = strict_ratio_limit;
 	result.baseline_threshold = strict_threshold;
 	// Preserve the strict threshold and margin in diagnostics whenever the
 	// candidate already wins at 1.0; the stretch ceiling is activated only
@@ -268,11 +311,25 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 		result.pass = true;
 		return result;
 	}
-	if (!result.stretch_eligible) {
+	if (!result.stretch_eligible && !result.low_selectivity_eligible) {
 		return result;
 	}
 
-	result.cost_ratio_limit = STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO;
+	if (result.low_selectivity_eligible) {
+		const auto selectivity_progress =
+		    (LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD - costs.unary_filter_selectivity) /
+		    LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD;
+		result.low_selectivity_cost_ratio_limit =
+		    strict_ratio_limit + selectivity_progress *
+		                             (LOW_SELECTIVITY_MAX_CANDIDATE_TO_BASELINE_RATIO -
+		                              strict_ratio_limit);
+		result.cost_ratio_limit =
+		    MaxValue(result.cost_ratio_limit, result.low_selectivity_cost_ratio_limit);
+	}
+	if (result.stretch_eligible) {
+		result.cost_ratio_limit =
+		    MaxValue(result.cost_ratio_limit, STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO);
+	}
 	result.baseline_threshold = result.cost_ratio_limit * costs.baseline_cost;
 	if (!ValidCost(result.cost_ratio_limit) || !ValidCost(result.baseline_threshold)) {
 		result.available = false;
@@ -280,11 +337,16 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	}
 
 	result.pass = costs.candidate_total <= result.baseline_threshold;
-	result.stretch_selected = result.pass;
+	result.stretch_selected = result.pass && result.stretch_eligible &&
+	                          STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO >=
+	                              result.low_selectivity_cost_ratio_limit;
+	result.low_selectivity_selected =
+	    result.pass && result.low_selectivity_eligible && !result.stretch_selected;
 	return result;
 }
 
 OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperator> input) {
+	using Clock = std::chrono::steady_clock;
 	OuterYanOptimizationResult result;
 	if (!input) {
 		throw InternalException("OuterYanOptimizer::Optimize: null input plan");
@@ -307,11 +369,11 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		if (input->type == LogicalOperatorType::LOGICAL_EXPLAIN && input->children.size() == 1) {
 			candidate_input = input->children[0].get();
 		}
+		const auto applicability_start = Clock::now();
 		contains_aggregate = ContainsAggregateLikeOperator(*candidate_input);
-		if (contains_aggregate) {
-			return;
-		}
 		applicable = candidate_tree.CheckApplicability(*candidate_input);
+		candidate_tree.phase_timings.applicability +=
+		    std::chrono::duration<double>(Clock::now() - applicability_start).count();
 		if (!applicable) {
 			return;
 		}
@@ -336,7 +398,10 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	if (!applicable) {
 		OuterYanDecisionRecord decision;
 		decision.selection_mode = selection_mode;
-		decision.reason = contains_aggregate ? "DUCKDB_AGGREGATE" : "INAPPLICABLE";
+		decision.aggregate_query = contains_aggregate;
+		decision.reason = "INAPPLICABLE";
+		candidate_tree.phase_timings.available = true;
+		decision.phase_timings = candidate_tree.phase_timings;
 		OuterYanTrace::Decision(decision);
 		result.plan = std::move(input);
 		return result;
@@ -344,23 +409,33 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	OuterYanDPCostSummary candidate_cost;
 	optimizer.RunOptimizer(OptimizerType::OUTER_YAN_DP, [&]() {
+		const auto phase_start = Clock::now();
 		OuterYanDP dp(context);
 		candidate_cost = dp.Optimize(candidate_tree);
+		candidate_tree.phase_timings.outeryan_join_reorder +=
+		    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	});
 
 	// Produce the actual normal DuckDB alternative, rather than comparing the
 	// DP result with OuterYan's own pre-DP input shape.
 	optimizer.RunOptimizer(OptimizerType::OUTER_JOIN_SIMPLIFICATION, [&]() {
+		const auto phase_start = Clock::now();
 		OuterJoinSimplification simplification;
 		simplification.VisitOperator(*baseline_plan);
+		candidate_tree.phase_timings.duckdb_simplification +=
+		    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	});
 	optimizer.RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+		const auto phase_start = Clock::now();
 		JoinOrderOptimizer join_order(context);
 		baseline_plan = join_order.Optimize(std::move(baseline_plan));
+		candidate_tree.phase_timings.duckdb_join_reorder +=
+		    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	});
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("normal DuckDB candidate (logical plan)", baseline_plan->ToString());
 	}
+	const auto cost_model_start = Clock::now();
 	const auto empty_proof = ProveBaselineEliminatesJoinWork(optimizer, context, *baseline_plan);
 	if (OuterYanTrace::Enabled()) {
 		std::ostringstream proof;
@@ -448,6 +523,9 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 			}
 		}
 		const auto uncertain_filter = InspectUncertainFilterAmplification(candidate_tree, candidate_cost);
+		const auto unary_filter = InspectUnaryFilterSelectivity(candidate_tree);
+		trace_costs.unary_filter_selectivity = unary_filter.minimum;
+		trace_costs.unary_filter_selectivity_available = unary_filter.available;
 		trace_costs.semijoin_retained_cardinality_ratio = uncertain_filter.retained_cardinality_ratio;
 		trace_costs.uncertain_filter_cardinality_amplification = uncertain_filter.cardinality_amplification;
 		trace_costs.uncertain_filter_amplification_guard = uncertain_filter.guard;
@@ -513,11 +591,17 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		    ValidCost(trace_costs.semijoin_probe_emit_weight) && std::isfinite(trace_costs.raw_cost_delta) &&
 		    (!trace_costs.candidate_to_baseline_join_input_ratio_available ||
 		     ValidCost(trace_costs.candidate_to_baseline_join_input_ratio)) &&
+		    (!trace_costs.unary_filter_selectivity_available ||
+		     (ValidCost(trace_costs.unary_filter_selectivity) &&
+		      trace_costs.unary_filter_selectivity <= 1.0)) &&
 		    (!trace_costs.raw_cost_ratio_available || std::isfinite(trace_costs.raw_cost_ratio));
 
-		gate_policy = EvaluateCostGate(trace_costs);
+		gate_policy = EvaluateCostGate(trace_costs, contains_aggregate);
 		trace_costs.available = gate_policy.available;
 		trace_costs.stretch_cost_gate_eligible = gate_policy.stretch_eligible;
+		trace_costs.low_selectivity_cost_gate_eligible = gate_policy.low_selectivity_eligible;
+		trace_costs.low_selectivity_cost_ratio_limit =
+		    gate_policy.low_selectivity_cost_ratio_limit;
 		trace_costs.cost_ratio_limit = gate_policy.cost_ratio_limit;
 		trace_costs.baseline_threshold = gate_policy.baseline_threshold;
 		trace_costs.gate_lhs = trace_costs.candidate_total;
@@ -527,6 +611,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 
 	OuterYanDecisionRecord decision;
 	decision.selection_mode = selection_mode;
+	decision.aggregate_query = contains_aggregate;
 	decision.outer_reordered = outer_reordered;
 	decision.baseline_proven_empty = empty_proof.eliminates_all_join_work;
 	decision.costs = trace_costs;
@@ -571,7 +656,14 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 			decision.outer_yan_selected = true;
 			decision.gate_result = OuterYanGateResult::PASS;
 			decision.stretch_cost_gate_selected = gate_policy.stretch_selected;
-			decision.reason = gate_policy.stretch_selected ? "COST_OUTERYAN_STRETCH" : "COST_OUTERYAN_BETTER";
+			decision.low_selectivity_cost_gate_selected = gate_policy.low_selectivity_selected;
+			if (gate_policy.stretch_selected) {
+				decision.reason = "COST_OUTERYAN_STRETCH";
+			} else if (gate_policy.low_selectivity_selected) {
+				decision.reason = "COST_OUTERYAN_LOW_SELECTIVITY";
+			} else {
+				decision.reason = "COST_OUTERYAN_BETTER";
+			}
 		} else {
 			decision.gate_result = OuterYanGateResult::FAIL;
 			decision.reason = "COST_DUCKDB_BETTER";
@@ -580,6 +672,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	candidate_tree.stage_stats.outer_reordered = decision.outer_reordered;
 	candidate_tree.stage_stats.cost_gate_applied = decision.cost_gate_applied;
 	candidate_tree.stage_stats.outer_yan_selected = decision.outer_yan_selected;
+	candidate_tree.phase_timings.cost_model +=
+	    std::chrono::duration<double>(Clock::now() - cost_model_start).count();
 
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("DuckDB baseline join-cost detail",
@@ -592,6 +686,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		costs << std::setprecision(17)
 		      << "formula_id=" << trace_costs.formula_id << "\n"
 		      << "selection_mode=" << decision.selection_mode << "\n"
+		      << "aggregate_query=" << (contains_aggregate ? 1 : 0) << "\n"
 		      << "apply_cost_gate=" << (apply_cost_gate ? 1 : 0) << "\n"
 		      << "default_filter_upper_bound_checked="
 		      << (trace_costs.default_filter_upper_bound_checked ? 1 : 0) << "\n"
@@ -605,6 +700,17 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << (trace_costs.stretch_cost_gate_eligible ? 1 : 0) << "\n"
 		      << "stretch_cost_gate_selected="
 		      << (decision.stretch_cost_gate_selected ? 1 : 0) << "\n"
+		      << "unary_filter_selectivity=";
+		if (trace_costs.unary_filter_selectivity_available) {
+			costs << trace_costs.unary_filter_selectivity;
+		} else {
+			costs << "NA";
+		}
+		costs << "\n"
+		      << "low_selectivity_cost_gate_eligible="
+		      << (trace_costs.low_selectivity_cost_gate_eligible ? 1 : 0) << "\n"
+		      << "low_selectivity_cost_gate_selected="
+		      << (decision.low_selectivity_cost_gate_selected ? 1 : 0) << "\n"
 		      << "semijoin_retained_cardinality_ratio="
 		      << trace_costs.semijoin_retained_cardinality_ratio << "\n"
 		      << "uncertain_filter_cardinality_amplification="
@@ -642,6 +748,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		}
 		costs << "\n"
 		      << "cost_ratio_limit=" << std::setprecision(6) << trace_costs.cost_ratio_limit << "\n"
+		      << "low_selectivity_cost_ratio_limit="
+		      << trace_costs.low_selectivity_cost_ratio_limit << "\n"
 		      << std::setprecision(17)
 		      << "baseline_threshold=" << trace_costs.baseline_threshold << "\n"
 		      << "inner_output_weight=" << trace_costs.inner_output_weight << "\n"
@@ -663,7 +771,9 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO
 		      << " when semijoin_retained_cardinality_ratio < "
 		      << LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO << "; otherwise "
-		      << MAX_CANDIDATE_TO_BASELINE_RATIO << std::setprecision(17) << "\n"
+		      << MAX_CANDIDATE_TO_BASELINE_RATIO << "; aggregate_limit="
+		      << AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO
+		      << " with relaxed tiers disabled" << std::setprecision(17) << "\n"
 		      << "stretch_gate_predicate=no_default_filter_upper_bound && no_uncertain_filter_guard && "
 		         "no_full_reduction_lower_bound && candidate_join_cost < baseline_cost && "
 		         "candidate_join_input_rows <= "
@@ -671,6 +781,14 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << " * baseline_join_input_rows && semijoin_retained_cardinality_ratio >= "
 		      << std::setprecision(6) << STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO
 		      << std::setprecision(17) << "\n"
+		      << "low_selectivity_gate_predicate=stats_backed_unary_filter_selectivity <= "
+		      << std::setprecision(6) << LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD
+		      << "; no_default_filter_upper_bound; no_uncertain_filter_guard; "
+		         "no_full_reduction_lower_bound; candidate_join_cost < baseline_cost; "
+		         "candidate_join_input_rows <= "
+		      << LOW_SELECTIVITY_MAX_JOIN_INPUT_RATIO
+		      << " * baseline_join_input_rows; interpolated_limit <= "
+		      << LOW_SELECTIVITY_MAX_CANDIDATE_TO_BASELINE_RATIO << std::setprecision(17) << "\n"
 		      << "cost_gate_result=";
 		if (trace_costs.uncertain_filter_amplification_guard) {
 			costs << "uncertain_filter_amplification_guard => ";
@@ -694,37 +812,31 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		costs << "\n";
 		OuterYanTrace::Stage("candidate cost comparison", costs.str());
 	}
-	OuterYanTrace::Decision(decision);
-
 	unique_ptr<LogicalOperator> selected_plan;
-	OuterYanTree *selected_tree;
 	if (decision.outer_yan_selected) {
 		optimizer.RunOptimizer(OptimizerType::OUTER_YAN_POST, [&]() {
 			OuterYanPost post(context);
 			selected_plan = post.Optimize(candidate_tree);
 		});
-		selected_tree = &candidate_tree;
+		optimizer.RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
+			const auto phase_start = Clock::now();
+			AggregatePushdownOuter aggregate_pushdown(optimizer, candidate_tree);
+			selected_plan = aggregate_pushdown.Optimize(std::move(selected_plan));
+			candidate_tree.phase_timings.aggregate_pushdown +=
+			    std::chrono::duration<double>(Clock::now() - phase_start).count();
+			if (OuterYanTrace::Enabled()) {
+				OuterYanTrace::Stage("selected OuterYan plan after Aggregate Pushdown", selected_plan->ToString());
+			}
+		});
 	} else {
-		// Generate aggregate-pushdown decisions from the baseline shape itself.
-		// Reusing candidate_tree here is unsafe because the decision vector is
-		// consumed positionally during a post-order logical-plan walk.
-		baseline_tree.BuildOJT();
-		OuterYanPost baseline_post(context);
-		baseline_post.MarkAggPushdown(baseline_tree);
+		// A rejected candidate must leave DuckDB's normal plan exact. In
+		// particular, do not apply the OuterYan-specific aggregation rewrite to
+		// the baseline after the cost gate selected it.
 		selected_plan = std::move(baseline_plan);
-		selected_tree = &baseline_tree;
 	}
-
-	// This phase is deliberately outside the candidate branch: both an
-	// accepted OuterYan plan and a selected DuckDB baseline receive it, with
-	// metadata from the corresponding tree.
-	optimizer.RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
-		AggregatePushdownOuter aggregate_pushdown(optimizer, *selected_tree);
-		selected_plan = aggregate_pushdown.Optimize(std::move(selected_plan));
-		if (OuterYanTrace::Enabled()) {
-			OuterYanTrace::Stage("selected plan after Aggregate Pushdown", selected_plan->ToString());
-		}
-	});
+	candidate_tree.phase_timings.available = true;
+	decision.phase_timings = candidate_tree.phase_timings;
+	OuterYanTrace::Decision(decision);
 	// The selected plan lives locally while the facade is running, so the
 	// normal RunOptimizer post-callback check cannot see it through
 	// Optimizer::plan. Preserve the same verification boundary explicitly.

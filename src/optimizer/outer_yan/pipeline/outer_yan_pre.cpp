@@ -6,6 +6,8 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
+#include <chrono>
+
 namespace duckdb {
 
 // ============================================================================
@@ -69,28 +71,41 @@ void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree)
 	//                              `OTNode::join_kind`.
 	//   6. AllPairsSatisfy      -- post-condition: every (P, D) pair in an OK
 	//                              cell.
+	using Clock = std::chrono::steady_clock;
+	auto phase_start = Clock::now();
 	tree.BuildOT(std::move(plan));
+	tree.phase_timings.build_ot +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after BuildOT (OT rendered as OJT)", tree.ConstructOJT()->PrintAsTree(true));
 	}
 
+	phase_start = Clock::now();
 	Simplify(tree);
+	tree.phase_timings.simplification +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after Simplify (" + to_string(tree.stage_stats.simplify_collapses) +
 		                         " collapse(s); OT rendered as OJT)",
 		                     tree.ConstructOJT()->PrintAsTree(true));
 	}
 
+	phase_start = Clock::now();
 	{
 		auto post_simp_ojt = tree.ConstructOJT();
 		BottomUpPass(tree, post_simp_ojt->Root());
 		TopDownPass(tree, post_simp_ojt->Root());
 	}
+	tree.phase_timings.semijoin_pair_planning +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("semi-join pairs (bottom-up + top-down)", PrintSemiPairs(tree));
 	}
 
+	phase_start = Clock::now();
 	Desimplify(tree);
+	tree.phase_timings.desimplification +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after Desimplify (" + to_string(tree.stage_stats.desimplify_changes) +
 		                         " kind rewrite(s); OT rendered as OJT)",

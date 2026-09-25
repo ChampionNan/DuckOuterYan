@@ -446,7 +446,7 @@ class CorpusRunnerTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.auto_test = self.root / "auto_test"
         self.tools = self.auto_test / "postgres_replay"
-        self.corpus = self.auto_test / "outerjoin_query"
+        self.corpus = self.auto_test / "outerjoin_benchmark" / "benchmark"
         self.tools.mkdir(parents=True)
         for family in ("graph", "tpch", "tpcds", "job"):
             (self.corpus / family).mkdir(parents=True)

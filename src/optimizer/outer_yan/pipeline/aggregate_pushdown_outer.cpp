@@ -9,6 +9,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -24,6 +25,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 #include <functional>
+#include <sstream>
 #include <unordered_set>
 
 namespace duckdb {
@@ -242,6 +244,18 @@ AggregatePushdownRewriter::CreateDynamicAggregate(unique_ptr<LogicalOperator> ch
 	child_node->ResolveOperatorTypes();
 	auto child_bindings = child_node->GetColumnBindings();
 	auto child_types = child_node->types;
+	if (OuterYanTrace::Enabled()) {
+		std::ostringstream out;
+		out << "child=" << LogicalOperator::ColumnBindingsToString(child_bindings) << " targets=";
+		for (idx_t i = 0; i < agg_columns.size(); i++) {
+			if (i > 0) {
+				out << ",";
+			}
+			out << agg_columns[i].function_name << ":" << agg_columns[i].original_binding.ToString() << "->"
+			    << agg_columns[i].current_binding.ToString();
+		}
+		OuterYanTrace::Stage("aggregate-pushdown binding candidate", out.str());
+	}
 
 	// SELECT_DISTINCT special-case: replace the aggregate scaffold with a
 	// `LogicalDistinct` over every child column. No annot column is
@@ -477,6 +491,10 @@ AggregatePushdownRewriter::AddProjectionWithAnnot(unique_ptr<LogicalOperator> op
 	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(proj_expressions));
 	projection->AddChild(std::move(op));
 	projection->ResolveOperatorTypes();
+	// This projection is the last binding rewrite performed at a join node.
+	// Refresh here (rather than only before annot propagation) so the root
+	// aggregate replacement sees the binding exposed by the topmost projection.
+	RefreshAggColumnBindings();
 	return std::move(projection);
 }
 
@@ -812,17 +830,10 @@ AggregatePushdownOuter::ReplaceRootMinMax(unique_ptr<LogicalOperator> plan,
 	}
 	root_agg.expressions = std::move(new_agg_expressions);
 
-	// Rebuild the root projection to read the new aggregate outputs. The
-	// reference replaces the whole expression list with just the aggregate
-	// outputs (each aliased back to the original min/max alias is handled
-	// by `LogicalProjection::ResolveOperatorTypes`).
-	vector<unique_ptr<Expression>> new_proj_exprs;
-	for (idx_t i = 0; i < root_agg.expressions.size(); i++) {
-		const auto agg_binding = ColumnBinding(root_agg.aggregate_index, ProjectionIndex(i));
-		new_proj_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(root_agg.expressions[i]->return_type, agg_binding));
-	}
-	root_proj.expressions = std::move(new_proj_exprs);
+	// Keep the root projection intact. Its aggregate-result bindings are
+	// positional and the replacement above preserves both expression count and
+	// order. Rebuilding the projection here would discard projected GROUP BY
+	// keys (for example `SELECT key, MIN(v), MAX(v)`).
 	root_agg.ResolveOperatorTypes();
 	root_proj.ResolveOperatorTypes();
 	return plan;
@@ -879,13 +890,9 @@ AggregatePushdownOuter::ReplaceRootSum(unique_ptr<LogicalOperator> plan,
 	}
 	root_agg.expressions = std::move(new_agg_expressions);
 
-	vector<unique_ptr<Expression>> new_proj_exprs;
-	for (idx_t i = 0; i < root_agg.expressions.size(); i++) {
-		const auto agg_binding = ColumnBinding(root_agg.aggregate_index, ProjectionIndex(i));
-		new_proj_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(root_agg.expressions[i]->return_type, agg_binding));
-	}
-	root_proj.expressions = std::move(new_proj_exprs);
+	// The root projection continues to reference the aggregate outputs by their
+	// unchanged positional bindings. Preserve it so GROUP BY columns and aliases
+	// are not lost.
 	root_agg.ResolveOperatorTypes();
 	root_proj.ResolveOperatorTypes();
 	return plan;
@@ -894,8 +901,8 @@ AggregatePushdownOuter::ReplaceRootSum(unique_ptr<LogicalOperator> plan,
 unique_ptr<LogicalOperator>
 AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan) {
 	if (tree.root_aggregation.type != OuterYanAggregationType::COUNT_STAR) {
-		// MINMAX is handled by `ReplaceRootMinMax`. SUM and SELECT_DISTINCT
-		// remain to be wired in a follow-on (Slice 2C-cont / Slice 2D-cont).
+		// MINMAX and SUM are handled by their dedicated root rewrites;
+		// SELECT_DISTINCT has no count-to-sum replacement.
 		return plan;
 	}
 	if (!plan || plan->type != LogicalOperatorType::LOGICAL_PROJECTION || plan->children.empty()) {
@@ -947,15 +954,8 @@ AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan
 	                                                     AggregateType::NON_DISTINCT);
 	root_agg.expressions[0] = std::move(sum_expr);
 
-	// Adjust the root projection's first expression to read the new
-	// aggregate output. The reference replaces the whole expression list
-	// with just the annot ref; we mirror that — `count(*)` queries return
-	// a single column.
-	const auto agg_binding = ColumnBinding(root_agg.aggregate_index, ProjectionIndex(0));
-	vector<unique_ptr<Expression>> new_proj_exprs;
-	new_proj_exprs.push_back(
-	    make_uniq<BoundColumnRefExpression>(root_agg.expressions[0]->return_type, agg_binding));
-	root_proj.expressions = std::move(new_proj_exprs);
+	// The result remains in aggregate slot zero, so the existing root
+	// projection already points at the correct binding and retains its alias.
 	root_agg.ResolveOperatorTypes();
 	root_proj.ResolveOperatorTypes();
 	return plan;
@@ -992,23 +992,34 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	    tree.root_aggregation.type != OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
 	}
-	// The old blanket SJ-pairs gate (which disabled the pushdown for EVERY
-	// aggregation) is removed. The pushdown now runs for COUNT(*) WITH a GROUP BY
-	// — the reference rewrite shape (outerjoin_test/{count,aggregation}/q4_r.sql):
-	// the deepest relation emits `count(*) as annot`, every level above and the
-	// root emit `sum(COALESCE(annot, 1))`. This is correct AND survives
-	// enable_verification's plan-roundtrip. The remaining shapes are skipped (the
-	// SJ-reduced plain aggregate is already correct, so skipping forgoes only the
-	// push optimization, never correctness):
-	//   - group-less COUNT(*): the pushed annot is not summed at the group-less
-	//     root (it would return |preserved side| instead of the full count);
-	//   - SUM / MINMAX / SELECT_DISTINCT: the pushed plan trips the
-	//     enable_verification result-collector type check (an intermediate type
-	//     goes stale across the Serialize/Deserialize re-plan; execution itself is
-	//     correct). These await the type-fidelity fix.
-	if (tree.root_aggregation.type != OuterYanAggregationType::COUNT_STAR ||
-	    RootAggregateHasNoGroups(*plan)) {
+	// Group-less COUNT(*) remains the one unsupported pushdown shape: the
+	// pushed annotation is not summed at its group-less root. MIN/MAX and SUM
+	// use their dedicated root rewrites below. SELECT DISTINCT stays disabled
+	// until its serialization/type-fidelity path has the same coverage.
+	if ((tree.root_aggregation.type == OuterYanAggregationType::COUNT_STAR &&
+	     RootAggregateHasNoGroups(*plan)) ||
+	    tree.root_aggregation.type == OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
+	}
+	if (tree.root_aggregation.type == OuterYanAggregationType::MINMAX) {
+		// One input binding cannot be represented by two differently typed
+		// annotations in the rewriter's one-to-one binding map. Keep the selected
+		// OuterYan join/SJ plan, but conservatively leave aggregation above it when
+		// a query asks for both MIN(x) and MAX(x). The v3 workload uses separate
+		// MIN and MAX queries so both pushdown paths are still measured.
+		for (idx_t i = 0; i < tree.root_aggregation.columns.size(); i++) {
+			const auto &lhs = tree.root_aggregation.columns[i];
+			if (lhs.function_name != "min" && lhs.function_name != "max") {
+				continue;
+			}
+			for (idx_t j = i + 1; j < tree.root_aggregation.columns.size(); j++) {
+				const auto &rhs = tree.root_aggregation.columns[j];
+				if ((rhs.function_name == "min" || rhs.function_name == "max") &&
+				    lhs.binding == rhs.binding) {
+					return plan;
+				}
+			}
+		}
 	}
 
 	// Stage A — speculative refinement on a throwaway deep copy.
@@ -1047,22 +1058,24 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 		final_agg_columns = stage_b.AggColumns();
 	}
 
+	// Rewire the root aggregate to consume the pushed-down annot columns.
+	// This must happen before the final prune cycle: the rewriter's binding map
+	// describes the unpruned stage-B plan, while pruning can compact projection
+	// positions. Once the root expressions consume the annot bindings, DuckDB's
+	// column-pruning pass can remap them together with the rest of the plan.
+	plan = ReplaceRootCountWithSum(std::move(plan));
+	plan = ReplaceRootMinMax(std::move(plan), final_agg_columns);
+	plan = ReplaceRootSum(std::move(plan), final_agg_columns);
+
 	// Final prune cycle on the real plan — mirrors the reference's
-	// `RemoveUnusedColumns` + `PruneAggregationWithProjectionMap` call
-	// after `ApplyAgg`. One pass each is sufficient at this point because
-	// the bindings are already consistent.
+	// `RemoveUnusedColumns` + `PruneAggregationWithProjectionMap` call after
+	// `ApplyAgg`.
 	const idx_t final_height = DetermineMaxHeight(*plan);
 	for (idx_t i = 0; i < final_height; i++) {
 		RemoveUnusedColumns unused(optimizer);
 		unused.VisitOperator(plan);
 		plan = PruneInsertedAggregates(std::move(plan));
 	}
-
-	// Rewire the root aggregate to consume the pushed-down annot columns.
-	// Each branch is a no-op when the type does not match.
-	plan = ReplaceRootCountWithSum(std::move(plan));
-	plan = ReplaceRootMinMax(std::move(plan), final_agg_columns);
-	plan = ReplaceRootSum(std::move(plan), final_agg_columns);
 
 	// Re-resolve operator types across the WHOLE rebuilt plan, post-order. The
 	// piecemeal `ResolveOperatorTypes()` calls inside the rewriter / ReplaceRoot*

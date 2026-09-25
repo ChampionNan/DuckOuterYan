@@ -8,6 +8,8 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 
+#include <chrono>
+
 namespace duckdb {
 
 OuterYanPost::OuterYanPost(ClientContext &context_p) : context(context_p) {
@@ -21,7 +23,11 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 	// Pipeline: Resimplify → MarkAggPushdown → OJTToLogicalPlan →
 	// SemijoinInsertOnPlan. Aggregation-driven root anchoring is already
 	// enforced by OuterYanDP, so the OJT seen here is order-correct.
+	using Clock = std::chrono::steady_clock;
+	auto phase_start = Clock::now();
 	Resimplify(tree);
+	tree.phase_timings.resimplification +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after Resimplify (" + to_string(tree.stage_stats.resimplify_reverts) +
 		                         " revert(s); OJT)",
@@ -32,18 +38,27 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 	// live. Must run before OJTToLogicalPlan because the marker reads
 	// `OJTEdge::has_pk_fk_constraint` / `parent_relation_id` / `order` off
 	// the OJT.
+	phase_start = Clock::now();
 	MarkAggPushdown(tree);
+	tree.phase_timings.aggregate_pushdown_marking +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 
 	// Lower the OJT to a fresh LogicalPlan. After this call, `tree.ojt` and
 	// `tree.source_plan` are released — only `tree.{bottom_up_pairs,
 	// top_down_pairs, table_to_relation, agg_pushdown_decisions}` remain
 	// valid for SJ insertion and downstream aggregate pushdown.
+	phase_start = Clock::now();
 	auto plan = tree.OJTToLogicalPlan(context);
+	tree.phase_timings.plan_lowering +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 
 	// Final pass: splice LogicalSJBuild + LogicalSJProbe wraps based on the
 	// pre-decided pairs. Plan 3 contract — runs on the rebuilt LogicalPlan,
 	// not on the OJT.
+	phase_start = Clock::now();
 	plan = SemijoinInsertOnPlan(std::move(plan), tree);
+	tree.phase_timings.semijoin_insertion +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
 		OuterYanTrace::Stage("after semi-join insertion (logical plan)", plan->ToString());
 	}

@@ -30,17 +30,21 @@ struct OuterYanOptimizationResult {
 struct OuterYanCostGatePolicyResult {
 	bool available = false;
 	bool stretch_eligible = false;
+	bool low_selectivity_eligible = false;
 	bool pass = false;
 	bool stretch_selected = false;
+	bool low_selectivity_selected = false;
 	double cost_ratio_limit = 0.0;
+	double low_selectivity_cost_ratio_limit = 0.0;
 	double baseline_threshold = 0.0;
 };
 
 //! Owns the complete two-candidate policy for an OuterYan-applicable query:
 //! build the normal DuckDB baseline, build the OuterYan candidate, compare
 //! base-relation join groupings, optionally apply the common cost gate, and
-//! lower the winner. Queries containing aggregation or DISTINCT bypass this
-//! pipeline and continue through DuckDB's normal optimizer unchanged.
+//! lower the winner. Supported root aggregation and DISTINCT queries use the
+//! same candidate construction with a stricter, non-relaxed cost gate; only an
+//! accepted OuterYan candidate may receive OuterYan aggregate pushdown.
 class OuterYanOptimizer {
 public:
 	//! Final candidate-selection policy. This is deliberately a class-local
@@ -51,7 +55,7 @@ public:
 	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
-	//! it to the OuterYan candidate's real-join cost. V7 uses the full modeled
+	//! it to the OuterYan candidate's real-join cost. V9 uses the full modeled
 	//! row-work instead of the former 0.50 discount: the 2026-08-18 benchmark
 	//! showed that discount admitted candidates whose reducer work dominated the
 	//! realized execution time.
@@ -61,6 +65,11 @@ public:
 	//! cost. Uncertain table filters are checked under both their estimated and
 	//! unfiltered-cardinality scenarios.
 	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
+	//! Root aggregation/DISTINCT candidates must already show at least 10%
+	//! estimated join-work headroom. Aggregate-pushdown benefit is deliberately
+	//! not credited by the gate, so an accepted candidate has conservative
+	//! headroom before that additional optimization is applied.
+	static constexpr double AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO = 0.90;
 	//! Candidates that depend on a material estimated reduction need headroom
 	//! for selectivity error and reducer scheduling work. The August 30 corpus
 	//! showed that near-tie estimates in this regime consistently regressed.
@@ -78,6 +87,15 @@ public:
 	//! lowers real-join work. Lower-retention candidates must win the strict gate
 	//! because their performance depends more heavily on reduction estimates.
 	static constexpr double STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO = 0.95;
+	//! A stats-backed unary filter at or below this selectivity may use a
+	//! continuous relaxed tier. The limit starts at the ordinary strict limit
+	//! at 0.35 and approaches 1.20 as selectivity approaches zero.
+	static constexpr double LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD = 0.35;
+	static constexpr double LOW_SELECTIVITY_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
+	//! Still require the reordered real joins to reduce estimated input work;
+	//! this tier is broader than the 0.30 reorder-only stretch tier because a
+	//! selective unary predicate can make reducer propagation itself valuable.
+	static constexpr double LOW_SELECTIVITY_MAX_JOIN_INPUT_RATIO = 0.75;
 	//! A generic-selectivity filter on a tiny relation is too uncertain to drive
 	//! a large reorder when the two reducer rounds retain essentially all rows.
 	static constexpr double MAX_UNCERTAIN_FILTER_RETAINED_CARDINALITY_RATIO = 0.99;
@@ -87,10 +105,11 @@ public:
 
 	OuterYanOptimizationResult Optimize(unique_ptr<LogicalOperator> input);
 
-	//! Evaluate the strict 1.0 gate and the confidence-aware stretch gate from
-	//! already-computed costs. Hard plan guards (failed candidate, proven empty,
-	//! same grouping) remain in Optimize.
-	static OuterYanCostGatePolicyResult EvaluateCostGate(const OuterYanDecisionCosts &costs);
+	//! Evaluate the strict gate plus the confidence-aware stretch and
+	//! stats-backed low-selectivity tiers from already-computed costs. Hard plan
+	//! guards (failed candidate, proven empty, same grouping) remain in Optimize.
+	static OuterYanCostGatePolicyResult EvaluateCostGate(const OuterYanDecisionCosts &costs,
+	                                                   bool aggregate_query = false);
 
 private:
 	Optimizer &optimizer;

@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../configs.sh
 source "$SCRIPT_DIR/../configs.sh"
 
-CORPUS="${OY_CORPUS:-$SCRIPT_DIR/../outerjoin_query}"
+CORPUS="${OY_CORPUS:-$SCRIPT_DIR/../outerjoin_benchmark/benchmark}"
 ONLY="all"
 PATTERN="*"
 LIMIT=0
@@ -50,8 +50,8 @@ correctness/performance comparisons:
 
   DuckDB, PGPlan, OuterYan
 
-With the default corpus and --only all, this selects all 176 queries: 5 graph,
-48 TPC-H, 41 TPC-DS, and 82 JOB.
+With the default corpus and --only all, this selects all 224 queries: 25 graph,
+54 TPC-H, 63 TPC-DS, and 82 JOB.
 
 Fresh graph, TPC-DS, and JOB plans use isolated PostgreSQL schemas populated from at
 most --rows rows per DuckDB table (default 1000). TPC-H uses the exact SF0.01

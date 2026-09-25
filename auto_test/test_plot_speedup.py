@@ -17,6 +17,12 @@ PLOT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PLOT)
 
 
+def empty_benchmark_provenance():
+    return pd.DataFrame(columns=[
+        "query_id", "source_component", "evaluation_role", "workload_component",
+    ])
+
+
 def result_frame(rows):
     return pd.DataFrame(
         rows,
@@ -41,7 +47,11 @@ class PlotSpeedupLoadTest(unittest.TestCase):
                 "timing_threads": threads, "tm_off": 10.0, "tm_on": 5.0, "tm_speedup": 2.0,
             }]) for threads in (16, 32)
         }
-        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
+        with mock.patch.object(
+            PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()
+        ), mock.patch.object(
+            PLOT, "benchmark_provenance", side_effect=empty_benchmark_provenance
+        ):
             loaded = PLOT.timed(PLOT.load(list(sources)))
         self.assertEqual(len(loaded), 2)
         self.assertEqual(loaded["run"].nunique(), 2)
@@ -75,7 +85,11 @@ class PlotSpeedupLoadTest(unittest.TestCase):
                 ("oy_th_real_supplier_right", "tpch", 1.3, 1.4, "industry"),
             ]),
         }
-        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
+        with mock.patch.object(
+            PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()
+        ), mock.patch.object(
+            PLOT, "benchmark_provenance", side_effect=empty_benchmark_provenance
+        ):
             loaded = PLOT.load([core_path, industry_path])
 
         self.assertEqual(len(loaded), 2)
@@ -101,11 +115,40 @@ class PlotSpeedupLoadTest(unittest.TestCase):
                 ("derived__ojb_job_21a_skeleton_ldmx", "job", 2.1, 2.2, "final"),
             ]),
         }
-        with mock.patch.object(PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()):
+        with mock.patch.object(
+            PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()
+        ), mock.patch.object(
+            PLOT, "benchmark_provenance", side_effect=empty_benchmark_provenance
+        ):
             loaded = PLOT.load([final_path, attempts_path])
         self.assertEqual(len(loaded), 1)
         self.assertEqual(loaded.iloc[0]["marker"], "final")
         self.assertEqual(loaded.iloc[0]["query_class"], "derived")
+
+    def test_combined_versions_share_experiment_group_without_cross_version_dedup(self):
+        paths = ["result_v1.csv", "result_v2.csv", "result_all.csv"]
+        common = {
+            "query": "derived__same", "family": "tpch", "correct": "TRUE",
+            "timing_threads": 32, "tm_off": 2.0, "tm_on": 1.0, "tm_speedup": 2.0,
+            "experiment_group": "20260925_120000",
+        }
+        sources = {
+            paths[0]: pd.DataFrame([dict(common, workload_category="v1")]),
+            paths[1]: pd.DataFrame([dict(common, workload_category="v2")]),
+            paths[2]: pd.DataFrame([
+                dict(common, workload_category="v1"),
+                dict(common, workload_category="v2"),
+            ]),
+        }
+        with mock.patch.object(
+            PLOT.pd, "read_csv", side_effect=lambda path: sources[path].copy()
+        ), mock.patch.object(
+            PLOT, "benchmark_provenance", side_effect=empty_benchmark_provenance
+        ):
+            loaded = PLOT.load(paths)
+        self.assertEqual(loaded["run"].unique().tolist(), ["20260925_120000"])
+        self.assertEqual(len(loaded), 2)
+        self.assertEqual(set(loaded["workload_category"]), {"v1", "v2"})
 
     def test_new_shape_suffixes_are_recognized(self):
         cases = {
@@ -199,9 +242,18 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
         self.assertEqual(axis.get_xlabel(), "CPU Time (%)")
         self.assertEqual(runtime_axis.get_xscale(), "log")
         self.assertEqual(runtime_axis.get_xlabel(), "Running time: DuckDB vs. OuterYan")
+        self.assertTrue(runtime_axis.get_axisbelow())
+        self.assertTrue(all(line.get_zorder() == 0 for line in runtime_axis.get_xgridlines()))
         self.assertEqual(
             [text.get_text() for text in runtime_axis.get_legend().get_texts()],
-            ["DuckDB baseline", "OuterYan enabled"],
+            ["DuckDB", "OuterYan"],
+        )
+        phase_colors = {color.lower() for _, _, _, color in PLOT.PHASES}
+        self.assertNotIn(PLOT.PHASE_RUNTIME_DUCKDB_COLOR.lower(), phase_colors)
+        self.assertNotIn(PLOT.PHASE_RUNTIME_OUTERYAN_COLOR.lower(), phase_colors)
+        self.assertNotEqual(
+            PLOT.PHASE_RUNTIME_DUCKDB_COLOR.lower(),
+            PLOT.PHASE_RUNTIME_OUTERYAN_COLOR.lower(),
         )
         runtime_points = [
             collection.get_offsets().tolist() for collection in runtime_axis.collections

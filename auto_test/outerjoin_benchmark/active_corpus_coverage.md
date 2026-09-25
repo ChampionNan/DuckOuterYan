@@ -1,10 +1,11 @@
 # Retired FULL-heavy corpus: multithread timeout exclusions
 
 > Historical record only. The current default revision is
-> `v1-mixed-20260922`, contains all **206 queries**, and has no active timeout
-> exclusions. Changing join labels changed the SQL and invalidated the timeout
-> and performance observations below. A complete mixed-v1 run is required
-> before defining any new exclusions.
+> `v1-mixed-graph25-20260925`, contains all **224 queries** (including the full
+> 25-pattern Graph control set), and has no active timeout exclusions. The
+> tables below describe the preceding 206-query revision. Changing join labels
+> changed the SQL and invalidated those timeout and performance observations. A
+> complete current-v1 run is required before defining any new exclusions.
 
 The retired FULL-heavy active corpus contained 176 queries, down from 206
 originally and 185 after the first timeout filter. This record explains the

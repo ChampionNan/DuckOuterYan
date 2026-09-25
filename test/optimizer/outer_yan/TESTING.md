@@ -132,7 +132,7 @@ PRAGMA explain_output='optimized_only';
 -- Safe disable options (dp / post alone break plan ownership; do not use):
 SET disabled_optimizers TO 'outer_yan_pre';                        -- short-circuits whole pipeline
 SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';  -- explicit all-off
-SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- legacy pass; aggregates bypass OuterYan
+SET disabled_optimizers TO 'aggregate_pushdown_outer';             -- disable the selected-candidate aggregate rewrite
 
 -- Bitmap budget control:
 SET VARIABLE outer_yan_bitmap_max_bytes = 0;          -- force HashFilter
@@ -163,8 +163,8 @@ Tests `OuterYanApplicability::Check` (white-box) and
 | rejects set op above join | `UNION ALL` above skeleton → `applicable = false` |
 | rejects window operator above join | `ROW_NUMBER() OVER` above skeleton → `applicable = false` |
 | rejects cyclic 3-relation graph | Triangle (a–b, a–c, b–c) → `applicable = false` |
-| accepts root aggregation (COUNT_STAR) | The low-level applicability checker accepts it and records `has_root_aggregate`; the optimizer policy bypasses it before this checker is called |
-| accepts GROUP BY at root | The low-level applicability checker accepts it and records `has_root_aggregate`; the optimizer policy bypasses it before this checker is called |
+| accepts root aggregation (COUNT_STAR) | The applicability checker accepts it; candidate selection uses the strict aggregate gate |
+| accepts GROUP BY at root | The applicability checker accepts it; aggregate pushdown runs only for a selected OuterYan candidate |
 | relation table-index mapping is populated | 3 distinct `RelationId`s in [0, 3) after accept |
 | edges hold valid LogicalComparisonJoin pointers | `edge.join != nullptr`, `edge.left != edge.right` |
 | rejection populates reason string | `result.reason` non-empty on any rejection |

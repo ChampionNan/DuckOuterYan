@@ -30,7 +30,7 @@
 #   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
 #   PGPLAN_SETUP     source (default, auto-installs) | docker | external
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
-#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_query, 176 queries)
+#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_benchmark/benchmark)
 #   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
 #   PGPLAN_PLAN_CACHE  Persistent typed-plan cache (default auto_test/pgplan/plans)
 #   PGPLAN_COMPARISON_MODE  both (default) | pgplan-only | none
@@ -176,7 +176,7 @@ run_pgplan_corpus() {
     local corpus out_dir corpus_status=0 argument_index=0
     local correctness_mode correctness_from reuse_from comparison_mode plan_cache
     local -a corpus_command
-    corpus="${PGPLAN_CORPUS:-${CUSTOM_CORPUS:-$SCRIPT_DIR/outerjoin_query}}"
+    corpus="${PGPLAN_CORPUS:-${CUSTOM_CORPUS:-$SCRIPT_DIR/outerjoin_benchmark/benchmark}}"
     out_dir="${PGPLAN_OUT:-$SCRIPT_DIR/results/pgplan_corpus_${RUN_TS}}"
     correctness_mode="${PGPLAN_CORRECTNESS_MODE:-target}"
     correctness_from="${PGPLAN_CORRECTNESS_FROM:-}"
@@ -346,7 +346,7 @@ for thread_count in "${OY_THREAD_VALUES[@]}"; do
         run_experiment "custom" "$CUSTOM_CORPUS" "all" || thread_status=$?
     else
         log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
-        run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_query" "all" || thread_status=$?
+        run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_benchmark/benchmark" "all" || thread_status=$?
     fi
     case "$thread_status" in
         130|143) exit "$thread_status";;

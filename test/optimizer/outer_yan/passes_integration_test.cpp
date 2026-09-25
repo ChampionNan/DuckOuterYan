@@ -673,7 +673,7 @@ TEST_CASE("outer_yan semi-join elimination: nullable probe key survives RIGHT-FU
 	REQUIRE(CollectSortedRows(*optimized) == expected);
 }
 
-TEST_CASE("outer_yan policy: aggregate queries use the exact DuckDB plan",
+TEST_CASE("outer_yan policy: supported root aggregates enter candidate selection",
           "[outer_yan][passes][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -684,10 +684,13 @@ TEST_CASE("outer_yan policy: aggregate queries use the exact DuckDB plan",
 	    "SELECT a.id, SUM(c.cx) FROM a LEFT JOIN b ON a.id=b.id "
 	    "LEFT JOIN c ON b.id=c.id GROUP BY a.id";
 	const auto root_baseline = ExplainOptimizedPlan(con, "outer_yan", root_aggregate);
-	const auto root_enabled = ExplainOptimizedPlan(con, "", root_aggregate);
-	REQUIRE(root_enabled == root_baseline);
-	REQUIRE(root_enabled.find("SJ_BUILD") == string::npos);
-	REQUIRE(root_enabled.find("SJ_PROBE") == string::npos);
+	{
+		ScopedOuterYanCandidateForce force_candidate;
+		const auto root_enabled = ExplainOptimizedPlan(con, "", root_aggregate);
+		REQUIRE(root_enabled != root_baseline);
+		REQUIRE(root_enabled.find("SJ_BUILD") != string::npos);
+		REQUIRE(root_enabled.find("SJ_PROBE") != string::npos);
+	}
 
 	const string nested_aggregate =
 	    "SELECT a.id, b.bx, totals.total FROM a LEFT JOIN b ON a.id=b.id "
@@ -702,11 +705,17 @@ TEST_CASE("outer_yan policy: aggregate queries use the exact DuckDB plan",
 	const string distinct_query =
 	    "SELECT DISTINCT a.id, b.bx, c.cx FROM a LEFT JOIN b ON a.id=b.id "
 	    "LEFT JOIN c ON b.id=c.id";
-	const auto distinct_baseline = ExplainOptimizedPlan(con, "outer_yan", distinct_query);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO 'outer_yan'"));
+	auto distinct_baseline_result = con.Query(distinct_query);
+	REQUIRE_FALSE(distinct_baseline_result->HasError());
 	const auto distinct_enabled = ExplainOptimizedPlan(con, "", distinct_query);
-	REQUIRE(distinct_enabled == distinct_baseline);
+	REQUIRE(distinct_enabled.find("DISTINCT") != string::npos);
 	REQUIRE(distinct_enabled.find("SJ_BUILD") == string::npos);
 	REQUIRE(distinct_enabled.find("SJ_PROBE") == string::npos);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	auto distinct_enabled_result = con.Query(distinct_query);
+	REQUIRE_FALSE(distinct_enabled_result->HasError());
+	REQUIRE(CollectSortedRows(*distinct_enabled_result) == CollectSortedRows(*distinct_baseline_result));
 }
 
 // ============================================================================
@@ -1161,11 +1170,12 @@ TEST_CASE("outer_yan passes: equivalence — full SELECT* 10-relation LEFT chain
 
 // ============================================================================
 // Broader aggregate-policy variants over 3..6-relation outer-join skeletons.
-// These verify ON/OFF result equivalence while the production policy routes
-// every aggregate query through DuckDB's normal optimizer.
+// AssertOuterYanPreservesResults forces a complete candidate, so these tests
+// exercise root-aggregate lowering and pushdown independently of the strict
+// production cost gate.
 // ============================================================================
 
-TEST_CASE("outer_yan policy: COUNT(*) over 3-relation LEFT chain stays on DuckDB",
+TEST_CASE("outer_yan policy: COUNT(*) over 3-relation LEFT chain remains equivalent",
           "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -1176,7 +1186,7 @@ TEST_CASE("outer_yan policy: COUNT(*) over 3-relation LEFT chain stays on DuckDB
 	                                     "LEFT JOIN c ON a.id = c.id");
 }
 
-TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain stays on DuckDB",
+TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain remains equivalent",
           "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -1188,7 +1198,7 @@ TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain stays on DuckDB",
 	                                     "GROUP BY a.id");
 }
 
-TEST_CASE("outer_yan policy: GROUP BY + COUNT/MIN/MAX stays on DuckDB",
+TEST_CASE("outer_yan policy: GROUP BY + COUNT/MIN/MAX remains equivalent",
           "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -1201,7 +1211,7 @@ TEST_CASE("outer_yan policy: GROUP BY + COUNT/MIN/MAX stays on DuckDB",
 	                                     "GROUP BY a.id");
 }
 
-TEST_CASE("outer_yan policy: SUM over 6-relation chain stays on DuckDB",
+TEST_CASE("outer_yan policy: SUM over 6-relation chain remains equivalent",
           "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);
 	Connection con(db);
@@ -1454,13 +1464,37 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 	};
 
 	REQUIRE(OuterYanOptimizer::MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.0));
+	REQUIRE(OuterYanOptimizer::AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(0.90));
 	REQUIRE(OuterYanOptimizer::LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(0.90));
 	REQUIRE(OuterYanOptimizer::LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.90));
 	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(1.0));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.30));
 	REQUIRE(OuterYanOptimizer::STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.95));
-	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V7");
+	REQUIRE(OuterYanOptimizer::LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD == Approx(0.35));
+	REQUIRE(OuterYanOptimizer::LOW_SELECTIVITY_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
+	REQUIRE(OuterYanOptimizer::LOW_SELECTIVITY_MAX_JOIN_INPUT_RATIO == Approx(0.75));
+	REQUIRE(costs().formula_id == "OUTER_YAN_COST_V9");
+
+	SECTION("root aggregation uses a strict non-relaxed boundary") {
+		auto input = costs();
+		input.candidate_total = 90.0;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input, true);
+		REQUIRE(result.available);
+		REQUIRE(result.pass);
+		REQUIRE(result.cost_ratio_limit == Approx(0.90));
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
+
+		input.candidate_total = 90.0001;
+		input.unary_filter_selectivity_available = true;
+		input.unary_filter_selectivity = 0.01;
+		result = OuterYanOptimizer::EvaluateCostGate(input, true);
+		REQUIRE_FALSE(result.pass);
+		REQUIRE(result.cost_ratio_limit == Approx(0.90));
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
+	}
 
 	SECTION("strict boundary remains inclusive") {
 		auto result = OuterYanOptimizer::EvaluateCostGate(costs());
@@ -1567,6 +1601,68 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		input.semijoin_retained_cardinality_ratio = 0.949999;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("stats-backed low unary selectivity relaxes the gate monotonically") {
+		auto input = costs();
+		input.semijoin_retained_cardinality_ratio = 0.89;
+		input.candidate_to_baseline_join_input_ratio = 0.75;
+		input.candidate_join_input_rows = 750.0;
+		input.unary_filter_selectivity_available = true;
+
+		input.unary_filter_selectivity = 0.35;
+		input.candidate_total = 90.0001;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.low_selectivity_eligible);
+		REQUIRE_FALSE(result.pass);
+		REQUIRE(result.low_selectivity_cost_ratio_limit == Approx(0.90));
+
+		input.unary_filter_selectivity = 0.175;
+		input.candidate_total = 105.0;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.pass);
+		REQUIRE(result.low_selectivity_selected);
+		REQUIRE_FALSE(result.stretch_selected);
+		REQUIRE(result.low_selectivity_cost_ratio_limit == Approx(1.05));
+		REQUIRE(result.cost_ratio_limit == Approx(1.05));
+
+		input.unary_filter_selectivity = 0.0;
+		input.candidate_total = 120.0;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE(result.pass);
+		REQUIRE(result.low_selectivity_selected);
+		REQUIRE(result.cost_ratio_limit == Approx(1.20));
+	}
+
+	SECTION("low-selectivity tier rejects uncertain and non-reducing inputs") {
+		auto input = costs();
+		input.semijoin_retained_cardinality_ratio = 0.89;
+		input.candidate_total = 100.0;
+		input.unary_filter_selectivity_available = true;
+		input.unary_filter_selectivity = 0.20;
+
+		input.default_filter_upper_bound_checked = true;
+		auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
+		REQUIRE_FALSE(result.pass);
+
+		input.default_filter_upper_bound_checked = false;
+		input.candidate_to_baseline_join_input_ratio = 0.750001;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
+		REQUIRE_FALSE(result.pass);
+
+		input.candidate_to_baseline_join_input_ratio = 0.75;
+		input.candidate_join_cost = input.baseline_cost;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
+		REQUIRE_FALSE(result.pass);
+
+		input.candidate_join_cost = 70.0;
+		input.unary_filter_selectivity = 0.350001;
+		result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
 		REQUIRE_FALSE(result.pass);
 	}
 

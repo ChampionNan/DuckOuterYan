@@ -8,8 +8,10 @@ imputation, speed-up-based trimming, or representative-query sampling is used.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,21 @@ PHASE_COMPONENTS = (
     ("round3", "profile_round3_operator_s"),
     ("other", "profile_other_elapsed_s"),
 )
+
+FAMILY_LABELS = {
+    "all": "all",
+    "graph": "Graph",
+    "tpch": "TPC-H",
+    "tpc-h": "TPC-H",
+    "tpcds": "TPC-DS",
+    "tpc-ds": "TPC-DS",
+    "job": "JOB",
+}
+
+
+def normalize_family(value: object) -> str:
+    text = str(value).strip()
+    return FAMILY_LABELS.get(text.lower(), text)
 
 
 def distribution(values: pd.Series) -> dict:
@@ -50,13 +67,16 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         raise ValueError("statistics require one logical run; do not mix thread configurations")
     if "timing_threads" in frame and frame["timing_threads"].nunique() > 1:
         raise ValueError("statistics require one timing thread count")
-    if frame.duplicated(["family", "query"]).any():
+    identity_columns = [column for column in ("workload_category", "family", "query") if column in frame]
+    if frame.duplicated(identity_columns).any():
         raise ValueError("deduplicate final and attempts rows before computing statistics")
     columns = [column for column in (
+        "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
         "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
         "selected_plan", "correct", "note", "timing_threads", "sql_path",
     ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
+    detail["family"] = detail["family"].map(normalize_family)
     detail["selected_plan"] = detail.get("selected_plan", pd.Series("UNKNOWN", index=detail.index)).fillna(
         "UNKNOWN").astype(str).str.upper()
     correct = detail.get("correct", pd.Series("TRUE", index=detail.index)).astype(str).str.upper().eq("TRUE")
@@ -127,10 +147,13 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
         }
 
     detail = frame[[column for column in (
-        "query", "family", "topology", "selected_plan", "profile_status", "profile_threads",
+        "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
+        "query", "family", "topology", "selected_plan", "correct", "note",
+        "profile_status", "profile_threads",
         "profile_wall_time_s", "profile_cpu_time_s", *(column for _, column in PHASE_COMPONENTS),
         f"{metric}_off", f"{metric}_on",
     ) if column in frame]].copy().reset_index(drop=True)
+    detail["family"] = detail["family"].map(normalize_family)
     numeric_columns = [
         "profile_threads", "profile_wall_time_s", "profile_cpu_time_s",
         *(column for _, column in PHASE_COMPONENTS), f"{metric}_off", f"{metric}_on",
@@ -140,11 +163,14 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
             detail[column] = pd.to_numeric(detail[column], errors="coerce")
     selected = detail["selected_plan"].fillna("").astype(str).str.upper().eq("OUTERYAN")
     complete = detail["profile_status"].fillna("").astype(str).str.upper().eq("OK")
+    correct = detail.get("correct", pd.Series("TRUE", index=detail.index)).astype(str).str.upper().eq("TRUE")
+    notes = detail.get("note", pd.Series("", index=detail.index)).fillna("").astype(str)
+    not_timeout = ~notes.str.contains("TIMEOUT", case=False, regex=False)
     finite = np.isfinite(detail["profile_wall_time_s"]) & detail["profile_wall_time_s"].gt(0)
     finite &= np.isfinite(detail["profile_cpu_time_s"]) & detail["profile_cpu_time_s"].gt(0)
     for _, column in PHASE_COMPONENTS:
         finite &= np.isfinite(detail[column]) & detail[column].ge(0)
-    detail = detail.loc[selected & complete & finite].copy()
+    detail = detail.loc[selected & complete & correct & not_timeout & finite].copy()
     if detail.empty:
         return {
             "available": False,
@@ -179,7 +205,8 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
     else:
         detail["unprofiled_speedup"] = np.nan
 
-    def phase_group(family: str, rows: pd.DataFrame) -> dict:
+    def phase_group(scope: str, rows: pd.DataFrame, *, family: str = "all",
+                    workload_category: str = "all") -> dict:
         cpu_total = float(rows["profile_cpu_time_s"].sum())
         component_seconds = {
             name: float(rows[column].sum()) for name, column in PHASE_COMPONENTS
@@ -187,17 +214,26 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
         speedups = rows["unprofiled_speedup"].dropna()
         valid_pairs = rows.loc[rows["unprofiled_speedup"].notna()]
         return {
+            "scope": scope,
             "family": family,
+            "workload_category": workload_category,
             "profiles": len(rows),
             "profile_threads": sorted(rows["profile_threads"].dropna().astype(int).unique().tolist())
             if "profile_threads" in rows else [],
             "cpu_total_s": cpu_total,
             "component_seconds": component_seconds,
+            "component_seconds_distribution": {
+                name: signed_distribution(rows[column]) for name, column in PHASE_COMPONENTS
+            },
             "cpu_weighted_fraction": {
                 name: value / cpu_total for name, value in component_seconds.items()
             },
             "median_query_fraction": {
                 name: float(rows[f"{name}_fraction"].median()) for name, _ in PHASE_COMPONENTS
+            },
+            "query_fraction_distribution": {
+                name: signed_distribution(rows[f"{name}_fraction"])
+                for name, _ in PHASE_COMPONENTS
             },
             "profile_wall_s": distribution(rows["profile_wall_time_s"]),
             "unprofiled_speedup": distribution(speedups),
@@ -207,9 +243,22 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
             ),
         }
 
-    groups = [phase_group("all", detail)]
-    groups.extend(phase_group(family, rows) for family, rows in detail.groupby("family", sort=True))
+    groups = [phase_group("overall", detail)]
+    groups.extend(
+        phase_group("benchmark", rows, family=family)
+        for family, rows in detail.groupby("family", sort=True)
+    )
+    if "workload_category" in detail:
+        groups.extend(
+            phase_group("workload_category", rows, workload_category=category)
+            for category, rows in detail.groupby("workload_category", sort=True)
+        )
+        groups.extend(
+            phase_group("workload_benchmark", rows, family=family, workload_category=category)
+            for (category, family), rows in detail.groupby(["workload_category", "family"], sort=True)
+        )
     query_columns = [column for column in (
+        "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
         "query", "family", "topology", "profile_threads", "profile_wall_time_s",
         "profile_cpu_time_s", "phase_sum_s", "unprofiled_speedup",
         *(column for _, column in PHASE_COMPONENTS),
@@ -219,7 +268,7 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
         "available": True,
         "reason": None,
         "method": {
-            "population": "Complete same-run profiles for queries whose ON run selected OuterYan",
+            "population": "Correct, non-timeout queries with complete same-run profiles whose ON run selected OuterYan",
             "components": "Accumulated operator CPU seconds; components sum to profile_cpu_time_s",
             "wall_time": "profile_wall_time_s is elapsed latency and is not added to CPU components",
             "cpu_weighted_fraction": "sum(component CPU seconds) / sum(profile CPU seconds)",
@@ -231,6 +280,188 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
     }
 
 
+def signed_distribution(values: pd.Series) -> dict:
+    """Distribution for differences, where a geometric mean is undefined."""
+    values = values.dropna()
+    if values.empty:
+        return dict.fromkeys(("min", "max", "mean", "median", "stddev"))
+    return {
+        "min": float(values.min()),
+        "max": float(values.max()),
+        "mean": float(values.mean()),
+        "median": float(values.median()),
+        "stddev": float(values.std(ddof=1)) if len(values) > 1 else None,
+    }
+
+
+def build_optimizer_statistics(frame: pd.DataFrame) -> dict:
+    """Summarize paired execution profiles and algorithmic optimizer phases."""
+    required = {
+        "query", "family", "selected_plan", "correct", "note", "optimizer_profile_status",
+        "optimizer_duckdb_total_s", "optimizer_outeryan_total_s",
+        "optimizer_duckdb_phases_json", "optimizer_outeryan_phases_json",
+    }
+    if not required.issubset(frame.columns):
+        return {
+            "available": False,
+            "reason": "input has no complete optimizer-profile schema",
+            "method": {},
+            "groups": [],
+            "queries": [],
+            "phases": [],
+        }
+
+    columns = [column for column in (
+        "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
+        "query", "family", "selected_plan", "correct", "note", "optimizer_profile_status",
+        "optimizer_timed_samples", "optimizer_duckdb_total_s", "optimizer_outeryan_total_s",
+        "optimizer_overhead_s", "optimizer_outeryan_to_duckdb_ratio",
+        "optimizer_duckdb_measured_phase_s", "optimizer_outeryan_measured_phase_s",
+        "optimizer_duckdb_other_s", "optimizer_outeryan_other_s",
+        "optimizer_duckdb_phases_json", "optimizer_outeryan_phases_json", "optimizer_phase_delta_json",
+    ) if column in frame]
+    detail = frame[columns].copy().reset_index(drop=True)
+    detail["family"] = detail["family"].map(normalize_family)
+    numeric = [column for column in (
+        "optimizer_timed_samples", "optimizer_duckdb_total_s", "optimizer_outeryan_total_s",
+        "optimizer_overhead_s", "optimizer_outeryan_to_duckdb_ratio",
+        "optimizer_duckdb_measured_phase_s", "optimizer_outeryan_measured_phase_s",
+        "optimizer_duckdb_other_s", "optimizer_outeryan_other_s",
+    ) if column in detail]
+    for column in numeric:
+        detail[column] = pd.to_numeric(detail[column], errors="coerce")
+    correct = detail["correct"].astype(str).str.upper().eq("TRUE")
+    not_timeout = ~detail["note"].fillna("").astype(str).str.contains("TIMEOUT", case=False, regex=False)
+    complete = detail["optimizer_profile_status"].fillna("").astype(str).str.upper().eq("OK")
+    finite = (
+        np.isfinite(detail["optimizer_duckdb_total_s"])
+        & detail["optimizer_duckdb_total_s"].gt(0)
+        & np.isfinite(detail["optimizer_outeryan_total_s"])
+        & detail["optimizer_outeryan_total_s"].gt(0)
+    )
+    detail = detail.loc[correct & not_timeout & complete & finite].copy()
+    if detail.empty:
+        return {
+            "available": False,
+            "reason": "no correct non-timeout queries have complete paired optimizer profiles",
+            "method": {},
+            "groups": [],
+            "queries": [],
+            "phases": [],
+        }
+
+    detail["optimizer_overhead_s"] = (
+        detail["optimizer_outeryan_total_s"] - detail["optimizer_duckdb_total_s"]
+    )
+    detail["optimizer_outeryan_to_duckdb_ratio"] = (
+        detail["optimizer_outeryan_total_s"] / detail["optimizer_duckdb_total_s"]
+    )
+    parsed_phases = []
+    valid_indices = []
+    for index, row in detail.iterrows():
+        try:
+            row_phases = []
+            off_phases = json.loads(row["optimizer_duckdb_phases_json"])
+            on_phases = json.loads(row["optimizer_outeryan_phases_json"])
+            if not isinstance(off_phases, dict) or not isinstance(on_phases, dict):
+                raise ValueError("optimizer phase JSON is not an object")
+            phase_names = sorted(set(off_phases) | set(on_phases))
+            for phase in phase_names:
+                off = float(off_phases.get(phase, 0.0))
+                on = float(on_phases.get(phase, 0.0))
+                if not math.isfinite(off) or not math.isfinite(on) or off < 0 or on < 0:
+                    raise ValueError("invalid optimizer phase value")
+                row_phases.append({
+                    "row_index": int(index),
+                    "experiment_group": row.get("experiment_group"),
+                    "corpus_version": row.get("corpus_version"),
+                    "corpus_scope": row.get("corpus_scope"),
+                    "workload_category": row.get("workload_category"),
+                    "query_class": row.get("query_class"),
+                    "query": row["query"],
+                    "family": row["family"],
+                    "selected_plan": str(row["selected_plan"]).upper(),
+                    "phase": phase,
+                    "duckdb_s": off,
+                    "outeryan_s": on,
+                    "delta_s": on - off,
+                })
+            parsed_phases.extend(row_phases)
+            valid_indices.append(index)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+    detail = detail.loc[valid_indices].copy()
+    if detail.empty:
+        return {
+            "available": False,
+            "reason": "optimizer totals exist but workflow-phase JSON is invalid",
+            "method": {},
+            "groups": [],
+            "queries": [],
+            "phases": [],
+        }
+
+    def optimizer_group(subset: str, scope: str, rows: pd.DataFrame, *, family: str = "all",
+                        workload_category: str = "all") -> dict:
+        off_total = float(rows["optimizer_duckdb_total_s"].sum())
+        on_total = float(rows["optimizer_outeryan_total_s"].sum())
+        return {
+            "subset": subset,
+            "scope": scope,
+            "family": family,
+            "workload_category": workload_category,
+            "profiles": len(rows),
+            "duckdb_s": distribution(rows["optimizer_duckdb_total_s"]),
+            "outeryan_s": distribution(rows["optimizer_outeryan_total_s"]),
+            "overhead_s": signed_distribution(rows["optimizer_overhead_s"]),
+            "outeryan_to_duckdb_ratio": distribution(rows["optimizer_outeryan_to_duckdb_ratio"]),
+            "totals": {
+                "duckdb_s": off_total,
+                "outeryan_s": on_total,
+                "overhead_s": on_total - off_total,
+                "outeryan_to_duckdb_ratio": on_total / off_total if off_total > 0 else None,
+            },
+        }
+
+    groups = []
+    for subset, rows in (
+        ("all", detail),
+        ("outeryan_selected", detail.loc[detail["selected_plan"].astype(str).str.upper().eq("OUTERYAN")]),
+    ):
+        groups.append(optimizer_group(subset, "overall", rows))
+        groups.extend(
+            optimizer_group(subset, "benchmark", group, family=family)
+            for family, group in rows.groupby("family", sort=True)
+        )
+        if "workload_category" in rows:
+            groups.extend(
+                optimizer_group(subset, "workload_category", group, workload_category=category)
+                for category, group in rows.groupby("workload_category", sort=True)
+            )
+            groups.extend(
+                optimizer_group(subset, "workload_benchmark", group, family=family,
+                                workload_category=category)
+                for (category, family), group in rows.groupby(["workload_category", "family"], sort=True)
+            )
+
+    query_columns = [column for column in columns if not column.endswith("_phases_json")]
+    return {
+        "available": True,
+        "reason": None,
+        "method": {
+            "population": "Correct, non-timeout queries with complete paired detailed optimizer profiles",
+            "measurement": "Real query execution; one unprofiled warm-up plus one profiled sample per side",
+            "selection": "The sole post-warm-up execution supplies optimizer totals and workflow phases",
+            "total": "DuckDB all_optimizers wall time from the execution profile",
+            "phases": "Algorithmic OuterYan workflow phases; generic DuckDB per-pass timings are not exported",
+            "ratio": "OuterYan optimizer time / DuckDB optimizer time; values above 1 are overhead",
+        },
+        "groups": groups,
+        "queries": json.loads(detail[query_columns].to_json(orient="records", double_precision=15)),
+        "phases": parsed_phases,
+    }
+
+
 def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str] | None = None) -> dict:
     detail = prepare_queries(frame, metric)
     groups = []
@@ -239,10 +470,16 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                          ("duckdb_selected", detail.loc[detail["selected_plan"].eq("DUCKDB")])):
         groups.append({"subset": subset, "scope": "overall", "family": "all", "topology": "all",
                        **summarize(rows)})
-        group_specs = [("benchmark", ["family"]), ("shape", ["topology"]),
-                       ("benchmark_shape", ["family", "topology"])]
+        group_specs = [("benchmark", ["family"])]
+        if "topology" in detail:
+            group_specs.extend([("shape", ["topology"]), ("benchmark_shape", ["family", "topology"])])
         if "workload_component" in detail:
             group_specs.append(("workload_component", ["workload_component"]))
+        if "workload_category" in detail:
+            group_specs.extend([
+                ("workload_category", ["workload_category"]),
+                ("workload_benchmark", ["workload_category", "family"]),
+            ])
         for scope, keys in group_specs:
             for group_keys, group_rows in rows.groupby(keys, sort=True):
                 if not isinstance(group_keys, tuple):
@@ -254,6 +491,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                     "family": identity.get("family", "all"),
                     "topology": identity.get("topology", "all"),
                     "workload_component": identity.get("workload_component", "all"),
+                    "workload_category": identity.get("workload_category", "all"),
                     **summarize(group_rows),
                 })
     source_info = []
@@ -263,7 +501,12 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                             "rows": len(pd.read_csv(path)),
                             "kind": "attempts" if path.name.endswith(".attempts.csv") else "final"})
     return {
-        "schema_version": 1, "run": str(frame["run"].iloc[0]) if "run" in frame and len(frame) else None,
+        "schema_version": 2,
+        "run": (
+            str(frame["run"].iloc[0]) if "run" in frame and len(frame)
+            else str(frame["experiment_group"].iloc[0]) if "experiment_group" in frame and len(frame)
+            else None
+        ),
         "metric": metric, "timing_threads": sorted(frame["timing_threads"].dropna().astype(int).unique().tolist())
         if "timing_threads" in frame else [],
         "sources": source_info, "input_rows": sum(source["rows"] for source in source_info) if source_info else None,
@@ -271,7 +514,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         "method": {
             "speedup": "OFF / ON from original unrounded timing pairs; values > 1 mean faster",
             "eligibility": "Correct, not marked TIMEOUT, finite positive OFF, ON, and ratio",
-            "deduplication": "Final rows win family + query duplicates; attempts fill missing queries",
+            "deduplication": "Rows are unique by workload category + family + query",
             "geomean": "exp(mean(log(OFF / ON))), each eligible query weighted equally",
             "total_speedup": "sum(OFF) / sum(ON) over the same eligible pairs, not mean query speedup",
             "stddev_variance": "Sample statistics (ddof=1); unavailable for n < 2",
@@ -281,6 +524,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         },
         "groups": groups,
         "phase_profiles": build_phase_statistics(frame, metric),
+        "optimizer_profiles": build_optimizer_statistics(frame),
         "queries": json.loads(detail.to_json(orient="records", double_precision=15)),
     }
 
@@ -294,7 +538,7 @@ def markdown_report(report: dict) -> str:
              "## Definitions and coverage", ""]
     lines.extend(f"- {name}: {definition}." for name, definition in report["method"].items())
     lines.extend(["", f"Unique queries after final/attempts reconciliation: {report['unique_queries']}.", ""])
-    family_order = {name: index for index, name in enumerate(("all", "graph", "TPC-H", "TPC-DS", "JOB"))}
+    family_order = {name: index for index, name in enumerate(("all", "Graph", "TPC-H", "TPC-DS", "JOB"))}
     for subset in ("all", "outeryan_selected", "duckdb_selected"):
         rows = [row for row in report["groups"] if row["subset"] == subset and row["scope"] in ("overall", "benchmark")]
         rows.sort(key=lambda row: family_order[row["family"]])
@@ -377,8 +621,9 @@ def markdown_report(report: dict) -> str:
         lines.extend(["", "CPU shares below are work-weighted across the displayed population; they are not wall-time shares.", "",
                       "| Benchmark | Profiles | Round 1 CPU (%) | Round 2 CPU (%) | Round 3 CPU (%) | Other CPU (%) | Median unprofiled speed-up | Total-time speed-up |",
                       "|---|---:|---:|---:|---:|---:|---:|---:|"])
-        phase_order = {name: index for index, name in enumerate(("all", "graph", "TPC-H", "TPC-DS", "JOB"))}
-        for row in sorted(phase["groups"], key=lambda item: phase_order.get(item["family"], 99)):
+        phase_order = {name: index for index, name in enumerate(("all", "Graph", "TPC-H", "TPC-DS", "JOB"))}
+        phase_headline = [row for row in phase["groups"] if row["scope"] in ("overall", "benchmark")]
+        for row in sorted(phase_headline, key=lambda item: phase_order.get(item["family"], 99)):
             shares = row["cpu_weighted_fraction"]
             median = row["unprofiled_speedup"]["median"]
             values = [shares[name] * 100 for name, _ in PHASE_COMPONENTS]
@@ -388,6 +633,31 @@ def markdown_report(report: dict) -> str:
                 + " |"
             )
         lines.append("")
+    optimizer = report["optimizer_profiles"]
+    lines.extend(["## Optimization-time statistics", ""])
+    if not optimizer["available"]:
+        lines.extend([f"Unavailable: {optimizer['reason']}.", ""])
+    else:
+        lines.extend(f"- {name}: {definition}." for name, definition in optimizer["method"].items())
+        for subset in ("all", "outeryan_selected"):
+            rows = [row for row in optimizer["groups"]
+                    if row["subset"] == subset and row["scope"] in ("overall", "benchmark")]
+            rows.sort(key=lambda row: family_order.get(row["family"], 99))
+            lines.extend(["", f"### {subset}", "",
+                          "| Benchmark | Profiles | DuckDB median (s) | OuterYan median (s) | Median ratio | Sample SD ratio | Total DuckDB (s) | Total OuterYan (s) | Total ratio |",
+                          "|---|---:|---:|---:|---:|---:|---:|---:|---:|"])
+            for row in rows:
+                values = (
+                    row["duckdb_s"]["median"], row["outeryan_s"]["median"],
+                    row["outeryan_to_duckdb_ratio"]["median"],
+                    row["outeryan_to_duckdb_ratio"]["stddev"],
+                    row["totals"]["duckdb_s"], row["totals"]["outeryan_s"],
+                    row["totals"]["outeryan_to_duckdb_ratio"],
+                )
+                lines.append(f"| {row['family']} | {row['profiles']} | "
+                             + " | ".join(number(value) for value in values) + " |")
+        lines.extend(["", "Per-query workflow timings and their DuckDB-to-OuterYan deltas are in "
+                      "`optimizer_phases.csv`; group-level phase summaries are in `optimizer_phase_summary.csv`.", ""])
     lines.extend(["## Excluded queries", "", "| Benchmark | Query | Reason | Recorded note |", "|---|---|---|---|"])
     for row in report["queries"]:
         if not row["valid_timing"]:
@@ -408,4 +678,186 @@ def write_statistics(output_directory: Path, frame: pd.DataFrame, metric: str = 
     output_directory.mkdir(parents=True, exist_ok=True)
     (output_directory / "statistics.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     (output_directory / "STATISTICS.md").write_text(markdown_report(report), encoding="utf-8")
+    benchmark_rows = []
+    for row in report["groups"]:
+        if row["subset"] not in ("all", "outeryan_selected"):
+            continue
+        if row["scope"] not in ("overall", "benchmark", "workload_category", "workload_benchmark"):
+            continue
+        benchmark_rows.append({
+            "subset": row["subset"],
+            "scope": row["scope"],
+            "workload_category": row.get("workload_category", "all"),
+            "benchmark": row["family"],
+            "valid": row["counts"]["valid"],
+            "total": row["counts"]["total"],
+            "excluded": row["counts"]["excluded"],
+            "timeouts": row["counts"]["timeouts"],
+            "min": row["speedup"]["min"],
+            "max": row["speedup"]["max"],
+            "geomean": row["speedup"]["geomean"],
+            "mean": row["speedup"]["mean"],
+            "median": row["speedup"]["median"],
+            "stddev": row["speedup"]["stddev"],
+            "duckdb_total_s": row["totals"]["off_s"],
+            "outeryan_total_s": row["totals"]["on_s"],
+            "total_time_speedup": row["totals"]["speedup"],
+        })
+    pd.DataFrame(benchmark_rows).to_csv(output_directory / "benchmark_statistics.csv", index=False)
+
+    phase_rows = []
+    phase = report["phase_profiles"]
+    if phase["available"]:
+        for row in phase["groups"]:
+            phase_rows.append({
+                "scope": row["scope"],
+                "workload_category": row.get("workload_category", "all"),
+                "benchmark": row["family"],
+                "profiles": row["profiles"],
+                "profile_threads": ";".join(map(str, row["profile_threads"])),
+                "cpu_total_s": row["cpu_total_s"],
+                **{f"{name}_total_s": row["component_seconds"][name] for name, _ in PHASE_COMPONENTS},
+                **{f"{name}_s_{stat}": row["component_seconds_distribution"][name][stat]
+                   for name, _ in PHASE_COMPONENTS for stat in ("min", "max", "mean", "median", "stddev")},
+                **{f"{name}_cpu_fraction": row["cpu_weighted_fraction"][name] for name, _ in PHASE_COMPONENTS},
+                **{f"{name}_median_query_fraction": row["median_query_fraction"][name]
+                   for name, _ in PHASE_COMPONENTS},
+                **{f"{name}_query_fraction_{stat}": row["query_fraction_distribution"][name][stat]
+                   for name, _ in PHASE_COMPONENTS for stat in ("min", "max", "mean", "median", "stddev")},
+                "profile_wall_median_s": row["profile_wall_s"]["median"],
+                "unprofiled_speedup_median": row["unprofiled_speedup"]["median"],
+                "unprofiled_total_speedup": row["unprofiled_total_speedup"],
+            })
+    phase_columns = [
+        "scope", "workload_category", "benchmark", "profiles", "profile_threads", "cpu_total_s",
+        *(f"{name}_total_s" for name, _ in PHASE_COMPONENTS),
+        *(f"{name}_s_{stat}" for name, _ in PHASE_COMPONENTS
+          for stat in ("min", "max", "mean", "median", "stddev")),
+        *(f"{name}_cpu_fraction" for name, _ in PHASE_COMPONENTS),
+        *(f"{name}_median_query_fraction" for name, _ in PHASE_COMPONENTS),
+        *(f"{name}_query_fraction_{stat}" for name, _ in PHASE_COMPONENTS
+          for stat in ("min", "max", "mean", "median", "stddev")),
+        "profile_wall_median_s", "unprofiled_speedup_median", "unprofiled_total_speedup",
+    ]
+    pd.DataFrame(phase_rows, columns=phase_columns).to_csv(output_directory / "phase_summary.csv", index=False)
+
+    optimizer_rows = []
+    optimizer = report["optimizer_profiles"]
+    if optimizer["available"]:
+        for row in optimizer["groups"]:
+            optimizer_rows.append({
+                "subset": row["subset"],
+                "scope": row["scope"],
+                "workload_category": row.get("workload_category", "all"),
+                "benchmark": row["family"],
+                "profiles": row["profiles"],
+                **{f"duckdb_{name}": row["duckdb_s"][name]
+                   for name in ("min", "max", "geomean", "mean", "median", "stddev")},
+                **{f"outeryan_{name}": row["outeryan_s"][name]
+                   for name in ("min", "max", "geomean", "mean", "median", "stddev")},
+                **{f"ratio_{name}": row["outeryan_to_duckdb_ratio"][name]
+                   for name in ("min", "max", "geomean", "mean", "median", "stddev")},
+                "duckdb_total_s": row["totals"]["duckdb_s"],
+                "outeryan_total_s": row["totals"]["outeryan_s"],
+                "overhead_total_s": row["totals"]["overhead_s"],
+                "total_ratio": row["totals"]["outeryan_to_duckdb_ratio"],
+            })
+    optimizer_columns = [
+        "subset", "scope", "workload_category", "benchmark", "profiles",
+        *(f"duckdb_{name}" for name in ("min", "max", "geomean", "mean", "median", "stddev")),
+        *(f"outeryan_{name}" for name in ("min", "max", "geomean", "mean", "median", "stddev")),
+        *(f"ratio_{name}" for name in ("min", "max", "geomean", "mean", "median", "stddev")),
+        "duckdb_total_s", "outeryan_total_s", "overhead_total_s", "total_ratio",
+    ]
+    pd.DataFrame(optimizer_rows, columns=optimizer_columns).to_csv(
+        output_directory / "optimizer_summary.csv", index=False
+    )
+
+    phase_rows = optimizer["phases"] if optimizer["available"] else []
+    phase_columns = [
+        "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
+        "query", "family", "selected_plan", "phase", "duckdb_s", "outeryan_s", "delta_s",
+    ]
+    pd.DataFrame(phase_rows).drop(columns=["row_index"], errors="ignore").reindex(columns=phase_columns).to_csv(
+        output_directory / "optimizer_phases.csv", index=False
+    )
+    phase_summary_rows = []
+    if phase_rows:
+        phase_frame = pd.DataFrame(phase_rows)
+        for subset, subset_rows in (
+            ("all", phase_frame),
+            ("outeryan_selected", phase_frame.loc[phase_frame["selected_plan"].eq("OUTERYAN")]),
+        ):
+            group_specs = [("overall", ["phase"]), ("benchmark", ["family", "phase"])]
+            if "workload_category" in subset_rows:
+                group_specs.extend([
+                    ("workload_category", ["workload_category", "phase"]),
+                    ("workload_benchmark", ["workload_category", "family", "phase"]),
+                ])
+            for scope, keys in group_specs:
+                for identity, rows in subset_rows.groupby(keys, sort=True):
+                    if not isinstance(identity, tuple):
+                        identity = (identity,)
+                    labels = dict(zip(keys, identity))
+                    phase_summary_rows.append({
+                        "subset": subset,
+                        "scope": scope,
+                        "workload_category": labels.get("workload_category", "all"),
+                        "benchmark": labels.get("family", "all"),
+                        "phase": labels["phase"],
+                        "profiles": len(rows),
+                        **{f"duckdb_{name}": signed_distribution(rows["duckdb_s"])[name]
+                           for name in ("mean", "median", "stddev")},
+                        **{f"outeryan_{name}": signed_distribution(rows["outeryan_s"])[name]
+                           for name in ("mean", "median", "stddev")},
+                        **{f"delta_{name}": signed_distribution(rows["delta_s"])[name]
+                           for name in ("mean", "median", "stddev")},
+                    })
+    phase_summary_columns = [
+        "subset", "scope", "workload_category", "benchmark", "phase", "profiles",
+        "duckdb_mean", "duckdb_median", "duckdb_stddev",
+        "outeryan_mean", "outeryan_median", "outeryan_stddev",
+        "delta_mean", "delta_median", "delta_stddev",
+    ]
+    pd.DataFrame(phase_summary_rows, columns=phase_summary_columns).to_csv(
+        output_directory / "optimizer_phase_summary.csv", index=False
+    )
     return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Combine experiment CSVs and write benchmark statistics")
+    parser.add_argument("sources", nargs="+", help="Per-corpus experiment CSV files")
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--combined-csv", type=Path,
+                        help="Optional path for a concatenated raw CSV")
+    parser.add_argument("--run", required=True, help="Logical experiment-group identifier")
+    parser.add_argument("--metric", choices=("tm", "t1"), default="tm")
+    args = parser.parse_args(argv)
+
+    frames = []
+    expected_columns = None
+    for source in args.sources:
+        frame = pd.read_csv(source, keep_default_na=False)
+        columns = list(frame.columns)
+        if expected_columns is None:
+            expected_columns = columns
+        elif columns != expected_columns:
+            raise ValueError(f"CSV schema mismatch: {source}")
+        frames.append(frame)
+    combined = pd.concat(frames, ignore_index=True)
+    if "experiment_group" not in combined:
+        combined.insert(0, "experiment_group", args.run)
+    elif not combined["experiment_group"].astype(str).eq(str(args.run)).all():
+        raise ValueError("source CSVs do not belong to the requested experiment group")
+    if args.combined_csv is not None:
+        args.combined_csv.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_csv(args.combined_csv, index=False)
+    statistics_frame = combined.copy()
+    statistics_frame["run"] = args.run
+    write_statistics(args.output_dir, statistics_frame, args.metric, args.sources)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

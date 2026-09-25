@@ -22,8 +22,7 @@ synopsis.
 | `audit_cost_gate.py` | Extract changed-grouping candidates and classify normal gate decisions against forced-candidate timings |
 | `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
 | `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
-| `outerjoin_query/` | Compatibility link to the provenance-backed benchmark core |
-| `outerjoin_benchmark/` | 206-query mixed v1 view, 170-query source-derived core, 36-query evaluation-control suite, 28-query historical supplemental suite, manifests, and paper text |
+| `outerjoin_benchmark/` | Canonical mixed v1 view, expanded v2 selectivity workload, 102-query v3 aggregation workload, manifests, and paper text |
 | `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
 | `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
 | `results/` | Generated text, CSV, trace output, and native phase profiles |
@@ -48,16 +47,16 @@ corresponding environment values.
 | `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
-| `OY_PROFILE` | `1` | Separate ON phase profiling for correct OuterYan-selected queries; `0` skips it |
+| `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
-| `OY_CORPUS` | `auto_test/outerjoin_query` | Corpus root |
-| `OY_CORPUS_SCOPE` | `benchmark` | V2 view: `benchmark`, `selectivity-stress`, or `job-regressions` |
+| `OY_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Canonical v1 corpus root |
+| `OY_CORPUS_SCOPE` | `benchmark` | Versioned view: v2 has `job-regressions`; v3 has `selectivity-stress` |
 | `RUN_PGPLAN` | `0` | Set to `1` to opt into PGPlan generation and three-way comparison |
 | `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
 | `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
 | `PGPLAN_INSTALL_DIR` | `postgres/postgresql` | Repo-local PostgreSQL installation prefix used by `source` mode |
 | `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
-| `PGPLAN_CORPUS` | `auto_test/outerjoin_query` | Corpus whose selected queries receive validated cached or freshly captured PGPlan artifacts |
+| `PGPLAN_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Corpus whose selected queries receive validated cached or freshly captured PGPlan artifacts |
 | `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
 | `PGPLAN_PLAN_CACHE` | `auto_test/pgplan/plans` | Persistent validated typed-plan cache; override with `--plan-cache` |
 | `PGPLAN_COMPARISON_MODE` | `both` | `both`, `pgplan-only` (`--skip1`), or `none` (`--performance-only`) |
@@ -122,10 +121,10 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The default corpus is **v1-mixed** (`corpus_revision=v1-mixed-20260922`), the
-206-query workload under `outerjoin_benchmark/benchmark/`. The
-`outerjoin_query` compatibility link points there. It contains all 170
-source-derived structures and all 36 Graph/industry/schema-synthetic controls.
+The canonical v1 corpus is **v1-mixed**
+(`corpus_revision=v1-mixed-graph25-20260925`), the 224-query workload under
+`outerjoin_benchmark/benchmark/`. It contains all 170 source-derived structures
+and all 54 Graph/industry/schema-synthetic evaluation controls.
 The retired FULL-heavy v1 timeout hashes do not filter this corpus: changing
 join labels changes the SQL and invalidates both the old timing and timeout
 observations. `active_timeout_exclusions.csv` is therefore empty. Historical
@@ -136,41 +135,56 @@ Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
 entire label using shell-glob syntax.
 
 ```bash
-# Regenerate or test v1 (default).
+# Regenerate or test v1 only.
 python3 auto_test/gen_outerjoin_benchmark.py
-bash auto_test/experiment_onoff.sh --only all
+bash auto_test/experiment_onoff.sh --version v1 --only all
 
-# Generate and test the 546-query expanded v2 corpus.
+# Generate and test the 564-query expanded v2 corpus.
 python3 auto_test/gen_outerjoin_benchmark.py --version v2
-bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
+bash auto_test/experiment_onoff.sh --version v2 --only all
 
-# Run v1 and v2 sequentially; results receive _v1 and _v2 suffixes.
+# Generate v3, then test its 102 aggregation and 42 selectivity-stress queries.
+python3 auto_test/gen_outerjoin_benchmark.py --version v3
+bash auto_test/experiment_onoff.sh --version v3 --only all
+
+# Aggregation component only.
+bash auto_test/experiment_onoff.sh --version v3 --corpus-scope benchmark --only all
+
+# Default: run all benchmark versions plus v3 selectivity-stress sequentially.
 bash auto_test/experiment_onoff.sh --all
+# The following is equivalent:
+bash auto_test/experiment_onoff.sh
 
 # Metadata-selected balanced selectivity ablation; report separately.
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
+bash auto_test/experiment_onoff.sh --version v3 \
   --corpus-scope selectivity-stress --only all
 
 # Reproduce the two confirmed JOB regressions only.
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
+bash auto_test/experiment_onoff.sh --version v2 \
   --corpus-scope job-regressions --only job
 ```
 
+Version selection is therefore unambiguous: `--version v1`, `--version v2`,
+and `--version v3` run exactly that version (v3 includes both of its scopes
+unless `--corpus-scope` narrows it); `--all` runs v1, v2, v3 aggregation, and
+v3 selectivity stress: 224 + 564 + 102 + 42 = 932 query instances. With no
+version option, the harness behaves exactly as `--all`.
+
 V2 is stored under `outerjoin_benchmark/v2/` and does not replace v1. It applies
 three bounded deterministic selectivity tiers (approximately 0.1%, 1%, and 5%)
-to 170 source-derived structures, then adds the 36 v1 evaluation controls. Both
+to 170 source-derived structures, then adds the 54 v1 evaluation controls. Both
 v1 and v2 use the same mixed-join design. Every
 source seed still contributes the same five graph-preserving shapes, but their
 join edges use a deterministic cyclic assignment of `I/L/R/F`. Across the 170
 base structures, the 625 join edges contain 157 INNER and 156 each LEFT,
 RIGHT, and FULL labels. The three selectivity copies retain the same vector for
-each base. The 36 Graph, industry, and schema-synthetic controls are retained,
+each base. The 54 Graph, industry, and schema-synthetic controls are retained,
 but their existing relations, predicates, and grouping are relabeled with the
-same balancing rule. In the complete 206-query v1 union, the 753 edge
-occurrences contain 188 INNER, 188 LEFT, 189 RIGHT, and 188 FULL labels.
-Consequently, the complete 546-query v2 main workload has
-501 INNER, 501 LEFT, 501 RIGHT, and 500 FULL edge occurrences. It includes 67
-all-outer queries (using two or more of LEFT/RIGHT/FULL) and 479 queries that
+same balancing rule. In the complete 224-query v1 union, the 801 edge
+occurrences contain 200 INNER, 201 LEFT, 200 RIGHT, and 200 FULL labels.
+Consequently, the complete 564-query v2 main workload has
+512 INNER, 513 LEFT, 513 RIGHT, and 513 FULL edge occurrences. It includes 75
+all-outer queries (using two or more of LEFT/RIGHT/FULL) and 489 queries that
 also contain INNER; no v2 main query has a single-kind vector such as all-FULL.
 These are input-expression labels; optimizer simplification and physical join
 selection are measured outcomes, not part of the corpus-balancing rule.
@@ -184,21 +198,28 @@ motivated by the 0916 advantage hypothesis, but all seeds, shapes, join-label
 rotations, and paired controls remain included independently of measured speed. See
 `outerjoin_benchmark/README.md` for the design and provenance fields.
 
-The generated `v2/selectivity_stress/` directory contains 84 variants of 12
+The generated `v3/selectivity_stress/` directory contains 42 variants of six
 metadata-selected mixed v2 counterparts of feasibility-screened v1 structures
 at approximately 0.025%, 0.05%, 0.2%, 10%,
 20%, 50%, and 80% target selectivity. The ablation domain is declared from
 static metadata: mixed joins with at least four relations and an applicable
-null-rejecting predicate. Four distinct source queries are selected from each
-of TPC-H, TPC-DS, and JOB; every family covers left-deep, right-deep, and bushy
-trees, while the fourth structure broadens source-benchmark and relation-count
-coverage. Selection uses a fixed salted SHA-256 rank over query identifiers and
-never reads measured runtimes. Every tier contains 12 queries
+null-rejecting predicate. Two distinct source queries are selected from each
+of TPC-H, TPC-DS, and JOB; across the complete set there are two left-deep, two
+right-deep, and two bushy structures. Each family contributes one native
+benchmark source and one SQLStorm-derived source. Selection uses fixed family/shape/source slots
+and a salted SHA-256 rank over query identifiers and never reads measured
+runtimes. Every tier contains six queries
 and uses a common deterministic 4,000-bucket hash sample. This is equal
 representation per tier, not a claim of numerically uniform or realized
 selectivity. The manifest records `performance_selected=false` and marks every
 query `headline_eligible=false`; keep this correlated selectivity ablation
-separate from the 546-query headline score.
+separate from headline scores.
+
+The v3 aggregation component contains 102 queries: 42 global `COUNT(*)`, 30
+grouped `SUM`, 15 grouped `MIN`, and 15 grouped `MAX`. MIN and MAX split one
+extremum class equally. Each of the three structural slots receives exactly 14
+COUNT, 10 SUM, 5 MIN, and 5 MAX assignments from a static weighted schedule;
+the assignment never reads experimental results.
 The separate `v2/job_regressions/` directory contains the mixed-v2 counterparts
 of two historical FULL-heavy v1 JOB cases below 0.95x. Their structure remains in the
 main benchmark so difficult cases are not silently removed. Because changing
@@ -206,24 +227,17 @@ join labels changes the query, the old v1 speedups are provenance only; both
 v2 counterparts are marked `requires_v2_remeasurement`.
 
 Generation is deterministic and writes query-level provenance manifests. Active
-query names use only `derived__` and `industry__`. In the complete components,
-the 170 benchmark-derived queries and 27 legacy synthetic performance guards
-use `derived__`; the nine
-business-role patterns use `industry__`, including the one that is also a
-pinned legacy win. Exact roles remain in the manifest rather than being encoded
-as `*win` name variants. The benchmark-derived core has 170 queries (TPC-H 25,
+query names use only `derived__` and `industry__`. The benchmark-derived core
+has 170 queries (TPC-H 25,
 TPC-DS 35, JOB 50, and SQLStorm 60), including 46 left-deep, 80 right-deep,
 and 44 genuinely bushy graph-preserving applicability inputs. Its 625 join
-edges contain 157 INNER and 156 each LEFT, RIGHT, and FULL. The evaluation under
-`outerjoin_benchmark/industry_inspired/` is the
-union of nine explainable legacy business patterns and all 28 correct queries
-where the pinned August 10 run selected OuterYan with `tm_speedup > 1.0`. One
-query belongs to both groups, so the corpus contains 36 unique controls. Its
-manifest labels the two roles separately; performance-selected entries are not
-claimed to be industry-derived. Their historical speedups are selection
-provenance only and are marked as requiring a mixed-v1 rerun. The active
-206-query union contains all 46 left-deep, 80 right-deep, and 44 bushy core
-inputs plus the 36 controls.
+edges contain 157 INNER and 156 each LEFT, RIGHT, and FULL. The 54-query
+evaluation component contains nine explainable business-role patterns, all 25
+completed Graph-generator patterns, and 20 schema-synthetic regression guards.
+The complete Graph set is included without consulting performance; seven rows
+retain historical speed-up only as provenance. The 25 Graph structures comprise
+10 bushy, seven left-deep, and eight right-deep expressions. The active
+224-query union contains the 170-query core plus all 54 controls.
 Run the complete component (which bypasses active timeout filtering)
 with:
 
@@ -281,8 +295,9 @@ vectors exercise both simplification and applicability boundaries.
 The two historical aggregate patterns in the active evaluation set are emitted
 as detail projections so they do not bypass OuterYan.
 
-The schema-only legacy queries are not included in any active benchmark
-component. They remain in `outerjoin_query_old/` solely as historical inputs.
+Twenty schema-synthetic legacy regression guards remain explicitly labeled in
+the evaluation component. Other historical queries stay in
+`outerjoin_query_old/` as generation/provenance inputs.
 
 ## Experiment pipeline
 
@@ -305,22 +320,39 @@ For every selected query at each thread count, `experiment_onoff.sh` performs:
 4. Time OuterYan OFF and ON at `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-5. For correct queries whose ON plan selects OuterYan, collect a separate native
-   JSON profile batch at the same thread count. This is enabled by default
-   (`OY_PROFILE=1`); `--no-profile` or `OY_PROFILE=0` skips it, and `--profile`
-   explicitly enables it. One profiled warm-up is followed by `--runs N` samples.
-   The complete phase tuple from the median profile wall-latency execution is
-   retained, rather than taking independent medians of its components.
+5. For every correct query, execute OFF and ON once after one unprofiled warm-up
+   while collecting a detailed JSON profile. DuckDB's `all_optimizers` value is
+   the OFF total. The ON total adds OuterYan's cost-model phase because that
+   phase sits between named DuckDB optimizer timers and is therefore absent
+   from `all_optimizers`. The ON record also exports the algorithmic
+   OuterYan workflow phases: applicability, OT construction, simplification,
+   semi-join-pair planning, desimplification, OuterYan join reorder, DuckDB
+   baseline simplification/reorder, cost model, resimplification, aggregate
+   marking, plan lowering, semi-join insertion, and aggregate pushdown. Generic
+   DuckDB optimizer-pass timings are not reported.
+6. For correct queries whose ON plan selects OuterYan, read R1/R2/R3 operator
+   work from that same post-warm-up ON execution profile. This is enabled by
+   default (`OY_PROFILE=1`); `--no-profile` or `OY_PROFILE=0` skips both optimizer
+   and phase profiling. The performance medians in step 4 remain unprofiled and
+   independent of this single diagnostic sample.
+
+Every statement uses the same fixed `OY_TIMEOUT_SECS` limit. The larger external
+watchdog on a timing/profile process only accounts for the four fixed-limit
+statements in that process; it does not increase any statement's timeout. At the
+first timeout in correctness, kernel classification, timing, or profiling, the
+query is marked `TIMEOUT-*`, the remaining phases for that query are skipped,
+and the query is never retried with a longer limit.
 
 All executions explicitly set the selected multi-thread count. Correctness,
 diagnostics, and OFF/ON performance timing disable profiling. There is no
 single-thread batch. Timing runs in fresh `-no-init` CLI processes using `.mode
 trash`, which fully drains the bare query without measuring CSV formatting or
 file output. Correctness and optional plan/cost diagnostics remain enabled.
-Profile work adds a separate ON batch and never contributes to OFF/ON timing
-medians or speed-up. A profile failure leaves valid timing pairs intact and
-records `profile_status=ERROR`, unavailable phase values, and `PROFILE-ERROR`
-in the note; partial JSON files and the CLI log remain available for diagnosis.
+Profile work adds one paired OFF/ON execution batch and never contributes
+to OFF/ON timing medians or speed-up. A profile failure leaves valid timing pairs
+intact. Optimizer and phase failures are recorded independently as
+`OPTIMIZER-PROFILE-ERROR` and `PROFILE-ERROR`; partial JSON files and CLI logs
+remain available for diagnosis.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -354,7 +386,7 @@ strict_threshold = strict_ratio_limit * baseline_cost
 select OuterYan on the strict tier iff candidate_total <= strict_threshold
 ```
 
-Cost formula V7 retains two consistency checks before that final comparison.
+Cost formula V9 retains two consistency checks before that final comparison.
 For fully reduced all-INNER candidates, every intermediate estimate is bounded
 below by the largest reduced leaf in its subtree. For table filters that used
 DuckDB's generic selectivity fallback, the candidate and baseline are also
@@ -368,7 +400,7 @@ largest input is at least `1000x` the uncertain filtered relation and the two
 reducer rounds retain at least `99%` of estimated input cardinality. The trace
 records the retention ratio, amplification, and guard result explicitly.
 
-Cost formula V7 uses the full modeled semi-join row-work (`1.0 *
+Cost formula V9 uses the full modeled semi-join row-work (`1.0 *
 semijoin_raw_cost`) and a confidence-aware stretch tier without changing DP
 enumeration. The earlier `0.50` semi-join discount admitted regressions in the
 August 18 unified audit. Candidates whose reducer rounds are estimated to
@@ -394,6 +426,26 @@ reason `COST_OUTERYAN_STRETCH`. High-retention candidates otherwise retain the
 strict `1.0` limit; lower-retention candidates use the guarded `0.90` limit.
 These constants are experimental safety margins, not a runtime performance
 guarantee.
+
+V9 also exposes a separate stats-backed unary-filter tier. Let `s` be the
+minimum filtered/base cardinality ratio among pre-join base scans. A predicate
+retained at root scope is not credited because it does not reduce join or
+semi-join inputs. If `s <= 0.35`,
+the estimate did not use DuckDB's generic filter fallback, the confidence
+guards above are clear, `candidate_join_cost < baseline_cost`, and the
+candidate/baseline join-input ratio is at most `0.75`, the gate computes:
+
+```text
+progress = (0.35 - s) / 0.35
+low_selectivity_limit = strict_ratio_limit
+                        + progress * (1.20 - strict_ratio_limit)
+```
+
+The final relaxed limit is the maximum applicable tier. This is continuous at
+`0.35`: the threshold itself receives no discontinuous bonus, while lower
+selectivity makes selection progressively more likely. Generic/default 20%
+estimates never qualify. A candidate admitted only by this tier records
+`COST_OUTERYAN_LOW_SELECTIVITY`.
 
 The trace and CSV report two separate comparisons: `raw_cost_winner` compares
 `candidate_total` directly with `baseline_cost`, while `gate_result` compares
@@ -524,21 +576,28 @@ Decision reasons written to the trace and result files include:
 | Reason | Meaning |
 |---|---|
 | `INAPPLICABLE` | OuterYan applicability check failed |
-| `DUCKDB_AGGREGATE` | Query contains aggregation or DISTINCT and bypasses OuterYan |
 | `DUCKDB_PLAN` | Candidate has the same grouping as DuckDB; use DuckDB |
 | `DUCKDB_PROVEN_EMPTY` | DuckDB's proof copy eliminates all real join work; use DuckDB without SJs |
 | `FORCE_OUTERYAN` | Changed candidate selected by the forced experiment mode |
 | `FORCE_OUTERYAN_DIAGNOSTIC` | Complete candidate forced past grouping and cost selection for a targeted correctness run |
 | `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
 | `COST_OUTERYAN_STRETCH` | High-confidence candidate passed the relaxed `1.20` stretch threshold |
+| `COST_OUTERYAN_LOW_SELECTIVITY` | Stats-backed unary selectivity at or below `0.35` admitted the candidate through the continuous low-selectivity tier |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
 | `COST_UNCERTAIN_FILTER_AMPLIFICATION` | Unknown-selectivity amplification guard rejected the candidate |
 | `COST_UNAVAILABLE` | A finite comparison could not be produced |
 | `OUTERYAN_FAILED` | OuterYan did not produce a complete candidate |
 
-Aggregate and DISTINCT queries bypass OuterYan and use DuckDB's normal plan.
-Semi-join operators are inserted only when a non-aggregate OuterYan candidate
-is selected.
+Supported root aggregate and DISTINCT queries enter the same candidate pipeline.
+They use a stricter gate: `candidate_total <= 0.90 * baseline_cost`, with neither
+the stretch tier nor the low-selectivity relaxation. The gate deliberately does
+not credit estimated aggregate-pushdown benefit. Aggregate pushdown runs only
+after this gate selects the OuterYan candidate; a rejected candidate returns the
+exact DuckDB baseline without an OuterYan-specific rewrite. Aggregation inside a
+join skeleton remains `INAPPLICABLE`. The enabled decomposition paths cover the
+v3 grouped `MIN`, `MAX`, and `SUM` queries. Global `COUNT(*)` still participates
+in candidate selection and semi-join reduction, but remains above the joins so
+outer-join NULL-padding retains exact count semantics.
 
 ### Command-line options
 
@@ -548,12 +607,17 @@ bash auto_test/experiment_onoff.sh [options]
   -n, --runs N        positive odd timed executions per configuration
   -t, --timeout S     per-statement timeout
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
+      --version V     run exactly v1, v2, or v3 (v3 includes both scopes)
+      --all           run v1, v2, v3 aggregation, and v3 selectivity-stress (default)
+      --corpus-scope S  benchmark, v2 job-regressions, or v3 selectivity-stress
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
       --limit N       global query cap; 0 means unlimited
       --query-list FILE  ordered corpus-relative SQL paths; requires --only all
       --capture-plans save OFF/ON EXPLAIN, trace, and detailed cost files
+      --profile       enable phase and optimizer profiling (default)
+      --no-profile    skip phase and optimizer profiling
   -o, --out FILE      exact text output path
 ```
 
@@ -607,10 +671,18 @@ thread count `N` (only `32` by default), the result group is:
 ```text
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.txt
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.csv
-auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.attempts.csv
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.plans/
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.profiles/
 ```
+
+The default all-version run additionally writes `*_v1.csv`, `*_v2.csv`,
+`*_v3.csv`, and `*_v3_selectivity_stress.csv`, plus one `*_all.csv` raw table.
+Every row explicitly records `experiment_group`, `corpus_version`,
+`corpus_scope`, `workload_category`, and `query_class`; the four headline
+categories are `v1`, `v2`, `v3_aggregation`, and `v3_selectivity_stress`.
+Its `*_statistics/` directory contains `benchmark_statistics.csv`,
+`phase_summary.csv`, `optimizer_summary.csv`, `optimizer_phases.csv`,
+`optimizer_phase_summary.csv`, `statistics.json`, and `STATISTICS.md`.
 
 `run_all.sh` includes the corpus label, for example
 `experiment_onoff_benchmark_YYYYMMDD_HHMMSS_t16.csv` and
@@ -623,23 +695,27 @@ and records `timing_threads`, `tm_off`, `tm_on`, and `tm_speedup`. New outputs
 contain no `t1_*` columns. Appended `profile_*` columns record status, actual
 thread count, R1/R2/R3 operator work and counts, Other CPU work, wall latency,
 total CPU work, phase shares, sample count, and the raw profile directory.
-When profiling is disabled or skipped, phase measurements remain unavailable.
-Each profiled query has its own subdirectory with `profile_0.json` (warm-up),
-`profile_1.json` through `profile_N.json`, and `duckdb.log`. The historical
-attempts CSV is retained for downstream compatibility and is an identical
-single-attempt copy; timed-out queries are not retried.
+The `optimizer_*` columns record paired DuckDB/OuterYan total optimization time,
+the measured workflow-phase sum, residual optimizer time, one-sample count, and
+workflow-phase JSON maps. When profiling is disabled or skipped, these measurements
+remain unavailable.
+Each failed profiled query retains its post-warm-up OFF/ON JSON files, compact
+decision trace, and CLI log. Successful intermediate profiles are deleted. Timed-out queries are not
+retried, and no separate attempts CSV is produced.
 
 Live stderr and the TXT report use one clearly separated block per query:
 
 ```text
 ====================================================================================================
-[ 63/185] derived__example  correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 TM:off=12.000000000 on=6.000000000 spd=2.000
-  details: family=tpch sql=... pass=main timeout=900s note=OK ... decision=[mode=FORCE_OUTERYAN reason=FORCE_OUTERYAN ...] cost=[...] SJ=[R1(... pairs=0 filters=0) R2(... pairs=3 filters=3) ...]
+[ 63/185] query=derived__example
+  result: correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 runtime_s=[DuckDB=12.000000000 OuterYan=6.000000000] speedup=2.000 optimization_s=[status=OK DuckDB=... OuterYan=...]
+  context: family=tpch category=v2 nrel=5 pass=main note=OK ... breakdown_s=[status=OK CPU=... R1=... R2=... R3=... Other=...]
+  decision: plan=[mode=GATED reason=COST_OUTERYAN_BETTER ... formula=...] optimizer_phases=[...] cost=[...] SJ=[...]
 ```
 
-The record always uses two lines: line 1 contains the high-level result,
-kernel choice, thread count, and timing; line 2 contains decision/cost metadata
-and `profile=[status=... threads=... Total-Time=... CPU-Time=... R1=... R2=... R3=... OtherCPU=...]`.
+The record always uses four lines: query identity; result/runtime/optimization;
+family and phase breakdown; and decision/formula details. Full workflow-phase
+maps remain in CSV rather than making the live text block unreadable.
 Applicable queries include the OuterYan and
 DuckDB cost formula, gate comparison, and join/SJ weights on line 2. With plan
 capture enabled, that line also lists the DuckDB-OFF and enabled EXPLAIN files,
@@ -653,8 +729,10 @@ Each query block includes:
 
 | Field | Meaning |
 |---|---|
-| Line 1 | Query/result, selected plan, kernel counts, thread count, and unprofiled OFF/ON timing and speed-up |
-| Line 2 | Family/path/pass, decision mode, cost/gate operands, SJ work, weights, profile status/measurements, hash notices, and optional artifacts |
+| Line 1 | Query index and name |
+| Line 2 | Correctness, reorder/selection, kernel, unprofiled runtime/speed-up, and optimizer totals |
+| Line 3 | Family/category/path/pass, relation count, note, and phase breakdown |
+| Line 4 | Decision mode, formula/cost operands, focused OuterYan pass timings, notices, and optional artifacts |
 
 Each applicable, costed query includes raw cost components and an expanded
 gate:
@@ -674,6 +752,8 @@ fields in machine-readable form, including the SQL-derived `relation_count`,
 `full_reduction_cardinality_lower_bound_applied`,
 `uncertain_filter_amplification_guard`,
 `stretch_cost_gate_eligible`, `stretch_cost_gate_selected`,
+`unary_filter_selectivity`, `low_selectivity_cost_gate_eligible`,
+`low_selectivity_cost_gate_selected`, `low_selectivity_cost_ratio_limit`,
 `baseline_join_input_rows`, `candidate_join_input_rows`,
 `candidate_to_baseline_join_input_ratio`,
 `semijoin_retained_cardinality_ratio`,
@@ -735,7 +815,7 @@ statistics.
 
 The September 16 plots and statistics were produced from the retired FULL-heavy
 revision and are historical artifacts only. Regenerate figures and tables only
-after a complete `v1-mixed-20260922` run; do not combine its SQL with those old
+after a complete `v1-mixed-graph25-20260925` run; do not combine its SQL with those old
 timings.
 
 ## Optimizer trace
@@ -753,7 +833,7 @@ traced `EXPLAIN` process.
 # Trace a corpus file with release
 bash auto_test/trace_outer_yan.sh \
   -b build/release/duckdb --db tpch_db \
-  -f auto_test/outerjoin_query/tpch/oy_th_th_agg0.sql
+  -f auto_test/outerjoin_benchmark/benchmark/tpch/derived__ojb_tpch_q03_order_revenue_ldmx.sql
 
 # Trace inline SQL
 bash auto_test/trace_outer_yan.sh \
@@ -799,7 +879,7 @@ SET disabled_optimizers TO 'outer_yan';
 
 ```bash
 # Build release and data, regenerate queries, then compare DuckDB Original and
-# OuterYan for every query in auto_test/outerjoin_query. No PG plan is generated
+# OuterYan for every v1 query in auto_test/outerjoin_benchmark/benchmark. No PG plan is generated
 # or executed by this default workflow.
 bash auto_test/run_all.sh
 
@@ -849,8 +929,9 @@ OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default comparison stage walks all 206 SQL files under `outerjoin_query`:
-7 Graph, 54 TPC-H, 63 TPC-DS, and 82 JOB queries. It executes each bare query
+The default v1 comparison stage walks all 224 SQL files under
+`outerjoin_benchmark/benchmark`: 25 Graph, 54 TPC-H, 63 TPC-DS, and 82 JOB
+queries. It executes each bare query
 with OuterYan disabled (Original) and enabled, verifies complete result
 equivalence, records the selected DuckDB/OuterYan plan, and then measures both
 configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture
@@ -1005,7 +1086,7 @@ Manual equivalent for the unified two-way benchmark stage:
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 bash auto_test/build_db.sh all
 python3 auto_test/gen_outerjoin_benchmark.py
-OY_CORPUS=auto_test/outerjoin_query \
+OY_CORPUS=auto_test/outerjoin_benchmark/benchmark \
   bash auto_test/experiment_onoff.sh --only all
 ```
 

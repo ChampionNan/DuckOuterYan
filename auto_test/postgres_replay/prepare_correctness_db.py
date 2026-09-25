@@ -983,7 +983,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--query-dir",
-        help="queries to bound-check (default: auto_test/outerjoin_query/FAMILY)",
+        help="queries to bound-check (default: auto_test/outerjoin_benchmark/benchmark/FAMILY)",
     )
     parser.add_argument(
         "--max-result-rows",
@@ -1040,7 +1040,7 @@ def validate_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     query_dir = (
         Path(args.query_dir).expanduser().resolve()
         if args.query_dir
-        else REPO_ROOT / "auto_test" / "outerjoin_query" / args.family
+        else REPO_ROOT / "auto_test" / "outerjoin_benchmark" / "benchmark" / args.family
     )
 
     source = Path(args.source_db).expanduser().resolve()

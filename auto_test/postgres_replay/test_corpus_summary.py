@@ -566,7 +566,7 @@ class CorpusSummaryTest(unittest.TestCase):
                 row = next(reader)
                 header = tuple(reader.fieldnames or ())
             self.assertEqual(header[-len(COMPARISON_FIELDS):], COMPARISON_FIELDS)
-            self.assertEqual(len(original_csv_fields()), 70)
+            self.assertEqual(len(original_csv_fields()), 93)
             self.assertEqual(
                 header[:len(original_csv_fields())], original_csv_fields()
             )

@@ -19,7 +19,7 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       positive odd timed iterations per config (default 3)
-#   -t,--timeout S    per-statement timeout sec (default 900). DuckDB enforces S
+#   -t,--timeout S    per-statement timeout sec (default 1800). DuckDB enforces S
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1)×S for 1 warm-up + N timed executions.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
@@ -28,19 +28,23 @@
 #      --exclude GLOB  skip labels matching any '|'-separated glob
 #      --limit N       cap number of queries (0 = no cap, default 0)
 #      --query-list FILE  ordered corpus-relative SQL paths (requires --only all)
-#      --corpus-version V  v1 (default) or expanded selectivity-sweep v2
-#      --corpus-scope S    benchmark (default), selectivity-stress, or
-#                          job-regressions; non-benchmark scopes require v2
-#      --all             run both corpus versions in order: v1, then v2
+#      --version V         run v1, v2, or both v3 scopes (`--corpus-version` alias)
+#      --corpus-scope S    benchmark (default); v2 also has job-regressions,
+#                          while v3 also has selectivity-stress
+#      --all             run v1/v2/v3 benchmarks, then v3 selectivity-stress
+#                        (default); also writes one combined CSV and reports
 #      --capture-plans   save OFF/ON EXPLAIN, trace, and detailed cost artifacts
 #      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
-#      --profile         collect ON phase metrics; keep raw files only on error (default)
-#      --no-profile      skip phase profiles; performance timing stays unprofiled
+#      --profile         collect ON phase plus OFF/ON optimizer metrics (default)
+#      --no-profile      skip phase/optimizer profiles; timing stays unprofiled
 #   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CALLER_OY_CORPUS_SET="${OY_CORPUS+x}"
+CALLER_OY_VERSION_SET="${OY_CORPUS_VERSION+x}"
+CALLER_OY_SCOPE_SET="${OY_CORPUS_SCOPE+x}"
 # Unified config: defines DUCKDB_BIN, GRAPH_DATASET, TPCH_SF/TPCDS_SF,
 # OY_TIMEOUT_SECS, OY_RUNS.
 . "$SCRIPT_DIR/configs.sh"
@@ -51,7 +55,16 @@ CORPUS="${OY_CORPUS:-}"
 CORPUS_VERSION="${OY_CORPUS_VERSION:-v1}"
 CORPUS_VERSION_CLI=0
 CORPUS_SCOPE="${OY_CORPUS_SCOPE:-benchmark}"
-ALL_CORPORA=0
+CORPUS_SCOPE_CLI=0
+if [ -n "$CALLER_OY_VERSION_SET" ] && [ -z "$CALLER_OY_CORPUS_SET" ]; then
+    CORPUS=""
+fi
+ALL_CORPORA=1
+ALL_CORPORA_CLI=0
+V3_ALL_SCOPES=0
+if [ -n "$CALLER_OY_CORPUS_SET" ] || [ -n "$CALLER_OY_VERSION_SET" ] || [ -n "$CALLER_OY_SCOPE_SET" ]; then
+    ALL_CORPORA=0
+fi
 
 RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
@@ -67,9 +80,9 @@ while [ $# -gt 0 ]; do case "$1" in
     --exclude) EXCLUDE="$2"; shift 2;;
     --limit) LIMIT="$2"; shift 2;;
     --query-list) QUERY_LIST="$2"; shift 2;;
-    --corpus-version) CORPUS_VERSION="$2"; CORPUS_VERSION_CLI=1; shift 2;;
-    --corpus-scope) CORPUS_SCOPE="$2"; shift 2;;
-    --all) ALL_CORPORA=1; shift;;
+    --version|--corpus-version) CORPUS_VERSION="$2"; CORPUS_VERSION_CLI=1; ALL_CORPORA=0; shift 2;;
+    --corpus-scope) CORPUS_SCOPE="$2"; CORPUS_SCOPE_CLI=1; shift 2;;
+    --all) ALL_CORPORA=1; ALL_CORPORA_CLI=1; shift;;
     --capture-plans) CAPTURE_PLANS=1; shift;;
     --profile) PROFILE=1; shift;;
     --no-profile) PROFILE=0; shift;;
@@ -82,18 +95,37 @@ while [ $# -gt 0 ]; do case "$1" in
 [ -z "$QUERY_LIST" ] || [ "$ONLY" = "all" ] || {
     echo "--query-list requires --only all" >&2; exit 2;
 }
-[ "$ALL_CORPORA" = 0 ] || [ "$CORPUS_VERSION_CLI" = 0 ] || {
-    echo "--all cannot be combined with --corpus-version" >&2; exit 2;
+[ "$ALL_CORPORA_CLI" = 0 ] || [ "$CORPUS_VERSION_CLI" = 0 ] || {
+    echo "--all cannot be combined with --version" >&2; exit 2;
 }
+if [ "$ALL_CORPORA" = 0 ] && [ "$CORPUS_VERSION_CLI" = 1 ] && \
+   [ "$CORPUS_VERSION" = v3 ] && [ "$CORPUS_SCOPE_CLI" = 0 ] && \
+   [ -z "$CALLER_OY_CORPUS_SET" ]; then
+    # V3 comprises both the aggregation benchmark and its selectivity-stress
+    # component. An explicit --corpus-scope remains the single-scope escape.
+    ALL_CORPORA=1
+    V3_ALL_SCOPES=1
+fi
 [ "$ALL_CORPORA" = 0 ] || [ "$CORPUS_SCOPE" = "benchmark" ] || {
-    echo "--all runs the headline-eligible benchmark scope only" >&2; exit 2;
+    echo "--all chooses the v1/v2/v3 benchmark and v3 selectivity-stress scopes itself" >&2; exit 2;
 }
 if [ "$ALL_CORPORA" = 1 ]; then
     [ -z "$QUERY_LIST" ] || { echo "--all cannot be combined with --query-list" >&2; exit 2; }
-    CORPUS_VERSION="v1"
-    CORPUS="$SCRIPT_DIR/outerjoin_query"
-    [ -d "$SCRIPT_DIR/outerjoin_benchmark/v2/benchmark" ] || {
-        echo "V2 corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version v2" >&2
+    if [ "$V3_ALL_SCOPES" = 1 ]; then
+        CORPUS_VERSION="v3"
+        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/benchmark"
+    else
+        CORPUS_VERSION="v1"
+        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/benchmark"
+        for required_version in v2 v3; do
+            [ -d "$SCRIPT_DIR/outerjoin_benchmark/$required_version/benchmark" ] || {
+                echo "$required_version corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version $required_version" >&2
+                exit 2
+            }
+        done
+    fi
+    [ -d "$SCRIPT_DIR/outerjoin_benchmark/v3/selectivity_stress" ] || {
+        echo "v3 selectivity-stress corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version v3" >&2
         exit 2
     }
 else
@@ -101,29 +133,48 @@ else
     case "$CORPUS_VERSION" in
         v1)
             [ "$CORPUS_SCOPE" = "benchmark" ] || {
-                echo "--corpus-scope $CORPUS_SCOPE requires --corpus-version v2" >&2; exit 2;
+                echo "--corpus-scope $CORPUS_SCOPE is not available for --version v1" >&2; exit 2;
             }
-            [ -n "$CORPUS" ] || CORPUS="$SCRIPT_DIR/outerjoin_query"
+            [ -n "$CORPUS" ] || CORPUS="$SCRIPT_DIR/outerjoin_benchmark/benchmark"
             ;;
         v2)
             if [ -z "$CORPUS" ]; then
                 case "$CORPUS_SCOPE" in
                     benchmark) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/benchmark";;
-                    selectivity-stress|advantage-stress)
-                        CORPUS_SCOPE="selectivity-stress"
-                        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/selectivity_stress"
-                        ;;
                     job-regressions) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/job_regressions";;
                     *)
-                        echo "--corpus-scope must be benchmark, selectivity-stress, or job-regressions (got: $CORPUS_SCOPE)" >&2
+                        echo "v2 --corpus-scope must be benchmark or job-regressions (got: $CORPUS_SCOPE)" >&2
                         exit 2
                         ;;
                 esac
             fi
             ;;
-        *) echo "--corpus-version must be v1 or v2 (got: $CORPUS_VERSION)" >&2; exit 2;;
+        v3)
+            if [ -z "$CORPUS" ]; then
+                case "$CORPUS_SCOPE" in
+                    benchmark) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/benchmark";;
+                    selectivity-stress|advantage-stress)
+                        CORPUS_SCOPE="selectivity-stress"
+                        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/selectivity_stress"
+                        ;;
+                    *)
+                        echo "v3 --corpus-scope must be benchmark or selectivity-stress (got: $CORPUS_SCOPE)" >&2
+                        exit 2
+                        ;;
+                esac
+            fi
+            ;;
+        *) echo "--version must be v1, v2, or v3 (got: $CORPUS_VERSION)" >&2; exit 2;;
     esac
 fi
+case "$CORPUS_VERSION:$CORPUS_SCOPE" in
+    v1:benchmark) WORKLOAD_CATEGORY="v1"; QUERY_CLASS="base";;
+    v2:benchmark) WORKLOAD_CATEGORY="v2"; QUERY_CLASS="selectivity_sweep";;
+    v2:job-regressions) WORKLOAD_CATEGORY="v2_job_regressions"; QUERY_CLASS="regression";;
+    v3:benchmark) WORKLOAD_CATEGORY="v3_aggregation"; QUERY_CLASS="aggregation";;
+    v3:selectivity-stress) WORKLOAD_CATEGORY="v3_selectivity_stress"; QUERY_CLASS="selectivity_stress";;
+    *) WORKLOAD_CATEGORY="${CORPUS_VERSION}_${CORPUS_SCOPE//-/_}"; QUERY_CLASS="custom";;
+esac
 [ -d "$CORPUS" ] || {
     echo "Corpus directory not found: $CORPUS (generate with: python3 auto_test/gen_outerjoin_benchmark.py --version $CORPUS_VERSION)" >&2
     exit 2
@@ -141,16 +192,18 @@ oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 # filename form and human form can never straddle a second boundary.
 _now="$(date '+%Y%m%d_%H%M%S|%F %T')"
 START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
+EXPERIMENT_GROUP="${OY_EXPERIMENT_GROUP:-$START_TS}"
 if [ "$ALL_CORPORA" = 1 ]; then
     all_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
     all_status=0
     all_pid=""
     all_forward_args=()
+    all_csv_files=()
     for ((arg_index=0; arg_index<${#ORIGINAL_ARGS[@]}; arg_index++)); do
         arg="${ORIGINAL_ARGS[$arg_index]}"
         case "$arg" in
             --all) ;;
-            -o|--out) arg_index=$((arg_index + 1));;
+            -o|--out|--version|--corpus-version|--corpus-scope) arg_index=$((arg_index + 1));;
             *) all_forward_args+=("$arg");;
         esac
     done
@@ -164,12 +217,23 @@ if [ "$ALL_CORPORA" = 1 ]; then
     }
     trap 'oy_stop_all_corpora 130' INT
     trap 'oy_stop_all_corpora 143' TERM
-    for corpus_version in v1 v2; do
-        version_out="${all_out%.txt}_${corpus_version}.txt"
-        echo "--- Running corpus version: $corpus_version ---" >&2
-        OY_CORPUS="" OY_CORPUS_VERSION="$corpus_version" \
+    if [ "$V3_ALL_SCOPES" = 1 ]; then
+        corpus_targets=(v3:benchmark v3:selectivity-stress)
+    else
+        corpus_targets=(v1:benchmark v2:benchmark v3:benchmark v3:selectivity-stress)
+    fi
+    for corpus_target in "${corpus_targets[@]}"; do
+        corpus_version="${corpus_target%%:*}"
+        corpus_scope="${corpus_target##*:}"
+        result_label="$corpus_version"
+        [ "$corpus_scope" = "benchmark" ] || result_label="${corpus_version}_${corpus_scope//-/_}"
+        version_out="${all_out%.txt}_${result_label}.txt"
+        echo "--- Running corpus version: $corpus_version scope: $corpus_scope ---" >&2
+        OY_CORPUS="" OY_CORPUS_VERSION="$corpus_version" OY_CORPUS_SCOPE="$corpus_scope" \
+            OY_EXPERIMENT_GROUP="$EXPERIMENT_GROUP" OY_DEFER_STATISTICS=1 \
             bash "$SCRIPT_DIR/experiment_onoff.sh" "${all_forward_args[@]}" \
-            --corpus-version "$corpus_version" --out "$version_out" &
+            --version "$corpus_version" --corpus-scope "$corpus_scope" \
+            --out "$version_out" &
         all_pid=$!
         wait "$all_pid"
         version_status=$?
@@ -179,7 +243,23 @@ if [ "$ALL_CORPORA" = 1 ]; then
             0) ;;
             *) all_status="$version_status";;
         esac
+        [ "$version_status" = 0 ] && all_csv_files+=("${version_out%.txt}.csv")
     done
+    if [ "$all_status" = 0 ]; then
+        combined_csv="${all_out%.txt}_all.csv"
+        statistics_dir="${all_out%.txt}_statistics"
+        if "${PYTHON_BIN:-python3}" "$SCRIPT_DIR/benchmark_statistics.py" \
+            --output-dir "$statistics_dir" --combined-csv "$combined_csv" \
+            --run "$START_TS" "${all_csv_files[@]}"; then
+            echo "Combined CSV written to $combined_csv"
+            echo "Statistics written to $statistics_dir"
+            echo "RESULT_COMBINED_CSV=$combined_csv"
+            echo "RESULT_STATISTICS_DIR=$statistics_dir"
+        else
+            echo "Failed to generate combined statistics" >&2
+            all_status=1
+        fi
+    fi
     exit "$all_status"
 fi
 if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
@@ -236,7 +316,7 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=900}"
+: "${OY_TIMEOUT_SECS:=1800}"
 : "${OY_BATCH_GRACE_SECS:=30}"
 case "$OY_TIMEOUT_SECS" in
     ''|*[!0-9]*) echo "--timeout must be a non-negative integer (got: $OY_TIMEOUT_SECS)" >&2; exit 2;;
@@ -249,8 +329,10 @@ OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 OY_QUERY_SEPARATOR="===================================================================================================="
 
 # DuckDB enforces this limit independently for every statement. The external
-# `timeout` remains a process watchdog and is scaled for multi-statement timing
-# batches, but no single bare-query execution can consume that entire batch.
+# `timeout` remains a process watchdog and is scaled only to contain all fixed-
+# limit statements in a multi-statement timing/profile batch. A timed-out
+# statement fails that query's phase immediately: the harness never retries it
+# and never raises its per-statement limit.
 oy_statement_timeout_sql() {
     local seconds="$1"
     [ "$seconds" != "0" ] || return 0
@@ -442,8 +524,12 @@ oy_time_median() {
     completed="$(printf '%s\n' "$times" | awk 'NF {n++} END {print n+0}')"
     if [ "$duck_rc" -ne 0 ] || grep -qE 'Error:' "$rawf" || [ "$completed" -ne $((runs + 1)) ]; then
         rm -f "$sqlf" "$rawf"
+        if [ "$duck_rc" -eq 124 ]; then
+            echo "TIMEOUT 0"
+            return 124
+        fi
         echo "NA 0"
-        return
+        return 1
     fi
     rm -f "$sqlf" "$rawf"
     # Median over the timed runs after dropping the warm-up.
@@ -478,6 +564,10 @@ oy_time_median() {
 #                 uncertain_filter_amplification_guard=0|1 \
 #                 stretch_cost_gate_eligible=0|1 \
 #                 stretch_cost_gate_selected=0|1 \
+#                 unary_filter_selectivity=N|NA \
+#                 low_selectivity_cost_gate_eligible=0|1 \
+#                 low_selectivity_cost_gate_selected=0|1 \
+#                 low_selectivity_cost_ratio_limit=N|NA \
 #                 baseline_join_input_rows=N|NA \
 #                 candidate_join_input_rows=N|NA \
 #                 candidate_to_baseline_join_input_ratio=N|NA \
@@ -502,6 +592,10 @@ OY_DECISION_FULL_REDUCTION_LOWER_BOUND="NA"
 OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
 OY_DECISION_STRETCH_ELIGIBLE="NA"
 OY_DECISION_STRETCH_SELECTED="NA"
+OY_DECISION_UNARY_FILTER_SELECTIVITY="NA"
+OY_DECISION_LOW_SELECTIVITY_ELIGIBLE="NA"
+OY_DECISION_LOW_SELECTIVITY_SELECTED="NA"
+OY_DECISION_LOW_SELECTIVITY_LIMIT="NA"
 OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
 OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
 OY_DECISION_BASELINE_COST="NA"
@@ -564,6 +658,10 @@ oy_reset_decision() {
     OY_DECISION_UNCERTAIN_FILTER_GUARD="NA"
     OY_DECISION_STRETCH_ELIGIBLE="NA"
     OY_DECISION_STRETCH_SELECTED="NA"
+    OY_DECISION_UNARY_FILTER_SELECTIVITY="NA"
+    OY_DECISION_LOW_SELECTIVITY_ELIGIBLE="NA"
+    OY_DECISION_LOW_SELECTIVITY_SELECTED="NA"
+    OY_DECISION_LOW_SELECTIVITY_LIMIT="NA"
     OY_DECISION_SEMIJOIN_RETAINED_RATIO="NA"
     OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="NA"
     OY_DECISION_BASELINE_COST="NA"
@@ -643,6 +741,10 @@ oy_decision() {
         OY_DECISION_UNCERTAIN_FILTER_GUARD="$(oy_record_value "$record" uncertain_filter_amplification_guard)"
         OY_DECISION_STRETCH_ELIGIBLE="$(oy_record_value "$record" stretch_cost_gate_eligible)"
         OY_DECISION_STRETCH_SELECTED="$(oy_record_value "$record" stretch_cost_gate_selected)"
+        OY_DECISION_UNARY_FILTER_SELECTIVITY="$(oy_record_value "$record" unary_filter_selectivity)"
+        OY_DECISION_LOW_SELECTIVITY_ELIGIBLE="$(oy_record_value "$record" low_selectivity_cost_gate_eligible)"
+        OY_DECISION_LOW_SELECTIVITY_SELECTED="$(oy_record_value "$record" low_selectivity_cost_gate_selected)"
+        OY_DECISION_LOW_SELECTIVITY_LIMIT="$(oy_record_value "$record" low_selectivity_cost_ratio_limit)"
         OY_DECISION_SEMIJOIN_RETAINED_RATIO="$(oy_record_value "$record" semijoin_retained_cardinality_ratio)"
         OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION="$(oy_record_value "$record" uncertain_filter_cardinality_amplification)"
         OY_DECISION_BASELINE_COST="$(oy_record_value "$record" baseline_cost)"
@@ -687,8 +789,8 @@ oy_decision() {
             OUTERYAN:[01]:[01]:1:[01]:EQUAL:*) ;;
             *) OY_DECISION_REASON="TRACE_INVALID";;
         esac
-        case "$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED:$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED:$OY_DECISION_FULL_REDUCTION_LOWER_BOUND:$OY_DECISION_UNCERTAIN_FILTER_GUARD:$OY_DECISION_STRETCH_ELIGIBLE:$OY_DECISION_STRETCH_SELECTED" in
-            [01]:[01]:[01]:[01]:[01]:[01]) ;;
+        case "$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED:$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED:$OY_DECISION_FULL_REDUCTION_LOWER_BOUND:$OY_DECISION_UNCERTAIN_FILTER_GUARD:$OY_DECISION_STRETCH_ELIGIBLE:$OY_DECISION_STRETCH_SELECTED:$OY_DECISION_LOW_SELECTIVITY_ELIGIBLE:$OY_DECISION_LOW_SELECTIVITY_SELECTED" in
+            [01]:[01]:[01]:[01]:[01]:[01]:[01]:[01]) ;;
             *) OY_DECISION_REASON="TRACE_INVALID";;
         esac
         if [ "$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED" = 1 ] && \
@@ -698,6 +800,12 @@ oy_decision() {
         if [ "$OY_DECISION_STRETCH_SELECTED" = 1 ]; then
             case "$OY_DECISION_STRETCH_ELIGIBLE:$OY_DECISION_SELECTED_PLAN:$OY_DECISION_SELECTED:$OY_DECISION_GATE_RESULT:$OY_DECISION_REASON" in
                 1:OUTERYAN:1:PASS:COST_OUTERYAN_STRETCH) ;;
+                *) OY_DECISION_REASON="TRACE_INVALID";;
+            esac
+        fi
+        if [ "$OY_DECISION_LOW_SELECTIVITY_SELECTED" = 1 ]; then
+            case "$OY_DECISION_LOW_SELECTIVITY_ELIGIBLE:$OY_DECISION_SELECTED_PLAN:$OY_DECISION_SELECTED:$OY_DECISION_GATE_RESULT:$OY_DECISION_REASON" in
+                1:OUTERYAN:1:PASS:COST_OUTERYAN_LOW_SELECTIVITY) ;;
                 *) OY_DECISION_REASON="TRACE_INVALID";;
             esac
         fi
@@ -759,6 +867,10 @@ oy_kernel() {
     done
     [ -n "$reasons" ] || reasons="-"
     rm -f "$sqlf" "$errf"
+    if [ "$rc" -eq 124 ]; then
+        echo "not-run|b0h0|$reasons|timeout"
+        return
+    fi
     if [ "$rc" -ne 0 ]; then
         echo "not-run|b0h0|$reasons|error"
         return
@@ -957,11 +1069,14 @@ csv_result_row() {
 }
 
 CSV_HEADER=(
+    experiment_group corpus_version corpus_scope workload_category query_class
     query family sql_path relation_count reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
     baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
     default_filter_upper_bound_checked default_filter_upper_bound_selected
     full_reduction_cardinality_lower_bound_applied uncertain_filter_amplification_guard
     stretch_cost_gate_eligible stretch_cost_gate_selected
+    unary_filter_selectivity low_selectivity_cost_gate_eligible low_selectivity_cost_gate_selected
+    low_selectivity_cost_ratio_limit
     baseline_join_input_rows candidate_join_input_rows candidate_to_baseline_join_input_ratio
     semijoin_retained_cardinality_ratio
     uncertain_filter_cardinality_amplification
@@ -972,6 +1087,11 @@ CSV_HEADER=(
     inner_output_weight unmatched_left_weight unmatched_right_weight semijoin_materialize_weight
     semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight semijoin_probe_emit_weight
     kernel kernel_detail kernel_hash_reasons correct note timing_threads tm_off tm_on tm_speedup
+    optimizer_profile_status optimizer_timed_samples
+    optimizer_duckdb_total_s optimizer_outeryan_total_s optimizer_overhead_s optimizer_outeryan_to_duckdb_ratio
+    optimizer_duckdb_measured_phase_s optimizer_outeryan_measured_phase_s
+    optimizer_duckdb_other_s optimizer_outeryan_other_s
+    optimizer_duckdb_phases_json optimizer_outeryan_phases_json optimizer_phase_delta_json optimizer_profile_directory
     rows effective_pass duckdb_plan enabled_plan trace_file cost_file
     profile_status profile_threads profile_round1_operator_s profile_round2_operator_s profile_round3_operator_s
     profile_round1_operator_count profile_round2_operator_count profile_round3_operator_count
@@ -987,11 +1107,13 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo "# OuterYan on/off experiment   started $START_HUMAN"
     echo "# binary : $DUCKDB_BIN"
     echo "# corpus : version=$CORPUS_VERSION, scope=$CORPUS_SCOPE, $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
+    echo "# class  : workload_category=$WORKLOAD_CATEGORY query_class=$QUERY_CLASS"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
     echo "# timing : threads=${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
-    echo "# overhead: correctness, diagnostics and TM timing disable profiling; separate ON phase batch enabled=$PROFILE"
-    echo "# phases : OuterYan-selected only, threads=${OY_THREADS}, 1 warm-up + ${RUNS} samples; whole tuple at median profile latency"
+    echo "# overhead: correctness, diagnostics and TM timing disable profiling; phase/optimizer profiling enabled=$PROFILE"
+    echo "# optimize: OFF/ON query execution profiles; 1 unprofiled warm-up + 1 measured sample per side"
+    echo "# phases : workflow optimizer phases and execution R1/R2/R3 share the same measured ON execution"
     echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time"
     echo "#          successful raw profiles are deleted; failure artifacts, if any: $PROFILE_DIR"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
@@ -1004,9 +1126,11 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo
     echo "===================== PER-QUERY RESULT BLOCKS ========================="
     echo "# Columns: TM = unprofiled wall-clock timing at threads=${OY_THREADS}"
-    echo "# Each query has exactly two lines after a full-width separator:"
-    echo "#   line 1 = query/result, selected plan, kernel, thread count, and TM"
-    echo "#   line 2 = decision, cost/gate inputs, weights, notices, and artifacts"
+    echo "# Each query has exactly four lines after a full-width separator:"
+    echo "#   line 1 = query index and name"
+    echo "#   line 2 = correctness, reorder/selection, kernel, runtime, speed-up, optimizer time"
+    echo "#   line 3 = family, relations, pass, note, and phase breakdown"
+    echo "#   line 4 = decision, formula/cost details, optimizer workflow phases, and artifacts"
     echo "#   kernel = not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) | none(b=0,h=0)"
 } > "$OUT"
 
@@ -1052,6 +1176,8 @@ process_one() {
     local formula_id="-" selection_mode="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
     local default_filter_upper_checked="-" default_filter_upper_selected="-" uncertain_filter_guard="-"
     local full_reduction_lower_bound="-" stretch_eligible="-" stretch_selected="-"
+    local unary_filter_selectivity="-" low_selectivity_eligible="-" low_selectivity_selected="-"
+    local low_selectivity_limit="-"
     local baseline_join_input_rows="-" candidate_join_input_rows="-" join_input_ratio="-"
     local semijoin_retained_ratio="-" uncertain_filter_amplification="-"
     local baseline_cost="-" candidate_join_cost="-" semijoin_raw_cost="-"
@@ -1070,7 +1196,17 @@ process_one() {
     local r1sj="NA" r2sj="NA" realjoin="NA" profile_wall="NA" profile_cpu="NA"
     local r1ratio="NA" r2ratio="NA" sjratio="NA" realjoin_ratio="NA" other="NA" other_ratio="NA"
     local r1_operators="NA" r2_operators="NA" realjoin_operators="NA" profile_samples="NA"
-    [ "$PROFILE" = 0 ] || profile_status="not-correct"
+    local optimizer_status="disabled" optimizer_samples="NA" optimizer_profile_directory="-"
+    local optimizer_duckdb_total="NA" optimizer_outeryan_total="NA" optimizer_overhead="NA"
+    local optimizer_ratio="NA" optimizer_duckdb_phase_sum="NA" optimizer_outeryan_phase_sum="NA"
+    local optimizer_duckdb_other="NA" optimizer_outeryan_other="NA"
+    local optimizer_duckdb_phases="{}" optimizer_outeryan_phases="{}" optimizer_phase_delta="{}"
+    local optimizer_focus="-"
+    local stop_after_timeout=0
+    if [ "$PROFILE" = 1 ]; then
+        profile_status="not-correct"
+        optimizer_status="not-correct"
+    fi
     if [ "$correct" = "TRUE" ]; then
         if [ "$CAPTURE_PLANS" = 1 ]; then
             local artifact_stem="$PLAN_DIR/${family}__${id}.${PASS}"
@@ -1098,6 +1234,10 @@ process_one() {
         uncertain_filter_guard="$OY_DECISION_UNCERTAIN_FILTER_GUARD"
         stretch_eligible="$OY_DECISION_STRETCH_ELIGIBLE"
         stretch_selected="$OY_DECISION_STRETCH_SELECTED"
+        unary_filter_selectivity="$OY_DECISION_UNARY_FILTER_SELECTIVITY"
+        low_selectivity_eligible="$OY_DECISION_LOW_SELECTIVITY_ELIGIBLE"
+        low_selectivity_selected="$OY_DECISION_LOW_SELECTIVITY_SELECTED"
+        low_selectivity_limit="$OY_DECISION_LOW_SELECTIVITY_LIMIT"
         semijoin_retained_ratio="$OY_DECISION_SEMIJOIN_RETAINED_RATIO"
         uncertain_filter_amplification="$OY_DECISION_UNCERTAIN_FILTER_AMPLIFICATION"
         baseline_cost="$OY_DECISION_BASELINE_COST"
@@ -1145,31 +1285,107 @@ process_one() {
             local kraw
             kraw="$(oy_kernel "$db" "$sql")"
             IFS='|' read -r ker kdetail kreasons kernel_status <<< "$kraw"
-            if [ "$kernel_status" != "ok" ]; then
+            if [ "$kernel_status" = "timeout" ]; then
+                note="TIMEOUT-KERNEL"
+                profile_status="timeout"
+                optimizer_status="timeout"
+                stop_after_timeout=1
+            elif [ "$kernel_status" != "ok" ]; then
                 note="${note};KERNEL-TRACE-ERROR"
             fi
         else
             ker="not-run"; kdetail="b0h0"; kreasons="-"; kernel_status="not-run"
         fi
         kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
-        local local_rom local_rnm
-        local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
-        local_rnm="$(oy_time_median "$db" "$OY_ON"  "$sql" "$RUNS" "${OY_THREADS}")"
-        offm="$(echo "$local_rom" | awk '{print $1}')"; onm="$(echo "$local_rnm" | awk '{print $1}')"
-        ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-        if [ "$PROFILE" = 1 ]; then
-            profile_status="not-selected"
-            if [ "$selected_plan" = "OUTERYAN" ]; then
+        local local_rom local_rnm off_timing_rc=0 on_timing_rc=0
+        if [ "$stop_after_timeout" = 0 ]; then
+            local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
+            off_timing_rc=$?
+            if [ "$off_timing_rc" -eq 124 ]; then
+                note="TIMEOUT-OFF-TIMING"
+                offm="NA"; onm="NA"; ratiom="NA"
+                profile_status="timeout"
+                optimizer_status="timeout"
+                stop_after_timeout=1
+            elif [ "$off_timing_rc" -ne 0 ]; then
+                note="${note};OFF-TIMING-ERROR"
+                offm="NA"; onm="NA"; ratiom="NA"
+                profile_status="not-run"
+                optimizer_status="not-run"
+                stop_after_timeout=1
+            else
+                offm="$(echo "$local_rom" | awk '{print $1}')"
+            fi
+        fi
+        if [ "$stop_after_timeout" = 0 ]; then
+            local_rnm="$(oy_time_median "$db" "$OY_ON" "$sql" "$RUNS" "${OY_THREADS}")"
+            on_timing_rc=$?
+            if [ "$on_timing_rc" -eq 124 ]; then
+                note="TIMEOUT-ON-TIMING"
+                onm="NA"; ratiom="NA"
+                profile_status="timeout"
+                optimizer_status="timeout"
+                stop_after_timeout=1
+            elif [ "$on_timing_rc" -ne 0 ]; then
+                note="${note};ON-TIMING-ERROR"
+                onm="NA"; ratiom="NA"
+                profile_status="not-run"
+                optimizer_status="not-run"
+                stop_after_timeout=1
+            else
+                onm="$(echo "$local_rnm" | awk '{print $1}')"
+            fi
+        fi
+        if [ "$stop_after_timeout" = 0 ]; then
+            ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
+        fi
+        if [ "$PROFILE" = 1 ] && [ "$stop_after_timeout" = 0 ]; then
+            local optimizer_result optimizer_rc=0 optimizer_raw
+            local -a optimizer_fields=()
+            optimizer_status="ERROR"
+            optimizer_profile_directory="$(mktemp -d "$PROFILE_DIR/${family}__${id}.optimizer.XXXXXX")" || optimizer_rc=1
+            optimizer_result="$(mktemp)" || optimizer_rc=1
+            if [ "$optimizer_rc" = 0 ]; then
+                oy_optimizer_profile_pair "$db" "$sql" "$OY_THREADS" "$RUNS" \
+                    "$optimizer_profile_directory" > "$optimizer_result" || optimizer_rc=$?
+                optimizer_raw="$(< "$optimizer_result")"
+                IFS='|' read -r -a optimizer_fields <<< "$optimizer_raw"
+                rm -f "$optimizer_result"
+            fi
+            if [ "$optimizer_rc" = 0 ] && [ "${#optimizer_fields[@]}" -eq 13 ] && \
+               [ "${optimizer_fields[0]}" != "NA" ]; then
+                IFS='|' read -r optimizer_duckdb_total optimizer_outeryan_total optimizer_overhead \
+                    optimizer_ratio optimizer_duckdb_phase_sum optimizer_outeryan_phase_sum \
+                    optimizer_duckdb_other optimizer_outeryan_other optimizer_samples \
+                    optimizer_duckdb_phases optimizer_outeryan_phases optimizer_phase_delta optimizer_focus \
+                    <<< "$optimizer_raw"
+                optimizer_status="OK"
+            else
+                if [ "$optimizer_rc" -eq 124 ]; then
+                    optimizer_status="TIMEOUT"
+                    profile_status="timeout"
+                    note="TIMEOUT-PROFILE"
+                    profile_directory="$optimizer_profile_directory"
+                    stop_after_timeout=1
+                else
+                    note="${note};OPTIMIZER-PROFILE-ERROR"
+                fi
+                echo "OPTIMIZER-PROFILE-ERROR: $id; see ${optimizer_profile_directory:-unavailable}/optimizer_duckdb.log" >&2
+            fi
+
+            if [ "$profile_status" != "timeout" ]; then
+                profile_status="not-selected"
+            fi
+            if [ "$optimizer_status" = "OK" ] && [ "$selected_plan" = "OUTERYAN" ]; then
                 local profile_result profile_rc=0 praw
                 local -a profile_fields=()
                 profile_threads="$OY_THREADS"
                 profile_status="ERROR"
-                profile_directory="$(mktemp -d "$PROFILE_DIR/${family}__${id}.XXXXXX")" || profile_rc=1
                 profile_result="$(mktemp)" || profile_rc=1
                 if [ "$profile_rc" = 0 ]; then
-                    # Direct call keeps DuckDB owned by this shell's PID tracker.
-                    oy_phase_profile "$db" "$sql" "$OY_THREADS" "$RUNS" "$selected_plan" \
-                        "$round1_pairs" "$round2_pairs" "$proven_empty" "$profile_directory" \
+                    oy_phase_profile_from_json \
+                        "$optimizer_profile_directory/optimizer_outeryan_1.json" "$sql" "$selected_plan" \
+                        "$round1_pairs" "$round2_pairs" "$proven_empty" \
                         > "$profile_result" || profile_rc=$?
                     praw="$(< "$profile_result")"
                     read -r -a profile_fields <<< "$praw"
@@ -1181,22 +1397,27 @@ process_one() {
                         realjoin_ratio other other_ratio r1_operators r2_operators realjoin_operators \
                         profile_samples <<< "$praw"
                     profile_status="OK"
-                    # Successful JSON profiles are intermediate measurements, not
-                    # error artifacts. Keep only the values written to the main CSV.
-                    local profile_index
-                    for ((profile_index=0; profile_index<=RUNS; profile_index++)); do
-                        rm -f "$profile_directory/profile_${profile_index}.json"
-                    done
-                    rm -f "$profile_directory/duckdb.log"
-                    if rmdir "$profile_directory" 2>/dev/null; then
-                        profile_directory="-"
-                    else
-                        echo "PROFILE-CLEANUP-WARNING: could not remove $profile_directory" >&2
-                    fi
                 else
                     # Do not discard valid unprofiled timing pairs after a profile failure.
                     note="${note};PROFILE-ERROR"
-                    echo "PROFILE-ERROR: $id; see ${profile_directory:-unavailable}/duckdb.log" >&2
+                    profile_directory="$optimizer_profile_directory"
+                    echo "PROFILE-ERROR: $id; see ${optimizer_profile_directory:-unavailable}/optimizer_outeryan_1.json" >&2
+                fi
+            elif [ "$selected_plan" = "OUTERYAN" ] && [ "$profile_status" != "timeout" ]; then
+                profile_status="ERROR"
+                profile_directory="$optimizer_profile_directory"
+                note="${note};PROFILE-ERROR"
+            fi
+            if [ "$optimizer_status" = "OK" ] && [ "$profile_status" != "ERROR" ]; then
+                rm -f "$optimizer_profile_directory/optimizer_duckdb_1.json" \
+                    "$optimizer_profile_directory/optimizer_outeryan_1.json" \
+                    "$optimizer_profile_directory/optimizer_outeryan.trace" \
+                    "$optimizer_profile_directory/optimizer_duckdb.log"
+                if rmdir "$optimizer_profile_directory" 2>/dev/null; then
+                    optimizer_profile_directory="-"
+                    profile_directory="-"
+                else
+                    echo "OPTIMIZER-PROFILE-CLEANUP-WARNING: could not remove $optimizer_profile_directory" >&2
                 fi
             fi
         fi
@@ -1232,44 +1453,49 @@ process_one() {
     QEFFECTIVE_PASS[$i]="$PASS"; QDUCKDB_PLAN[$i]="$duckdb_plan"; QENABLED_PLAN[$i]="$enabled_plan"
     QTRACE_FILE[$i]="$trace_file"; QCOST_FILE[$i]="$cost_file"
     # ---- append to TXT and CSV ----
-    local primary_line detail_line detail_suffix gate_detail
-    printf -v primary_line \
-        '[%3d/%d] %-36s correct=%s reorder=%s selected=%s kernel=%s threads=%s  TM:off=%s on=%s spd=%s' \
-        "$((i+1))" "${#LABELS[@]}" "$id" "$correct" "$outer_reordered" "$selected_plan" \
-        "$kernel_display" "$OY_THREADS" "$offm" "$onm" "$ratiom"
-    printf -v detail_line \
-        '  details: family=%s sql=%s pass=%s timeout=%ss note=%s rows=%s nrel=%s' \
-        "$family" "$sql_path" "$PASS" "$OY_TIMEOUT_SECS" "$note" "$rows" "$nrel"
-    if [ "$PROFILE" = 1 ]; then
-        printf -v detail_suffix \
-            ' profile=[status=%s threads=%s Total-Time=%ss CPU-Time=%ss R1=%ss R2=%ss R3=%ss OtherCPU=%ss samples=%s directory=%s]' \
-            "$profile_status" "$profile_threads" "$profile_wall" "$profile_cpu" "$r1sj" "$r2sj" \
-            "$realjoin" "$other" "$profile_samples" "$profile_directory"
-        detail_line+="$detail_suffix"
-    fi
+    local query_line result_line context_line decision_line detail_suffix gate_detail
+    printf -v query_line '[%3d/%d] query=%s' "$((i+1))" "${#LABELS[@]}" "$id"
+    printf -v result_line \
+        '  result: correct=%s reorder=%s selected=%s kernel=%s threads=%s runtime_s=[DuckDB=%s OuterYan=%s] speedup=%s optimization_s=[status=%s DuckDB=%s OuterYan=%s overhead=%s ratio=%s samples=%s]' \
+        "$correct" "$outer_reordered" "$selected_plan" "$kernel_display" "$OY_THREADS" \
+        "$offm" "$onm" "$ratiom" "$optimizer_status" "$optimizer_duckdb_total" \
+        "$optimizer_outeryan_total" "$optimizer_overhead" "$optimizer_ratio" "$optimizer_samples"
+    printf -v context_line \
+        '  context: family=%s category=%s nrel=%s pass=%s note=%s rows=%s sql=%s breakdown_s=[status=%s CPU=%s R1=%s R2=%s R3=%s Other=%s wall=%s samples=%s]' \
+        "$family" "$WORKLOAD_CATEGORY" "$nrel" "$PASS" "$note" "$rows" "$sql_path" \
+        "$profile_status" "$profile_cpu" "$r1sj" "$r2sj" "$realjoin" "$other" "$profile_wall" "$profile_samples"
+    decision_line='  decision:'
     if [ "$correct" = "TRUE" ]; then
         printf -v detail_suffix \
-            ' decision=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
+            ' plan=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
             "$selection_mode" \
             "$decision" "$raw_winner" "$gate_result" "$gate_applied" "$proven_empty" \
             "$selected" "$formula_id"
-        detail_line+="$detail_suffix"
+        decision_line+="$detail_suffix"
         printf -v detail_suffix \
-            ' risk=[default_filter_upper_checked=%s selected=%s retained=%s amplification=%s guard=%s full_reduction_bound=%s stretch_eligible=%s stretch_selected=%s join_input_ratio=%s]' \
+            ' risk=[default_filter_upper_checked=%s selected=%s retained=%s amplification=%s guard=%s full_reduction_bound=%s stretch_eligible=%s stretch_selected=%s unary_selectivity=%s low_selectivity_eligible=%s low_selectivity_selected=%s low_selectivity_limit=%s join_input_ratio=%s]' \
             "$default_filter_upper_checked" "$default_filter_upper_selected" \
             "$semijoin_retained_ratio" "$uncertain_filter_amplification" "$uncertain_filter_guard" \
-            "$full_reduction_lower_bound" "$stretch_eligible" "$stretch_selected" "$join_input_ratio"
-        detail_line+="$detail_suffix"
+            "$full_reduction_lower_bound" "$stretch_eligible" "$stretch_selected" \
+            "$unary_filter_selectivity" "$low_selectivity_eligible" "$low_selectivity_selected" \
+            "$low_selectivity_limit" "$join_input_ratio"
+        decision_line+="$detail_suffix"
+        if [ "$PROFILE" = 1 ]; then
+            printf -v detail_suffix \
+                ' optimizer_phases=[%s; DuckDB_measured=%ss OuterYan_measured=%ss]' \
+                "$optimizer_focus" "$optimizer_duckdb_phase_sum" "$optimizer_outeryan_phase_sum"
+            decision_line+="$detail_suffix"
+        fi
         if [ "$ker" = "hash" ] || [ "$ker" = "mixed" ]; then
             printf -v detail_suffix ' kernel_notice=[HASH-FALLBACK reasons=%s default_bitmap_budget_bytes=34359738368]' \
                 "$kreasons"
-            detail_line+="$detail_suffix"
+            decision_line+="$detail_suffix"
             printf 'NOTICE %s: %s; hash reasons=%s. More bitmap memory helps overflow/force_hash after replanning, not ineligible keys.\n' \
                 "$id" "$kernel_display" "$kreasons" >&2
         fi
         if [ "$candidate_total" = "NA" ] || [ "$candidate_total" = "-" ] || \
            [ "$baseline_cost" = "NA" ] || [ "$baseline_cost" = "-" ]; then
-            detail_line+=" cost=[UNAVAILABLE]"
+            decision_line+=" cost=[UNAVAILABLE]"
         else
             printf -v detail_suffix \
                 ' cost=[OuterYan=%s + %s*%s = %s; DuckDB=%s; delta=%s; raw_ratio=%s] gate_cmp=[numeric:%s <= %s (= %s*%s); final=%s; margin=%s] SJ=[R1(build=%s probe=%s pairs=%s filters=%s) R2(build=%s probe=%s pairs=%s filters=%s) weighted=%s] weights=[join(inner=%s unmatched_left=%s unmatched_right=%s) SJ(materialize=%s filter_build=%s replay=%s lookup=%s emit=%s)]' \
@@ -1281,33 +1507,35 @@ process_one() {
                 "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
                 "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" \
                 "$sj_lookup_weight" "$sj_emit_weight"
-            detail_line+="$detail_suffix"
+            decision_line+="$detail_suffix"
         fi
         if [ "$CAPTURE_PLANS" = 1 ]; then
             printf -v detail_suffix ' artifacts=[duckdb=%s enabled=%s trace=%s cost=%s]' \
                 "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
-            detail_line+="$detail_suffix"
+            decision_line+="$detail_suffix"
         fi
     else
         gate_detail="$(printf '%s' "${gate:-ERROR: correctness gate produced no diagnostic}" | tr '\n' ' ')"
         printf -v detail_suffix ' gate_detail=[%s]' "$gate_detail"
-        detail_line+="$detail_suffix"
+        decision_line+="$detail_suffix"
     fi
     {
         echo
         echo "$OY_QUERY_SEPARATOR"
-        printf '%s\n%s\n' "$primary_line" "$detail_line"
+        printf '%s\n%s\n%s\n%s\n' "$query_line" "$result_line" "$context_line" "$decision_line"
     } >> "$OUT"
     {
         echo
         echo "$OY_QUERY_SEPARATOR"
-        printf '%s\n%s\n' "$primary_line" "$detail_line"
+        printf '%s\n%s\n%s\n%s\n' "$query_line" "$result_line" "$context_line" "$decision_line"
     } >&2
     csv_result_row \
+        "$EXPERIMENT_GROUP" "$CORPUS_VERSION" "$CORPUS_SCOPE" "$WORKLOAD_CATEGORY" "$QUERY_CLASS" \
         "$id" "$family" "$sql_path" "$nrel" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
         "$default_filter_upper_checked" "$default_filter_upper_selected" "$full_reduction_lower_bound" \
         "$uncertain_filter_guard" "$stretch_eligible" "$stretch_selected" \
+        "$unary_filter_selectivity" "$low_selectivity_eligible" "$low_selectivity_selected" "$low_selectivity_limit" \
         "$baseline_join_input_rows" "$candidate_join_input_rows" "$join_input_ratio" \
         "$semijoin_retained_ratio" "$uncertain_filter_amplification" \
         "$baseline_cost" "$candidate_join_cost" "$semijoin_raw_cost" "$semijoin_cost_ratio" \
@@ -1318,7 +1546,12 @@ process_one() {
         "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
         "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" "$sj_lookup_weight" "$sj_emit_weight" \
         "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$OY_THREADS" \
-        "$offm" "$onm" "$ratiom" "$rows" "$PASS" \
+        "$offm" "$onm" "$ratiom" \
+        "$optimizer_status" "$optimizer_samples" "$optimizer_duckdb_total" "$optimizer_outeryan_total" \
+        "$optimizer_overhead" "$optimizer_ratio" "$optimizer_duckdb_phase_sum" "$optimizer_outeryan_phase_sum" \
+        "$optimizer_duckdb_other" "$optimizer_outeryan_other" \
+        "$optimizer_duckdb_phases" "$optimizer_outeryan_phases" "$optimizer_phase_delta" "$optimizer_profile_directory" \
+        "$rows" "$PASS" \
         "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file" \
         "$profile_status" "$profile_threads" "$r1sj" "$r2sj" "$realjoin" \
         "$r1_operators" "$r2_operators" "$realjoin_operators" \
@@ -1407,8 +1640,21 @@ fi
 if [ "$CAPTURE_PLANS" = 1 ]; then
     echo "Plan artifacts written to $PLAN_DIR"
 fi
+if [ "${OY_DEFER_STATISTICS:-0}" != 1 ]; then
+    STATISTICS_DIR="${OUT%.txt}_statistics"
+    if "${PYTHON_BIN:-python3}" "$SCRIPT_DIR/benchmark_statistics.py" \
+        --output-dir "$STATISTICS_DIR" --run "$EXPERIMENT_GROUP" "$CSV_FINAL"; then
+        echo "Statistics written to $STATISTICS_DIR"
+    else
+        echo "Failed to generate statistics from $CSV_FINAL" >&2
+        exit 1
+    fi
+fi
 echo "RESULT_TXT=$OUT"
 echo "RESULT_CSV=$CSV_FINAL"
+if [ "${OY_DEFER_STATISTICS:-0}" != 1 ]; then
+    echo "RESULT_STATISTICS_DIR=$STATISTICS_DIR"
+fi
 if [ "$CAPTURE_PLANS" = 1 ]; then
     echo "RESULT_PLAN_DIR=$PLAN_DIR"
 fi

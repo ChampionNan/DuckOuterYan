@@ -106,7 +106,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
             ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
-                for core_only, count in ((False, 206), (True, 170)):
+                for core_only, count in ((False, 224), (True, 170)):
                     with self.subTest(core_only=core_only):
                         root = scratch / ("core-only" if core_only else "full")
                         argv = ["gen_outerjoin_benchmark.py", "--root", str(root)]
@@ -151,9 +151,13 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             for row in csv_rows(root / "manifest.csv")
         }
         for row in csv_rows(root / "industry_inspired" / "manifest.csv"):
-            prefix = "derived" if row["evaluation_role"] == "legacy_performance_win" else "industry"
+            prefix = (
+                "industry"
+                if row["evaluation_role"].startswith("industry_pattern")
+                else "derived"
+            )
             expected.add(f"{row['family']}/{prefix}__{row['query_id']}.sql")
-        self.assertEqual(len(expected), 206)
+        self.assertEqual(len(expected), 224)
         self.assertEqual(active_paths, expected)
         self.assertTrue(set(pins) <= active_paths)
         self.assertEqual(
@@ -170,6 +174,15 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         active_by_path = {row["path"]: row for row in active}
         self.assertTrue(
             all(active_by_path[path]["content_sha256"] != digest for path, digest in pins.items())
+        )
+        graph_rows = [row for row in active if row["family"] == "graph"]
+        self.assertEqual(len(graph_rows), 25)
+        self.assertEqual(
+            Counter(row["tree_shape"] for row in graph_rows),
+            Counter({"bushy": 10, "left_deep": 7, "right_deep": 8}),
+        )
+        self.assertEqual(
+            {row["evaluation_role"] for row in graph_rows}, {"graph_pattern"}
         )
         for row in active:
             source_bytes = (root / row["source_path"]).read_bytes()
@@ -233,13 +246,11 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="outeryan-v2-") as directory, forbid_result_access():
             root = Path(directory)
             self.assertEqual(BENCHMARK.generate_v2_core(root), 510)
-            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 546)
-            self.assertEqual(BENCHMARK.generate_v2_selectivity_stress(root), 84)
+            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 564)
             self.assertEqual(BENCHMARK.generate_v2_job_regressions(root), 2)
             BENCHMARK.validate_v2_generated(root)
             core = csv_rows(root / "manifest.csv")
             active = csv_rows(root / "benchmark" / "manifest.csv")
-            stress = csv_rows(root / "selectivity_stress" / "manifest.csv")
             regressions = csv_rows(root / "job_regressions" / "manifest.csv")
             self.assertEqual(
                 {row["selectivity_tier"] for row in core},
@@ -285,7 +296,13 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             )
             self.assertEqual(
                 sum(row["evaluation_role"] != "benchmark_derived_v2" for row in active),
-                36,
+                54,
+            )
+            graph_rows = [row for row in active if row["family"] == "graph"]
+            self.assertEqual(len(graph_rows), 25)
+            self.assertEqual(
+                Counter(row["tree_shape"] for row in graph_rows),
+                Counter({"bushy": 10, "left_deep": 7, "right_deep": 8}),
             )
             self.assertTrue(all(len(set(row["join_vector"])) >= 2 for row in active))
             active_join_counts = Counter()
@@ -306,59 +323,6 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                     "schema_synthetic_control",
                 },
             )
-            self.assertEqual({row["headline_eligible"] for row in stress}, {"false"})
-            self.assertEqual({row["performance_selected"] for row in stress}, {"false"})
-            self.assertEqual({row["query_class"] for row in stress}, {"selectivity_stress"})
-            self.assertTrue(all("observed_base_tm_speedup" not in row for row in stress))
-            self.assertEqual(
-                {row["selectivity_hash_buckets"] for row in stress},
-                {"4000"},
-            )
-            self.assertEqual(
-                {row["selectivity_bucket_threshold"] for row in stress},
-                {"1", "2", "8", "400", "800", "2000", "3200"},
-            )
-            self.assertEqual(
-                {row["target_fraction"] for row in stress},
-                {
-                    "0.000250", "0.000500", "0.002000", "0.100000",
-                    "0.200000", "0.500000", "0.800000",
-                },
-            )
-            self.assertEqual(
-                {row["tier_balance"] for row in stress}, {"12 queries per tier"}
-            )
-            self.assertEqual(
-                {row["distribution_claim"] for row in stress},
-                {
-                    "balanced tier counts; numeric levels and realized selectivity "
-                    "are not claimed to be uniform"
-                },
-            )
-            base_rows = {row["base_query_id"]: row for row in stress}
-            self.assertEqual(len(base_rows), 12)
-            self.assertEqual(
-                {
-                    row["base_query_id"]
-                    for row in BENCHMARK.select_v2_stress_bases(root)
-                },
-                set(base_rows),
-            )
-            self.assertTrue(
-                all(len(set(row["join_vector"])) >= 2 for row in stress)
-            )
-            self.assertTrue(all(int(row["relation_count"]) >= 4 for row in stress))
-            self.assertEqual(
-                {family: sum(row["family"] == family for row in base_rows.values())
-                 for family in ("tpch", "tpcds", "job")},
-                {"tpch": 4, "tpcds": 4, "job": 4},
-            )
-            for family in ("tpch", "tpcds", "job"):
-                shapes = {
-                    row["tree_shape"] for row in base_rows.values()
-                    if row["family"] == family
-                }
-                self.assertTrue({"left_deep", "right_deep", "bushy"} <= shapes)
             self.assertEqual(
                 {row["base_query_id"] for row in regressions},
                 {"ojb_sqlstorm_job_11914_bdmx", "oy_jb_jb_bushy4a_v2"},
@@ -373,6 +337,98 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             )
             self.assertTrue(
                 all(len(set(row["join_vector"])) >= 2 for row in regressions)
+            )
+
+    def test_v3_balances_source_derived_root_aggregation_coverage(self):
+        with tempfile.TemporaryDirectory(prefix="outeryan-v3-") as directory, forbid_result_access():
+            root = Path(directory)
+            self.assertEqual(BENCHMARK.generate_v3_core(root), 102)
+            self.assertEqual(BENCHMARK.generate_v3_benchmark(root), 102)
+            self.assertEqual(BENCHMARK.generate_v3_selectivity_stress(root), 42)
+            BENCHMARK.validate_v3_generated(root)
+            core = csv_rows(root / "manifest.csv")
+            active = csv_rows(root / "benchmark" / "manifest.csv")
+            stress = csv_rows(root / "selectivity_stress" / "manifest.csv")
+            self.assertEqual(
+                Counter(row["aggregate_variant"] for row in core),
+                Counter(
+                    {
+                        "global_count": 42,
+                        "grouped_sum": 30,
+                        "grouped_min": 15,
+                        "grouped_max": 15,
+                    }
+                ),
+            )
+            self.assertEqual(
+                Counter(row["source_benchmark"] for row in core),
+                Counter({"TPC-H": 15, "TPC-DS": 21, "JOB": 30, "SQLStorm": 36}),
+            )
+            self.assertEqual(
+                Counter(row["family"] for row in active),
+                Counter({"tpch": 27, "tpcds": 33, "job": 42}),
+            )
+            for tree_shape in {row["tree_shape"] for row in active}:
+                aggregate_counts = Counter(
+                    row["aggregate_variant"]
+                    for row in active
+                    if row["tree_shape"] == tree_shape
+                )
+                shape_count = sum(aggregate_counts.values())
+                for variant, target in BENCHMARK.V3_AGGREGATE_TARGET_COUNTS.items():
+                    expected = shape_count * target / BENCHMARK.V3_BENCHMARK_QUERY_COUNT
+                    self.assertLessEqual(abs(aggregate_counts[variant] - expected), 1.0)
+            join_counts = Counter()
+            for row in active:
+                sql = (root / "benchmark" / row["path"]).read_text(encoding="utf-8")
+                self.assertIn("-- corpus_version: v3", sql)
+                self.assertTrue(
+                    any(
+                        token in sql.upper()
+                        for token in ("COUNT(", "MIN(", "MAX(", "SUM(")
+                    )
+                )
+                self.assertGreaterEqual(len(set(row["join_vector"])), 2)
+                join_counts.update(row["join_vector"])
+            self.assertLessEqual(max(join_counts.values()) - min(join_counts.values()), 1)
+            self.assertEqual({row["corpus_version"] for row in stress}, {"v3"})
+            self.assertEqual({row["headline_eligible"] for row in stress}, {"false"})
+            self.assertEqual({row["performance_selected"] for row in stress}, {"false"})
+            self.assertEqual({row["query_class"] for row in stress}, {"selectivity_stress"})
+            self.assertTrue(all("observed_base_tm_speedup" not in row for row in stress))
+            self.assertEqual({row["selectivity_hash_buckets"] for row in stress}, {"4000"})
+            self.assertEqual(
+                {row["selectivity_bucket_threshold"] for row in stress},
+                {"1", "2", "8", "400", "800", "2000", "3200"},
+            )
+            self.assertEqual(
+                {row["target_fraction"] for row in stress},
+                {
+                    "0.000250", "0.000500", "0.002000", "0.100000",
+                    "0.200000", "0.500000", "0.800000",
+                },
+            )
+            self.assertEqual({row["tier_balance"] for row in stress}, {"6 queries per tier"})
+            base_rows = {row["base_query_id"]: row for row in stress}
+            self.assertEqual(len(base_rows), 6)
+            self.assertEqual(
+                {
+                    row["base_query_id"]
+                    for row in BENCHMARK.select_v3_stress_bases()
+                },
+                set(base_rows),
+            )
+            self.assertEqual(
+                Counter(row["family"] for row in base_rows.values()),
+                Counter({"tpch": 2, "tpcds": 2, "job": 2}),
+            )
+            self.assertEqual(
+                Counter(row["tree_shape"] for row in base_rows.values()),
+                Counter({"left_deep": 2, "right_deep": 2, "bushy": 2}),
+            )
+            self.assertEqual(
+                {row["source_benchmark"] for row in base_rows.values()},
+                {"TPC-H", "TPC-DS", "JOB", "SQLStorm"},
             )
 
 

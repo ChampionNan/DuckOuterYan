@@ -1,4 +1,4 @@
--- corpus_revision: v1-mixed-20260922
+-- corpus_revision: v1-mixed-graph25-20260925
 -- workload_role: retained evaluation control with deterministic mixed joins
 -- join_vector: RFIL; relation and predicate structure unchanged
 SELECT s_name, n_name, r_name, p_name, ps_availqty

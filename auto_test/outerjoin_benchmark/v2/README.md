@@ -4,11 +4,9 @@ V2 is the expanded workload. V1 remains the default harness corpus.
 
 - 510 benchmark-derived queries: 170 mixed-join source structures at
   deterministic hash-filter tiers of approximately 0.1%, 1%, and 5%.
-- 36 Graph, industry, and schema-synthetic controls, relabeled
+- 54 Graph, industry, and schema-synthetic controls, relabeled
   with deterministic mixed join vectors while retaining their relation graph.
-- 546 active queries in `benchmark/`.
-- 84 balanced-tier, metadata-selected selectivity-ablation queries in
-  `selectivity_stress/`. These are explicitly **not** headline-eligible.
+- 564 active queries in `benchmark/`.
 - Two mixed counterparts of historical v1 JOB regressions in
   `job_regressions/`; both require fresh v2 measurement.
 
@@ -32,41 +30,28 @@ main query is an all-FULL or other single-kind vector.
 The counts apply to the SQL input expression. They do not assert that every
 label survives logical simplification or maps one-to-one to a physical join.
 
-The 36 retained controls use the same balancing objective without changing
-their relations, equality predicates, or parentheses. Across the complete 546
-queries, the 2,003 join edges contain 501 INNER, 501 LEFT, 501 RIGHT, and 500
-FULL labels. Sixty-seven queries are all-outer and 479 contain INNER plus outer
+The 54 retained controls use the same balancing objective without changing
+their relations, equality predicates, or parentheses. Across the complete 564
+queries, the 2,051 join edges contain 512 INNER, 513 LEFT, 513 RIGHT, and 513
+FULL labels. Seventy-five queries are all-outer and 489 contain INNER plus outer
 joins.
 
 Every structural-core query retains the relation instances and connected
 equality graph of a pinned TPC-H, TPC-DS, JOB, or SQLStorm source query. The
-seven Graph controls, nine industry controls, and 20 schema-synthetic controls
-are retained as explicitly labeled control strata; they are not described as
-source-derived benchmark queries.
+25 Graph controls, nine industry controls, and 20 schema-synthetic controls are
+retained as explicitly labeled control strata; they are not described as
+source-derived benchmark queries. The complete Graph suite contains 10 bushy,
+seven left-deep, and eight right-deep expressions and is included without
+timing-based selection.
 
 `v1_advantage_hypothesis` identifies star/branch cases with alternate, bushy,
 or right-start groupings motivated by the 0916 observations. It is an analysis
 tag, not an inclusion rule. Every seed and tree variant is generated at every
 tier, and `paired_structural_control` cases remain in the same workload.
 
-The separate selectivity-stress suite starts from 12 mixed v2 counterparts of
-feasibility-screened v1 source-derived structures, selected without measured
-speed. Its static target domain is
-mixed joins with at least four relations and an applicable null-rejecting
-predicate. It uses four distinct source queries from each of TPC-H, TPC-DS,
-and JOB. Within every family, the first three slots cover left-deep, right-deep,
-and bushy trees; the fourth favors a new source benchmark and greater
-relation-count separation. Ties are resolved by a fixed salted SHA-256 rank
-over query identifiers, so regeneration never reads result files. Each
-structure is evaluated at approximately 0.025%, 0.05%,
-0.2%, 10%, 20%, 50%, and 80% target selectivity. Every tier therefore contains
-exactly 12 queries. A common 4,000-bucket hash predicate produces nested,
-deterministic samples. This is balanced representation across seven
-predeclared tiers, not a claim that the numerical selectivity values or
-realized output cardinalities are uniformly distributed. Because the seven
-variants of a base are correlated, this ablation is reported separately from
-the 546-query benchmark. The manifest records the source hashes, selection
-rule, `performance_selected=false`, and `headline_eligible=false`.
+The compact paired selectivity-stress ablation has moved to v3. V2 remains its
+source of mixed-join structures and low-selectivity variants, but no longer
+owns a separate stress directory.
 
 The JOB guard suite contains mixed-v2 counterparts of two queries that were
 below the objective 0.95x threshold in the retired FULL-heavy revision:
@@ -78,14 +63,10 @@ both counterparts `requires_v2_remeasurement`.
 
 ```bash
 python3 auto_test/gen_outerjoin_benchmark.py --version v2
-bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
-bash auto_test/experiment_onoff.sh --all  # v1, then v2
-
-# Separately reported selectivity ablation (84 queries).
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
-  --corpus-scope selectivity-stress --only all
+bash auto_test/experiment_onoff.sh --version v2 --only all
+bash auto_test/experiment_onoff.sh --all  # v1/v2/v3, then v3 selectivity-stress
 
 # Focused JOB regression guard (2 queries).
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
+bash auto_test/experiment_onoff.sh --version v2 \
   --corpus-scope job-regressions --only job
 ```

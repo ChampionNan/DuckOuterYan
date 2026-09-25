@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Generate the provenance-backed OuterJoin benchmark corpus.
 
-The generated core is independent of OuterYan performance results.  Each seed
+The generated workloads are independent of OuterYan performance results.  Each seed
 records an upstream benchmark query and retains a connected subgraph of its
 relation instances and join predicates.  The SQL is normalized to a flat
 projection/filter/join skeleton so that it remains inside the optimizer's
-current applicability envelope.
+current applicability envelope. V3 deliberately replaces only that projection
+with a root aggregation while preserving the same source graph.
 
 The active ``benchmark`` corpus is the timeout-filtered union used by the harness.
 Query names use only two reporting prefixes: ``derived__`` for generated/legacy synthetic
@@ -45,11 +46,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_ROOT = SCRIPT_DIR / "outerjoin_benchmark"
 DEFAULT_V2_ROOT = DEFAULT_ROOT / "v2"
+DEFAULT_V3_ROOT = DEFAULT_ROOT / "v3"
 LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
 TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
 CORE_QUERY_COUNT = 170
-INDUSTRY_EVALUATION_QUERY_COUNT = 36
-V1_CORPUS_REVISION = "v1-mixed-20260922"
+GRAPH_CONTROL_FILENAMES = tuple(
+    Path(path).name
+    for path in sorted(COMPLETED_QUERY_PATHS)
+    if Path(path).parts[0] == "graph"
+)
+GRAPH_CONTROL_QUERY_COUNT = 25
+if len(GRAPH_CONTROL_FILENAMES) != GRAPH_CONTROL_QUERY_COUNT:
+    raise RuntimeError(
+        f"expected {GRAPH_CONTROL_QUERY_COUNT} completed graph controls, "
+        f"found {len(GRAPH_CONTROL_FILENAMES)}"
+    )
+INDUSTRY_EVALUATION_QUERY_COUNT = 54
+V1_CORPUS_REVISION = "v1-mixed-graph25-20260925"
 ACTIVE_CORE_QUERY_COUNT = CORE_QUERY_COUNT
 ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
 V2_SELECTIVITY_TIERS: tuple[tuple[str, int, str], ...] = (
@@ -61,8 +74,8 @@ V2_CORE_QUERY_COUNT = CORE_QUERY_COUNT * len(V2_SELECTIVITY_TIERS)
 V2_EVALUATION_QUERY_COUNT = ACTIVE_BENCHMARK_QUERY_COUNT - ACTIVE_CORE_QUERY_COUNT
 V2_BENCHMARK_QUERY_COUNT = V2_CORE_QUERY_COUNT + V2_EVALUATION_QUERY_COUNT
 V2_0916_REFERENCE_RUN = "experiment_onoff_benchmark_20260916_211812_t32.csv"
-V2_STRESS_HASH_BUCKETS = 4000
-V2_STRESS_TIERS: tuple[tuple[str, int, float, str], ...] = (
+SELECTIVITY_STRESS_HASH_BUCKETS = 4000
+SELECTIVITY_STRESS_TIERS: tuple[tuple[str, int, float, str], ...] = (
     ("stress0025", 1, 0.00025, "approximately 0.025% of hash buckets"),
     ("stress005", 2, 0.0005, "approximately 0.05% of hash buckets"),
     ("stress02", 8, 0.002, "approximately 0.2% of hash buckets"),
@@ -71,18 +84,41 @@ V2_STRESS_TIERS: tuple[tuple[str, int, float, str], ...] = (
     ("stress50", 2000, 0.50, "approximately 50% of hash buckets"),
     ("stress80", 3200, 0.80, "approximately 80% of hash buckets"),
 )
-V2_STRESS_FAMILIES = ("tpch", "tpcds", "job")
-V2_STRESS_TREE_SHAPES = ("left_deep", "right_deep", "bushy")
-V2_STRESS_BASES_PER_FAMILY = 4
-V2_STRESS_MIN_RELATIONS = 4
-V2_STRESS_BASE_COUNT = len(V2_STRESS_FAMILIES) * V2_STRESS_BASES_PER_FAMILY
-V2_STRESS_QUERY_COUNT = V2_STRESS_BASE_COUNT * len(V2_STRESS_TIERS)
-V2_STRESS_SELECTION_SALT = "outeryan-v2-balanced-selectivity-v1"
+SELECTIVITY_STRESS_FAMILIES = ("tpch", "tpcds", "job")
+SELECTIVITY_STRESS_TREE_SHAPES = ("left_deep", "right_deep", "bushy")
+SELECTIVITY_STRESS_MIN_RELATIONS = 4
+# Six paired bases keep the ablation below 50 queries while balancing both
+# family (two per family) and tree shape (two per shape) over the complete set.
+V3_STRESS_SLOTS_BY_FAMILY = {
+    "tpch": (("left_deep", "TPC-H"), ("right_deep", "SQLStorm")),
+    "tpcds": (("right_deep", "TPC-DS"), ("bushy", "SQLStorm")),
+    "job": (("bushy", "JOB"), ("left_deep", "SQLStorm")),
+}
+V3_STRESS_BASES_PER_FAMILY = 2
+V3_STRESS_BASE_COUNT = (
+    len(SELECTIVITY_STRESS_FAMILIES) * V3_STRESS_BASES_PER_FAMILY
+)
+V3_STRESS_QUERY_COUNT = V3_STRESS_BASE_COUNT * len(SELECTIVITY_STRESS_TIERS)
+V3_STRESS_SELECTION_SALT = "outeryan-v3-balanced-selectivity-v1"
 V2_JOB_REGRESSIONS: tuple[tuple[str, str, str], ...] = (
     ("ojb_sqlstorm_job_11914_bdmx", "1af32617cb10164c5f999a0f99f196b23232059a40dd8f0f2ff5e1eb81af7836", "0.772"),
     ("oy_jb_jb_bushy4a_v2", "6dca40cd9267b67ea297a5245c6cd0d9b0fe7bf8653d1d6c6a643f89e9a82103", "0.857"),
 )
 V2_JOB_REGRESSION_COUNT = len(V2_JOB_REGRESSIONS)
+V3_VARIANTS_PER_SEED = 3
+V3_BENCHMARK_QUERY_COUNT = 102
+V3_AGGREGATE_TARGET_COUNTS = {
+    # COUNT is intentionally the largest class. MIN and MAX are two operators
+    # for the same extremum workload class, so they split that class equally.
+    # SUM remains a substantial control class, but is smaller than COUNT.
+    "global_count": 42,
+    "grouped_sum": 30,
+    "grouped_min": 15,
+    "grouped_max": 15,
+}
+V3_AGGREGATE_VARIANTS = tuple(V3_AGGREGATE_TARGET_COUNTS)
+if sum(V3_AGGREGATE_TARGET_COUNTS.values()) != V3_BENCHMARK_QUERY_COUNT:
+    raise RuntimeError("v3 aggregate targets must sum to the v3 benchmark size")
 # Approved 32-thread timeouts move topology/scale/vector shares by up to 2.66 pp.
 # Tree-shape shares still satisfy the original 2 pp bound. Do not remove healthy
 # queries merely to rebalance counts; retain explicit coverage-loss accounting.
@@ -93,6 +129,9 @@ LEGACY_WIN_SELECTION_POLICY = (
 )
 ACTIVE_LEGACY_SOURCE_SELECTION_POLICY = (
     LEGACY_WIN_SELECTION_POLICY + "; archived source query before active normalization"
+)
+GRAPH_CONTROL_SELECTION_POLICY = (
+    "all 25 completed legacy graph-generator patterns; no timing-based selection"
 )
 
 INDUSTRY_INSPIRED_PATTERNS: tuple[tuple[str, str, str, str], ...] = (
@@ -1522,6 +1561,52 @@ def add_v2_selectivity(
     return filtered.replace("SELECT ", metadata + "SELECT ", 1), anchor
 
 
+SELECT_LIST_PATTERN = re.compile(
+    r"^SELECT\s+.*?^FROM\s+", re.IGNORECASE | re.MULTILINE | re.DOTALL
+)
+
+
+def add_v3_aggregation(sql: str, seed: Seed, aggregate_variant: str) -> tuple[str, str]:
+    """Replace only the output list with a deterministic root aggregation."""
+    anchor = selectivity_anchor(seed)
+    group_key = next(
+        reference
+        for predicate in seed.predicates
+        for reference in SIMPLE_EDGE_EQUALITY.search(active_edge_predicate(predicate)).groups()
+        if reference != anchor
+    )
+    if aggregate_variant == "global_count":
+        projection = "COUNT(*) AS row_count"
+        group_by = ""
+    elif aggregate_variant == "grouped_min":
+        projection = f"{group_key} AS group_key, MIN({anchor}) AS min_key"
+        group_by = f"\nGROUP BY {group_key}"
+    elif aggregate_variant == "grouped_max":
+        projection = f"{group_key} AS group_key, MAX({anchor}) AS max_key"
+        group_by = f"\nGROUP BY {group_key}"
+    elif aggregate_variant == "grouped_sum":
+        projection = f"{group_key} AS group_key, SUM({anchor}) AS key_sum"
+        group_by = f"\nGROUP BY {group_key}"
+    else:
+        raise ValueError(f"unknown v3 aggregate variant: {aggregate_variant}")
+
+    aggregated, replacements = SELECT_LIST_PATTERN.subn(
+        f"SELECT {projection}\nFROM ", sql, count=1
+    )
+    if replacements != 1:
+        raise ValueError(f"{seed.seed_id}: generated SQL has an unexpected SELECT/FROM shape")
+    aggregated = aggregated.rstrip()
+    if not aggregated.endswith(";"):
+        raise ValueError(f"{seed.seed_id}: generated SQL must end with a semicolon")
+    aggregated = aggregated[:-1] + group_by + ";\n"
+    metadata = (
+        "-- corpus_version: v3\n"
+        "-- workload_role: source-derived aggregation coverage; no timing-based selection\n"
+        f"-- aggregate_variant: {aggregate_variant}; anchor={anchor}; group_key={group_key}\n"
+    )
+    return aggregated.replace("SELECT ", metadata + "SELECT ", 1), anchor
+
+
 def reset_generated_dir(root: Path) -> None:
     if root.exists():
         shutil.rmtree(root)
@@ -1668,6 +1753,15 @@ def generate_industry_inspired(root: Path) -> int:
         join_counts.update(row["join_vector"])
     control_index = 0
 
+    def graph_structure(filename: str) -> tuple[str, str]:
+        if filename.startswith("bushy"):
+            return "branched", "bushy"
+        if filename.startswith("rdeep"):
+            return "chain", "right_deep"
+        if filename.startswith("line"):
+            return "chain", "left_deep"
+        raise ValueError(f"unknown graph control structure: {filename}")
+
     def relabel_control(source_sql: str, *, flatten_aggregate: bool) -> tuple[str, str, int]:
         nonlocal control_index
         normalized = normalize_active_sql(
@@ -1731,6 +1825,8 @@ def generate_industry_inspired(root: Path) -> int:
                 "historical_full_join_tm_speedup": observed_speedup,
                 "measurement_status": "requires_v1_mixed_rerun",
                 "provenance_class": "industry_synthetic_control",
+                "topology": "",
+                "tree_shape": "",
                 "join_vector": join_vector,
                 "relation_count": str(edge_count + 1),
                 "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
@@ -1740,7 +1836,7 @@ def generate_industry_inspired(root: Path) -> int:
         )
 
     for family, filename, speedup in LEGACY_OUTERYAN_WINS:
-        if (family, filename) in pattern_keys:
+        if (family, filename) in pattern_keys or family == "graph":
             continue
         source = LEGACY_ROOT / family / filename
         if not source.is_file():
@@ -1764,7 +1860,7 @@ def generate_industry_inspired(root: Path) -> int:
                 "source": f"outerjoin_query_old/{family}/{filename}",
                 "pattern_class": "observed_outeryan_speedup",
                 "semantics": (
-                    "Graph from a legacy synthetic query with a previously observed "
+                    "A legacy schema-synthetic query with a previously observed "
                     "OuterYan speedup; the active SQL is applicability-normalized."
                 ),
                 "industry_status": "not_industry_derived",
@@ -1772,11 +1868,53 @@ def generate_industry_inspired(root: Path) -> int:
                 "selection_policy": ACTIVE_LEGACY_SOURCE_SELECTION_POLICY,
                 "historical_full_join_tm_speedup": speedup,
                 "measurement_status": "requires_v1_mixed_rerun",
-                "provenance_class": (
-                    "graph_synthetic_control"
-                    if family == "graph"
-                    else "schema_synthetic_control"
+                "provenance_class": "schema_synthetic_control",
+                "topology": "",
+                "tree_shape": "",
+                "join_vector": join_vector,
+                "relation_count": str(edge_count + 1),
+                "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
+                "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
+                "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
+            }
+        )
+
+    for filename in GRAPH_CONTROL_FILENAMES:
+        family = "graph"
+        source = LEGACY_ROOT / family / filename
+        if not source.is_file():
+            raise FileNotFoundError(f"graph control source query not found: {source}")
+        destination = destination_root / family / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_sql = source.read_text(encoding="utf-8")
+        normalized_sql, join_vector, edge_count = relabel_control(
+            source_sql,
+            flatten_aggregate=False,
+        )
+        destination.write_text(normalized_sql, encoding="utf-8")
+        topology, tree_shape = graph_structure(filename)
+        rows.append(
+            {
+                "query_id": source.stem,
+                "path": f"{family}/{filename}",
+                "corpus_revision": V1_CORPUS_REVISION,
+                "evaluation_role": "graph_pattern",
+                "stratum": "graph_synthetic_control",
+                "family": family,
+                "source": f"outerjoin_query_old/{family}/{filename}",
+                "pattern_class": "graph_join_pattern",
+                "semantics": (
+                    "A generated multi-hop graph pattern over repeated edge relations; "
+                    "the complete completed Graph suite is retained."
                 ),
+                "industry_status": "not_industry_derived",
+                "production_source_id": "none",
+                "selection_policy": GRAPH_CONTROL_SELECTION_POLICY,
+                "historical_full_join_tm_speedup": wins.get((family, filename), ""),
+                "measurement_status": "requires_v1_mixed_rerun",
+                "provenance_class": "graph_synthetic_control",
+                "topology": topology,
+                "tree_shape": tree_shape,
                 "join_vector": join_vector,
                 "relation_count": str(edge_count + 1),
                 "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
@@ -1786,7 +1924,10 @@ def generate_industry_inspired(root: Path) -> int:
         )
 
     expected_paths = {
-        f"{family}/{filename}" for family, filename in pattern_keys | set(wins)
+        f"{family}/{filename}"
+        for family, filename in (
+            pattern_keys | set(wins) | {("graph", name) for name in GRAPH_CONTROL_FILENAMES}
+        )
     }
     actual_paths = {row["path"] for row in rows}
     if (
@@ -1860,6 +2001,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                 "industry",
                 "industry",
             ),
+            "graph_pattern": ("derived", "derived"),
             "legacy_performance_win": ("derived", "derived"),
         }
         for row in industry_rows:
@@ -1887,8 +2029,8 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                     "source_benchmark": "",
                     "source_query": "",
                     "source_location": row["source"],
-                    "topology": "",
-                    "tree_shape": "",
+                    "topology": row["topology"],
+                    "tree_shape": row["tree_shape"],
                     "join_vector": row["join_vector"],
                     "relation_count": row["relation_count"],
                     "predicate_class": "evaluation_control",
@@ -2287,6 +2429,166 @@ def generate_v2_core(root: Path) -> int:
     return len(rows)
 
 
+def v3_aggregate_schedule() -> list[str]:
+    """Return a deterministic, evenly interleaved weighted aggregate schedule."""
+    total = V3_BENCHMARK_QUERY_COUNT
+    assigned: Counter[str] = Counter()
+    order = {variant: index for index, variant in enumerate(V3_AGGREGATE_VARIANTS)}
+    schedule: list[str] = []
+    for slot in range(total):
+        available = [
+            variant
+            for variant, target in V3_AGGREGATE_TARGET_COUNTS.items()
+            if assigned[variant] < target
+        ]
+        # Largest cumulative quota deficit first. Integer arithmetic makes the
+        # mapping stable and independent of Python floating-point behavior.
+        aggregate_variant = max(
+            available,
+            key=lambda variant: (
+                (slot + 1) * V3_AGGREGATE_TARGET_COUNTS[variant]
+                - assigned[variant] * total,
+                V3_AGGREGATE_TARGET_COUNTS[variant],
+                -order[variant],
+            ),
+        )
+        assigned[aggregate_variant] += 1
+        schedule.append(aggregate_variant)
+    if assigned != Counter(V3_AGGREGATE_TARGET_COUNTS):
+        raise RuntimeError(f"v3 aggregate schedule missed its targets: {assigned}")
+    return schedule
+
+
+def generate_v3_core(root: Path) -> int:
+    """Generate one aggregate form for each of three shapes of every source seed."""
+    core = root / "core"
+    reset_generated_dir(core)
+    rows: list[dict[str, str]] = []
+    design_basis = (
+        "all 34 source-derived seeds are included without timing-based selection; "
+        "each contributes its first three deterministic mixed-join structural variants, "
+        "aggregate forms follow a fixed weighted schedule using only structural "
+        "slot order (COUNT=42, SUM=30, MIN=15, MAX=15); MIN and MAX split one "
+        "extremum class equally, and no timing or result file affects assignment"
+    )
+    aggregate_schedule = v3_aggregate_schedule()
+    for seed_index, seed in enumerate(SEEDS):
+        seed.validate()
+        if seed.source_benchmark not in SOURCE_BENCHMARKS:
+            raise RuntimeError(
+                f"{seed.seed_id}: unsupported v3 source benchmark {seed.source_benchmark}"
+            )
+        verify_source(seed)
+        family_dir = core / seed.family
+        family_dir.mkdir(parents=True, exist_ok=True)
+        expected_graph = Counter(
+            tuple(sorted(predicate_aliases(predicate))) for predicate in seed.predicates
+        )
+        structural_variants = list(balanced_variant_rows(seed, seed_index))[
+            :V3_VARIANTS_PER_SEED
+        ]
+        if len(structural_variants) != V3_VARIANTS_PER_SEED:
+            raise RuntimeError(f"{seed.seed_id}: insufficient structural variants for v3")
+        for variant_index, structural in enumerate(structural_variants):
+            aggregate_variant = aggregate_schedule[
+                seed_index * V3_VARIANTS_PER_SEED + variant_index
+            ]
+            suffix, vector, tree_shape, variant_semantics, base_sql = structural
+            query_id = f"ojb_{seed.seed_id}_{suffix}_{aggregate_variant}"
+            relative_path = f"{seed.family}/{query_id}.sql"
+            sql, anchor = add_v3_aggregation(base_sql, seed, aggregate_variant)
+            if sql_join_graph(sql) != expected_graph:
+                raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
+            (core / relative_path).write_text(sql, encoding="utf-8")
+            rows.append(
+                {
+                    "query_id": query_id,
+                    "path": relative_path,
+                    "corpus_version": "v3",
+                    "base_query_id": f"ojb_{seed.seed_id}_{suffix}",
+                    "stratum": "benchmark_derived_v3_aggregate_core",
+                    "family": seed.family,
+                    "source_benchmark": seed.source_benchmark,
+                    "source_version": seed.source_version,
+                    "source_query": seed.source_query,
+                    "source_location": seed.source_location,
+                    "source_sha256": seed.source_hash,
+                    "transformation": (
+                        "connected_join_subgraph_adaptation+root_aggregation"
+                    ),
+                    "topology": seed.topology,
+                    "tree_shape": tree_shape,
+                    "join_vector": vector,
+                    "relation_count": str(len(seed.relations)),
+                    "predicate_class": "null_rejecting_outeryan_applicable",
+                    "semantic_role": variant_semantics,
+                    "semantics": seed.semantics,
+                    "aggregate_variant": aggregate_variant,
+                    "aggregate_anchor": anchor,
+                    "design_basis": design_basis,
+                }
+            )
+    fields = list(rows[0])
+    with (root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    if len(rows) != V3_BENCHMARK_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v3 core count: {len(rows)}")
+    return len(rows)
+
+
+def generate_v3_benchmark(root: Path) -> int:
+    """Materialize the v3 aggregation core as a harness-ready benchmark."""
+    destination_root = root / "benchmark"
+    reset_generated_dir(destination_root)
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    rows: list[dict[str, str]] = []
+    for row in core_rows:
+        source = root / "core" / row["path"]
+        query_id = f"aggregate__{row['query_id']}"
+        destination_path = f"{row['family']}/{query_id}.sql"
+        destination = destination_root / destination_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        rows.append(
+            {
+                "query_id": query_id,
+                "path": destination_path,
+                "query_class": "aggregate",
+                "evaluation_role": "benchmark_derived_v3_aggregate",
+                "family": row["family"],
+                "source_component": "core",
+                "source_path": f"core/{row['path']}",
+                "source_content_sha256": content_sha256,
+                "content_sha256": content_sha256,
+                "corpus_version": "v3",
+                "base_query_id": row["base_query_id"],
+                "provenance_class": "benchmark_source_derived",
+                "source_benchmark": row["source_benchmark"],
+                "source_query": row["source_query"],
+                "source_location": row["source_location"],
+                "topology": row["topology"],
+                "tree_shape": row["tree_shape"],
+                "join_vector": row["join_vector"],
+                "relation_count": row["relation_count"],
+                "predicate_class": row["predicate_class"],
+                "aggregate_variant": row["aggregate_variant"],
+                "aggregate_anchor": row["aggregate_anchor"],
+            }
+        )
+    fields = list(rows[0])
+    with (destination_root / "manifest.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    return len(rows)
+
+
 def sql_join_keyword_count(sql: str) -> int:
     """Count emitted join keywords while ignoring full-line SQL comments."""
     statement = "\n".join(
@@ -2464,8 +2766,8 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
                 "source_benchmark": "",
                 "source_query": "",
                 "source_location": row["source_path"],
-                "topology": "",
-                "tree_shape": "",
+                "topology": row["topology"],
+                "tree_shape": row["tree_shape"],
                 "join_vector": "".join(vector),
                 "relation_count": str(edge_count + 1),
                 "predicate_class": "evaluation_control",
@@ -2505,23 +2807,23 @@ def v1_active_rows(v1_root: Path) -> dict[str, dict[str, str]]:
     return {row["query_id"]: row for row in rows}
 
 
-V2_STRESS_SOURCE_FILTER = re.compile(
+SELECTIVITY_STRESS_SOURCE_FILTER = re.compile(
     r"^\s*AND hash\((?P<anchor>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\) "
     r"% (?P<source_modulus>[0-9]+) = 0;$",
     re.MULTILINE,
 )
 
 
-def v2_stress_selection_rank(query_id: str) -> str:
-    material = f"{V2_STRESS_SELECTION_SALT}:{query_id}".encode("utf-8")
+def v3_stress_selection_rank(query_id: str) -> str:
+    material = f"{V3_STRESS_SELECTION_SALT}:{query_id}".encode("utf-8")
     return hashlib.sha256(material).hexdigest()
 
 
-def select_v2_stress_bases(
-    root: Path, v1_root: Path = DEFAULT_ROOT
+def select_v3_stress_bases(
+    v2_root: Path = DEFAULT_V2_ROOT, v1_root: Path = DEFAULT_ROOT
 ) -> list[dict[str, str]]:
-    """Select balanced mixed v2 bases from metadata only, never performance."""
-    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+    """Select six balanced mixed bases from metadata only, never performance."""
+    with (v2_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
         core_rows = list(csv.DictReader(handle))
     active_v1_base_ids = {
         Path(row["source_path"]).stem
@@ -2534,17 +2836,17 @@ def select_v2_stress_bases(
             continue
         if metadata["base_query_id"] not in active_v1_base_ids:
             continue
-        if metadata["family"] not in V2_STRESS_FAMILIES:
+        if metadata["family"] not in SELECTIVITY_STRESS_FAMILIES:
             continue
         if (
             len(set(metadata["join_vector"])) < 2
-            or int(metadata["relation_count"]) < V2_STRESS_MIN_RELATIONS
+            or int(metadata["relation_count"]) < SELECTIVITY_STRESS_MIN_RELATIONS
             or metadata["predicate_class"] != "null_rejecting_outeryan_applicable"
         ):
             continue
-        source = root / "core" / metadata["path"]
+        source = v2_root / "core" / metadata["path"]
         source_sql = source.read_text(encoding="utf-8")
-        matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
+        matches = list(SELECTIVITY_STRESS_SOURCE_FILTER.finditer(source_sql))
         if len(matches) != 1:
             continue
         candidate = dict(metadata)
@@ -2555,65 +2857,50 @@ def select_v2_stress_bases(
                 "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "selectivity_anchor": matches[0].group("anchor"),
                 "source_selectivity_modulus": matches[0].group("source_modulus"),
-                "selection_rank": v2_stress_selection_rank(metadata["base_query_id"]),
+                "selection_rank": v3_stress_selection_rank(metadata["base_query_id"]),
             }
         )
         candidates.append(candidate)
 
     selected: list[dict[str, str]] = []
-    for family in V2_STRESS_FAMILIES:
-        family_selected: list[dict[str, str]] = []
+    for family in SELECTIVITY_STRESS_FAMILIES:
         used_sources: set[str] = set()
-        for tree_shape in V2_STRESS_TREE_SHAPES:
+        for tree_shape, source_benchmark in V3_STRESS_SLOTS_BY_FAMILY[family]:
             eligible = [
                 row for row in candidates
                 if row["family"] == family
                 and row["tree_shape"] == tree_shape
+                and row["source_benchmark"] == source_benchmark
                 and row["source_location"] not in used_sources
             ]
             if not eligible:
-                raise RuntimeError(f"no v2 selectivity-stress candidate for {family}/{tree_shape}")
+                raise RuntimeError(
+                    f"no v3 selectivity-stress candidate for "
+                    f"{family}/{tree_shape}/{source_benchmark}"
+                )
             chosen = min(eligible, key=lambda row: row["selection_rank"])
-            chosen = dict(chosen, selection_slot=f"tree_shape:{tree_shape}")
-            family_selected.append(chosen)
-            used_sources.add(chosen["source_location"])
-
-        remaining = [
-            row for row in candidates
-            if row["family"] == family and row["source_location"] not in used_sources
-        ]
-        if not remaining:
-            raise RuntimeError(f"no v2 selectivity-stress coverage supplement for {family}")
-        selected_benchmarks = {row["source_benchmark"] for row in family_selected}
-        selected_relation_counts = [int(row["relation_count"]) for row in family_selected]
-
-        def coverage_score(row: dict[str, str]) -> tuple[int, int]:
-            return (
-                int(row["source_benchmark"] not in selected_benchmarks),
-                min(
-                    abs(int(row["relation_count"]) - relation_count)
-                    for relation_count in selected_relation_counts
+            chosen = dict(
+                chosen,
+                selection_slot=(
+                    f"tree_shape:{tree_shape};source_benchmark:{source_benchmark}"
                 ),
             )
+            selected.append(chosen)
+            used_sources.add(chosen["source_location"])
 
-        best_score = max(coverage_score(row) for row in remaining)
-        supplement = min(
-            (row for row in remaining if coverage_score(row) == best_score),
-            key=lambda row: row["selection_rank"],
-        )
-        family_selected.append(dict(supplement, selection_slot="coverage_supplement"))
-        selected.extend(family_selected)
-
-    if len(selected) != V2_STRESS_BASE_COUNT:
-        raise RuntimeError(f"unexpected v2 selectivity-stress base count: {len(selected)}")
+    if len(selected) != V3_STRESS_BASE_COUNT:
+        raise RuntimeError(f"unexpected v3 selectivity-stress base count: {len(selected)}")
+    if Counter(row["tree_shape"] for row in selected) != Counter(
+        {shape: 2 for shape in SELECTIVITY_STRESS_TREE_SHAPES}
+    ):
+        raise RuntimeError("v3 selectivity-stress bases are not shape-balanced")
     return selected
 
 
-def generate_v2_selectivity_stress(root: Path) -> int:
-    """Generate a metadata-selected, balanced-tier selectivity ablation."""
-    legacy_root = root / "advantage_stress"
-    if legacy_root.exists():
-        shutil.rmtree(legacy_root)
+def generate_v3_selectivity_stress(
+    root: Path, v2_root: Path = DEFAULT_V2_ROOT
+) -> int:
+    """Generate a compact, paired selectivity ablation under v3."""
     destination_root = root / "selectivity_stress"
     reset_generated_dir(destination_root)
     rows: list[dict[str, str]] = []
@@ -2621,30 +2908,35 @@ def generate_v2_selectivity_stress(root: Path) -> int:
         "mixed v2 counterparts of feasibility-screened active v1 source-derived core; "
         "static target domain "
         "(at least two join kinds, at least four relations, applicable predicate); "
-        "four bases per TPC-H/TPC-DS/JOB; "
-        "one distinct source query per left-deep/right-deep/bushy stratum by salted "
-        "SHA-256 rank, plus one distinct-source coverage supplement favoring a new "
-        "source benchmark and relation-count distance; no timing or result input"
+        "two bases per TPC-H/TPC-DS/JOB execution family and two bases per "
+        "left-deep/right-deep/bushy shape across the complete set; one native-source "
+        "and one SQLStorm source per family, selected by fixed family/shape/source "
+        "slots and salted SHA-256 rank; no timing or result input"
     )
-    for base in select_v2_stress_bases(root):
+    for base in select_v3_stress_bases(v2_root):
         base_query_id = base["base_query_id"]
         family = base["family"]
-        source = root / "core" / base["core_path"]
+        source = v2_root / "core" / base["core_path"]
         source_sql = source.read_text(encoding="utf-8")
         if hashlib.sha256(source.read_bytes()).hexdigest() != base["content_sha256"]:
-            raise RuntimeError(f"v2 selectivity-stress base changed: {base_query_id}")
-        matches = list(V2_STRESS_SOURCE_FILTER.finditer(source_sql))
+            raise RuntimeError(f"v3 selectivity-stress base changed: {base_query_id}")
+        matches = list(SELECTIVITY_STRESS_SOURCE_FILTER.finditer(source_sql))
         if len(matches) != 1:
             raise RuntimeError(f"stress base needs one simple modulo filter: {base_query_id}")
         anchor = matches[0].group("anchor")
-        for tier, bucket_threshold, target_fraction, description in V2_STRESS_TIERS:
+        for tier, bucket_threshold, target_fraction, description in SELECTIVITY_STRESS_TIERS:
             query_id = f"stress__{base_query_id}_{tier}"
             relative_path = f"{family}/{query_id}.sql"
             predicate = (
-                f"  AND hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
+                f"  AND hash({anchor}) % {SELECTIVITY_STRESS_HASH_BUCKETS} "
                 f"< {bucket_threshold};"
             )
-            sql = V2_STRESS_SOURCE_FILTER.sub(predicate, source_sql, count=1)
+            sql = SELECTIVITY_STRESS_SOURCE_FILTER.sub(predicate, source_sql, count=1)
+            sql = sql.replace(
+                "-- corpus_version: v2\n",
+                "-- corpus_version: v3\n-- derived_from_corpus_version: v2\n",
+                1,
+            )
             sql = re.sub(
                 r"^-- selectivity_sweep:.*\n",
                 "",
@@ -2655,7 +2947,7 @@ def generate_v2_selectivity_stress(root: Path) -> int:
             metadata = (
                 "-- workload_role: metadata-selected balanced selectivity ablation\n"
                 f"-- selectivity_stress: {tier}; {description}; anchor={anchor}; "
-                f"predicate=hash({anchor}) % {V2_STRESS_HASH_BUCKETS} "
+                f"predicate=hash({anchor}) % {SELECTIVITY_STRESS_HASH_BUCKETS} "
                 f"< {bucket_threshold}\n"
             )
             sql = sql.replace("SELECT ", metadata + "SELECT ", 1)
@@ -2668,9 +2960,9 @@ def generate_v2_selectivity_stress(root: Path) -> int:
                     "path": relative_path,
                     "query_class": "selectivity_stress",
                     "family": family,
-                    "corpus_version": "v2",
+                    "corpus_version": "v3",
                     "base_query_id": base_query_id,
-                    "source_path": f"../core/{base['core_path']}",
+                    "source_path": f"../../v2/core/{base['core_path']}",
                     "source_content_sha256": base["content_sha256"],
                     "content_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
                     "headline_eligible": "false",
@@ -2678,7 +2970,7 @@ def generate_v2_selectivity_stress(root: Path) -> int:
                     "performance_selected": "false",
                     "selection_reference": "outerjoin_benchmark/v2/manifest.csv",
                     "selection_policy": selection_policy,
-                    "selection_salt": V2_STRESS_SELECTION_SALT,
+                    "selection_salt": V3_STRESS_SELECTION_SALT,
                     "selection_rank": base["selection_rank"],
                     "selection_slot": base["selection_slot"],
                     "source_benchmark": base["source_benchmark"],
@@ -2695,11 +2987,11 @@ def generate_v2_selectivity_stress(root: Path) -> int:
                     ),
                     "selectivity_tier": tier,
                     "target_fraction": f"{target_fraction:.6f}",
-                    "selectivity_hash_buckets": str(V2_STRESS_HASH_BUCKETS),
+                    "selectivity_hash_buckets": str(SELECTIVITY_STRESS_HASH_BUCKETS),
                     "selectivity_bucket_threshold": str(bucket_threshold),
                     "selectivity_anchor": anchor,
                     "source_selectivity_modulus": base["source_selectivity_modulus"],
-                    "tier_balance": f"{V2_STRESS_BASE_COUNT} queries per tier",
+                    "tier_balance": f"{V3_STRESS_BASE_COUNT} queries per tier",
                     "distribution_claim": (
                         "balanced tier counts; numeric levels and realized selectivity "
                         "are not claimed to be uniform"
@@ -2710,7 +3002,7 @@ def generate_v2_selectivity_stress(root: Path) -> int:
                     ),
                 }
             )
-    if len(rows) != V2_STRESS_QUERY_COUNT:
+    if len(rows) != V3_STRESS_QUERY_COUNT:
         raise RuntimeError(f"unexpected selectivity-stress count: {len(rows)}")
     fields = list(rows[0])
     with (destination_root / "manifest.csv").open(
@@ -2888,58 +3180,6 @@ def validate_v2_generated(root: Path) -> None:
     if max(active_join_counts.values()) - min(active_join_counts.values()) > 1:
         raise RuntimeError(f"v2 benchmark join labels are imbalanced: {active_join_counts}")
 
-    stress_root = root / "selectivity_stress"
-    with (stress_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
-        stress_rows = list(csv.DictReader(handle))
-    stress_paths = {
-        str(path.relative_to(stress_root)) for path in stress_root.glob("*/*.sql")
-    }
-    if len(stress_rows) != V2_STRESS_QUERY_COUNT or {
-        row["path"] for row in stress_rows
-    } != stress_paths:
-        raise RuntimeError("v2 selectivity-stress manifest does not match generated SQL")
-    if any(row["headline_eligible"] != "false" for row in stress_rows):
-        raise RuntimeError("selectivity-stress queries must not enter the main headline score")
-    stress_base_counts = Counter(row["base_query_id"] for row in stress_rows)
-    if (
-        len(stress_base_counts) != V2_STRESS_BASE_COUNT
-        or set(stress_base_counts.values()) != {len(V2_STRESS_TIERS)}
-    ):
-        raise RuntimeError("every selectivity-stress base must have all selectivity tiers")
-    family_counts = Counter(row["family"] for row in stress_rows)
-    expected_family_count = V2_STRESS_BASES_PER_FAMILY * len(V2_STRESS_TIERS)
-    if family_counts != Counter(
-        {family: expected_family_count for family in V2_STRESS_FAMILIES}
-    ):
-        raise RuntimeError(f"unexpected selectivity-stress family balance: {family_counts}")
-    if any(row["performance_selected"] != "false" for row in stress_rows):
-        raise RuntimeError("selectivity-stress membership must not use measured performance")
-    if any(
-        len(set(row["join_vector"])) < 2
-        or int(row["relation_count"]) < V2_STRESS_MIN_RELATIONS
-        or row["predicate_class"] != "null_rejecting_outeryan_applicable"
-        for row in stress_rows
-    ):
-        raise RuntimeError("selectivity-stress base is outside the static target domain")
-    base_rows = {
-        row["base_query_id"]: row
-        for row in stress_rows
-    }
-    for family in V2_STRESS_FAMILIES:
-        family_bases = [row for row in base_rows.values() if row["family"] == family]
-        if {row["tree_shape"] for row in family_bases} < set(V2_STRESS_TREE_SHAPES):
-            raise RuntimeError(f"selectivity-stress misses a tree shape for {family}")
-        if len({row["source_location"] for row in family_bases}) != len(family_bases):
-            raise RuntimeError(f"selectivity-stress repeats a source query for {family}")
-    for row in stress_rows:
-        sql = (stress_root / row["path"]).read_text(encoding="utf-8")
-        predicate = (
-            f"hash({row['selectivity_anchor']}) % {row['selectivity_hash_buckets']} "
-            f"< {row['selectivity_bucket_threshold']}"
-        )
-        if predicate not in sql or "workload_role: metadata-selected" not in sql:
-            raise RuntimeError(f"{row['path']}: missing selectivity-stress provenance")
-
     regression_root = root / "job_regressions"
     with (regression_root / "manifest.csv").open(
         newline="", encoding="utf-8"
@@ -2963,28 +3203,167 @@ def validate_v2_generated(root: Path) -> None:
         raise RuntimeError("v2 JOB counterparts must be mixed and marked for remeasurement")
 
 
+def validate_v3_generated(root: Path) -> None:
+    """Validate v3 membership, provenance, aggregation forms, and join balance."""
+    with (root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        core_rows = list(csv.DictReader(handle))
+    active_root = root / "benchmark"
+    with (active_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        active_rows = list(csv.DictReader(handle))
+    active_paths = {
+        str(path.relative_to(active_root)) for path in active_root.glob("*/*.sql")
+    }
+    if len(core_rows) != V3_BENCHMARK_QUERY_COUNT:
+        raise RuntimeError(f"unexpected v3 core count: {len(core_rows)}")
+    if len(active_rows) != V3_BENCHMARK_QUERY_COUNT or {
+        row["path"] for row in active_rows
+    } != active_paths:
+        raise RuntimeError("v3 benchmark manifest does not match generated SQL")
+    aggregate_counts = Counter(row["aggregate_variant"] for row in core_rows)
+    if aggregate_counts != Counter(V3_AGGREGATE_TARGET_COUNTS):
+        raise RuntimeError(f"v3 aggregate targets changed: {aggregate_counts}")
+    if Counter(row["source_benchmark"] for row in core_rows) != Counter(
+        {"TPC-H": 15, "TPC-DS": 21, "JOB": 30, "SQLStorm": 36}
+    ):
+        raise RuntimeError("v3 source-benchmark distribution changed")
+    if Counter(row["family"] for row in core_rows) != Counter(
+        {"tpch": 27, "tpcds": 33, "job": 42}
+    ):
+        raise RuntimeError("v3 execution-family distribution changed")
+    for tree_shape in {row["tree_shape"] for row in core_rows}:
+        aggregate_counts = Counter(
+            row["aggregate_variant"]
+            for row in core_rows
+            if row["tree_shape"] == tree_shape
+        )
+        shape_count = sum(aggregate_counts.values())
+        for variant, target in V3_AGGREGATE_TARGET_COUNTS.items():
+            expected = shape_count * target / V3_BENCHMARK_QUERY_COUNT
+            if abs(aggregate_counts[variant] - expected) > 1.0:
+                raise RuntimeError(
+                    f"v3 aggregate form {variant} is confounded with {tree_shape}: "
+                    f"actual={aggregate_counts[variant]}, expected={expected:.2f}"
+                )
+    seed_counts = Counter(row["source_location"] for row in core_rows)
+    if len(seed_counts) != len(SEEDS) or set(seed_counts.values()) != {
+        V3_VARIANTS_PER_SEED
+    }:
+        raise RuntimeError("v3 does not contain exactly three aggregate queries per seed")
+    join_counts: Counter[str] = Counter()
+    for row in active_rows:
+        if len(set(row["join_vector"])) < 2:
+            raise RuntimeError(f"{row['path']}: v3 contains a single-kind join vector")
+        sql = (active_root / row["path"]).read_text(encoding="utf-8")
+        if hashlib.sha256(sql.encode("utf-8")).hexdigest() != row["content_sha256"]:
+            raise RuntimeError(f"{row['path']}: output content hash mismatch")
+        if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
+            raise RuntimeError(f"{row['path']}: SQL and benchmark join labels differ")
+        aggregate_token = {
+            "global_count": "COUNT(",
+            "grouped_min": "MIN(",
+            "grouped_max": "MAX(",
+            "grouped_sum": "SUM(",
+        }[row["aggregate_variant"]]
+        if aggregate_token not in sql.upper():
+            raise RuntimeError(f"{row['path']}: missing expected root aggregation")
+        grouped = row["aggregate_variant"] != "global_count"
+        if ("GROUP BY" in sql.upper()) != grouped:
+            raise RuntimeError(f"{row['path']}: unexpected GROUP BY form")
+        join_counts.update(row["join_vector"])
+    if max(join_counts.values()) - min(join_counts.values()) > 1:
+        raise RuntimeError(f"v3 benchmark join labels are imbalanced: {join_counts}")
+
+    stress_root = root / "selectivity_stress"
+    with (stress_root / "manifest.csv").open(newline="", encoding="utf-8") as handle:
+        stress_rows = list(csv.DictReader(handle))
+    stress_paths = {
+        str(path.relative_to(stress_root)) for path in stress_root.glob("*/*.sql")
+    }
+    if len(stress_rows) != V3_STRESS_QUERY_COUNT or {
+        row["path"] for row in stress_rows
+    } != stress_paths:
+        raise RuntimeError("v3 selectivity-stress manifest does not match generated SQL")
+    if any(
+        row["corpus_version"] != "v3"
+        or row["headline_eligible"] != "false"
+        or row["performance_selected"] != "false"
+        for row in stress_rows
+    ):
+        raise RuntimeError("v3 selectivity-stress must be an unselected diagnostic scope")
+    stress_base_counts = Counter(row["base_query_id"] for row in stress_rows)
+    if (
+        len(stress_base_counts) != V3_STRESS_BASE_COUNT
+        or set(stress_base_counts.values()) != {len(SELECTIVITY_STRESS_TIERS)}
+    ):
+        raise RuntimeError("every v3 selectivity-stress base must have all tiers")
+    family_counts = Counter(row["family"] for row in stress_rows)
+    expected_family_count = V3_STRESS_BASES_PER_FAMILY * len(SELECTIVITY_STRESS_TIERS)
+    if family_counts != Counter(
+        {family: expected_family_count for family in SELECTIVITY_STRESS_FAMILIES}
+    ):
+        raise RuntimeError(f"unexpected v3 selectivity-stress family balance: {family_counts}")
+    base_rows = {row["base_query_id"]: row for row in stress_rows}
+    if Counter(row["tree_shape"] for row in base_rows.values()) != Counter(
+        {shape: 2 for shape in SELECTIVITY_STRESS_TREE_SHAPES}
+    ):
+        raise RuntimeError("v3 selectivity-stress base shapes are not balanced")
+    if any(
+        len(set(row["join_vector"])) < 2
+        or int(row["relation_count"]) < SELECTIVITY_STRESS_MIN_RELATIONS
+        or row["predicate_class"] != "null_rejecting_outeryan_applicable"
+        for row in stress_rows
+    ):
+        raise RuntimeError("v3 selectivity-stress base is outside the static target domain")
+    for row in stress_rows:
+        sql = (stress_root / row["path"]).read_text(encoding="utf-8")
+        predicate = (
+            f"hash({row['selectivity_anchor']}) % {row['selectivity_hash_buckets']} "
+            f"< {row['selectivity_bucket_threshold']}"
+        )
+        if (
+            predicate not in sql
+            or "workload_role: metadata-selected" not in sql
+            or "-- corpus_version: v3" not in sql
+            or "-- derived_from_corpus_version: v2" not in sql
+        ):
+            raise RuntimeError(f"{row['path']}: missing selectivity-stress provenance")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", choices=("v1", "v2"), default="v1")
+    parser.add_argument("--version", choices=("v1", "v2", "v3"), default="v1")
     parser.add_argument("--root", type=Path)
     parser.add_argument("--core-only", action="store_true")
     args = parser.parse_args()
 
-    root = args.root or (DEFAULT_ROOT if args.version == "v1" else DEFAULT_V2_ROOT)
+    default_roots = {"v1": DEFAULT_ROOT, "v2": DEFAULT_V2_ROOT, "v3": DEFAULT_V3_ROOT}
+    root = args.root or default_roots[args.version]
     root.mkdir(parents=True, exist_ok=True)
     if args.version == "v2":
         if args.core_only:
             parser.error("--core-only is only supported for v1")
         core_count = generate_v2_core(root)
         benchmark_count = generate_v2_benchmark(root)
-        stress_count = generate_v2_selectivity_stress(root)
         regression_count = generate_v2_job_regressions(root)
         validate_v2_generated(root)
         print(
             f"generated v2 with {benchmark_count} active queries: {core_count} "
             f"selectivity-sweep core and {V2_EVALUATION_QUERY_COUNT} v1 evaluation controls "
-            f"under {root}; also generated {stress_count} selectivity-ablation "
-            f"queries and {regression_count} focused JOB regression guards"
+            f"under {root}; also generated {regression_count} focused JOB regression guards"
+        )
+        return
+    if args.version == "v3":
+        if args.core_only:
+            parser.error("--core-only is only supported for v1")
+        core_count = generate_v3_core(root)
+        benchmark_count = generate_v3_benchmark(root)
+        stress_count = generate_v3_selectivity_stress(root)
+        validate_v3_generated(root)
+        print(
+            f"generated v3 with {benchmark_count} aggregation queries from "
+            f"{len(SEEDS)} source-derived seeds under {root}; "
+            "aggregate mix is COUNT=42, SUM=30, MIN=15, MAX=15; "
+            f"also generated {stress_count} selectivity-ablation queries"
         )
         return
 

@@ -39,7 +39,7 @@ This command:
 1. builds the release DuckDB CLI and the configured target databases;
 2. checks the persistent PGPlan cache under `auto_test/pgplan/plans` before
    starting PostgreSQL, and captures only missing or stale plan families;
-3. runs every query under `auto_test/outerjoin_query/{graph,tpch,tpcds,job}`;
+3. runs every query under `auto_test/outerjoin_benchmark/benchmark/{graph,tpch,tpcds,job}`;
 4. checks both `Original == PGPlan` and `Original == OuterYan` on target data;
 5. records Original, PGPlan, and OuterYan TM/T1 performance; and
 6. writes a timestamped result directory containing:
@@ -118,18 +118,23 @@ For a different grouping, the default source-level cost gate evaluates:
 candidate_total = candidate_join_cost
                 + SEMIJOIN_COST_RATIO * semijoin_raw_cost
 
-strict:  candidate_total <= 1.0 * baseline_cost
+strict:  candidate_total <= (0.90 or 1.0) * baseline_cost
 stretch: candidate_total <= 1.20 * baseline_cost, only when confidence checks pass
+low-selectivity: interpolate from the strict limit toward 1.20 as a reliable
+                 unary-filter selectivity falls from 0.35 toward zero
 ```
 
 The current build uses `GATED`. Its cost model uses
-`SEMIJOIN_COST_RATIO=0.35` and
-`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Cost formula V4 keeps that strict tier
-and adds a confidence-aware `1.20` stretch tier. The stretch tier is not a
+`SEMIJOIN_COST_RATIO=1.0` and
+`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Cost formula V8 keeps that strict tier
+and adds confidence-aware stretch and low-selectivity tiers. The stretch tier is not a
 global multiplier: it requires no generic-filter uncertainty, no uncertain
 filter amplification guard, no active full-reduction lower-bound correction,
 a lower candidate real-join cost, and candidate real-join input work at most
-`0.75` of DuckDB's. V4 retains the V3 lower-tail protections:
+`0.30` of DuckDB's, with semi-join retention at least `0.95`. The
+low-selectivity tier requires the same confidence guards, a stats-backed unary
+selectivity at most `0.35`, lower candidate join cost, and join-input ratio at
+most `0.75`. V8 retains the lower-tail protections:
 
 - A fully reduced all-INNER candidate cannot estimate an intermediate result
   below the largest reduced leaf in that subtree.
@@ -276,10 +281,11 @@ The live log and reports distinguish:
   counts and observed operator counts per round.
 
 Every query is printed as a separate block beginning with a full-width
-separator followed by exactly two lines. The first line contains correctness,
-reorder, selected plan, kernel, phase profile, TM, and T1. The second line
-contains decision, cost, gate, weight, and artifact details. Inapplicable
-queries print `cost=[UNAVAILABLE]` instead of a formula filled with `NA` values.
+separator followed by exactly four lines: query identity; correctness,
+selection, runtime, and optimizer totals; workload context and phase breakdown;
+and decision/formula details. Full optimizer-pass maps are stored in the CSV.
+Inapplicable queries print `cost=[UNAVAILABLE]` instead of a formula filled with
+`NA` values.
 
 R1, R2, and R3 are sums from DuckDB's native `OPERATOR_TIMING` tree, not
 contiguous phase wall timers. R1 matches `SJ_BUILD_ROUND_1` and
@@ -298,8 +304,8 @@ disable profiling before the timer starts, and do not run the native profile
 batch.
 A zero-pair round is printed as
 `NA(no-pairs,pairs=0)` rather than as a measured zero. The canonical CSV
-contains one row per query; `.attempts.csv` is retained as an identical
-single-attempt compatibility artifact. Timed-out queries are not retried.
+contains one row per query and no separate attempts file. Timed-out queries are
+not retried.
 `--capture-plans` also stores OFF/ON
 EXPLAIN plans, optimizer traces, and per-step cost details.
 
@@ -324,7 +330,7 @@ against an existing database and records the OuterYan stages selected by
 bash auto_test/trace_outer_yan.sh \
     --bin build/release/duckdb \
     --db graph_db \
-    --file auto_test/outerjoin_query/graph/line_N3_mixB_s67.sql
+    --file auto_test/outerjoin_benchmark/benchmark/graph/derived__rdeep_N4_mixB_s10.sql
 ```
 
 Useful runtime controls are:

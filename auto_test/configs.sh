@@ -52,9 +52,9 @@ export TPCDS_DB="${TPCDS_DB:-$OY_REPO_ROOT/tpcds_db}"
 export JOB_DB="${JOB_DB:-$OY_REPO_ROOT/job_db}"
 
 # Corpus root: where experiment_onoff.sh looks for
-# *.sql files. Default = auto_test/outerjoin_query/ (the unified corpus).
+# *.sql files. Default = auto_test/outerjoin_benchmark/benchmark/ (v1).
 # Override with OY_CORPUS env if needed.
-export OY_CORPUS="${OY_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_query}"
+export OY_CORPUS="${OY_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_benchmark/benchmark}"
 
 # ===========================================================================
 # 3) Data scale
@@ -369,7 +369,7 @@ export PSQL_BIN
 
 # Corpus-wide PGPlan defaults. TPC-H plan selection uses SF0.01; the other
 # families use isolated, row-capped schemas derived from their DuckDB schemas.
-export PGPLAN_CORPUS="${PGPLAN_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_query}"
+export PGPLAN_CORPUS="${PGPLAN_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_benchmark/benchmark}"
 export PGPLAN_SAMPLE_ROWS="${PGPLAN_SAMPLE_ROWS:-1000}"
 # Normal runs retain validated PostgreSQL artifacts across result directories.
 # The cache key mirrors the corpus-relative query stem (family/name.pg.json).

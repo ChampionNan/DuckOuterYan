@@ -16,6 +16,7 @@
 #include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
@@ -196,6 +197,9 @@ public:
 		bool outer_yan_selected = false;
 	};
 	StageStats stage_stats;
+	//! Fine-grained workflow timings exported only as diagnostics. No optimizer
+	//! decision reads these values.
+	OuterYanPhaseTimings phase_timings;
 
 private:
 	//! Set only by CheckPGPlanApplicability. It makes BuildOT annotate sensitive

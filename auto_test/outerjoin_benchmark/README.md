@@ -1,17 +1,17 @@
 # OuterJoin benchmark design
 
-This directory contains two versioned, provenance-backed workloads for
-outer-join query optimization. The existing workload is **v1** and remains the
-default. The expanded **v2** workload is generated under `v2/` only when it is
-explicitly requested.
+This directory contains three versioned, provenance-backed workloads for
+outer-join query optimization. **v1** remains the default, **v2** is the
+selectivity expansion under `v2/`, and **v3** is the root-aggregation workload
+under `v3/`.
 
 The v1 layout contains one active benchmark plus three auditable component
 views:
 
-- `benchmark/` is the active 206-query union used by `../outerjoin_query` and
-  the default harness. Query names use only `derived__` and `industry__`.
+- `benchmark/` is the canonical active 224-query union used by the default
+  harness. Query names use only `derived__` and `industry__`.
   Specific evaluation roles remain available in the manifest. It contains the
-  complete 170-query core plus all 36 evaluation controls.
+  complete 170-query core plus all 54 evaluation controls.
 
 - `core/` is the 170-query paper benchmark. Every query is derived from a named
   TPC-H, TPC-DS, JOB, or SQLStorm query skeleton and has a row in
@@ -20,13 +20,14 @@ views:
   August 10 result selected OuterYan and measured `tm_speedup > 1.0`. They must
   not be included in an unbiased headline benchmark score and are not
   industry-derived.
-- `industry_inspired/` is a 36-query evaluation corpus: the union of nine
-  business-role patterns and those 28 legacy performance wins, with one query
-  in both groups. Manifest roles keep industry-inspired synthetic patterns
-  distinct from performance-selected optimizer stress cases.
+- `industry_inspired/` is a 54-query evaluation corpus: nine business-role
+  patterns, all 25 completed Graph-generator patterns, and 20 schema-synthetic
+  regression guards. Graph membership is complete rather than selected from
+  historical speed-up; manifest roles keep all three strata distinct.
 
-The historical corpus is preserved in `../outerjoin_query_old/`.
-`../outerjoin_query` is a compatibility link to `benchmark/`.
+The historical corpus is preserved in `../outerjoin_query_old/`. It remains an
+input to the auditable Graph/industry/schema control generation and therefore
+must not be deleted with the retired compatibility path.
 `legacy_classification.csv`
 records the disposition of all 254 historical queries. The historical reference run,
 `../results/experiment_onoff_20260810_084908.csv`, contains 170 completed cases
@@ -42,7 +43,7 @@ The earlier FULL-heavy revision excluded 30 queries using August 30 and
 September 8 timeout observations. Those observations do not apply after join
 labels changed: the SQL, semantics, and execution plans are different.
 `active_timeout_exclusions.csv` is therefore empty for
-`v1-mixed-20260922`, and the current active union restores complete family,
+`v1-mixed-graph25-20260925`, and the current active union restores complete family,
 shape, and source coverage. `../benchmark_timeouts.py` and
 [`active_corpus_coverage.md`](active_corpus_coverage.md) retain the retired
 policy only as historical provenance. A new timeout policy, if needed, must be
@@ -67,9 +68,12 @@ python3 auto_test/gen_outerjoin_benchmark.py
 
 # Generate the expanded v2 workload without changing v1.
 python3 auto_test/gen_outerjoin_benchmark.py --version v2
+
+# Generate the 102-query root-aggregation workload.
+python3 auto_test/gen_outerjoin_benchmark.py --version v3
 ```
 
-Generation is deterministic. For both corpus versions, the script verifies that every core query:
+Generation is deterministic. For v1 and v2, the script verifies that every core query:
 
 - has at least three relations and at least one outer join;
 - uses a connected sequence of source-derived equality predicates;
@@ -82,6 +86,11 @@ Generation is deterministic. For both corpus versions, the script verifies that 
 
 V2 additionally verifies source provenance, paired vectors across selectivity
 tiers, and workload-level I/L/R/F balance.
+
+V3 verifies the same source provenance and join balance, plus near-equal
+coverage of `COUNT(*)`, `MIN`, `MAX`, and `SUM` (25/26/26/25 queries).
+Aggregation is necessarily outside the v1/v2 non-aggregate applicability
+condition.
 
 The generated SQL has also been `EXPLAIN`-validated against the local TPC-H,
 TPC-DS, and JOB databases with OuterYan both enabled and disabled.
@@ -129,17 +138,17 @@ Mixed join vectors are assigned without consulting runtime and then checked for
 the current applicability envelope. The `predicate_class` manifest value is
 `null_rejecting_outeryan_applicable`.
 
-The 36-query evaluation view receives the same graph-preserving mixed-join
+The 54-query evaluation view receives the same graph-preserving mixed-join
 normalization. Its two historical aggregate patterns are emitted as detail
-projections because the active optimizer deliberately bypasses aggregate
-queries. `supplemental/` remains the exact, unnormalized 28-query legacy-win
+projections so v1 remains a non-aggregate structural comparison; v3 supplies
+the dedicated, balanced aggregate workload. `supplemental/` remains the exact, unnormalized 28-query legacy-win
 view for historical comparison. Historical speedups in the active evaluation
 manifest describe source-selection provenance; they do not transfer to the
 normalized SQL.
 
-Across the complete 206-query v1 union, the 753 input join-edge occurrences
-contain 188 INNER, 188 LEFT, 189 RIGHT, and 188 FULL labels. Twenty-six queries
-use only multiple outer-join kinds and 180 combine INNER with outer joins; no
+Across the complete 224-query v1 union, the 801 input join-edge occurrences
+contain 200 INNER, 201 LEFT, 200 RIGHT, and 200 FULL labels. Thirty-two queries
+use only multiple outer-join kinds and 192 combine INNER with outer joins; no
 query has a single-kind vector.
 
 ## Provenance terminology
@@ -167,18 +176,43 @@ cases.
 
 ## Running
 
-The harness defaults to v1, retains the `graph/`, `tpch/`, `tpcds/`, and `job/`
-family layout, and runs at 32 threads by default:
+The harness retains the `graph/`, `tpch/`, `tpcds/`, and `job/` family layout,
+runs at 32 threads by default, and defaults to the complete all-version run:
 
 ```bash
-bash auto_test/experiment_onoff.sh --only all
+bash auto_test/experiment_onoff.sh --all
+
+# v1 only
+bash auto_test/experiment_onoff.sh --version v1 --only all
 
 # Full expanded workload (must be generated first).
-bash auto_test/experiment_onoff.sh --corpus-version v2 --only all
+bash auto_test/experiment_onoff.sh --version v2 --only all
 
-# Both versions in order, with separate _v1 and _v2 result files.
+# All benchmark versions plus v3 selectivity-stress, with separate result files.
 bash auto_test/experiment_onoff.sh --all
 ```
+
+## Aggregation v3 design
+
+V3 contains 102 queries. Every one of the 34 TPC-H, TPC-DS, JOB, and SQLStorm
+source seeds contributes its deterministic left-deep, right-deep, and third
+structural variant. These are paired with global `COUNT(*)`, grouped `MIN`,
+grouped `MAX`, and grouped `SUM`. The mix is 42 `COUNT`, 30 `SUM`, 15 `MIN`,
+and 15 `MAX`: MIN and MAX split one extremum class equally, while COUNT receives
+the largest share and SUM remains a substantial control class. Each of the
+three structural slots has the same 14/10/5/5 mix. The fixed weighted schedule
+uses only structural slot order; no result or timing file participates in
+membership or aggregate-form selection. The source distribution is 15
+TPC-H, 21 TPC-DS, 30 JOB, and 36 SQLStorm queries; the execution-schema family
+distribution is 27 TPC-H, 33 TPC-DS, and 42 JOB. Across 375 join edges, the
+I/L/R/F counts are 94/94/94/93.
+
+Supported root aggregates enter OuterYan candidate construction. They use the
+strict aggregate gate (`candidate_total <= 0.90 * baseline_cost`) without the
+stretch or low-selectivity tiers. Aggregate pushdown is enabled only for a
+cost-selected OuterYan candidate; a rejected candidate remains the exact DuckDB
+baseline. Thus v3 measures both conservative plan selection and the realized
+effect of pushdown for selected queries.
 
 ## Expanded v2 design
 
@@ -197,11 +231,11 @@ physical join selection are evaluated rather than assumed.
 Each base is instantiated at three hash-sampling tiers on a central join key:
 approximately 0.1%, 1%, and 5% of the source-derived anchor domain. A base uses
 the same join vector at all three tiers. This produces 510 benchmark-derived
-queries. V2 also carries forward all 36 Graph, industry, and schema-synthetic
+queries. V2 also carries forward all 54 Graph, industry, and schema-synthetic
 evaluation controls. Their relations, predicates, and
 parentheses are retained while join labels are deterministically rebalanced.
-Across all 546 main queries, the 2,003 edge occurrences contain 501 INNER, 501
-LEFT, 501 RIGHT, and 500 FULL labels. The benchmark manifest explicitly
+Across all 564 main queries, the 2,051 edge occurrences contain 512 INNER, 513
+LEFT, 513 RIGHT, and 513 FULL labels. The benchmark manifest explicitly
 distinguishes the 510 source-derived queries from the synthetic controls.
 
 The `pattern_role` manifest field marks star/branch plus alternate, bushy, or
@@ -213,32 +247,27 @@ low-selectivity hypothesis without constructing a corpus only from favorable
 OuterYan cases. SQL comments and the v2 manifests record the source query,
 transformation, selectivity tier, modulus, anchor column, and pattern role.
 
-V2 also generates two deliberately separate diagnostic views. The
-`selectivity_stress/` view contains 84 variants of 12 metadata-selected mixed
-v2 counterparts of feasibility-screened v1 structures from a static target
-domain: mixed joins with at least four
-relations and an applicable null-rejecting predicate. Four distinct source
-queries come from each of TPC-H, TPC-DS, and JOB. Every family covers
-left-deep, right-deep, and bushy trees, and its fourth structure broadens
-source-benchmark and relation-count coverage. A fixed salted
-SHA-256 ranking makes membership deterministic without reading timings or
-speed-ups. Each base appears once at 0.025%, 0.05%, 0.2%, 10%, 20%, 50%, and
-80% target selectivity, giving equal representation per predeclared tier. It
-is a correlated selectivity ablation rather than an independent 84-query
-headline sample, so every row is marked `headline_eligible=false` and
-`performance_selected=false`. The
-`job_regressions/` view exposes mixed-v2 counterparts of two cases that
+V2 also generates a deliberately separate `job_regressions/` diagnostic view,
+which exposes mixed-v2 counterparts of two cases that
 regressed in the retired FULL-heavy revision. Those structures remain in the
 main benchmark. Their historical speed-ups are provenance only; both current
 mixed-v1 and v2 counterparts require fresh measurement.
 
+V3 owns the compact selectivity-stress view: 42 variants of six
+metadata-selected mixed v2 counterparts, with two bases per execution family
+and two per tree shape across the complete set. Each family contributes one
+native benchmark source and one SQLStorm-derived source. Each base appears at 0.025%,
+0.05%, 0.2%, 10%, 20%, 50%, and 80%. Membership uses only static metadata and
+a fixed salted SHA-256 rank, never timings or speed-ups. It remains a paired
+ablation with `headline_eligible=false`, not 42 independent headline samples.
+
 ```bash
-# Selectivity ablation: plot/report separately from the 546-query benchmark.
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
+# Selectivity ablation: plot/report separately from the headline benchmark.
+bash auto_test/experiment_onoff.sh --version v3 \
   --corpus-scope selectivity-stress --only all
 
 # Mixed counterparts of the two historical v1 JOB regressions.
-bash auto_test/experiment_onoff.sh --corpus-version v2 \
+bash auto_test/experiment_onoff.sh --version v2 \
   --corpus-scope job-regressions --only job
 ```
 

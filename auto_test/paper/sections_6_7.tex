@@ -218,17 +218,20 @@ slices. Thus the workload includes both all-outer expressions using multiple
 outer-join kinds and expressions that combine INNER with outer joins, with no
 single-kind query.
 
-A separate 36-query evaluation component contains nine industry-inspired
-integration patterns and 28 historical optimizer-stress queries, with one
-overlap. The latter are labeled as performance-selected regression guards and
-are not presented as production traces or an unbiased workload. The active v1
-union contains 206 unique queries: all 170 structural queries and all 36
-controls. Timeout observations from the retired FULL-heavy revision are not
+A separate 54-query evaluation component contains nine industry-inspired
+integration patterns, all 25 completed Graph-generator patterns, and 20
+schema-synthetic optimizer-stress guards. Graph membership is complete rather
+than selected from historical performance; seven Graph rows retain old
+speed-ups only as provenance. The Graph expressions cover 10 bushy, seven
+left-deep, and eight right-deep trees. The schema-synthetic guards remain
+explicitly labeled and are not presented as an unbiased source-derived
+workload. The active v1 union contains 224 unique queries: all 170 structural
+queries and all 54 controls. Timeout observations from the retired FULL-heavy revision are not
 reused because changing a join label changes the query semantics and plan
 space. Consequently, no query is excluded before mixed-v1 is measured.
-Across the complete v1 union, the 753 input join-edge occurrences contain 188
-INNER, 188 LEFT, 189 RIGHT, and 188 FULL labels; 26 queries use only multiple
-outer-join kinds and 180 combine INNER with outer joins.
+Across the complete v1 union, the 801 input join-edge occurrences contain 200
+INNER, 201 LEFT, 200 RIGHT, and 200 FULL labels; 32 queries use only multiple
+outer-join kinds and 192 combine INNER with outer joins.
 
 V2 keeps the same 34 source graphs, five structural slots per source, and mixed
 join vectors as v1. The balance also
@@ -247,28 +250,30 @@ Every V2 base is instantiated at three deterministic hash-sampling levels,
 targeting approximately $0.1\%$, $1\%$, and $5\%$ of the source-derived anchor
 domain. A base retains the same join vector at all three levels, and each tier
 contains the same 170 structures---46 left-deep, 80 right-deep, and 44
-bushy---so neither selectivity nor shape is confounded with join type. All 36
+bushy---so neither selectivity nor shape is confounded with join type. All 54
 Graph, industry, and schema-synthetic evaluation controls remain separate
 control strata. We preserve their relation graph and parentheses but relabel
 their join edges with the same deterministic balancing objective. The complete
-546-query V2 workload has 501 INNER, 501 LEFT, 501 RIGHT, and 500 FULL edge
-occurrences; 67 queries use only outer joins and 479 also contain INNER.
+564-query V2 workload has 512 INNER, 513 LEFT, 513 RIGHT, and 513 FULL edge
+occurrences; 75 queries use only outer joins and 489 also contain INNER.
 
-We additionally define a separate wide-range selectivity ablation. Twelve
+We additionally define a separate V3 wide-range selectivity ablation. Six
 mixed, source-derived counterparts of feasibility-screened v1 structures with
 at least four relations are selected from static metadata, without consulting
-measured speed: four each from TPC-H,
-TPC-DS, and JOB, with every family covering left-deep, right-deep, and bushy
-inputs. Each base is instantiated at $0.025\%$, $0.05\%$, $0.2\%$, $10\%$,
-$20\%$, $50\%$, and $80\%$, yielding 84 queries with 12 queries per tier.
+measured speed: two each from TPC-H, TPC-DS, and JOB, and two each of
+left-deep, right-deep, and bushy shape across the complete set. Each execution
+family contributes one native benchmark source and one SQLStorm-derived
+source, retaining provenance from TPC-H, TPC-DS, JOB, and SQLStorm. Each base is
+instantiated at $0.025\%$, $0.05\%$, $0.2\%$, $10\%$, $20\%$, $50\%$, and
+$80\%$, yielding 42 queries with six queries per tier.
 The shared 4,000-bucket hash partition makes these samples deterministic and
 nested. Equal tier counts do not imply uniformly spaced numeric selectivities
 or identical realized cardinalities. Because variants of the same base are
-correlated, this ablation is reported separately from the 546-query main
+correlated, this ablation is reported separately from the 564-query main
 workload.
 
 The September 16 results used a retired FULL-heavy corpus revision and are not
-results for the mixed workload described here. V1, V2, and the wide-range
+results for the mixed workload described here. V1, V2, V3, and the wide-range
 ablation require fresh complete runs; no performance statistic is inferred
 from corpus membership alone.
 SQLStorm-derived queries are assigned to the family of their underlying schema.
@@ -328,7 +333,7 @@ The mixed-v1 workload changes the SQL of every structural and control query.
 The earlier FULL-heavy timings, timeout classifications, selected-plan counts,
 figures, and tables are therefore not comparable and are not reported. The
 following result slots will be populated only from a complete
-\texttt{v1-mixed-20260922} run.
+\texttt{v1-mixed-graph25-20260925} run.
 
 \subsubsection{Overall Performance}
 \label{sec:overall-performance}

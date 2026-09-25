@@ -6,8 +6,8 @@
 #                outer_yan_pre            — applicability + LogicalPlanToOT + simplify
 #                outer_yan_dp             — DP enumeration
 #                outer_yan_post           — Resimplify + semi-join insertion
-#                aggregate_pushdown_outer — retained internal rewrite pass;
-#                                           aggregate queries bypass OuterYan
+#                aggregate_pushdown_outer — root-aggregate rewrite for a
+#                                           cost-selected OuterYan candidate
 # group: [outer_yan]
 
 statement ok

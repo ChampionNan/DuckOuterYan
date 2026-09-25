@@ -17,12 +17,34 @@ enum class OuterYanSelectedPlan : uint8_t { DUCKDB_BASELINE, OUTERYAN_CANDIDATE 
 enum class OuterYanCostWinner : uint8_t { DUCKDB_BASELINE, OUTERYAN_CANDIDATE, EQUAL, UNAVAILABLE };
 enum class OuterYanGateResult : uint8_t { PASS, FAIL, SKIPPED, UNAVAILABLE };
 
+//! Non-overlapping wall-clock measurements for the research optimizer workflow.
+//! These are deliberately finer than DuckDB's OptimizerType boundaries: the
+//! experiment harness reports the algorithmic phases below instead of every
+//! generic DuckDB optimizer pass.
+struct OuterYanPhaseTimings {
+	bool available = false;
+	double applicability = 0.0;
+	double build_ot = 0.0;
+	double simplification = 0.0;
+	double semijoin_pair_planning = 0.0;
+	double desimplification = 0.0;
+	double outeryan_join_reorder = 0.0;
+	double duckdb_simplification = 0.0;
+	double duckdb_join_reorder = 0.0;
+	double cost_model = 0.0;
+	double resimplification = 0.0;
+	double aggregate_pushdown_marking = 0.0;
+	double plan_lowering = 0.0;
+	double semijoin_insertion = 0.0;
+	double aggregate_pushdown = 0.0;
+};
+
 //! Numeric inputs to the final OuterYan selection. Kept as a plain trace
 //! carrier so the experiment harness can export the exact comparison without
 //! depending on DP implementation types.
 struct OuterYanDecisionCosts {
 	bool available = false;
-	string formula_id = "OUTER_YAN_COST_V7";
+	string formula_id = "OUTER_YAN_COST_V9";
 	//! The generic table-filter estimate was also checked with unfiltered base
 	//! cardinalities. The selected flag means that conservative scenario was
 	//! the limiting (higher candidate/baseline ratio) gate input.
@@ -35,6 +57,13 @@ struct OuterYanDecisionCosts {
 	//! Risk guard for an unknown-selectivity filter on a tiny relation when the
 	//! reducers retain almost all estimated input rows.
 	bool uncertain_filter_amplification_guard = false;
+	//! Minimum planner-estimated filtered/base cardinality ratio among pre-join
+	//! base scans with a unary predicate. A root-scope predicate is deliberately
+	//! excluded because it does not reduce real-join or reducer inputs. Generic
+	//! default-selectivity estimates are exposed but never qualify for the tier.
+	double unary_filter_selectivity = 0.0;
+	bool unary_filter_selectivity_available = false;
+	bool low_selectivity_cost_gate_eligible = false;
 	double semijoin_retained_cardinality_ratio = 0.0;
 	double uncertain_filter_cardinality_amplification = 0.0;
 	double baseline_cost = 0.0;
@@ -55,6 +84,9 @@ struct OuterYanDecisionCosts {
 	double weighted_semijoin_cost = 0.0;
 	//! candidate_join_cost + weighted_semijoin_cost.
 	double candidate_total = 0.0;
+	//! Candidate/baseline ceiling computed by the low-selectivity tier before
+	//! combining it with the independent stretch tier.
+	double low_selectivity_cost_ratio_limit = 0.0;
 	double cost_ratio_limit = 0.0;
 	double baseline_threshold = 0.0;
 	double round1_build = 0.0;
@@ -91,11 +123,15 @@ struct OuterYanDecisionCosts {
 //! in different layers.
 struct OuterYanDecisionRecord {
 	string selection_mode = "GATED";
+	bool aggregate_query = false;
 	bool outer_reordered = false;
 	bool cost_gate_applied = false;
 	//! True only when a candidate that lost the strict 1.0 comparison was
 	//! selected through the confidence-aware stretch tier.
 	bool stretch_cost_gate_selected = false;
+	//! True only when the strict gate lost and the stats-backed unary-filter
+	//! tier was the policy that admitted the candidate.
+	bool low_selectivity_cost_gate_selected = false;
 	bool outer_yan_selected = false;
 	bool baseline_proven_empty = false;
 	OuterYanSelectedPlan selected_plan = OuterYanSelectedPlan::DUCKDB_BASELINE;
@@ -103,6 +139,7 @@ struct OuterYanDecisionRecord {
 	OuterYanGateResult gate_result = OuterYanGateResult::SKIPPED;
 	string reason = "INAPPLICABLE";
 	OuterYanDecisionCosts costs;
+	OuterYanPhaseTimings phase_timings;
 };
 
 //! Opt-in, file-based pipeline tracer for the OuterYan optimizer.
@@ -120,6 +157,9 @@ struct OuterYanDecisionRecord {
 //! the calls can stay compiled into every build with no measurable cost.
 //! Output is appended — one file can accumulate several queries; `BeginQuery`
 //! writes a separator banner so blocks stay readable.
+//! `DUCKDB_OY_PROFILE_TRACE` is a separate machine-readable decision sink used
+//! by the benchmark profiler. It writes only `[OY_DECISION]` records, avoiding
+//! the I/O cost of full stage snapshots in measured optimization phases.
 class OuterYanTrace {
 public:
 	//! True iff `DUCKDB_OYTRACE` names a non-empty path. Resolved once and

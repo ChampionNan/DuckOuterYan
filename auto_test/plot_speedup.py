@@ -44,6 +44,9 @@ from matplotlib.patches import Patch
 
 C_T1 = "#4C72B0"
 C_TM = "#DD8452"
+PHASE_RUNTIME_DUCKDB_COLOR = "#A78BFA"
+PHASE_RUNTIME_OUTERYAN_COLOR = "#FB7185"
+PHASE_RUNTIME_EDGE_COLOR = "#5C5470"
 FAMILY_ORDER = ["graph", "TPC-H", "TPC-DS", "JOB"]
 FAMILY_COLORS = {
     "graph": "#7A7A7A",
@@ -110,10 +113,11 @@ STANDALONE_PNG_DPI = 300
 
 
 def benchmark_provenance() -> pd.DataFrame:
-    """Return auditable v1/v2 active-corpus roles keyed by emitted query id."""
+    """Return auditable active-corpus roles keyed by emitted query id."""
     manifests = [
         SCRIPT_DIR / "outerjoin_benchmark" / "benchmark" / "manifest.csv",
         SCRIPT_DIR / "outerjoin_benchmark" / "v2" / "benchmark" / "manifest.csv",
+        SCRIPT_DIR / "outerjoin_benchmark" / "v3" / "benchmark" / "manifest.csv",
     ]
     frames = []
     for path in manifests:
@@ -283,7 +287,7 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
     fallback_relations = frame["query"].map(relation_count_from_name)
     sql_relations = pd.Series(np.nan, index=frame.index, dtype="float64")
     if "sql_path" in frame:
-        corpus_root = SCRIPT_DIR / "outerjoin_query"
+        corpus_root = SCRIPT_DIR / "outerjoin_benchmark" / "benchmark"
 
         def relation_count_from_sql_path(relative_path: object) -> float:
             if not isinstance(relative_path, str) or not relative_path:
@@ -331,6 +335,10 @@ def load(paths: list[str]) -> pd.DataFrame:
             continue
         run, source_kind, label = result_source(path)
         raw = raw.copy()
+        if "experiment_group" in raw:
+            experiment_groups = raw["experiment_group"].dropna().astype(str).unique()
+            if len(experiment_groups) == 1 and experiment_groups[0]:
+                run = experiment_groups[0]
         raw["__plot_source_priority"] = 0 if source_kind == "attempts" else 1
         raw["__plot_source_order"] = source_order
         raw["__plot_row_order"] = np.arange(len(raw))
@@ -355,6 +363,8 @@ def load(paths: list[str]) -> pd.DataFrame:
         combined["__plot_merge_family"] = merge_family
         combined = combined.sort_values(order_columns, kind="stable")
         keys = ["__plot_merge_family", "query"]
+        if "workload_category" in combined:
+            keys.insert(0, "workload_category")
         duplicate_count = int(combined.duplicated(keys, keep="last").sum())
         merged = combined.drop_duplicates(keys, keep="last").sort_values(
             ["__plot_row_order", "__plot_source_priority", "__plot_source_order"], kind="stable"
@@ -1163,11 +1173,13 @@ def page_phase(
                 )
         runtime_axis.scatter(
             baseline_runtime[runtime_valid], y[runtime_valid], marker="o", s=38,
-            color=C_T1, edgecolor="white", linewidth=0.25, zorder=3,
+            color=PHASE_RUNTIME_DUCKDB_COLOR, edgecolor=PHASE_RUNTIME_EDGE_COLOR,
+            linewidth=0.45, zorder=3,
         )
         runtime_axis.scatter(
             outeryan_runtime[runtime_valid], y[runtime_valid], marker="D", s=42,
-            color=C_TM, edgecolor="white", linewidth=0.25, zorder=4,
+            color=PHASE_RUNTIME_OUTERYAN_COLOR, edgecolor=PHASE_RUNTIME_EDGE_COLOR,
+            linewidth=0.45, zorder=4,
         )
         runtime_values = np.concatenate([
             baseline_runtime[runtime_valid], outeryan_runtime[runtime_valid]
@@ -1177,10 +1189,11 @@ def page_phase(
         runtime_axis.set_xscale("log")
         runtime_axis.set_xlim(10 ** (log_min - pad), 10 ** (log_max + pad))
         runtime_axis.set_xlabel("Running time: DuckDB vs. OuterYan")
+        runtime_axis.set_axisbelow(True)
         runtime_axis.tick_params(axis="x", which="both", direction="in", top=True)
         runtime_axis.tick_params(axis="y", left=False, right=True, labelleft=False)
-        runtime_axis.grid(axis="x", which="major", color="0.90", linewidth=0.55)
-        runtime_axis.grid(axis="x", which="minor", color="0.96", linewidth=0.35)
+        runtime_axis.grid(axis="x", which="major", color="0.90", linewidth=0.55, zorder=0)
+        runtime_axis.grid(axis="x", which="minor", color="0.96", linewidth=0.35, zorder=0)
         for row_y, speedup, valid in zip(y, runtime_speedup, runtime_valid):
             if valid:
                 runtime_axis.text(
@@ -1203,10 +1216,12 @@ def page_phase(
     if runtime_axis is not None:
         runtime_axis.legend(
             handles=[
-                Line2D([], [], color=C_T1, marker="o", linestyle="none", markersize=5.8,
-                       label="DuckDB baseline"),
-                Line2D([], [], color=C_TM, marker="D", linestyle="none", markersize=6.0,
-                       label="OuterYan enabled"),
+                Line2D([], [], color=PHASE_RUNTIME_DUCKDB_COLOR, marker="o", linestyle="none",
+                       markeredgecolor=PHASE_RUNTIME_EDGE_COLOR, markeredgewidth=0.45,
+                       markersize=5.8, label="DuckDB"),
+                Line2D([], [], color=PHASE_RUNTIME_OUTERYAN_COLOR, marker="D", linestyle="none",
+                       markeredgecolor=PHASE_RUNTIME_EDGE_COLOR, markeredgewidth=0.45,
+                       markersize=6.0, label="OuterYan"),
             ],
             ncol=2, fontsize=9.2, loc="lower center", frameon=False,
             bbox_to_anchor=(0.50, 1.005), borderaxespad=0.15,

@@ -25,7 +25,6 @@ class RunAllPGPlanTests(unittest.TestCase):
         self.pgplan = self.auto_test / "pgplan"
         self.pgplan.mkdir(parents=True)
         (self.auto_test / "outerjoin_benchmark" / "benchmark").mkdir(parents=True)
-        (self.auto_test / "outerjoin_query").symlink_to("outerjoin_benchmark/benchmark")
         (self.auto_test / "outerjoin_benchmark" / "industry_inspired" / "tpch").mkdir(
             parents=True
         )
@@ -195,7 +194,7 @@ class RunAllPGPlanTests(unittest.TestCase):
         calls = self.log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0].startswith("onoff\t"), calls)
-        self.assertIn(str(self.auto_test / "outerjoin_query"), calls[0])
+        self.assertIn(str(self.auto_test / "outerjoin_benchmark" / "benchmark"), calls[0])
         self.assertIn("--only all", calls[0])
         self.assertIn("--limit 1", calls[0])
         self.assertIn(
@@ -261,7 +260,10 @@ class RunAllPGPlanTests(unittest.TestCase):
         # SKIP_DATA must not silently disable loading PG's independent tiny data.
         self.assertEqual(fields[1], "unset")
         corpus_args = fields[2]
-        self.assertIn(f"--corpus {self.auto_test / 'outerjoin_query'}", corpus_args)
+        self.assertIn(
+            f"--corpus {self.auto_test / 'outerjoin_benchmark' / 'benchmark'}",
+            corpus_args,
+        )
         self.assertIn(f"--duckdb-bin {self.duckdb}", corpus_args)
         self.assertIn("--rows 1000", corpus_args)
         self.assertIn("--threads 7", corpus_args)
