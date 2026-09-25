@@ -978,6 +978,7 @@ static bool RootAggregateHasNoGroups(LogicalOperator &plan) {
 }
 
 unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalOperator> plan) {
+	applied = false;
 	if (tree.root_aggregation.type == OuterYanAggregationType::NONE) {
 		return plan;
 	}
@@ -1057,7 +1058,6 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 		stage_b.RemapRootAggregateGroups(*plan);
 		final_agg_columns = stage_b.AggColumns();
 	}
-
 	// Rewire the root aggregate to consume the pushed-down annot columns.
 	// This must happen before the final prune cycle: the rewriter's binding map
 	// describes the unpruned stage-B plan, while pruning can compact projection
@@ -1093,6 +1093,24 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 		op.ResolveOperatorTypes();
 	};
 	resolve_types(*plan);
+
+	// Inspect the returned plan rather than the pre-prune decision vector. The
+	// final prune cycle can remove a speculative scaffold, in which case the
+	// query must not be reported as having realized aggregate pushdown.
+	std::function<bool(const LogicalOperator &, bool)> has_aggregate_below_join;
+	has_aggregate_below_join = [&](const LogicalOperator &op, bool below_join) {
+		if (below_join && op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			return true;
+		}
+		const bool child_below_join = below_join || AvailableJoin(op.type);
+		for (const auto &child : op.children) {
+			if (child && has_aggregate_below_join(*child, child_below_join)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	applied = has_aggregate_below_join(*plan, false);
 
 	return plan;
 }

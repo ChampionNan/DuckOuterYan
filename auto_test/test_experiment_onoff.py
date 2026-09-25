@@ -127,10 +127,27 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 trace = os.environ.get("DUCKDB_OYTRACE")
                 if trace:
                     selected = os.environ.get("SELECTED_PLAN", "OUTERYAN")
+                    aggregate = int(
+                        os.environ.get("AGGREGATE_QUERY", "") == "1"
+                        or bool(re.search(r"\b(?:COUNT|SUM|MIN|MAX)\s*\(", sql, re.IGNORECASE))
+                    )
+                    aggregate_pushdown = int(
+                        os.environ.get(
+                            "AGGREGATE_PUSHDOWN",
+                            "1" if aggregate and selected == "OUTERYAN" else "0",
+                        )
+                        == "1"
+                    )
+                    reason = "COST_OUTERYAN_BETTER" if selected == "OUTERYAN" else "COST_DUCKDB_BETTER"
+                    raw_winner = "OUTERYAN" if selected == "OUTERYAN" else "DUCKDB"
+                    gate_result = "PASS" if selected == "OUTERYAN" else "FAIL"
                     Path(trace).write_text(
-                        f"[OY_DECISION] formula_id=TEST selection_mode=GATED selected_plan={selected} "
+                        f"[OY_DECISION] formula_id=TEST selection_mode=GATED aggregate_query={aggregate} "
+                        f"aggregate_pushdown_applied={aggregate_pushdown} "
+                        f"selected_plan={selected} "
                         f"outer_reordered=1 cost_gate_applied=1 outer_yan_selected={int(selected == 'OUTERYAN')} "
-                        "reason=COST_OUTERYAN_BETTER baseline_proven_empty=0 "
+                        f"reason={reason} raw_cost_winner={raw_winner} gate_result={gate_result} "
+                        "baseline_proven_empty=0 "
                         "default_filter_upper_bound_checked=0 default_filter_upper_bound_selected=0 "
                         "full_reduction_cardinality_lower_bound_applied=0 uncertain_filter_amplification_guard=0 "
                         "stretch_cost_gate_eligible=0 stretch_cost_gate_selected=0 "
@@ -387,9 +404,12 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["note"], "TIMEOUT")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(calls[0]["timing"])
-        self.assertFalse(calls[0]["profiling"])
+        executions = [call for call in calls if "EXPLAIN" not in call["sql"]]
+        self.assertEqual(len(executions), 1)
+        self.assertFalse(executions[0]["timing"])
+        self.assertFalse(executions[0]["profiling"])
+        self.assertTrue(all(not call["timing"] for call in calls))
+        self.assertTrue(all(not call["profiling"] for call in calls))
         self.assertIn("timed=0", report)
 
     def test_timing_timeout_stops_query_without_retry_or_profile(self):
@@ -433,16 +453,61 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["profile_status"], "OK")
 
-    def test_duckdb_selected_queries_skip_profile(self):
+    def test_nonaggregate_duckdb_fallback_skips_execution_with_default_speedup(self):
         result = self.run_harness(SELECTED_PLAN="DUCKDB")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.read_row()
-        self.assertEqual(row["profile_status"], "not-selected")
+        self.assertEqual(row["aggregate_query"], "0")
+        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["note"], "FALLBACK-SKIP")
+        self.assertEqual(row["timing_status"], "fallback-skip")
+        self.assertEqual(row["profile_status"], "fallback-skip")
+        self.assertEqual(row["optimizer_profile_status"], "fallback-skip")
+        self.assertEqual(row["tm_off"], "NA")
+        self.assertEqual(row["tm_on"], "NA")
+        self.assertEqual(row["tm_speedup"], "1.000")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] for call in calls))
+        self.assertFalse(any(call["profiling"] for call in calls))
+        self.assertTrue(all("EXPLAIN" in call["sql"] for call in calls))
+
+    def test_aggregate_duckdb_fallback_without_pushdown_is_skipped(self):
+        result = self.run_harness(SELECTED_PLAN="DUCKDB", AGGREGATE_QUERY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["aggregate_query"], "1")
+        self.assertEqual(row["aggregate_pushdown_applied"], "0")
+        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["note"], "FALLBACK-SKIP")
+        self.assertEqual(row["timing_status"], "fallback-skip")
+        self.assertEqual(row["tm_speedup"], "1.000")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] for call in calls))
+
+    def test_aggregate_outeryan_without_pushdown_is_skipped(self):
+        result = self.run_harness(AGGREGATE_QUERY="1", AGGREGATE_PUSHDOWN="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["aggregate_query"], "1")
+        self.assertEqual(row["aggregate_pushdown_applied"], "0")
+        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["timing_status"], "fallback-skip")
+        self.assertEqual(row["tm_speedup"], "1.000")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] for call in calls))
+
+    def test_aggregate_outeryan_with_pushdown_is_executed(self):
+        result = self.run_harness(AGGREGATE_QUERY="1", AGGREGATE_PUSHDOWN="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["aggregate_query"], "1")
+        self.assertEqual(row["aggregate_pushdown_applied"], "1")
+        self.assertEqual(row["correct"], "TRUE")
+        self.assertEqual(row["note"], "OK")
+        self.assertEqual(row["timing_status"], "measured")
         self.assertEqual(row["tm_speedup"], "2.000")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        combined_profiles = [call for call in calls if call["profiling"]]
-        self.assertEqual(len(combined_profiles), 1)
-        self.assertNotIn("EXPLAIN", combined_profiles[0]["sql"])
+        self.assertEqual(len([call for call in calls if call["timing"]]), 2)
 
     def test_profile_failures_keep_timing_and_do_not_fabricate_phases(self):
         for failure in ("FAIL_PROFILE", "BAD_PROFILE_JSON", "BAD_PROFILE_ROUND"):

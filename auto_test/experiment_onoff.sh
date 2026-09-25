@@ -3,11 +3,14 @@
 # experiment_onoff.sh  —  OuterYan ON-vs-OFF correctness + performance test.
 #
 # Per corpus query, IN THIS ORDER:
-#   1. CORRECTNESS GATE — oy_equiv_check (ON==OFF on the bare query). A query that
-#      is not equivalence-preserving (or crashes/times out) is NOT timed.
-#   2. PLAN DECISION — oy_decision reads OuterYan's machine-readable trace:
+#   1. PLAN DECISION — oy_decision reads OuterYan's machine-readable trace:
 #      whether its candidate grouping differs from DuckDB, whether the cost gate
 #      ran, and which candidate was selected.
+#      A DuckDB fallback, or an aggregate query without an actual aggregate
+#      pushdown, is recorded as FALLBACK-SKIP with the selection-policy default
+#      speed-up 1.0 and is not executed.
+#   2. CORRECTNESS GATE — for every remaining query, oy_equiv_check compares
+#      ON==OFF on the bare query. A mismatch, crash, or timeout is NOT timed.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
@@ -582,6 +585,8 @@ OY_DECISION_SELECTED="NA"
 OY_DECISION_REASON="TRACE_MISSING"
 OY_DECISION_FORMULA_ID="NA"
 OY_DECISION_SELECTION_MODE="NA"
+OY_DECISION_AGGREGATE_QUERY="NA"
+OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED="NA"
 OY_DECISION_SELECTED_PLAN="NA"
 OY_DECISION_BASELINE_PROVEN_EMPTY="NA"
 OY_DECISION_RAW_COST_WINNER="NA"
@@ -644,6 +649,8 @@ oy_record_value() {
 oy_reset_decision() {
     OY_DECISION_FORMULA_ID="NA"
     OY_DECISION_SELECTION_MODE="NA"
+    OY_DECISION_AGGREGATE_QUERY="NA"
+    OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED="NA"
     OY_DECISION_SELECTED_PLAN="NA"
     OY_DECISION_REORDERED="NA"
     OY_DECISION_GATE="NA"
@@ -727,6 +734,8 @@ oy_decision() {
     if [ -n "$record" ]; then
         OY_DECISION_FORMULA_ID="$(oy_record_value "$record" formula_id)"
         OY_DECISION_SELECTION_MODE="$(oy_record_value "$record" selection_mode)"
+        OY_DECISION_AGGREGATE_QUERY="$(oy_record_value "$record" aggregate_query)"
+        OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED="$(oy_record_value "$record" aggregate_pushdown_applied)"
         OY_DECISION_SELECTED_PLAN="$(oy_record_value "$record" selected_plan)"
         OY_DECISION_REORDERED="$(oy_record_value "$record" outer_reordered)"
         OY_DECISION_GATE="$(oy_record_value "$record" cost_gate_applied)"
@@ -793,6 +802,20 @@ oy_decision() {
             [01]:[01]:[01]:[01]:[01]:[01]:[01]:[01]) ;;
             *) OY_DECISION_REASON="TRACE_INVALID";;
         esac
+        case "$OY_DECISION_AGGREGATE_QUERY" in
+            0|1) ;;
+            *) OY_DECISION_REASON="TRACE_INVALID";;
+        esac
+        case "$OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED" in
+            0|1) ;;
+            *) OY_DECISION_REASON="TRACE_INVALID";;
+        esac
+        if [ "$OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED" = 1 ]; then
+            case "$OY_DECISION_AGGREGATE_QUERY:$OY_DECISION_SELECTED_PLAN:$OY_DECISION_SELECTED" in
+                1:OUTERYAN:1) ;;
+                *) OY_DECISION_REASON="TRACE_INVALID";;
+            esac
+        fi
         if [ "$OY_DECISION_DEFAULT_FILTER_UPPER_SELECTED" = 1 ] && \
            [ "$OY_DECISION_DEFAULT_FILTER_UPPER_CHECKED" != 1 ]; then
             OY_DECISION_REASON="TRACE_INVALID"
@@ -1070,7 +1093,7 @@ csv_result_row() {
 
 CSV_HEADER=(
     experiment_group corpus_version corpus_scope workload_category query_class
-    query family sql_path relation_count reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
+    query family sql_path relation_count aggregate_query aggregate_pushdown_applied reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
     baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
     default_filter_upper_bound_checked default_filter_upper_bound_selected
     full_reduction_cardinality_lower_bound_applied uncertain_filter_amplification_guard
@@ -1086,7 +1109,7 @@ CSV_HEADER=(
     raw_cost_delta raw_cost_ratio gate_lhs gate_rhs gate_margin
     inner_output_weight unmatched_left_weight unmatched_right_weight semijoin_materialize_weight
     semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight semijoin_probe_emit_weight
-    kernel kernel_detail kernel_hash_reasons correct note timing_threads tm_off tm_on tm_speedup
+    kernel kernel_detail kernel_hash_reasons correct note timing_status timing_threads tm_off tm_on tm_speedup
     optimizer_profile_status optimizer_timed_samples
     optimizer_duckdb_total_s optimizer_outeryan_total_s optimizer_overhead_s optimizer_outeryan_to_duckdb_ratio
     optimizer_duckdb_measured_phase_s optimizer_outeryan_measured_phase_s
@@ -1119,6 +1142,7 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: ON result multiset == OFF result; only correct queries are timed"
+    echo "# fallback: DuckDB selections and aggregate queries without realized pushdown skip execution, use timing_status=fallback-skip and default speed-up=1.0"
     echo "# formula : candidate_total = candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost"
     echo "# gate    : candidate_total <= cost_ratio_limit * baseline_cost"
     echo "# compare : raw_cost_winner compares candidate_total directly with baseline_cost"
@@ -1138,7 +1162,7 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
 # the final summary.
 QLBL=(); QNREL=(); QCORRECT=(); QNOTE=(); QROWS=(); QREG=()
 QDB=(); QSQL=(); QFAMILY=(); QPATH=(); QKER=(); QKDETAIL=(); QKREASONS=()
-QREORDERED=(); QGATE=(); QSELECTED=(); QDECISION=()
+QAGGREGATE=(); QAGG_PUSHDOWN=(); QREORDERED=(); QGATE=(); QSELECTED=(); QDECISION=(); QTIMING_STATUS=()
 QFORMULA=(); QSELECTION_MODE=(); QSELECTED_PLAN=(); QPROVEN_EMPTY=(); QRAW_WINNER=(); QGATE_RESULT=()
 QFULL_REDUCTION_LOWER_BOUND=(); QSTRETCH_ELIGIBLE=(); QSTRETCH_SELECTED=()
 QBASELINE_JOIN_INPUT_ROWS=(); QCANDIDATE_JOIN_INPUT_ROWS=(); QJOIN_INPUT_RATIO=()
@@ -1156,7 +1180,7 @@ QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FIL
 
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
-# process_one <i> — run the full pipeline for query i (gate -> decision -> kernel
+# process_one <i> — run the full pipeline for query i (decision -> gate -> kernel
 # -> timing -> optional profile) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
@@ -1164,16 +1188,9 @@ process_one() {
     local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
     local family="${QUERY_FAMILIES[i]}" sql_path="${SQL_PATHS[i]}"
     local nrel="${RELATION_COUNTS[i]}"
-    local gate correct note rows
-    gate="$(oy_equiv_check "$db" "$id" "$sql")"
-    case "$gate" in
-        *"equiv OK"*)  correct="TRUE";  note="OK";        rows="$(printf '%s' "$gate" | grep -oE '[0-9]+ rows' | grep -oE '[0-9]+')";;
-        *"NOT EQUIV"*) correct="FALSE"; note="NOT-EQUIV"; rows="$(printf '%s' "$gate" | grep -oE 'off=[0-9]+ on=[0-9]+')";;
-        *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
-        *)             correct="FALSE"; note="ERROR";     rows="-";;
-    esac
+    local gate="" correct="FALSE" note="ERROR" rows="-"
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
-    local formula_id="-" selection_mode="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
+    local formula_id="-" selection_mode="-" aggregate_query="-" aggregate_pushdown_applied="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
     local default_filter_upper_checked="-" default_filter_upper_selected="-" uncertain_filter_guard="-"
     local full_reduction_lower_bound="-" stretch_eligible="-" stretch_selected="-"
     local unary_filter_selectivity="-" low_selectivity_eligible="-" low_selectivity_selected="-"
@@ -1190,7 +1207,7 @@ process_one() {
     local sj_materialize_weight="-" sj_filter_build_weight="-" sj_replay_weight="-"
     local sj_lookup_weight="-" sj_emit_weight="-"
     local ker="not-run" kdetail="b0h0" kreasons="-" kernel_status="not-run" kernel_display="not-run"
-    local offm="-" onm="-" ratiom="-"
+    local offm="-" onm="-" ratiom="-" timing_status="not-run"
     local duckdb_plan="-" enabled_plan="-" trace_file="-" cost_file="-"
     local profile_status="disabled" profile_threads="-" profile_directory="-"
     local r1sj="NA" r2sj="NA" realjoin="NA" profile_wall="NA" profile_cpu="NA"
@@ -1202,24 +1219,31 @@ process_one() {
     local optimizer_duckdb_other="NA" optimizer_outeryan_other="NA"
     local optimizer_duckdb_phases="{}" optimizer_outeryan_phases="{}" optimizer_phase_delta="{}"
     local optimizer_focus="-"
+    local decision_issue="" plan_issue=""
     local stop_after_timeout=0
     if [ "$PROFILE" = 1 ]; then
         profile_status="not-correct"
         optimizer_status="not-correct"
     fi
-    if [ "$correct" = "TRUE" ]; then
-        if [ "$CAPTURE_PLANS" = 1 ]; then
-            local artifact_stem="$PLAN_DIR/${family}__${id}.${PASS}"
-            duckdb_plan="${artifact_stem}.duckdb.plan.txt"
-            enabled_plan="${artifact_stem}.enabled.plan.txt"
-            trace_file="${artifact_stem}.trace.txt"
-            cost_file="${artifact_stem}.cost.txt"
-        fi
-        oy_decision "$db" "$sql" \
-            "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$trace_file")" \
-            "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$cost_file")"
+    if [ "$CAPTURE_PLANS" = 1 ]; then
+        local artifact_stem="$PLAN_DIR/${family}__${id}.${PASS}"
+        duckdb_plan="${artifact_stem}.duckdb.plan.txt"
+        enabled_plan="${artifact_stem}.enabled.plan.txt"
+        trace_file="${artifact_stem}.trace.txt"
+        cost_file="${artifact_stem}.cost.txt"
+    fi
+
+    # Decide first. A DuckDB fallback returns the exact baseline logical plan.
+    # Aggregate queries are timed only when the selected OuterYan plan actually
+    # contains an aggregate pushdown. Keep skipped rows for workload coverage
+    # with an explicit policy-default speed-up of 1.0.
+    oy_decision "$db" "$sql" \
+        "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$trace_file")" \
+        "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$cost_file")"
         formula_id="$OY_DECISION_FORMULA_ID"
         selection_mode="$OY_DECISION_SELECTION_MODE"
+        aggregate_query="$OY_DECISION_AGGREGATE_QUERY"
+        aggregate_pushdown_applied="$OY_DECISION_AGGREGATE_PUSHDOWN_APPLIED"
         selected_plan="$OY_DECISION_SELECTED_PLAN"
         outer_reordered="$OY_DECISION_REORDERED"
         gate_applied="$OY_DECISION_GATE"
@@ -1275,18 +1299,53 @@ process_one() {
         case "$outer_reordered" in 1) reg="Yes";; 0) reg="No";; *) reg="-";; esac
         case "$selected_plan:$selected" in
             DUCKDB:0|OUTERYAN:1) ;;
-            *) note="TRACE-INCONSISTENT";;
+            *) decision_issue="TRACE-INCONSISTENT";;
         esac
-        if [ "$CAPTURE_PLANS" = 1 ]; then
-            oy_capture_plan "$db" "$OY_OFF" "$sql" "$duckdb_plan" || note="${note};OFF-PLAN-ERROR"
-            oy_capture_plan "$db" "$OY_ON" "$sql" "$enabled_plan" || note="${note};ON-PLAN-ERROR"
-        fi
+
+    if [ "$CAPTURE_PLANS" = 1 ]; then
+        oy_capture_plan "$db" "$OY_OFF" "$sql" "$duckdb_plan" || plan_issue="OFF-PLAN-ERROR"
+        oy_capture_plan "$db" "$OY_ON" "$sql" "$enabled_plan" || plan_issue="${plan_issue:+$plan_issue;}ON-PLAN-ERROR"
+    fi
+
+    local fallback_skip=0
+    case "$decision" in
+        TRACE_ERROR|TRACE_MISSING|TRACE_INVALID) ;;
+        *)
+            if [ "$selected_plan:$selected" = "DUCKDB:0" ] || \
+               { [ "$aggregate_query" = 1 ] && [ "$aggregate_pushdown_applied" = 0 ]; }; then
+                fallback_skip=1
+            fi
+            ;;
+    esac
+    if [ "$fallback_skip" = 1 ]; then
+        correct="SKIPPED"
+        note="FALLBACK-SKIP"
+        timing_status="fallback-skip"
+        offm="NA"
+        onm="NA"
+        ratiom="1.000"
+        profile_status="fallback-skip"
+        optimizer_status="fallback-skip"
+    else
+        gate="$(oy_equiv_check "$db" "$id" "$sql")"
+        case "$gate" in
+            *"equiv OK"*)  correct="TRUE";  note="OK";        rows="$(printf '%s' "$gate" | grep -oE '[0-9]+ rows' | grep -oE '[0-9]+')";;
+            *"NOT EQUIV"*) correct="FALSE"; note="NOT-EQUIV"; rows="$(printf '%s' "$gate" | grep -oE 'off=[0-9]+ on=[0-9]+')";;
+            *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
+            *)             correct="FALSE"; note="ERROR";     rows="-";;
+        esac
+    fi
+    [ -z "$decision_issue" ] || note="${note};$decision_issue"
+    [ -z "$plan_issue" ] || note="${note};$plan_issue"
+
+    if [ "$correct" = "TRUE" ]; then
         if [ "$selected_plan" = "OUTERYAN" ]; then
             local kraw
             kraw="$(oy_kernel "$db" "$sql")"
             IFS='|' read -r ker kdetail kreasons kernel_status <<< "$kraw"
             if [ "$kernel_status" = "timeout" ]; then
                 note="TIMEOUT-KERNEL"
+                timing_status="timeout"
                 profile_status="timeout"
                 optimizer_status="timeout"
                 stop_after_timeout=1
@@ -1303,12 +1362,14 @@ process_one() {
             off_timing_rc=$?
             if [ "$off_timing_rc" -eq 124 ]; then
                 note="TIMEOUT-OFF-TIMING"
+                timing_status="timeout"
                 offm="NA"; onm="NA"; ratiom="NA"
                 profile_status="timeout"
                 optimizer_status="timeout"
                 stop_after_timeout=1
             elif [ "$off_timing_rc" -ne 0 ]; then
                 note="${note};OFF-TIMING-ERROR"
+                timing_status="error"
                 offm="NA"; onm="NA"; ratiom="NA"
                 profile_status="not-run"
                 optimizer_status="not-run"
@@ -1322,12 +1383,14 @@ process_one() {
             on_timing_rc=$?
             if [ "$on_timing_rc" -eq 124 ]; then
                 note="TIMEOUT-ON-TIMING"
+                timing_status="timeout"
                 onm="NA"; ratiom="NA"
                 profile_status="timeout"
                 optimizer_status="timeout"
                 stop_after_timeout=1
             elif [ "$on_timing_rc" -ne 0 ]; then
                 note="${note};ON-TIMING-ERROR"
+                timing_status="error"
                 onm="NA"; ratiom="NA"
                 profile_status="not-run"
                 optimizer_status="not-run"
@@ -1338,6 +1401,7 @@ process_one() {
         fi
         if [ "$stop_after_timeout" = 0 ]; then
             ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
+            case "$ratiom" in NA|-|'') timing_status="error";; *) timing_status="measured";; esac
         fi
         if [ "$PROFILE" = 1 ] && [ "$stop_after_timeout" = 0 ]; then
             local optimizer_result optimizer_rc=0 optimizer_raw
@@ -1426,6 +1490,7 @@ process_one() {
     QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
     QREG[$i]="$reg"; QDB[$i]="$db"; QSQL[$i]="$sql"; QFAMILY[$i]="$family"; QPATH[$i]="$sql_path"
     QKER[$i]="$ker"; QKDETAIL[$i]="$kdetail"; QKREASONS[$i]="$kreasons"
+    QAGGREGATE[$i]="$aggregate_query"; QAGG_PUSHDOWN[$i]="$aggregate_pushdown_applied"; QTIMING_STATUS[$i]="$timing_status"
     QREORDERED[$i]="$outer_reordered"; QGATE[$i]="$gate_applied"; QSELECTED[$i]="$selected"; QDECISION[$i]="$decision"
     QFORMULA[$i]="$formula_id"; QSELECTION_MODE[$i]="$selection_mode"
     QSELECTED_PLAN[$i]="$selected_plan"; QPROVEN_EMPTY[$i]="$proven_empty"
@@ -1456,8 +1521,8 @@ process_one() {
     local query_line result_line context_line decision_line detail_suffix gate_detail
     printf -v query_line '[%3d/%d] query=%s' "$((i+1))" "${#LABELS[@]}" "$id"
     printf -v result_line \
-        '  result: correct=%s reorder=%s selected=%s kernel=%s threads=%s runtime_s=[DuckDB=%s OuterYan=%s] speedup=%s optimization_s=[status=%s DuckDB=%s OuterYan=%s overhead=%s ratio=%s samples=%s]' \
-        "$correct" "$outer_reordered" "$selected_plan" "$kernel_display" "$OY_THREADS" \
+        '  result: correct=%s timing=%s aggregate=%s aggregate_pushdown=%s reorder=%s selected=%s kernel=%s threads=%s runtime_s=[DuckDB=%s OuterYan=%s] speedup=%s optimization_s=[status=%s DuckDB=%s OuterYan=%s overhead=%s ratio=%s samples=%s]' \
+        "$correct" "$timing_status" "$aggregate_query" "$aggregate_pushdown_applied" "$outer_reordered" "$selected_plan" "$kernel_display" "$OY_THREADS" \
         "$offm" "$onm" "$ratiom" "$optimizer_status" "$optimizer_duckdb_total" \
         "$optimizer_outeryan_total" "$optimizer_overhead" "$optimizer_ratio" "$optimizer_samples"
     printf -v context_line \
@@ -1465,7 +1530,7 @@ process_one() {
         "$family" "$WORKLOAD_CATEGORY" "$nrel" "$PASS" "$note" "$rows" "$sql_path" \
         "$profile_status" "$profile_cpu" "$r1sj" "$r2sj" "$realjoin" "$other" "$profile_wall" "$profile_samples"
     decision_line='  decision:'
-    if [ "$correct" = "TRUE" ]; then
+    if [ "$correct" = "TRUE" ] || [ "$timing_status" = "fallback-skip" ]; then
         printf -v detail_suffix \
             ' plan=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
             "$selection_mode" \
@@ -1531,7 +1596,7 @@ process_one() {
     } >&2
     csv_result_row \
         "$EXPERIMENT_GROUP" "$CORPUS_VERSION" "$CORPUS_SCOPE" "$WORKLOAD_CATEGORY" "$QUERY_CLASS" \
-        "$id" "$family" "$sql_path" "$nrel" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
+        "$id" "$family" "$sql_path" "$nrel" "$aggregate_query" "$aggregate_pushdown_applied" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
         "$default_filter_upper_checked" "$default_filter_upper_selected" "$full_reduction_lower_bound" \
         "$uncertain_filter_guard" "$stretch_eligible" "$stretch_selected" \
@@ -1545,7 +1610,7 @@ process_one() {
         "$raw_delta" "$raw_ratio" "$gate_lhs" "$gate_rhs" "$gate_margin" \
         "$inner_weight" "$unmatched_left_weight" "$unmatched_right_weight" \
         "$sj_materialize_weight" "$sj_filter_build_weight" "$sj_replay_weight" "$sj_lookup_weight" "$sj_emit_weight" \
-        "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$OY_THREADS" \
+        "$ker" "$kdetail" "$kreasons" "$correct" "$note" "$timing_status" "$OY_THREADS" \
         "$offm" "$onm" "$ratiom" \
         "$optimizer_status" "$optimizer_samples" "$optimizer_duckdb_total" "$optimizer_outeryan_total" \
         "$optimizer_overhead" "$optimizer_ratio" "$optimizer_duckdb_phase_sum" "$optimizer_outeryan_phase_sum" \
@@ -1562,22 +1627,18 @@ process_one() {
 # ==== Every query, once, under the fixed per-statement timeout =============
 echo "Temporary result storage: $OY_RUN_TMPDIR" >&2
 echo "Temporary filesystem: $OY_TMP_FREE available on $OY_TMP_MOUNT (base=$OY_TMPDIR)" >&2
-echo "--- Per-query: correctness + multi-thread timing (TM=${OY_THREADS}) ---" >&2
+echo "--- Per-query: decision + selected/aggregate correctness and timing (TM=${OY_THREADS}) ---" >&2
 for ((i=0; i<${#LABELS[@]}; i++)); do
     process_one "$i"
 done
 
 # ==== Final summary computed from the Q* arrays =============================
 QN="${#LABELS[@]}"
-NCORRECT=0; NTIMED=0; NKBM=0; NKHASH=0; NKMIX=0
+NCORRECT=0; NTIMED=0; NFALLBACK=0; NKBM=0; NKHASH=0; NKMIX=0
 NNO=0; NYES=0; SUMNO=0; SUMYES=0
 NBASELINE=0; NOUTERYAN=0; SUMBASELINE=0; SUMOUTERYAN=0
 NSAME=0; NREJECT=0; NSELECTED=0; NDECISION_UNKNOWN=0; NGATE_APPLIED=0
 for ((i=0; i<QN; i++)); do
-    [ "${QCORRECT[i]}" = "TRUE" ] || continue
-    NCORRECT=$((NCORRECT+1))
-    case "${QRATIOM[i]}" in ''|NA|-) ;; *) NTIMED=$((NTIMED+1));; esac
-    case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
     [ "${QGATE[i]}" = "1" ] && NGATE_APPLIED=$((NGATE_APPLIED+1))
     case "${QREORDERED[i]}:${QSELECTED[i]}" in
         0:0) NSAME=$((NSAME+1));;
@@ -1585,6 +1646,14 @@ for ((i=0; i<QN; i++)); do
         0:1|1:1) NSELECTED=$((NSELECTED+1));;
         *)   NDECISION_UNKNOWN=$((NDECISION_UNKNOWN+1));;
     esac
+    if [ "${QTIMING_STATUS[i]}" = "fallback-skip" ]; then
+        NFALLBACK=$((NFALLBACK+1))
+        continue
+    fi
+    [ "${QCORRECT[i]}" = "TRUE" ] || continue
+    NCORRECT=$((NCORRECT+1))
+    [ "${QTIMING_STATUS[i]}" = "measured" ] && NTIMED=$((NTIMED+1))
+    case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
     case "${QRATIOM[i]}" in ''|NA|-) continue;; esac
     case "${QREG[i]}" in
         No)  NNO=$((NNO+1));   SUMNO="$(awk -v s="$SUMNO" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
@@ -1595,7 +1664,7 @@ for ((i=0; i<QN; i++)); do
         1) NOUTERYAN=$((NOUTERYAN+1)); SUMOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
     esac
 done
-NSKIP=$((QN-NCORRECT))
+NSKIP=$((QN-NCORRECT-NFALLBACK))
 MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 MBASELINE="$(awk -v s="$SUMBASELINE" -v n="$NBASELINE" 'BEGIN{print (n? s/n : "-")}')"
@@ -1603,22 +1672,26 @@ MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-
 {
     echo
     echo "============================== SUMMARY ================================"
-    echo "queries=$QN  correct=$NCORRECT  incorrect/skipped=$NSKIP  timed=$NTIMED"
+    echo "queries=$QN  correct=$NCORRECT  fallback-skip=$NFALLBACK  incorrect/not-run=$NSKIP  timed=$NTIMED"
     echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
     echo "threads: multi=${OY_THREADS}"
     echo "OuterYan decisions: same-grouping=$NSAME  changed-rejected=$NREJECT  selected=$NSELECTED  unknown=$NDECISION_UNKNOWN  cost-gate-applied=$NGATE_APPLIED"
     echo "coverage by relation count:"
     while IFS= read -r nrel; do
         [ -n "$nrel" ] || continue
-        nrel_queries=0; nrel_correct=0; nrel_timed=0
+        nrel_queries=0; nrel_correct=0; nrel_fallback=0; nrel_timed=0
         for ((i=0; i<QN; i++)); do
             [ "${QNREL[i]}" = "$nrel" ] || continue
             nrel_queries=$((nrel_queries+1))
+            if [ "${QTIMING_STATUS[i]}" = "fallback-skip" ]; then
+                nrel_fallback=$((nrel_fallback+1))
+                continue
+            fi
             [ "${QCORRECT[i]}" = "TRUE" ] || continue
             nrel_correct=$((nrel_correct+1))
-            case "${QRATIOM[i]}" in ''|NA|-) ;; *) nrel_timed=$((nrel_timed+1));; esac
+            [ "${QTIMING_STATUS[i]}" = "measured" ] && nrel_timed=$((nrel_timed+1))
         done
-        echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  timed=$nrel_timed"
+        echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  fallback-skip=$nrel_fallback  timed=$nrel_timed"
     done < <(printf '%s\n' "${QNREL[@]}" | sort -n -u)
     echo "speed-up by outer_reordered (reorder CSV compatibility column):"
     echo "  No:  n=$NNO  mean speed-up(TM)=$MNO"

@@ -64,6 +64,36 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertTrue(all(row["speedup"] is None for row in report["queries"][1:]))
         json.dumps(report, allow_nan=False)
 
+    def test_fallback_skip_contributes_default_speedup_without_runtime(self):
+        measured = self.frame().iloc[0].to_dict()
+        fallback = dict(
+            measured,
+            query="fallback",
+            selected_plan="DUCKDB",
+            correct="SKIPPED",
+            note="FALLBACK-SKIP",
+            timing_status="fallback-skip",
+            tm_off=None,
+            tm_on=None,
+            tm_speedup=1.0,
+        )
+        report = STATS.build_statistics(pd.DataFrame([measured, fallback]))
+        summary = next(
+            row for row in report["groups"]
+            if row["subset"] == "all" and row["scope"] == "overall"
+        )
+        self.assertEqual(summary["counts"]["valid"], 2)
+        self.assertEqual(summary["counts"]["measured"], 1)
+        self.assertEqual(summary["counts"]["fallback_skips"], 1)
+        self.assertEqual(summary["counts"]["equal"], 1)
+        self.assertEqual(summary["totals"]["off_s"], measured["tm_off"])
+        self.assertEqual(summary["totals"]["on_s"], measured["tm_on"])
+        fallback_row = next(row for row in report["queries"] if row["query"] == "fallback")
+        self.assertEqual(fallback_row["speedup"], 1.0)
+        self.assertEqual(fallback_row["speedup_source"], "fallback-default")
+        self.assertFalse(fallback_row["valid_timing"])
+        self.assertTrue(fallback_row["valid_speedup"])
+
     def test_empty_statistics_and_timeout_only_shape_are_unavailable(self):
         frame = self.frame().iloc[:1].assign(correct=False, note="TIMEOUT", tm_on=None)
         report = STATS.build_statistics(frame)

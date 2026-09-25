@@ -141,6 +141,7 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	     << "[OY_DECISION] formula_id=" << costs.formula_id
 	     << " selection_mode=" << record.selection_mode
 	     << " aggregate_query=" << (record.aggregate_query ? 1 : 0)
+	     << " aggregate_pushdown_applied=" << (record.aggregate_pushdown_applied ? 1 : 0)
 	     << " default_filter_upper_bound_checked="
 	     << (costs.default_filter_upper_bound_checked ? 1 : 0)
 	     << " default_filter_upper_bound_selected="

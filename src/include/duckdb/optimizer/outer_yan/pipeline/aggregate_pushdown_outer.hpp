@@ -176,11 +176,18 @@ public:
 	//! Entry point. Returns the (possibly rewritten) plan.
 	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan);
 
+	//! Whether the final plan returned by Optimize retains an aggregate below a join.
+	bool Applied() const {
+		return applied;
+	}
+
 	//! Recognizer for the join kinds OuterYan emits. Public because the
 	//! `AggregatePushdownRewriter` (declared above) also calls it.
 	static bool AvailableJoin(LogicalOperatorType type);
 
 private:
+	bool applied = false;
+
 	//! Walk `plan_copy` after the speculative insertion + prune cycle and
 	//! tighten the decision vector: any push site whose inserted
 	//! aggregate still has `groups.size() > AggPushdown::kGroupByNum`

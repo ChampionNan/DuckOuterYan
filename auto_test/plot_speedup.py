@@ -379,10 +379,22 @@ def load(paths: list[str]) -> pd.DataFrame:
 
 
 def timed(frame: pd.DataFrame) -> pd.DataFrame:
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).fillna("TRUE").astype(str).str.upper().eq("TRUE")
+    notes = frame.get("note", pd.Series("", index=frame.index)).fillna("").astype(str).str.upper()
+    timing_status = frame.get(
+        "timing_status", pd.Series("", index=frame.index)
+    ).fillna("").astype(str).str.lower()
+    fallback = timing_status.eq("fallback-skip") | notes.eq("FALLBACK-SKIP")
     missing = pd.Series(np.nan, index=frame.index)
-    measured = frame.get("t1_speedup", missing).notna() | frame.get("tm_speedup", missing).notna()
-    return frame.loc[correct & measured].copy()
+    reported_speedup = pd.to_numeric(frame.get("t1_speedup", missing), errors="coerce").combine_first(
+        pd.to_numeric(frame.get("tm_speedup", missing), errors="coerce")
+    )
+    off = pd.to_numeric(frame.get("tm_off", missing), errors="coerce")
+    on = pd.to_numeric(frame.get("tm_on", missing), errors="coerce")
+    measured = (np.isfinite(off) & off.gt(0) & np.isfinite(on) & on.gt(0)) | (
+        np.isfinite(reported_speedup) & reported_speedup.gt(0)
+    )
+    return frame.loc[(correct | fallback) & measured].copy()
 
 
 def grouped_box(ax: plt.Axes, frame: pd.DataFrame, column: str, order: list[str], title: str) -> None:
@@ -652,7 +664,7 @@ def runtime_series(frame: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 def complete_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep correct, non-timeout queries with complete timings for their schema."""
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).fillna("TRUE").astype(str).str.upper().eq("TRUE")
     timeout = frame.get("note", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains(
         "TIMEOUT", case=False, regex=False
     )
@@ -852,7 +864,18 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     sub = sub.loc[np.isfinite(sub["_speedup"]) & sub["_speedup"].gt(0)]
     if sub.empty:
         return
-    families = [family for family in FAMILY_ORDER if sub["family"].eq(family).any()]
+    distribution = timed(frame).copy()
+    reported = pd.to_numeric(
+        distribution.get(f"{metric}_speedup", pd.Series(np.nan, index=distribution.index)),
+        errors="coerce",
+    )
+    distribution["_speedup"] = reported
+    measured_index = distribution.index.intersection(sub.index)
+    distribution.loc[measured_index, "_speedup"] = sub.loc[measured_index, "_speedup"]
+    distribution = distribution.loc[
+        np.isfinite(distribution["_speedup"]) & distribution["_speedup"].gt(0)
+    ]
+    families = [family for family in FAMILY_ORDER if distribution["family"].eq(family).any()]
     off_column, on_column = f"{metric}_off", f"{metric}_on"
     values = np.concatenate([sub[off_column].to_numpy(float), sub[on_column].to_numpy(float)])
     log_min, log_max = np.log10(values.min()), np.log10(values.max())
@@ -908,7 +931,7 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
         bbox_to_anchor=(0.5, 0.975), frameon=False, borderaxespad=0.0,
         handlelength=1.7, handletextpad=0.30, columnspacing=0.82,
     )
-    speedup_distribution(distribution_axis, sub, families)
+    speedup_distribution(distribution_axis, distribution, families)
 
     for label, axis in zip(
         ("(a) Running Time Comparison", "(b) Speed-up Comparison"), axes

@@ -822,6 +822,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 			const auto phase_start = Clock::now();
 			AggregatePushdownOuter aggregate_pushdown(optimizer, candidate_tree);
 			selected_plan = aggregate_pushdown.Optimize(std::move(selected_plan));
+			decision.aggregate_pushdown_applied = aggregate_pushdown.Applied();
 			candidate_tree.phase_timings.aggregate_pushdown +=
 			    std::chrono::duration<double>(Clock::now() - phase_start).count();
 			if (OuterYanTrace::Enabled()) {

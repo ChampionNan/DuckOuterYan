@@ -311,16 +311,22 @@ once before any requested sweep.
 
 For every selected query at each thread count, `experiment_onoff.sh` performs:
 
-1. Execute the bare query with OuterYan OFF and ON, sort the emitted CSV files
-   outside DuckDB, and compare the result multisets. A mismatch, error, or
+1. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record,
+   including `aggregate_query`, `aggregate_pushdown_applied`, and `selected_plan`.
+2. Execute a query only when it selects OuterYan and, for an aggregate query,
+   the selected plan actually contains at least one aggregate pushdown. A DuckDB
+   fallback or an aggregate query without a realized pushdown is retained as
+   `note=FALLBACK-SKIP`, `timing_status=fallback-skip`, with unavailable OFF/ON
+   runtimes and the selection-policy speed-up default `1.0`. For remaining
+   queries, execute the bare query with OuterYan OFF and ON, sort the emitted CSV
+   files outside DuckDB, and compare the result multisets. A mismatch, error, or
    timeout is not timed. No SQL wrapper changes the optimized plan.
-2. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record.
 3. If OuterYan was selected, run one kernel-classification execution and record
    bitmap/hash filter counts.
 4. Time OuterYan OFF and ON at `threads=$OY_THREADS`. Each batch
    has one warm-up followed by `--runs N` timed executions; the median excludes
    the warm-up.
-5. For every correct query, execute OFF and ON once after one unprofiled warm-up
+5. For every executed correct query, execute OFF and ON once after one unprofiled warm-up
    while collecting a detailed JSON profile. DuckDB's `all_optimizers` value is
    the OFF total. The ON total adds OuterYan's cost-model phase because that
    phase sits between named DuckDB optimizer timers and is therefore absent
@@ -691,7 +697,9 @@ Its `*_statistics/` directory contains `benchmark_statistics.csv`,
 With `--out path/name.txt`, a sweep writes `path/name_t16.txt` and
 `path/name_t32.txt`, with matching CSV names. For a single configuration the
 explicit output path is used unchanged. Each CSV contains one row per query
-and records `timing_threads`, `tm_off`, `tm_on`, and `tm_speedup`. New outputs
+and records `aggregate_query`, `aggregate_pushdown_applied`, `timing_status`,
+`timing_threads`, `tm_off`, `tm_on`, and `tm_speedup`. A `fallback-skip` row has
+no fabricated runtime pair and records `tm_speedup=1.000` as a policy default. New outputs
 contain no `t1_*` columns. Appended `profile_*` columns record status, actual
 thread count, R1/R2/R3 operator work and counts, Other CPU work, wall latency,
 total CPU work, phase shares, sample count, and the raw profile directory.
@@ -767,9 +775,9 @@ counts for every relation depth present in the run.
 `--split-output-dir`, the two publication figures used by the paper:
 
 - `speedup_all_queries.pdf`: panel (a) maps DuckDB runtime to the x-axis and
-  DuckOuterYan runtime to the y-axis for every valid query; panel (b) shows the
+  DuckOuterYan runtime to the y-axis for every measured query; panel (b) shows the
   per-family distribution of `DuckDB / DuckOuterYan` on a log axis. Family is
-  encoded by color. In panel (a), a circle denotes faster/equal and an `X`
+  encoded by color and includes fallback-skip defaults at `1.0`. In panel (a), a circle denotes faster/equal and an `X`
   denotes slower. The diagonal and `1x` line denote parity. This figure is not
   sampled.
 - `phase_breakdown_outeryan.pdf`: the left panel shows the Round 1, Round 2,
@@ -800,10 +808,13 @@ overrides it. Statistics use the full deduplicated run, not the displayed phase
 sample, and report all queries, OuterYan-selected queries, and DuckDB-selected
 queries separately. Generated groups include benchmark, input shape,
 benchmark-by-shape, and manifest-backed structural/evaluation components.
-Outputs include exact coverage, min/max queries, arithmetic/geometric means,
+Outputs include exact coverage, measured/fallback counts, min/max queries,
+arithmetic/geometric means,
 median and percentiles, sample dispersion, faster/slower bands, paired runtime
 totals, total-time speed-up, saved time, and complete phase-profile summaries.
 The JSON retains calculation precision; Markdown rounds to six decimals.
+Speed-up distributions include the explicit fallback default `1.0`; paired
+runtime distributions and totals use measured OFF/ON pairs only.
 
 Result files are grouped by filename timestamp before plotting. A final CSV and
 its `.attempts.csv` companion form one logical run, not two. Duplicate

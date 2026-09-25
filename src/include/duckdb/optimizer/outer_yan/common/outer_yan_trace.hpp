@@ -124,6 +124,10 @@ struct OuterYanDecisionCosts {
 struct OuterYanDecisionRecord {
 	string selection_mode = "GATED";
 	bool aggregate_query = false;
+	//! True only when at least one pushed aggregate remains below a join in the
+	//! final selected plan. An aggregate in the SQL text alone is not sufficient
+	//! to set this flag.
+	bool aggregate_pushdown_applied = false;
 	bool outer_reordered = false;
 	bool cost_gate_applied = false;
 	//! True only when a candidate that lost the strict 1.0 comparison was

@@ -567,6 +567,23 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
         self.assertEqual(points[0], [8.0, 4.0])
         plt.close(captured[0])
 
+    def test_fallback_skip_is_kept_for_speedup_distribution_only(self):
+        measured = self.runtime_row("derived__measured", "TPC-H", "OUTERYAN", 2.0, 0.0)
+        fallback = dict(
+            measured,
+            query="derived__fallback",
+            selected_plan="DUCKDB",
+            correct="SKIPPED",
+            note="FALLBACK-SKIP",
+            timing_status="fallback-skip",
+            tm_off=float("nan"),
+            tm_on=float("nan"),
+            tm_speedup=1.0,
+        )
+        frame = pd.DataFrame([measured, fallback])
+        self.assertEqual(PLOT.timed(frame)["query"].tolist(), ["derived__measured", "derived__fallback"])
+        self.assertEqual(PLOT.complete_runtime_rows(frame)["query"].tolist(), ["derived__measured"])
+
     def test_runtime_scatter_order_is_stable(self):
         frame = pd.DataFrame([
             self.runtime_row(f"derived__{index}_{suffix}", family, "OUTERYAN", 1 + index / 10, 0)

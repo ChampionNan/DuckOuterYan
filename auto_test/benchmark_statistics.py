@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Descriptive ON/OFF statistics for a deduplicated, single-thread-setting run.
 
-Keep failed and incomplete queries for coverage accounting. Timing statistics
-use only correct queries with finite positive OFF/ON pairs. No censoring-value
-imputation, speed-up-based trimming, or representative-query sampling is used.
+Keep failed and incomplete queries for coverage accounting. Measured timing
+statistics use correct queries with finite positive OFF/ON pairs. DuckDB
+fallbacks and aggregate queries without a realized aggregate pushdown are not
+executed; they contribute the explicit selection-policy speed-up default 1.0
+to speed-up distributions, but not runtime totals.
 """
 
 from __future__ import annotations
@@ -73,7 +75,8 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
     columns = [column for column in (
         "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
         "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
-        "selected_plan", "correct", "note", "timing_threads", "sql_path",
+        "aggregate_query", "aggregate_pushdown_applied", "selected_plan", "correct", "note", "timing_status",
+        "timing_threads", "sql_path",
     ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
     detail["family"] = detail["family"].map(normalize_family)
@@ -81,6 +84,9 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         "UNKNOWN").astype(str).str.upper()
     correct = detail.get("correct", pd.Series("TRUE", index=detail.index)).astype(str).str.upper().eq("TRUE")
     notes = detail.get("note", pd.Series("", index=detail.index)).fillna("").astype(str)
+    timing_status = detail.get(
+        "timing_status", pd.Series("", index=detail.index)
+    ).fillna("").astype(str).str.lower()
     missing = pd.Series(np.nan, index=frame.index)
     off = pd.to_numeric(frame.get(f"{metric}_off", missing), errors="coerce").reset_index(drop=True)
     on = pd.to_numeric(frame.get(f"{metric}_on", missing), errors="coerce").reset_index(drop=True)
@@ -88,10 +94,14 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         speedup = off / on
     pair = np.isfinite(off) & off.gt(0) & np.isfinite(on) & on.gt(0)
     timeout = notes.str.contains("TIMEOUT", case=False, regex=False)
-    valid = correct & ~timeout & pair & np.isfinite(speedup) & speedup.gt(0)
+    measured = correct & ~timeout & pair & np.isfinite(speedup) & speedup.gt(0)
+    fallback = timing_status.eq("fallback-skip") | notes.str.upper().eq("FALLBACK-SKIP")
+    valid = measured | fallback
     detail["off_s"], detail["on_s"] = off, on
-    detail["speedup"] = speedup.where(valid)
-    detail["valid_timing"] = valid
+    detail["speedup"] = speedup.where(measured).mask(fallback, 1.0)
+    detail["valid_timing"] = measured
+    detail["valid_speedup"] = valid
+    detail["speedup_source"] = np.where(fallback, "fallback-default", np.where(measured, "measured", ""))
     # Exclusive reasons make coverage totals reconcile without double-counting.
     detail["exclusion_reason"] = np.select(
         [valid, timeout, ~correct, ~pair],
@@ -102,10 +112,13 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
 
 
 def summarize(rows: pd.DataFrame) -> dict:
-    valid = rows.loc[rows["valid_timing"]]
+    valid = rows.loc[rows["valid_speedup"]]
+    measured = rows.loc[rows["valid_timing"]]
     speedup = valid["speedup"]
     counts = {
         "total": len(rows), "valid": len(valid), "excluded": len(rows) - len(valid),
+        "measured": len(measured),
+        "fallback_skips": int(valid["speedup_source"].eq("fallback-default").sum()),
         "timeouts": int(rows["exclusion_reason"].eq("timeout").sum()),
         "correctness_not_true": int(rows["exclusion_reason"].eq("correctness_not_true").sum()),
         "missing_or_invalid_timing": int(rows["exclusion_reason"].eq("missing_or_invalid_timing").sum()),
@@ -116,14 +129,14 @@ def summarize(rows: pd.DataFrame) -> dict:
         "speedup_lt_0_95": int(speedup.lt(0.95).sum()),
         "speedup_ge_2": int(speedup.ge(2).sum()), "speedup_ge_10": int(speedup.ge(10).sum()),
     }
-    total_off = float(valid["off_s"].sum()) if len(valid) else None
-    total_on = float(valid["on_s"].sum()) if len(valid) else None
+    total_off = float(measured["off_s"].sum()) if len(measured) else None
+    total_on = float(measured["on_s"].sum()) if len(measured) else None
     stats = distribution(speedup)
     for name in ("min", "max"):
         stats[f"{name}_queries"] = sorted(valid.loc[speedup.eq(stats[name]), "query"].tolist())
     return {
         "counts": counts, "speedup": stats,
-        "off_s": distribution(valid["off_s"]), "on_s": distribution(valid["on_s"]),
+        "off_s": distribution(measured["off_s"]), "on_s": distribution(measured["on_s"]),
         "totals": {"off_s": total_off, "on_s": total_on,
                    "speedup": total_off / total_on if total_on is not None else None,
                    "saved_s": total_off - total_on if total_on is not None else None,
@@ -512,14 +525,15 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         "sources": source_info, "input_rows": sum(source["rows"] for source in source_info) if source_info else None,
         "unique_queries": len(detail),
         "method": {
-            "speedup": "OFF / ON from original unrounded timing pairs; values > 1 mean faster",
-            "eligibility": "Correct, not marked TIMEOUT, finite positive OFF, ON, and ratio",
+            "speedup": "Measured rows use OFF / ON from original unrounded timing pairs; values > 1 mean faster",
+            "eligibility": "Measured rows require correct, non-timeout finite positive OFF/ON pairs; DuckDB fallbacks and aggregate queries without a realized pushdown contribute the explicit policy default 1.0",
+            "fallback": "timing_status=fallback-skip means no query execution occurred; speed-up 1.0 is a selection-policy default, not a measurement",
             "deduplication": "Rows are unique by workload category + family + query",
             "geomean": "exp(mean(log(OFF / ON))), each eligible query weighted equally",
-            "total_speedup": "sum(OFF) / sum(ON) over the same eligible pairs, not mean query speedup",
+            "total_speedup": "sum(OFF) / sum(ON) over measured timing pairs only; fallback skips have no fabricated runtime",
             "stddev_variance": "Sample statistics (ddof=1); unavailable for n < 2",
             "percentiles": "Linear interpolation; p50 is median",
-            "excluded": "No timeout substitution, imputation, trimming, or use of the representative display sample",
+            "excluded": "No timeout substitution, runtime imputation, speed-up trimming, or use of the representative display sample",
             "uncertainty": "Descriptive query-level statistics, not confidence intervals over repeated runs",
         },
         "groups": groups,
@@ -543,12 +557,13 @@ def markdown_report(report: dict) -> str:
         rows = [row for row in report["groups"] if row["subset"] == subset and row["scope"] in ("overall", "benchmark")]
         rows.sort(key=lambda row: family_order[row["family"]])
         lines.extend([f"## {subset}", "", "### Speed-up distribution", "",
-                      "| Benchmark | Valid / total | Min | Max | Geomean | Mean | Median | Sample SD | Total-time speed-up |",
-                      "|---|---:|---:|---:|---:|---:|---:|---:|---:|"])
+                      "| Benchmark | Speed-ups / total | Measured | Fallback default | Min | Max | Geomean | Mean | Median | Sample SD | Total-time speed-up |",
+                      "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
         for row in rows:
             stats, counts = row["speedup"], row["counts"]
             values = [stats[key] for key in ("min", "max", "geomean", "mean", "median", "stddev")]
-            lines.append(f"| {row['family']} | {counts['valid']} / {counts['total']} | " +
+            lines.append(f"| {row['family']} | {counts['valid']} / {counts['total']} | "
+                         f"{counts['measured']} | {counts['fallback_skips']} | " +
                          " | ".join(number(value) for value in values + [row["totals"]["speedup"]]) + " |")
         lines.extend(["", "### Percentiles and dispersion", "",
                       "| Benchmark | P05 | P10 | P25 | P75 | P90 | P95 | P99 | Variance | CV |",
@@ -557,7 +572,8 @@ def markdown_report(report: dict) -> str:
             lines.append(f"| {row['family']} | " + " | ".join(number(row["speedup"][key]) for key in
                          ("p05", "p10", "p25", "p75", "p90", "p95", "p99", "variance", "cv")) + " |")
         lines.extend(["", "### Coverage and faster/slower counts", "",
-                      "Faster/slower use exact OFF/ON > 1 or < 1. The ±5% band below applies to the speed-up ratio; "
+                      "Measured faster/slower use exact OFF/ON; fallback skips contribute exactly 1.0. "
+                      "The ±5% band below applies to the speed-up ratio; "
                       "it is a descriptive band, not a statistical significance test.", "",
                       "| Benchmark | Timeout | Other excluded | Faster | Equal | Slower | >1.05 | [0.95,1.05] | <0.95 | >=2 | >=10 |",
                       "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"])
@@ -660,7 +676,7 @@ def markdown_report(report: dict) -> str:
                       "`optimizer_phases.csv`; group-level phase summaries are in `optimizer_phase_summary.csv`.", ""])
     lines.extend(["## Excluded queries", "", "| Benchmark | Query | Reason | Recorded note |", "|---|---|---|---|"])
     for row in report["queries"]:
-        if not row["valid_timing"]:
+        if not row["valid_speedup"]:
             note = str(row.get("note") or "").replace("|", "/").replace("\n", " ")
             lines.append(f"| {row['family']} | `{row['query']}` | {row['exclusion_reason']} | {note} |")
     lines.extend(["", "## Sources", ""])
@@ -690,6 +706,8 @@ def write_statistics(output_directory: Path, frame: pd.DataFrame, metric: str = 
             "workload_category": row.get("workload_category", "all"),
             "benchmark": row["family"],
             "valid": row["counts"]["valid"],
+            "measured": row["counts"]["measured"],
+            "fallback_skips": row["counts"]["fallback_skips"],
             "total": row["counts"]["total"],
             "excluded": row["counts"]["excluded"],
             "timeouts": row["counts"]["timeouts"],
