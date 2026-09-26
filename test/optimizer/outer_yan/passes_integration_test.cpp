@@ -1180,10 +1180,38 @@ TEST_CASE("outer_yan policy: COUNT(*) over 3-relation LEFT chain remains equival
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
-	AssertOuterYanPreservesResults(con, "SELECT COUNT(*) "
-	                                     "FROM a "
-	                                     "LEFT JOIN b ON a.id = b.id "
-	                                     "LEFT JOIN c ON a.id = c.id");
+	const string sql = "SELECT COUNT(*) "
+	                   "FROM a "
+	                   "LEFT JOIN b ON a.id = b.id "
+	                   "LEFT JOIN c ON a.id = c.id";
+	AssertOuterYanPreservesResults(con, sql);
+
+	ScopedOuterYanCandidateForce force_candidate;
+	const auto plan = ExplainOptimizedPlan(con, "", sql);
+	REQUIRE(plan.find("GROUP_BY") != string::npos);
+	REQUIRE(plan.find("SJ_PROBE") != string::npos);
+}
+
+TEST_CASE("outer_yan policy: pushed group-less COUNT(*) returns zero on empty input",
+          "[outer_yan][passes][equivalence][aggregate_policy]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(id INTEGER)"));
+	const string sql = "SELECT COUNT(*) "
+	                   "FROM a "
+	                   "LEFT JOIN b ON a.id = b.id "
+	                   "LEFT JOIN c ON a.id = c.id";
+	AssertOuterYanPreservesResults(con, sql);
+
+	ScopedOuterYanCandidateForce force_candidate;
+	const auto plan = ExplainOptimizedPlan(con, "", sql);
+	REQUIRE(plan.find("GROUP_BY") != string::npos);
+	auto result = con.Query(sql);
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->types[0] == LogicalType::BIGINT);
+	REQUIRE(result->GetValue<int64_t>(0, 0) == 0);
 }
 
 TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain remains equivalent",

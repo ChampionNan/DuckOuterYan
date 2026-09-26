@@ -14,6 +14,7 @@
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -234,6 +235,13 @@ unique_ptr<Expression> MakeCoalesceWithOne(unique_ptr<Expression> annot, const L
 	auto coalesce = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_COALESCE, type);
 	coalesce->children.push_back(std::move(annot));
 	coalesce->children.push_back(make_uniq<BoundConstantExpression>(Value::Numeric(type, int64_t(1))));
+	return std::move(coalesce);
+}
+
+unique_ptr<Expression> MakeCoalesceWithZero(unique_ptr<Expression> expression, const LogicalType &type) {
+	auto coalesce = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_COALESCE, type);
+	coalesce->children.push_back(std::move(expression));
+	coalesce->children.push_back(make_uniq<BoundConstantExpression>(Value::Numeric(type, int64_t(0))));
 	return std::move(coalesce);
 }
 
@@ -942,39 +950,69 @@ AggregatePushdownOuter::ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan
 		return plan;
 	}
 
-	// Rebuild the root aggregate's first expression as
+	// Rebuild every root count_star expression as
 	// `sum(COALESCE(annot, 1))` — COUNT(*) semantics: a NULL annot from an
-	// outer-join NULL-padded row counts as 1, not 0.
-	auto root_annot_ref = make_uniq<BoundColumnRefExpression>(annot_type, annot_binding);
-	vector<unique_ptr<Expression>> sum_args;
-	sum_args.push_back(MakeCoalesceWithOne(std::move(root_annot_ref), annot_type));
+	// outer-join NULL-padded row counts as 1, not 0. SUM widens BIGINT to
+	// HUGEINT, so the root projection casts it back to COUNT(*)'s BIGINT result
+	// type. It also applies COALESCE(..., 0), which preserves COUNT(*) = 0 for
+	// an empty input to a group-less root aggregate.
 	auto sum_function = LookupAggregate(optimizer.context, "sum", annot_type);
-	FunctionBinder function_binder(optimizer.context);
-	auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(sum_args), nullptr,
-	                                                     AggregateType::NON_DISTINCT);
-	root_agg.expressions[0] = std::move(sum_expr);
+	struct CountReplacement {
+		ColumnBinding binding;
+		LogicalType sum_type;
+		LogicalType count_type;
+	};
+	vector<CountReplacement> replacements;
+	for (idx_t i = 0; i < root_agg.expressions.size(); i++) {
+		auto &root_expression = root_agg.expressions[i];
+		if (root_expression->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+			continue;
+		}
+		auto &root_aggregate = root_expression->Cast<BoundAggregateExpression>();
+		if (root_aggregate.function.name != "count_star" || root_aggregate.filter || root_aggregate.order_bys) {
+			continue;
+		}
+		const auto count_type = root_expression->return_type;
+		auto root_annot_ref = make_uniq<BoundColumnRefExpression>(annot_type, annot_binding);
+		vector<unique_ptr<Expression>> sum_args;
+		sum_args.push_back(MakeCoalesceWithOne(std::move(root_annot_ref), annot_type));
+		FunctionBinder function_binder(optimizer.context);
+		auto sum_expr = function_binder.BindAggregateFunction(sum_function, std::move(sum_args), nullptr,
+		                                                     AggregateType::NON_DISTINCT);
+		const auto sum_type = sum_expr->return_type;
+		root_expression = std::move(sum_expr);
+		replacements.push_back(
+		    {ColumnBinding(root_agg.aggregate_index, ProjectionIndex(i)), sum_type, count_type});
+	}
+	if (replacements.empty()) {
+		return plan;
+	}
 
-	// The result remains in aggregate slot zero, so the existing root
-	// projection already points at the correct binding and retains its alias.
+	for (auto &projection_expression : root_proj.expressions) {
+		ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+		    projection_expression, [&](BoundColumnRefExpression &column, unique_ptr<Expression> &owned_expression) {
+			    for (const auto &replacement : replacements) {
+				    if (column.binding != replacement.binding) {
+					    continue;
+				    }
+				    const auto alias = owned_expression->alias;
+				    unique_ptr<Expression> result =
+				        make_uniq<BoundColumnRefExpression>(replacement.sum_type, replacement.binding);
+				    result = BoundCastExpression::AddCastToType(optimizer.context, std::move(result),
+				                                                    replacement.count_type);
+				    result = MakeCoalesceWithZero(std::move(result), replacement.count_type);
+				    result->alias = alias;
+				    owned_expression = std::move(result);
+				    break;
+			    }
+		    });
+	}
+
+	// Aggregate slots stay in place, and the existing root projection keeps the
+	// original aliases while restoring COUNT's output type and empty-set value.
 	root_agg.ResolveOperatorTypes();
 	root_proj.ResolveOperatorTypes();
 	return plan;
-}
-
-// Descend through the root projection chain to the root LogicalAggregate and
-// report whether it has zero GROUP BY keys. A group-less COUNT(*) is the one
-// aggregate shape whose pushdown is not yet correct (the pushed annot is not
-// summed at the group-less root — it returns |preserved side| instead of the
-// full count); it is skipped so the plain SJ-reduced count runs instead.
-static bool RootAggregateHasNoGroups(LogicalOperator &plan) {
-	LogicalOperator *cur = &plan;
-	while (cur && cur->type == LogicalOperatorType::LOGICAL_PROJECTION && !cur->children.empty()) {
-		cur = cur->children[0].get();
-	}
-	if (cur && cur->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return cur->Cast<LogicalAggregate>().groups.empty();
-	}
-	return false;
 }
 
 unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalOperator> plan) {
@@ -993,13 +1031,9 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	    tree.root_aggregation.type != OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
 	}
-	// Group-less COUNT(*) remains the one unsupported pushdown shape: the
-	// pushed annotation is not summed at its group-less root. MIN/MAX and SUM
-	// use their dedicated root rewrites below. SELECT DISTINCT stays disabled
-	// until its serialization/type-fidelity path has the same coverage.
-	if ((tree.root_aggregation.type == OuterYanAggregationType::COUNT_STAR &&
-	     RootAggregateHasNoGroups(*plan)) ||
-	    tree.root_aggregation.type == OuterYanAggregationType::SELECT_DISTINCT) {
+	// SELECT DISTINCT stays disabled until its serialization/type-fidelity path
+	// has the same coverage as COUNT_STAR / MINMAX / SUM.
+	if (tree.root_aggregation.type == OuterYanAggregationType::SELECT_DISTINCT) {
 		return plan;
 	}
 	if (tree.root_aggregation.type == OuterYanAggregationType::MINMAX) {

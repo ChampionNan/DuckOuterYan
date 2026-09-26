@@ -356,7 +356,12 @@ private:
 
 			const auto &name = bag.function.name;
 			if (name == "count_star") {
-				if (agg.groups.empty()) {
+				if (bag.filter || bag.order_bys) {
+					// Filtered or ordered counts need their predicate/order semantics
+					// carried into every pushed partial aggregate. Keep them on the
+					// ordinary aggregate path until that representation is supported.
+					any_other = true;
+				} else if (agg.groups.empty()) {
 					any_count_star = true;
 				} else {
 					// count_star + GROUP BY decomposes to a SUM-shape during

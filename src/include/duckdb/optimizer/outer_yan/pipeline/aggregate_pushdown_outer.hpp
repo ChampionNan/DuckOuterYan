@@ -194,8 +194,9 @@ private:
 	//! after pruning has its `push_into_child` flipped back to false.
 	void Prune(LogicalOperator &plan_copy);
 
-	//! For root-aggregation `COUNT_STAR`: rewrite the root `count(*)` to
-	//! `sum(annot)` so the query result actually consumes the pushdown.
+	//! For root-aggregation `COUNT_STAR`: rewrite each root `count(*)` to
+	//! `coalesce(cast(sum(annot) as BIGINT), 0)` so the query result consumes
+	//! the pushdown while preserving COUNT's type and empty-input result.
 	//! No-op for other query types.
 	unique_ptr<LogicalOperator> ReplaceRootCountWithSum(unique_ptr<LogicalOperator> plan);
 
