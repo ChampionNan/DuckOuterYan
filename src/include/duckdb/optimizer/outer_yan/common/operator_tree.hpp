@@ -106,6 +106,8 @@ struct OTNode {
 	//! `stats_initialized = false`) on JOIN nodes; DP does not consult JOIN-
 	//! node stats.
 	RelationStats stats;
+	//! Uniform-residue heuristic, rather than a statistics-backed estimate.
+	bool cardinality_uses_modulo_selectivity = false;
 };
 
 //! OperatorTree — first IR of the OuterYan pipeline. Pure structure: only

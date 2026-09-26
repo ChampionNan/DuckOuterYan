@@ -1405,6 +1405,128 @@ TEST_CASE("outer_yan passes: DP — cost model restructures the join order",
 	REQUIRE(OuterYanDP::JoinGroupingSignature(*tree) != input_signature);
 }
 
+TEST_CASE("outer_yan passes: modulo selectivity respects candidate and baseline filter placement",
+          "[outer_yan][passes][dp][cost][modulo_selectivity]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	for (const auto &name : {"p", "q", "r", "s"}) {
+		REQUIRE_NO_FAIL(con.Query("CREATE TABLE " + string(name) +
+		                          " AS SELECT i AS id, i AS v FROM range(1000) t(i)"));
+	}
+	REQUIRE_NO_FAIL(con.Query("ANALYZE"));
+	vector<double> baseline_costs, candidate_costs, semijoin_costs;
+	for (const auto divisor : {20, 5}) {
+		const string sql = "SELECT * FROM (p FULL JOIN q ON p.id=q.id) "
+		                   "INNER JOIN (r LEFT JOIN s ON r.id=s.id) ON q.id=r.id "
+		                   "WHERE p.v % " + to_string(divisor) + " = 0";
+		auto tree = BuildPreIRFor(con, sql);
+		REQUIRE(tree->HasOT());
+		const auto p = RelationForTable(*tree, "p");
+		REQUIRE_FALSE(tree->filter_records.empty());
+		REQUIRE_FALSE(tree->filter_records[0]->retained_at_original_scope);
+		auto &ctx = *con.context;
+		ctx.transaction.BeginTransaction();
+		OuterYanDP scorer(ctx);
+		const auto baseline = scorer.ScoreCurrentJoinTreeDetailed(*tree);
+		const auto repeated = scorer.ScoreCurrentJoinTreeDetailed(*tree);
+		REQUIRE(repeated.total_cost == baseline.total_cost);
+		REQUIRE(tree->ot_relations_by_id[p]->stats.cardinality == 1000);
+		REQUIRE(baseline.steps[0].left_cardinality == 1000);
+		REQUIRE(baseline.steps[0].right_cardinality == 1000);
+		// The filter reduces the first join's output, not its local work.
+		REQUIRE(baseline.steps[0].output <= baseline.steps[0].local_cost / divisor);
+		baseline_costs.push_back(baseline.total_cost);
+		const auto candidate = OuterYanDP(ctx).Optimize(*tree);
+		REQUIRE(candidate.has_complete_plan);
+		REQUIRE(candidate.input_cardinalities[p] == 1000 / divisor);
+		REQUIRE(tree->ot_relations_by_id[p]->cardinality_uses_modulo_selectivity);
+		candidate_costs.push_back(candidate.CandidateCost(1.0));
+		semijoin_costs.push_back(candidate.SemijoinRawCost());
+		// Re-scoring must neither lose nor multiply the filter estimate.
+		const auto rescored = scorer.ScoreCurrentJoinTreeDetailed(*tree, &candidate.reduced_cardinalities, true);
+		REQUIRE(rescored.total_cost == Approx(candidate.chosen_real_join_cost));
+		ctx.transaction.Commit();
+		AssertOuterYanPreservesResults(con, sql);
+	}
+	REQUIRE(baseline_costs[0] < baseline_costs[1]);
+	REQUIRE(candidate_costs[0] < candidate_costs[1]);
+	REQUIRE(semijoin_costs[0] < semijoin_costs[1]);
+}
+
+TEST_CASE("outer_yan passes: modulo selectivity keeps root filters above reducer inputs",
+          "[outer_yan][passes][dp][cost][modulo_selectivity]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE p AS SELECT i AS id FROM range(1000) t(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE q AS SELECT i AS id FROM range(1000) t(i)"));
+	auto tree = BuildPreIRFor(con, "SELECT * FROM p FULL JOIN q ON p.id=q.id WHERE p.id % 20 = 0");
+	REQUIRE(tree->HasOT());
+	REQUIRE(tree->filter_records[0]->retained_at_original_scope);
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	const auto summary = OuterYanDP(ctx).Optimize(*tree);
+	REQUIRE(summary.has_complete_plan);
+	for (const auto cardinality : summary.input_cardinalities) {
+		REQUIRE(cardinality == 1000);
+	}
+	ctx.transaction.Commit();
+}
+
+TEST_CASE("outer_yan passes: modulo selectivity handles base FILTER wrappers conservatively",
+          "[outer_yan][passes][dp][cost][modulo_selectivity]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE p AS SELECT i AS id, i AS v FROM range(1000) t(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE q AS SELECT i AS id FROM range(1000) t(i)"));
+	string predicate;
+	idx_t expected = 50;
+	SECTION("base-local modulo") {
+		predicate = "p.v % 20 = 0";
+	}
+	SECTION("reversed equality") {
+		predicate = "0 = p.v % 20";
+	}
+	SECTION("correlated predicates use the strongest estimate") {
+		predicate = "p.v % 20 = 0 AND p.v % 5 = 0";
+	}
+	SECTION("negative divisors keep the previous estimate") {
+		predicate = "p.v % -20 = 0";
+		expected = 1000;
+	}
+	SECTION("nonzero residues keep the previous estimate") {
+		predicate = "p.v % 20 = 1";
+		expected = 1000;
+	}
+	SECTION("zero divisor is not used as a selectivity") {
+		predicate = "p.v % 0 = 0";
+		expected = 1000;
+	}
+	SECTION("empty input stays empty") {
+		predicate = "p.v % 20 = 0";
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TABLE p(id BIGINT, v BIGINT)"));
+		expected = 0;
+	}
+	const auto sql = "SELECT * FROM (SELECT * FROM p WHERE " + predicate + ") p LEFT JOIN q ON p.id=q.id";
+	// Keep an explicit FILTER wrapper: scan-pushed expression filters are
+	// already estimated by ExtractGetStats and are outside this residual path.
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO 'outer_yan,join_order,column_lifetime,"
+	                          "statistics_propagation,filter_pullup,filter_pushdown,outer_join_simplification,"
+	                          "join_elimination'"));
+	auto plan = con.ExtractPlan(sql, false);
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers TO ''"));
+	auto tree = make_uniq<OuterYanTree>();
+	REQUIRE(tree->CheckApplicability(*plan));
+	auto &ctx = *con.context;
+	ctx.transaction.BeginTransaction();
+	OuterYanPre().Optimize(std::move(plan), *tree);
+	const auto p = RelationForTable(*tree, "p");
+	const auto summary = OuterYanDP(ctx).Optimize(*tree);
+	REQUIRE(summary.has_complete_plan);
+	REQUIRE(summary.input_cardinalities[p] == expected);
+	ctx.transaction.Commit();
+	AssertOuterYanPreservesResults(con, sql);
+}
+
 TEST_CASE("outer_yan passes: DP — estimated no-op reducers remain correctness guards",
           "[outer_yan][passes][dp][cost]") {
 	DuckDB db(nullptr);
@@ -1588,6 +1710,18 @@ TEST_CASE("outer_yan policy: confidence-aware stretch gate boundaries",
 		input.full_reduction_cardinality_lower_bound_applied = true;
 		result = OuterYanOptimizer::EvaluateCostGate(input);
 		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.pass);
+	}
+
+	SECTION("uniform modulo estimates cannot enable relaxed gates") {
+		auto input = costs();
+		input.candidate_total = 110.0;
+		input.unary_filter_selectivity_available = true;
+		input.unary_filter_selectivity = 0.05;
+		input.heuristic_filter_selectivity = true;
+		const auto result = OuterYanOptimizer::EvaluateCostGate(input);
+		REQUIRE_FALSE(result.stretch_eligible);
+		REQUIRE_FALSE(result.low_selectivity_eligible);
 		REQUIRE_FALSE(result.pass);
 	}
 

@@ -63,6 +63,8 @@ struct OuterYanDecisionCosts {
 	//! default-selectivity estimates are exposed but never qualify for the tier.
 	double unary_filter_selectivity = 0.0;
 	bool unary_filter_selectivity_available = false;
+	//! A pre-join input uses the uniform-residue heuristic, not measured stats.
+	bool heuristic_filter_selectivity = false;
 	bool low_selectivity_cost_gate_eligible = false;
 	double semijoin_retained_cardinality_ratio = 0.0;
 	double uncertain_filter_cardinality_amplification = 0.0;

@@ -285,6 +285,7 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 		return result;
 	}
 	result.stretch_eligible = !aggregate_query &&
+	    !costs.heuristic_filter_selectivity &&
 	    !costs.default_filter_upper_bound_checked && !costs.uncertain_filter_amplification_guard &&
 	    !costs.full_reduction_cardinality_lower_bound_applied &&
 	    costs.candidate_to_baseline_join_input_ratio_available &&
@@ -293,6 +294,7 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	    costs.semijoin_retained_cardinality_ratio >=
 	        STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO;
 	result.low_selectivity_eligible = !aggregate_query &&
+	    !costs.heuristic_filter_selectivity &&
 	    costs.unary_filter_selectivity_available &&
 	    costs.unary_filter_selectivity <= LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD &&
 	    !costs.default_filter_upper_bound_checked && !costs.uncertain_filter_amplification_guard &&
@@ -526,6 +528,12 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		const auto unary_filter = InspectUnaryFilterSelectivity(candidate_tree);
 		trace_costs.unary_filter_selectivity = unary_filter.minimum;
 		trace_costs.unary_filter_selectivity_available = unary_filter.available;
+		for (const auto *relation : candidate_tree.ot_relations_by_id) {
+			trace_costs.heuristic_filter_selectivity |= relation && relation->cardinality_uses_modulo_selectivity;
+		}
+		for (const auto *relation : baseline_tree.ot_relations_by_id) {
+			trace_costs.heuristic_filter_selectivity |= relation && relation->cardinality_uses_modulo_selectivity;
+		}
 		trace_costs.semijoin_retained_cardinality_ratio = uncertain_filter.retained_cardinality_ratio;
 		trace_costs.uncertain_filter_cardinality_amplification = uncertain_filter.cardinality_amplification;
 		trace_costs.uncertain_filter_amplification_guard = uncertain_filter.guard;
@@ -707,6 +715,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 			costs << "NA";
 		}
 		costs << "\n"
+		      << "heuristic_filter_selectivity=" << (trace_costs.heuristic_filter_selectivity ? 1 : 0) << "\n"
 		      << "low_selectivity_cost_gate_eligible="
 		      << (trace_costs.low_selectivity_cost_gate_eligible ? 1 : 0) << "\n"
 		      << "low_selectivity_cost_gate_selected="
@@ -774,7 +783,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << MAX_CANDIDATE_TO_BASELINE_RATIO << "; aggregate_limit="
 		      << AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO
 		      << " with relaxed tiers disabled" << std::setprecision(17) << "\n"
-		      << "stretch_gate_predicate=no_default_filter_upper_bound && no_uncertain_filter_guard && "
+		      << "stretch_gate_predicate=no_heuristic_filter_selectivity && no_default_filter_upper_bound && "
+		         "no_uncertain_filter_guard && "
 		         "no_full_reduction_lower_bound && candidate_join_cost < baseline_cost && "
 		         "candidate_join_input_rows <= "
 		      << std::setprecision(6) << STRETCH_MAX_JOIN_INPUT_RATIO << std::setprecision(17)
@@ -783,7 +793,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		      << std::setprecision(17) << "\n"
 		      << "low_selectivity_gate_predicate=stats_backed_unary_filter_selectivity <= "
 		      << std::setprecision(6) << LOW_UNARY_FILTER_SELECTIVITY_THRESHOLD
-		      << "; no_default_filter_upper_bound; no_uncertain_filter_guard; "
+		      << "; no_heuristic_filter_selectivity; no_default_filter_upper_bound; no_uncertain_filter_guard; "
 		         "no_full_reduction_lower_bound; candidate_join_cost < baseline_cost; "
 		         "candidate_join_input_rows <= "
 		      << LOW_SELECTIVITY_MAX_JOIN_INPUT_RATIO

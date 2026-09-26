@@ -150,6 +150,7 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	     << (costs.full_reduction_cardinality_lower_bound_applied ? 1 : 0)
 	     << " uncertain_filter_amplification_guard="
 	     << (costs.uncertain_filter_amplification_guard ? 1 : 0)
+	     << " heuristic_filter_selectivity=" << (costs.heuristic_filter_selectivity ? 1 : 0)
 	     << " stretch_cost_gate_eligible=" << (costs.stretch_cost_gate_eligible ? 1 : 0)
 	     << " stretch_cost_gate_selected=" << (record.stretch_cost_gate_selected ? 1 : 0)
 	     << " low_selectivity_cost_gate_eligible="

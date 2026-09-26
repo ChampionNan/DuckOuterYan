@@ -166,8 +166,11 @@ public:
 	//! they are for DP enumeration, then the actual binary OT is evaluated with
 	//! the same type-aware estimator and cost parameters.
 	double ScoreCurrentJoinTree(OuterYanTree &tree);
+	//! Baselines retain residual filters at their source scope. Candidate
+	//! re-scoring passes relocate_filters=true to match OJT lowering.
 	OuterYanJoinCostBreakdown ScoreCurrentJoinTreeDetailed(
-	    OuterYanTree &tree, const vector<double> *leaf_cardinality_override = nullptr);
+	    OuterYanTree &tree, const vector<double> *leaf_cardinality_override = nullptr,
+	    bool relocate_filters = false);
 	//! Re-score a normal join tree with unfiltered base cardinalities wherever
 	//! the generic 20% table-filter estimate was used.
 	OuterYanJoinCostBreakdown ScoreCurrentJoinTreeConservatively(OuterYanTree &tree, bool &used_upper_bound);
@@ -216,7 +219,7 @@ private:
 	enum class RootFixMode { NONE, FIX_ALL_OUTPUTS, FIX_ONE_OUTPUT };
 
 	// ---- setup ----
-	void BuildLeafRelations(OuterYanTree &tree);
+	void BuildLeafRelations(OuterYanTree &tree, bool relocate_filters = false);
 	void BuildEdgeStatistics(OuterYanTree &tree);
 	void BuildEdgesFromOT(OuterYanTree &tree);
 	//! Estimate both reducer rounds before enumeration. The resulting leaf
@@ -289,7 +292,7 @@ private:
 	double ComputeCost(const DPJoinNode &left, const DPJoinNode &right, const JoinEstimate &estimate) const;
 	JoinTreeEstimate ScoreCurrentJoinTreeNode(const OuterYanTree &tree, const OTNode &node,
 	                                          const vector<double> *leaf_cardinality_override,
-	                                          vector<OuterYanJoinCostStep> *steps) const;
+	                                          vector<OuterYanJoinCostStep> *steps, bool relocate_filters) const;
 	static double ClampPlanCardinality(double cardinality);
 	static vector<idx_t> StableTableIndexes(const OuterYanTree &tree, const unordered_set<idx_t> &relations);
 	static idx_t StableTableIndex(const OuterYanTree &tree, idx_t relation_id);

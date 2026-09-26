@@ -8,6 +8,9 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -35,7 +38,7 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 
 	OuterYanDPCostSummary summary;
 	summary.parameters = cost_parameters;
-	BuildLeafRelations(tree);
+	BuildLeafRelations(tree, true);
 	BuildEdgesFromOT(tree);
 	BuildSemijoinCostModel(tree, summary);
 	enforce_full_reduction_cardinality_lower_bound = CanApplyFullReductionCardinalityLowerBound(tree);
@@ -145,7 +148,7 @@ OuterYanDPCostSummary OuterYanDP::Optimize(OuterYanTree &tree) {
 	summary.chosen_real_join_cost = plans.find(full_set)->second->cost;
 	summary.has_complete_plan = true;
 	RebuildOT(tree, full_set);
-	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities, true);
 	summary.full_reduction_cardinality_lower_bound_applied =
 	    full_reduction_cardinality_lower_bound_applied;
 	if (!ApproxEqual(summary.candidate_join_breakdown.total_cost, summary.chosen_real_join_cost)) {
@@ -236,7 +239,48 @@ bool OuterYanDP::ViolatesRootFix(JoinRelationSet &set) const {
 // Setup
 // ============================================================================
 
-void OuterYanDP::BuildLeafRelations(OuterYanTree &tree) {
+// Estimate only integral `column % positive_constant = 0` (either equality
+// orientation). Uniform residues give 1/k; NULLs and skew are not measured.
+// Unsupported expressions retain the existing estimate.
+static double ModuloSelectivity(const Expression &expression) {
+	if (expression.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return 1.0;
+	}
+	auto &comparison = expression.Cast<BoundComparisonExpression>();
+	const Expression *function_expr = comparison.left.get();
+	const Expression *constant_expr = comparison.right.get();
+	if (function_expr->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		std::swap(function_expr, constant_expr);
+	}
+	if (function_expr->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
+	    constant_expr->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return 1.0;
+	}
+	auto &remainder = constant_expr->Cast<BoundConstantExpression>().value;
+	if (remainder.IsNull() || !remainder.type().IsIntegral() ||
+	    remainder != Value::Numeric(remainder.type(), int64_t(0))) {
+		return 1.0;
+	}
+	auto &function = function_expr->Cast<BoundFunctionExpression>();
+	if (function.function.name != "%" || !function.return_type.IsIntegral() || function.children.size() != 2 ||
+	    function.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+	    function.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return 1.0;
+	}
+	auto &divisor = function.children[1]->Cast<BoundConstantExpression>().value;
+	if (divisor.IsNull() || !divisor.type().IsIntegral() ||
+	    divisor <= Value::Numeric(divisor.type(), int64_t(0))) {
+		return 1.0;
+	}
+	return 1.0 / divisor.GetValue<double>();
+}
+
+static bool RelocateFilterForCost(const OuterYanFilterRecord &record) {
+	return !record.retained_at_original_scope && !record.requires_original_scope &&
+	       record.referenced_relations.size() == 1;
+}
+
+void OuterYanDP::BuildLeafRelations(OuterYanTree &tree, bool relocate_filters) {
 	auto &ot_relations = tree.ot_relations_by_id;
 	num_relations = ot_relations.size();
 	for (idx_t r = 0; r < num_relations; r++) {
@@ -251,6 +295,34 @@ void OuterYanDP::BuildLeafRelations(OuterYanTree &tree) {
 		}
 		if (!rel->stats.stats_initialized) {
 			rel->stats.cardinality = 1;
+		}
+		double selectivity = 1.0;
+		// Base-local FILTER wrappers remain in origin; intermediate residuals
+		// live in filter_records. Never apply either predicate twice.
+		for (auto *op = rel->origin; op && op != base && op->children.size() == 1;
+		     op = op->children[0].get()) {
+			if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+				for (const auto &expression : op->expressions) {
+					selectivity = MinValue(selectivity, ModuloSelectivity(*expression));
+				}
+			}
+		}
+		if (relocate_filters) {
+			for (const auto &record : tree.filter_records) {
+				if (record && record->filter && RelocateFilterForCost(*record) &&
+				    record->referenced_relations.count(r)) {
+					selectivity = MinValue(selectivity, ModuloSelectivity(*record->filter));
+				}
+			}
+		}
+		rel->cardinality_uses_modulo_selectivity = selectivity < 1.0;
+		if (rel->cardinality_uses_modulo_selectivity) {
+			// Use the strongest recognized predicate rather than assuming
+			// independence between potentially correlated modulo predicates.
+			rel->stats.cardinality = static_cast<idx_t>(ClampPlanCardinality(rel->stats.cardinality * selectivity));
+			for (auto &distinct : rel->stats.column_distinct_count) {
+				distinct.distinct_count = MinValue(distinct.distinct_count, rel->stats.cardinality);
+			}
 		}
 	}
 }
@@ -896,7 +968,7 @@ double OuterYanDP::ClampPlanCardinality(double cardinality) {
 
 OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(
     const OuterYanTree &tree, const OTNode &node, const vector<double> *leaf_cardinality_override,
-    vector<OuterYanJoinCostStep> *steps) const {
+    vector<OuterYanJoinCostStep> *steps, bool relocate_filters) const {
 	if (node.kind == OTNode::Kind::RELATION) {
 		JoinTreeEstimate leaf;
 		if (leaf_cardinality_override) {
@@ -916,8 +988,8 @@ OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: malformed JOIN node");
 	}
 
-	auto left = ScoreCurrentJoinTreeNode(tree, *node.children[0], leaf_cardinality_override, steps);
-	auto right = ScoreCurrentJoinTreeNode(tree, *node.children[1], leaf_cardinality_override, steps);
+	auto left = ScoreCurrentJoinTreeNode(tree, *node.children[0], leaf_cardinality_override, steps, relocate_filters);
+	auto right = ScoreCurrentJoinTreeNode(tree, *node.children[1], leaf_cardinality_override, steps, relocate_filters);
 	const auto &info = *node.info;
 	const bool lhs_in_left = node.children[0]->subtree_relations.count(info.cond_left_relation_id) != 0;
 	const bool rhs_in_right = node.children[1]->subtree_relations.count(info.cond_right_relation_id) != 0;
@@ -938,6 +1010,16 @@ OuterYanDP::JoinTreeEstimate OuterYanDP::ScoreCurrentJoinTreeNode(
 	JoinTreeEstimate result;
 	result.cardinality = ClampPlanCardinality(estimate.output);
 	result.cost = left.cost + right.cost + estimate.weighted_output_cost;
+	// The DuckDB candidate still evaluates intermediate FILTERs above their
+	// original joins. Reduce downstream input, not the work of those joins.
+	double selectivity = 1.0;
+	for (const auto &record : tree.filter_records) {
+		if (record && record->filter && !(relocate_filters && RelocateFilterForCost(*record)) &&
+		    record->evaluation_relations == node.subtree_relations) {
+			selectivity = MinValue(selectivity, ModuloSelectivity(*record->filter));
+		}
+	}
+	result.cardinality = ClampPlanCardinality(result.cardinality * selectivity);
 	if (steps) {
 		OuterYanJoinCostStep detail;
 		detail.step = steps->size() + 1;
@@ -965,11 +1047,11 @@ double OuterYanDP::ScoreCurrentJoinTree(OuterYanTree &tree) {
 }
 
 OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeDetailed(
-    OuterYanTree &tree, const vector<double> *leaf_cardinality_override) {
+    OuterYanTree &tree, const vector<double> *leaf_cardinality_override, bool relocate_filters) {
 	if (!tree.HasOT()) {
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: tree.ot is null");
 	}
-	BuildLeafRelations(tree);
+	BuildLeafRelations(tree, relocate_filters);
 	BuildEdgeStatistics(tree);
 	if (leaf_cardinality_override && leaf_cardinality_override->size() != tree.ot_relations_by_id.size()) {
 		throw InternalException("OuterYanDP::ScoreCurrentJoinTree: expected %llu leaf overrides, got %llu",
@@ -977,7 +1059,7 @@ OuterYanJoinCostBreakdown OuterYanDP::ScoreCurrentJoinTreeDetailed(
 	}
 	full_reduction_cardinality_lower_bound_applied = false;
 	OuterYanJoinCostBreakdown result;
-	auto root = ScoreCurrentJoinTreeNode(tree, tree.OT().Root(), leaf_cardinality_override, &result.steps);
+	auto root = ScoreCurrentJoinTreeNode(tree, tree.OT().Root(), leaf_cardinality_override, &result.steps, relocate_filters);
 	result.root_cardinality = root.cardinality;
 	for (const auto &step : result.steps) {
 		result.total_input_rows += step.left_cardinality + step.right_cardinality;
@@ -1004,12 +1086,12 @@ OuterYanDPCostSummary OuterYanDP::ScoreCurrentSemijoinPlanConservatively(OuterYa
 	}
 	OuterYanDPCostSummary summary;
 	summary.parameters = cost_parameters;
-	BuildLeafRelations(tree);
+	BuildLeafRelations(tree, true);
 	BuildEdgesFromOT(tree);
 	auto leaf_cardinalities = ConservativeLeafCardinalities(tree, used_upper_bound);
 	BuildSemijoinCostModel(tree, summary, &leaf_cardinalities);
 	enforce_full_reduction_cardinality_lower_bound = CanApplyFullReductionCardinalityLowerBound(tree);
-	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities);
+	summary.candidate_join_breakdown = ScoreCurrentJoinTreeDetailed(tree, &summary.reduced_cardinalities, true);
 	summary.full_reduction_cardinality_lower_bound_applied =
 	    full_reduction_cardinality_lower_bound_applied;
 	summary.chosen_real_join_cost = summary.candidate_join_breakdown.total_cost;
