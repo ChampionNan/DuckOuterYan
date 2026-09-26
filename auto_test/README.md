@@ -601,9 +601,9 @@ not credit estimated aggregate-pushdown benefit. Aggregate pushdown runs only
 after this gate selects the OuterYan candidate; a rejected candidate returns the
 exact DuckDB baseline without an OuterYan-specific rewrite. Aggregation inside a
 join skeleton remains `INAPPLICABLE`. The enabled decomposition paths cover the
-v3 grouped `MIN`, `MAX`, and `SUM` queries. Global `COUNT(*)` still participates
-in candidate selection and semi-join reduction, but remains above the joins so
-outer-join NULL-padding retains exact count semantics.
+v3 grouped `MIN`, `MAX`, and `SUM` queries. Global `COUNT(*)` is decomposed into
+partial counts below the joins and a root sum, with the root projection restoring
+the original `BIGINT` type and empty-input value.
 
 ### Command-line options
 
@@ -626,6 +626,28 @@ bash auto_test/experiment_onoff.sh [options]
       --no-profile    skip phase and optimizer profiling
   -o, --out FILE      exact text output path
 ```
+
+The one-command build/data/experiment driver accepts the same built-in corpus
+selection:
+
+```bash
+# Build release, prepare data, regenerate every version, and run all queries.
+bash auto_test/run_all.sh
+
+# Build release, prepare data, regenerate the required dependency chain, and
+# run only the selected query version.
+bash auto_test/run_all.sh --version v1
+bash auto_test/run_all.sh --version v2
+bash auto_test/run_all.sh --version v3
+
+# Explicit spelling of the default.
+bash auto_test/run_all.sh --all
+```
+
+Unless `SKIP_BUILD=1` is set, every `run_all.sh` invocation compiles
+`build/release/duckdb` before running the experiments. `--version` controls
+which query version is executed; prerequisite versions may also be regenerated
+because v2 derives from v1 and v3 derives from v2.
 
 `select`, `agg`, and `pred` currently alias the graph family; they do not filter
 the graph filenames further. `bench` expands to TPC-H, TPC-DS, and JOB. `--limit`
@@ -889,10 +911,15 @@ SET disabled_optimizers TO 'outer_yan';
 ## One-command and manual workflows
 
 ```bash
-# Build release and data, regenerate queries, then compare DuckDB Original and
-# OuterYan for every v1 query in auto_test/outerjoin_benchmark/benchmark. No PG plan is generated
-# or executed by this default workflow.
+# Build release and data, regenerate v1/v2/v3, then compare DuckDB Original and
+# OuterYan across all built-in query versions. No PG plan is generated or
+# executed by this default workflow.
 bash auto_test/run_all.sh
+
+# Build release and data, but execute only one query version.
+bash auto_test/run_all.sh --version v1
+bash auto_test/run_all.sh --version v2
+bash auto_test/run_all.sh --version v3
 
 # Explicitly opt into PGPlan generation and Original/PGPlan/OuterYan testing.
 RUN_PGPLAN=1 bash auto_test/run_all.sh
@@ -940,9 +967,10 @@ OY_CORPUS=auto_test/outerjoin_benchmark/core \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default v1 comparison stage walks all 224 SQL files under
-`outerjoin_benchmark/benchmark`: 25 Graph, 54 TPC-H, 63 TPC-DS, and 82 JOB
-queries. It executes each bare query
+The default comparison stage runs the v1, v2, and v3 aggregation corpora plus
+the v3 selectivity-stress scope. Use `--version v1` to walk only the 224 SQL
+files under `outerjoin_benchmark/benchmark`: 25 Graph, 54 TPC-H, 63 TPC-DS,
+and 82 JOB queries. The harness executes each eligible bare query
 with OuterYan disabled (Original) and enabled, verifies complete result
 equivalence, records the selected DuckDB/OuterYan plan, and then measures both
 configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture

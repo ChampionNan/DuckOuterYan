@@ -3,7 +3,7 @@
 # run_all.sh — One-shot script: build + data + experiment (Linux server)
 #
 # Assumes the repo is already cloned. Run from the repo root:
-#   bash auto_test/run_all.sh
+#   bash auto_test/run_all.sh [--all | --version v1|v2|v3]
 #
 # What it does:
 #   1. Compile DuckDB release with required extensions (tpch, tpcds)
@@ -27,6 +27,9 @@
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
 #   SKIP_DATA        Set to 1 to skip target DuckDB database generation
 #   SKIP_QUERY_GEN   Set to 1 to keep the existing generated benchmark
+#   --version V      Generate and run exactly v1, v2, or v3
+#   --all            Generate and run v1, v2, v3, and v3 selectivity-stress
+#                    (default for the Original/OuterYan workflow)
 #   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
 #   PGPLAN_SETUP     source (default, auto-installs) | docker | external
 #   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
@@ -90,7 +93,9 @@ fi
     err "Python 3.7 or newer is required: $PYTHON_BIN"
 
 START_TIME=$SECONDS
-EXPERIMENT_ARGS=("$@")
+RAW_EXPERIMENT_ARGS=("$@")
+EXPERIMENT_ARGS=()
+PGPLAN_ARGS=()
 RESULT_TXTS=()
 PGPLAN_RESULT_DIRS=()
 RUN_STATUS=0
@@ -101,21 +106,78 @@ THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
 if [ "$RUN_PGPLAN" = 1 ] && [ -n "$CALLER_PGPLAN_THREADS" ]; then
     THREAD_COUNTS="$CALLER_PGPLAN_THREADS"
 fi
+
+# Normalize the built-in corpus selection here instead of relying on the
+# child harness to interpret a corpus path supplied by run_all. This keeps
+# query generation and execution on the same version. The default two-way
+# workflow covers every version, matching experiment_onoff.sh.
+QUERY_ALL=1
+QUERY_VERSION=""
+QUERY_SELECTOR_CLI=0
+QUERY_VERSION_CLI=0
+QUERY_ALL_CLI=0
 argument_index=0
-while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
-    if [ "${EXPERIMENT_ARGS[$argument_index]}" = "--threads" ]; then
-        [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ] || err "--threads requires a value"
-        THREAD_COUNTS="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-        argument_index=$((argument_index + 2))
-    elif [ "${EXPERIMENT_ARGS[$argument_index]}" = "--reuse-from" ]; then
-        [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ] || \
-            err "--reuse-from requires a prior corpus directory"
-        REUSE_SHORTCUT_FROM="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-        argument_index=$((argument_index + 2))
-    else
-        argument_index=$((argument_index + 1))
-    fi
+while [ "$argument_index" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ]; do
+    argument="${RAW_EXPERIMENT_ARGS[$argument_index]}"
+    case "$argument" in
+        --version|--corpus-version)
+            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
+                err "$argument requires v1, v2, or v3"
+            [ "$QUERY_ALL_CLI" = 0 ] || err "--all cannot be combined with $argument"
+            QUERY_VERSION="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
+            case "$QUERY_VERSION" in
+                v1|v2|v3) ;;
+                *) err "$argument must be v1, v2, or v3 (got: $QUERY_VERSION)" ;;
+            esac
+            QUERY_ALL=0
+            QUERY_SELECTOR_CLI=1
+            QUERY_VERSION_CLI=1
+            argument_index=$((argument_index + 2))
+            ;;
+        --all)
+            [ "$QUERY_VERSION_CLI" = 0 ] || err "--all cannot be combined with --version"
+            QUERY_ALL=1
+            QUERY_VERSION=""
+            QUERY_SELECTOR_CLI=1
+            QUERY_ALL_CLI=1
+            argument_index=$((argument_index + 1))
+            ;;
+        --threads)
+            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
+                err "--threads requires a value"
+            THREAD_COUNTS="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
+            EXPERIMENT_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
+            PGPLAN_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
+            argument_index=$((argument_index + 2))
+            ;;
+        --reuse-from)
+            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
+                err "--reuse-from requires a prior corpus directory"
+            REUSE_SHORTCUT_FROM="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
+            EXPERIMENT_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
+            PGPLAN_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
+            argument_index=$((argument_index + 2))
+            ;;
+        *)
+            EXPERIMENT_ARGS+=("$argument")
+            PGPLAN_ARGS+=("$argument")
+            argument_index=$((argument_index + 1))
+            ;;
+    esac
 done
+if [ -n "$CUSTOM_CORPUS" ] && [ "$QUERY_SELECTOR_CLI" = 1 ]; then
+    err "--version/--all cannot be combined with OY_CORPUS; unset OY_CORPUS to select a built-in version"
+fi
+if [ "$RUN_PGPLAN" = 1 ] && [ "$QUERY_SELECTOR_CLI" = 1 ]; then
+    err "--version/--all select the Original/OuterYan corpus; use PGPLAN_CORPUS with RUN_PGPLAN=1"
+fi
+if [ -z "$CUSTOM_CORPUS" ] && [ "$RUN_PGPLAN" != 1 ]; then
+    if [ "$QUERY_ALL" = 1 ]; then
+        EXPERIMENT_ARGS+=(--all)
+    else
+        EXPERIMENT_ARGS+=(--version "$QUERY_VERSION")
+    fi
+fi
 oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 if [ -n "$REUSE_SHORTCUT_FROM" ]; then
     for skip_name in SKIP_BUILD SKIP_DATA SKIP_QUERY_GEN; do
@@ -165,8 +227,21 @@ fi
 
 # --- Step 3: Generate benchmark ---------------------------------------------
 if [ "${SKIP_QUERY_GEN:-0}" != "1" ]; then
-    log "Step 3/5: Regenerating benchmark queries and manifests"
-    "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" 2>&1 | tee -a "$RUN_LOG"
+    generation_versions=(v1)
+    if [ -z "$CUSTOM_CORPUS" ] && [ "$RUN_PGPLAN" != 1 ]; then
+        if [ "$QUERY_ALL" = 1 ]; then
+            generation_versions=(v1 v2 v3)
+        elif [ "$QUERY_VERSION" = v2 ]; then
+            generation_versions=(v1 v2)
+        elif [ "$QUERY_VERSION" = v3 ]; then
+            generation_versions=(v1 v2 v3)
+        fi
+    fi
+    log "Step 3/5: Regenerating benchmark query versions: ${generation_versions[*]}"
+    for generation_version in "${generation_versions[@]}"; do
+        "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" \
+            --version "$generation_version" 2>&1 | tee -a "$RUN_LOG"
+    done
 else
     log "Step 3/5: Skipping benchmark generation (SKIP_QUERY_GEN=1)"
 fi
@@ -282,8 +357,8 @@ run_pgplan_corpus() {
     if [ -n "${PGPLAN_REUSE_FROM:-}" ]; then
         corpus_command+=(--reuse-from "$PGPLAN_REUSE_FROM")
     fi
-    if [ "${#EXPERIMENT_ARGS[@]}" -gt 0 ]; then
-        corpus_command+=("${EXPERIMENT_ARGS[@]}")
+    if [ "${#PGPLAN_ARGS[@]}" -gt 0 ]; then
+        corpus_command+=("${PGPLAN_ARGS[@]}")
     fi
     corpus_command+=(--threads "$OY_THREADS" --out "$out_dir")
 
@@ -322,12 +397,23 @@ run_experiment() {
     local label="$1" corpus="$2" default_only="$3" out experiment_status=0
     out="$SCRIPT_DIR/results/experiment_onoff_${label}_${RUN_TS}_t${OY_THREADS}.txt"
     log "Step 5/5: Running $label on/off experiment (threads=$OY_THREADS)"
-    if OY_CORPUS="$corpus" bash "$SCRIPT_DIR/experiment_onoff.sh" \
-        --only "$default_only" "${EXPERIMENT_ARGS[@]}" --threads "$OY_THREADS" -o "$out" \
-        2>&1 | tee -a "$RUN_LOG"; then
-        :
+    if [ -n "$corpus" ]; then
+        if OY_CORPUS="$corpus" bash "$SCRIPT_DIR/experiment_onoff.sh" \
+            --only "$default_only" "${EXPERIMENT_ARGS[@]}" --threads "$OY_THREADS" -o "$out" \
+            2>&1 | tee -a "$RUN_LOG"; then
+            :
+        else
+            experiment_status=$?
+        fi
     else
-        experiment_status=$?
+        if env -u OY_CORPUS -u OY_CORPUS_VERSION -u OY_CORPUS_SCOPE \
+            bash "$SCRIPT_DIR/experiment_onoff.sh" \
+            --only "$default_only" "${EXPERIMENT_ARGS[@]}" --threads "$OY_THREADS" -o "$out" \
+            2>&1 | tee -a "$RUN_LOG"; then
+            :
+        else
+            experiment_status=$?
+        fi
     fi
     RESULT_TXTS+=("$out")
     return "$experiment_status"
@@ -346,7 +432,7 @@ for thread_count in "${OY_THREAD_VALUES[@]}"; do
         run_experiment "custom" "$CUSTOM_CORPUS" "all" || thread_status=$?
     else
         log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
-        run_experiment "benchmark" "$SCRIPT_DIR/outerjoin_benchmark/benchmark" "all" || thread_status=$?
+        run_experiment "benchmark" "" "all" || thread_status=$?
     fi
     case "$thread_status" in
         130|143) exit "$thread_status";;
