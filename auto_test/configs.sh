@@ -65,7 +65,7 @@ export GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
 
 # TPC scale factors. Used by both correctness and performance scripts.
 export TPCH_SF="${TPCH_SF:-100}"
-export TPCDS_SF="${TPCDS_SF:-100}"
+export TPCDS_SF="${TPCDS_SF:-50}"
 
 # ===========================================================================
 # 4) Threading

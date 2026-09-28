@@ -73,6 +73,56 @@ returns $U_L$, $U_R$, or both, respectively. Empty inputs are handled directly
 using the join semantics. Swapping the children also swaps LEFT and RIGHT,
 so the same logical input remains preserved.
 
+\paragraph{Selection-predicate selectivity.}
+To distinguish queries with the same join graph but different filters, we
+incorporate shared selectivity estimates for supported scan and residual predicates. For an
+integer predicate $p: x \bmod k=0$, where $k>0$, we estimate
+$\widehat{s}(p)=1/k$ under a uniform-residue assumption. For hash predicates
+$\operatorname{hash}(x)\bmod k\;\theta\;c$, where
+$\theta\in\{=,<,\leq,>,\geq\}$, we estimate the fraction of the $k$
+nonnegative residue buckets satisfying the comparison. In particular,
+$\widehat{s}=1/k$ for equality to an in-range bucket, and
+$\widehat{s}=\min(k,\max(0,c))/k$ for an integer threshold with $\theta={<}$.
+When several
+recognized predicates apply at the same scope, we use their minimum
+selectivity rather than assuming independence. For a relation $R$ with
+estimated size $N_R$ and applicable selectivity $\widehat{s}_R$, we update
+\begin{equation}
+ \widehat{N}_R=
+ \begin{cases}
+  0, & N_R\widehat{s}_R=0,\\
+  \max(1,\lfloor N_R\widehat{s}_R\rfloor), & N_R\widehat{s}_R>0,
+ \end{cases}
+ \qquad
+ \widehat{d}_{R,a}=\min(d_{R,a},\widehat{N}_R),
+ \label{eq:predicate-selectivity}
+\end{equation}
+where $d_{R,a}$ is the distinct-count estimate for column $a$. Thus, distinct
+counts are capped by the filtered cardinality rather than multiplied by
+selectivity. Unsupported predicates retain the existing estimation path.
+
+Filter placement is respected when scoring each alternative. In the
+OuterYan candidate, single-relation predicates eligible for relocation are
+accounted for at the leaves before estimating the two reduction rounds.
+The resulting reduced cardinalities affect intermediate-output estimates
+and hence the costs used during dynamic-programming enumeration, as well
+as the final comparison in Equation~\ref{eq:plan-costs}. The DuckDB baseline
+is scored with filters at their existing scopes: a filter above a join
+reduces downstream inputs without discounting work already performed by
+that join. Predicates retained at their original scopes are not credited
+as leaf reductions, and each predicate is accounted for only once. For
+intermediate predicates involving functions with special NULL handling,
+we evaluate the bound, deterministic expression with typed NULL inputs
+to establish NULL rejection before permitting relocation. This proof is
+separate from selectivity estimation. A join skeleton that DuckDB has
+already simplified entirely to inner joins still participates in DP.
+
+The modulo estimate is a heuristic that does not measure skew, NULL
+fractions, or conditional key distributions. When it adjusts leaf
+statistics, the relaxed cost gates are disabled and the candidate must
+pass the strict cost comparison. The adjustment improves sensitivity to
+filter predicates but does not guarantee a faster execution plan.
+
 \subsection{Reduction and Plan Enumeration}
 \label{sec:two-round-reduction}
 \label{sec:plan-enumeration}
@@ -131,7 +181,8 @@ identical, DuckDB's plan is retained. A missing candidate, invalid cost
 comparison, or proof that the baseline eliminates all join work also keeps
 the baseline.
 
-For a genuinely different grouping, the default gate requires $C_Y\leq C_D$.
+For a genuinely different grouping, the V7 policy used for the runtime
+measurements below requires $C_Y\leq C_D$.
 If the reductions retain less than 90\% of the estimated input tuples in
 total, the stricter condition $C_Y\leq0.90C_D$ requires additional headroom.
 When a table filter uses a generic selectivity estimate, both candidates
@@ -150,6 +201,20 @@ active. Thus, the relaxed threshold targets benefits from regrouping, not
 candidates that rely on aggressive reduction estimates. These thresholds
 are fixed implementation parameters in the evaluated V7 policy; they are
 heuristics, not guarantees of a runtime improvement.
+
+The current V9 implementation exposes separate strict ratio limits for
+ordinary, low-retention, and root-aggregate candidates. In the current
+configuration, all three are set to $\tau=1.20$, and selection requires
+\[
+  C_Y = C_{\mathrm{out}}(T_Y)+\lambda C_{\mathrm{SJ}} \leq \tau C_D,
+  \qquad \lambda=1,\quad \tau=1.20.
+\]
+The full semi-join work estimate, uncertain-filter rescoring, amplification
+guard, and same-grouping fallback remain in force. Both confidence-based
+relaxed ceilings are also $1.20$, so neither admits a candidate beyond the
+strict ceiling in this configuration. This policy increases the allowance
+for estimated work; it does not bound actual runtime slowdown. The earlier
+runtime measurements below have not been rerun with these revised limits.
 
 \section{Experiments}
 \label{sec:experiments}

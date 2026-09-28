@@ -78,7 +78,8 @@ optional<idx_t> OuterYanTree::LookupSingleRelation(const Expression &expr,
 bool OuterYanTree::CheckApplicability(LogicalOperator &plan, bool require_outer,
                                       bool require_stable_intermediate_filters) {
 	pgplan_filter_scope_mode = false;
-	applicability = OuterYanApplicability::Check(plan, require_outer, require_stable_intermediate_filters);
+	applicability = OuterYanApplicability::Check(plan, require_outer, require_stable_intermediate_filters,
+	                                           /*allow_anchored_join_residuals=*/false, context);
 	return applicability.applicable;
 }
 
@@ -86,7 +87,7 @@ bool OuterYanTree::CheckPGPlanApplicability(LogicalOperator &plan) {
 	pgplan_filter_scope_mode = true;
 	applicability = OuterYanApplicability::Check(plan, /*require_outer=*/false,
 	                                            /*require_stable_intermediate_filters=*/false,
-	                                            /*allow_anchored_join_residuals=*/true);
+	                                            /*allow_anchored_join_residuals=*/true, context);
 	return applicability.applicable;
 }
 

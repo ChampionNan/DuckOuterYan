@@ -307,7 +307,7 @@ OuterYanCostGatePolicyResult OuterYanOptimizer::EvaluateCostGate(const OuterYanD
 	result.low_selectivity_cost_ratio_limit = strict_ratio_limit;
 	result.baseline_threshold = strict_threshold;
 	// Preserve the strict threshold and margin in diagnostics whenever the
-	// candidate already wins at 1.0; the stretch ceiling is activated only
+	// candidate already passes the configured strict limit; the stretch ceiling is activated only
 	// after this comparison loses.
 	if (costs.candidate_total <= strict_threshold) {
 		result.pass = true;
@@ -358,7 +358,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	    force_candidate_for_validation ? "FORCE_OUTERYAN_DIAGNOSTIC" : SelectionModeToString(SELECTION_MODE);
 	const bool apply_cost_gate = APPLY_COST_GATE && !force_candidate_for_validation;
 
-	OuterYanTree candidate_tree;
+	OuterYanTree candidate_tree(context);
 	unique_ptr<LogicalOperator> explain_wrapper;
 	unique_ptr<LogicalOperator> baseline_plan;
 	bool applicable = false;
@@ -373,7 +373,9 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		}
 		const auto applicability_start = Clock::now();
 		contains_aggregate = ContainsAggregateLikeOperator(*candidate_input);
-		applicable = candidate_tree.CheckApplicability(*candidate_input);
+		// Filter pushdown may remove every outer join in a generated query.
+		// Acyclic inner skeletons can use the same reduction and DP pipeline.
+		applicable = candidate_tree.CheckApplicability(*candidate_input, /*require_outer=*/false);
 		candidate_tree.phase_timings.applicability +=
 		    std::chrono::duration<double>(Clock::now() - applicability_start).count();
 		if (!applicable) {
@@ -669,6 +671,8 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 				decision.reason = "COST_OUTERYAN_STRETCH";
 			} else if (gate_policy.low_selectivity_selected) {
 				decision.reason = "COST_OUTERYAN_LOW_SELECTIVITY";
+			} else if (trace_costs.candidate_total > trace_costs.baseline_cost) {
+				decision.reason = "COST_OUTERYAN_WITHIN_LIMIT";
 			} else {
 				decision.reason = "COST_OUTERYAN_BETTER";
 			}

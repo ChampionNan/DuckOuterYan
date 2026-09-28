@@ -1,14 +1,17 @@
 #include "duckdb/optimizer/outer_yan/pipeline/simplification.hpp"
 
 #include "duckdb/common/enum_util.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -194,7 +197,7 @@ const unordered_set<idx_t> &Simplification::ComputeSubtreeRelations(OTNode &node
 	return out;
 }
 
-bool Simplification::FilterRejectsNulls(const Expression &expr) {
+static bool StructurallyRejectsNulls(const Expression &expr) {
 	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_OPERATOR: {
 		const auto t = expr.GetExpressionType();
@@ -246,7 +249,7 @@ bool Simplification::FilterRejectsNulls(const Expression &expr) {
 		if (conj.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 			// AND rejects NULL if ANY conjunct does.
 			for (auto &child : conj.children) {
-				if (FilterRejectsNulls(*child)) {
+				if (StructurallyRejectsNulls(*child)) {
 					return true;
 				}
 			}
@@ -258,7 +261,7 @@ bool Simplification::FilterRejectsNulls(const Expression &expr) {
 			return false;
 		}
 		for (auto &child : conj.children) {
-			if (!FilterRejectsNulls(*child)) {
+			if (!StructurallyRejectsNulls(*child)) {
 				return false;
 			}
 		}
@@ -267,6 +270,34 @@ bool Simplification::FilterRejectsNulls(const Expression &expr) {
 	default:
 		return false;
 	}
+}
+
+static void ReplaceColumnsWithNull(unique_ptr<Expression> &expr) {
+	if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		expr = make_uniq<BoundConstantExpression>(Value(expr->return_type));
+		return;
+	}
+	ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) { ReplaceColumnsWithNull(child); });
+}
+
+bool Simplification::FilterRejectsNulls(const Expression &expr, optional_ptr<ClientContext> context) {
+	if (StructurallyRejectsNulls(expr)) {
+		return true;
+	}
+	if (!context || expr.return_type != LogicalType::BOOLEAN ||
+	    OuterYanApplicability::FilterRequiresOriginalScope(expr)) {
+		return false;
+	}
+	// SPECIAL null handling (e.g., hash) need not propagate NULL. Evaluate the
+	// actual bound predicate instead of assuming that it accepts or rejects it.
+	auto null_input = expr.Copy();
+	ReplaceColumnsWithNull(null_input);
+	if (!null_input->IsFoldable()) {
+		return false;
+	}
+	Value result;
+	return ExpressionExecutor::TryEvaluateScalar(*context, *null_input, result) &&
+	       (result.IsNull() || !BooleanValue::Get(result));
 }
 
 bool Simplification::SubtreeIntersectsNullRejection(OTNode &node,
@@ -288,7 +319,7 @@ void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
 	const auto &node_relations = subtree_relations[&node];
 	for (const auto &rec : tree.filter_records) {
 		if (!rec || !rec->filter || rec->evaluation_relations != node_relations ||
-		    !FilterRejectsNulls(*rec->filter)) {
+		    !FilterRejectsNulls(*rec->filter, tree.context)) {
 			continue;
 		}
 		for (auto rel : rec->referenced_relations) {

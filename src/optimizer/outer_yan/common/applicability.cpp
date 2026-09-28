@@ -71,8 +71,10 @@ bool OuterYanApplicability::FilterRequiresOriginalScope(const Expression &expr) 
 
 ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan, bool require_outer,
                                                  bool require_stable_intermediate_filters,
-                                                 bool allow_anchored_join_residuals) {
+                                                 bool allow_anchored_join_residuals,
+                                                 optional_ptr<ClientContext> context) {
 	OuterYanApplicability v;
+	v.context = context;
 	v.require_stable_intermediate_filters = require_stable_intermediate_filters;
 	v.allow_anchored_join_residuals = allow_anchored_join_residuals;
 	auto &entry = v.SkeletonRoot(plan);
@@ -177,7 +179,7 @@ void OuterYanApplicability::VisitOperator(LogicalOperator &op) {
 				       "(evaluation count/scope may change)");
 				return;
 			}
-			if (!Simplification::FilterRejectsNulls(*expr)) {
+			if (!Simplification::FilterRejectsNulls(*expr, context)) {
 				Reject("NULL-tolerant filter inside join skeleton not supported "
 				       "(filter scope may not survive reordering)");
 				return;

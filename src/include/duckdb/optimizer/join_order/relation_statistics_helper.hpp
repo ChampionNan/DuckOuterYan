@@ -48,6 +48,7 @@ struct RelationStats {
 	double filter_strength = 1;
 	bool stats_initialized = false;
 	bool cardinality_uses_default_filter_selectivity = false;
+	bool cardinality_uses_modulo_selectivity = false;
 
 	// for debug, column names and tables
 	vector<string> column_names;
@@ -62,7 +63,11 @@ public:
 	static constexpr double DEFAULT_SELECTIVITY = 0.2;
 
 public:
-	static idx_t InspectTableFilter(idx_t cardinality, const TableFilter &filter, BaseStatistics &base_stats);
+	//! Uniform residue estimate for column modulo equality and hash-modulo bucket predicates.
+	//! Accepts both logical column references and scan-local bound references.
+	static bool TryGetModuloSelectivity(const Expression &expr, double &selectivity);
+	static idx_t InspectTableFilter(idx_t cardinality, const TableFilter &filter, BaseStatistics &base_stats,
+	                               optional_ptr<bool> uses_modulo_selectivity = nullptr);
 	//	static idx_t InspectConjunctionOR(idx_t cardinality, idx_t column_index, ConjunctionOrFilter &filter,
 	//	                                  BaseStatistics &base_stats);
 	//! Extract Statistics from a LogicalGet.

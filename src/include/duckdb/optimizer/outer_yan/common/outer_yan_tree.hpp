@@ -46,7 +46,11 @@ class JoinRelationSet;
 //!                             transforms are TBD).
 class OuterYanTree {
 public:
-	OuterYanTree() = default;
+	explicit OuterYanTree(optional_ptr<ClientContext> context_p = nullptr) : context(context_p) {
+	}
+
+	//! Optional context for evaluating stable predicates on a NULL-extended row.
+	optional_ptr<ClientContext> context;
 
 	// ----------------------------------------------------------------------
 	// Conversions — each mutates internal state in place.

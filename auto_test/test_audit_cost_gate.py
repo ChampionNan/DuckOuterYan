@@ -141,6 +141,18 @@ class CostGateAuditTest(unittest.TestCase):
         self.assertEqual(by_query["selected"]["tm_gate_judgment"], "false_positive")
         self.assertEqual(by_query["rejected"]["tm_gate_judgment"], "false_negative")
 
+    def test_higher_cost_admission_is_a_valid_selection(self):
+        for reason in ("COST_OUTERYAN_WITHIN_LIMIT", "COST_OUTERYAN_STRETCH",
+                       "COST_OUTERYAN_LOW_SELECTIVITY"):
+            with self.subTest(reason=reason):
+                selected = normal_row("selected", selected="1", plan="OUTERYAN", reason=reason)
+                forced = forced_row("selected", tm="0.80")
+                for row in (selected, forced):
+                    row.update(candidate_total="110", raw_cost_ratio="1.1")
+                row = self.audit([selected], [forced])[0]
+                self.assertEqual(row["normal_gate_valid"], "TRUE")
+                self.assertEqual(row["tm_gate_judgment"], "false_positive")
+
     def test_incorrect_candidate_is_never_a_performance_win(self):
         selected = normal_row(
             "bad",

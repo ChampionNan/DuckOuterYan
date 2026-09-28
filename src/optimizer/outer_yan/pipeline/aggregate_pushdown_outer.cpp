@@ -208,6 +208,48 @@ unique_ptr<LogicalOperator> AggregatePushdownRewriter::Rewrite(unique_ptr<Logica
 
 namespace {
 
+bool ReferencesAggregateInput(Expression &expr, const OuterYanTree &tree) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		const auto &binding = expr.Cast<BoundColumnRefExpression>().binding;
+		for (const auto &column : tree.root_aggregation.columns) {
+			if ((column.function_name == "sum" || column.function_name == "min" ||
+			     column.function_name == "max") && column.binding == binding) {
+				return true;
+			}
+		}
+	}
+	bool found = false;
+	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) {
+		found = found || ReferencesAggregateInput(child, tree);
+	});
+	return found;
+}
+
+bool CheckAggregateBoundaries(LogicalOperator &op, const OuterYanTree &tree, bool &safe) {
+	bool contains_join = AggregatePushdownOuter::AvailableJoin(op.type);
+	for (auto &child : op.children) {
+		contains_join = CheckAggregateBoundaries(*child, tree, safe) || contains_join;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER && contains_join) {
+		// The rewriter propagates annotations through joins/projections only.
+		// A retained post-join filter must consume raw rows before aggregation.
+		safe = false;
+	}
+	if (AggregatePushdownOuter::AvailableJoin(op.type)) {
+		LogicalOperatorVisitor::EnumerateExpressions(op, [&](unique_ptr<Expression> *expr) {
+			// A join key needs its original value and type, separately from its
+			// aggregate annotation. The current binding map cannot represent both.
+			safe = safe && !ReferencesAggregateInput(**expr, tree);
+		});
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		for (auto &group : op.Cast<LogicalAggregate>().groups) {
+			safe = safe && !ReferencesAggregateInput(*group, tree);
+		}
+	}
+	return contains_join;
+}
+
 //! Catalog-driven lookup mirroring the reference's
 //! `GetMinAggregate` / `GetMaxAggregate`. DuckDB's `MinFunction` /
 //! `MaxFunction::GetFunction()` return a generic template that is not
@@ -1034,6 +1076,12 @@ unique_ptr<LogicalOperator> AggregatePushdownOuter::Optimize(unique_ptr<LogicalO
 	// SELECT DISTINCT stays disabled until its serialization/type-fidelity path
 	// has the same coverage as COUNT_STAR / MINMAX / SUM.
 	if (tree.root_aggregation.type == OuterYanAggregationType::SELECT_DISTINCT) {
+		return plan;
+	}
+	bool safe_boundaries = true;
+	CheckAggregateBoundaries(*plan, tree, safe_boundaries);
+	if (!safe_boundaries) {
+		// Retain the selected DP join/SJ plan; only aggregate pushdown is skipped.
 		return plan;
 	}
 	if (tree.root_aggregation.type == OuterYanAggregationType::MINMAX) {

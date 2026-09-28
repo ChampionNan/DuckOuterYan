@@ -35,10 +35,11 @@ public:
 	//! environment variable can never weaken its null-rejection proof.
 	void Apply(OuterYanTree &tree, bool allow_scan_filter_seeding = true);
 
-	//! Conservative structural test used both by applicability and this pass.
+	//! Conservative test used both by applicability and this pass. With a context,
+	//! stable predicates may also be evaluated on an all-NULL input.
 	//! True only when replacing every referenced column by NULL cannot make the
 	//! predicate TRUE.
-	static bool FilterRejectsNulls(const Expression &expr);
+	static bool FilterRejectsNulls(const Expression &expr, optional_ptr<ClientContext> context = nullptr);
 
 private:
 	//! Top-down walk. RELATION nodes are no-ops. JOIN nodes:

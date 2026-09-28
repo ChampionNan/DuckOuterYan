@@ -8,9 +8,6 @@
 #include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -239,40 +236,11 @@ bool OuterYanDP::ViolatesRootFix(JoinRelationSet &set) const {
 // Setup
 // ============================================================================
 
-// Estimate only integral `column % positive_constant = 0` (either equality
-// orientation). Uniform residues give 1/k; NULLs and skew are not measured.
-// Unsupported expressions retain the existing estimate.
+// Share the scan estimator so predicate placement does not change the model.
 static double ModuloSelectivity(const Expression &expression) {
-	if (expression.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-		return 1.0;
-	}
-	auto &comparison = expression.Cast<BoundComparisonExpression>();
-	const Expression *function_expr = comparison.left.get();
-	const Expression *constant_expr = comparison.right.get();
-	if (function_expr->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		std::swap(function_expr, constant_expr);
-	}
-	if (function_expr->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
-	    constant_expr->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
-		return 1.0;
-	}
-	auto &remainder = constant_expr->Cast<BoundConstantExpression>().value;
-	if (remainder.IsNull() || !remainder.type().IsIntegral() ||
-	    remainder != Value::Numeric(remainder.type(), int64_t(0))) {
-		return 1.0;
-	}
-	auto &function = function_expr->Cast<BoundFunctionExpression>();
-	if (function.function.name != "%" || !function.return_type.IsIntegral() || function.children.size() != 2 ||
-	    function.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
-	    function.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
-		return 1.0;
-	}
-	auto &divisor = function.children[1]->Cast<BoundConstantExpression>().value;
-	if (divisor.IsNull() || !divisor.type().IsIntegral() ||
-	    divisor <= Value::Numeric(divisor.type(), int64_t(0))) {
-		return 1.0;
-	}
-	return 1.0 / divisor.GetValue<double>();
+	double selectivity = 1.0;
+	RelationStatisticsHelper::TryGetModuloSelectivity(expression, selectivity);
+	return selectivity;
 }
 
 static bool RelocateFilterForCost(const OuterYanFilterRecord &record) {
@@ -315,8 +283,8 @@ void OuterYanDP::BuildLeafRelations(OuterYanTree &tree, bool relocate_filters) {
 				}
 			}
 		}
-		rel->cardinality_uses_modulo_selectivity = selectivity < 1.0;
-		if (rel->cardinality_uses_modulo_selectivity) {
+		rel->cardinality_uses_modulo_selectivity = rel->stats.cardinality_uses_modulo_selectivity || selectivity < 1.0;
+		if (selectivity < 1.0) {
 			// Use the strongest recognized predicate rather than assuming
 			// independence between potentially correlated modulo predicates.
 			rel->stats.cardinality = static_cast<idx_t>(ClampPlanCardinality(rel->stats.cardinality * selectivity));

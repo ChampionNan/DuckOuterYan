@@ -147,7 +147,8 @@ RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientC
 
 			if (column_statistics) {
 				idx_t cardinality_with_filter =
-				    InspectTableFilter(base_table_cardinality, entry.Filter(), *column_statistics);
+				    InspectTableFilter(base_table_cardinality, entry.Filter(), *column_statistics,
+				                       &return_stats.cardinality_uses_modulo_selectivity);
 				cardinality_after_filters = MinValue(cardinality_after_filters, cardinality_with_filter);
 			}
 
@@ -157,7 +158,8 @@ RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientC
 		}
 		// if the above code didn't find an equality filter (i.e country_code = "[us]")
 		// and there are other table filters (i.e cost > 50), use default selectivity.
-		bool has_equality_filter = (cardinality_after_filters != base_table_cardinality);
+		bool has_equality_filter = (cardinality_after_filters != base_table_cardinality) ||
+		                           return_stats.cardinality_uses_modulo_selectivity;
 		if (!has_equality_filter && has_non_optional_filters) {
 			cardinality_after_filters = MaxValue<idx_t>(
 			    LossyNumericCast<idx_t>(double(base_table_cardinality) * RelationStatisticsHelper::DEFAULT_SELECTIVITY),
@@ -169,6 +171,11 @@ RelationStats RelationStatisticsHelper::ExtractGetStats(LogicalGet &get, ClientC
 		}
 	}
 	return_stats.cardinality = cardinality_after_filters;
+	if (return_stats.cardinality_uses_modulo_selectivity) {
+		for (auto &distinct : return_stats.column_distinct_count) {
+			distinct.distinct_count = MinValue(distinct.distinct_count, cardinality_after_filters);
+		}
+	}
 	// update the estimated cardinality of the get as well.
 	// This is not updated during plan reconstruction.
 	get.estimated_cardinality = cardinality_after_filters;
@@ -240,6 +247,7 @@ void RelationStatisticsHelper::CopyRelationStats(RelationStats &to, const Relati
 	to.cardinality = from.cardinality;
 	to.base_cardinality = from.base_cardinality;
 	to.cardinality_uses_default_filter_selectivity = from.cardinality_uses_default_filter_selectivity;
+	to.cardinality_uses_modulo_selectivity = from.cardinality_uses_modulo_selectivity;
 	to.table_name = from.table_name;
 	to.stats_initialized = from.stats_initialized;
 }
@@ -461,8 +469,86 @@ RelationStats RelationStatisticsHelper::ExtractEmptyResultStats(LogicalEmptyResu
 	return stats;
 }
 
+static bool IsFilterColumn(const Expression &expr) {
+	return expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF ||
+	       expr.GetExpressionClass() == ExpressionClass::BOUND_REF;
+}
+
+bool RelationStatisticsHelper::TryGetModuloSelectivity(const Expression &expr, double &selectivity) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+		return false;
+	}
+	auto &comparison = expr.Cast<BoundComparisonExpression>();
+	auto comparison_type = comparison.GetExpressionType();
+	const Expression *input = comparison.left.get();
+	const Expression *constant = comparison.right.get();
+	if (input->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		std::swap(input, constant);
+		comparison_type = FlipComparisonExpression(comparison_type);
+	}
+	if (input->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
+	    constant->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return false;
+	}
+	auto &modulo = input->Cast<BoundFunctionExpression>();
+	if (modulo.function.name != "%" || !modulo.return_type.IsIntegral() || modulo.children.size() != 2 ||
+	    modulo.children[1]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+		return false;
+	}
+	auto &divisor = modulo.children[1]->Cast<BoundConstantExpression>().value;
+	auto &bound = constant->Cast<BoundConstantExpression>().value;
+	if (divisor.IsNull() || !divisor.type().IsIntegral() || bound.IsNull() || !bound.type().IsIntegral() ||
+	    divisor <= Value::Numeric(divisor.type(), int64_t(0))) {
+		return false;
+	}
+	const double modulus = divisor.GetValue<double>();
+	const double threshold = bound.GetValue<double>();
+	if (IsFilterColumn(*modulo.children[0])) {
+		// Signed remainders need not be nonnegative; only the zero residue has
+		// the same estimate without knowing the input's sign distribution.
+		if (comparison_type != ExpressionType::COMPARE_EQUAL || threshold != 0.0) {
+			return false;
+		}
+		selectivity = 1.0 / modulus;
+		return true;
+	}
+	if (modulo.children[0]->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &hash = modulo.children[0]->Cast<BoundFunctionExpression>();
+	if (hash.function.name != "hash" || hash.return_type != LogicalType::HASH || hash.children.size() != 1 ||
+	    !IsFilterColumn(*hash.children[0])) {
+		return false;
+	}
+	// hash(x) is unsigned: the residue domain is [0, modulus). Count buckets
+	// satisfying the predicate. This covers both v2 equality and v3 thresholds.
+	double buckets;
+	switch (comparison_type) {
+	case ExpressionType::COMPARE_EQUAL:
+		buckets = threshold >= 0.0 && threshold < modulus ? 1.0 : 0.0;
+		break;
+	case ExpressionType::COMPARE_LESSTHAN:
+		buckets = threshold;
+		break;
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		buckets = threshold + 1.0;
+		break;
+	case ExpressionType::COMPARE_GREATERTHAN:
+		buckets = modulus - threshold - 1.0;
+		break;
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		buckets = modulus - threshold;
+		break;
+	default:
+		return false;
+	}
+	selectivity = MinValue(1.0, MaxValue(0.0, buckets / modulus));
+	return true;
+}
+
 idx_t RelationStatisticsHelper::InspectTableFilter(idx_t cardinality, const TableFilter &filter,
-                                                   BaseStatistics &base_stats) {
+	                                               BaseStatistics &base_stats,
+	                                               optional_ptr<bool> uses_modulo_selectivity) {
 	auto cardinality_after_filters = cardinality;
 	auto expr_filter = ExpressionFilter::FromTableFilter(filter, base_stats.GetType());
 	auto &expr = *expr_filter->expr;
@@ -471,15 +557,35 @@ idx_t RelationStatisticsHelper::InspectTableFilter(idx_t cardinality, const Tabl
 		for (auto &child : conj.children) {
 			ExpressionFilter child_filter(child->Copy());
 			cardinality_after_filters =
-			    MinValue(cardinality_after_filters, InspectTableFilter(cardinality, child_filter, base_stats));
+			    MinValue(cardinality_after_filters,
+			             InspectTableFilter(cardinality, child_filter, base_stats, uses_modulo_selectivity));
 		}
 		return cardinality_after_filters;
+	}
+	double selectivity;
+	if (TryGetModuloSelectivity(expr, selectivity)) {
+		if (uses_modulo_selectivity) {
+			*uses_modulo_selectivity = true;
+		}
+		if (cardinality == 0 || selectivity == 0.0) {
+			return 0;
+		}
+		if (selectivity == 1.0) {
+			return cardinality;
+		}
+		return MaxValue<idx_t>(1, static_cast<idx_t>(static_cast<double>(cardinality) * selectivity));
 	}
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
 		return cardinality_after_filters;
 	}
 	auto &comparison = expr.Cast<BoundComparisonExpression>();
 	if (comparison.type != ExpressionType::COMPARE_EQUAL) {
+		return cardinality_after_filters;
+	}
+	// Only a direct column = constant predicate selects one base-column value.
+	// An equality on a function result must not reuse the input column's NDV.
+	if (!((IsFilterColumn(*comparison.left) && comparison.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) ||
+	      (IsFilterColumn(*comparison.right) && comparison.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT))) {
 		return cardinality_after_filters;
 	}
 	auto column_count = base_stats.GetDistinctCount();

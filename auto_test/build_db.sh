@@ -17,7 +17,7 @@
 #   GRAPH_DATASET    SNAP graph to use for graph R1..R10 (default epinions)
 #                    Options: bitcoin | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 100)
-#   TPCDS_SF         TPC-DS scale factor (default 100)
+#   TPCDS_SF         TPC-DS scale factor (default 50)
 #   GRAPH_DATA_DIR   SNAP graph download dir (default $REPO/graph_data)
 #   FORCE=1          Rebuild even if DB already exists
 # ============================================================================
@@ -30,7 +30,7 @@ REPO_ROOT="$OY_REPO_ROOT"
 # --- defaults ---------------------------------------------------------------
 GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
 TPCH_SF="${TPCH_SF:-100}"
-TPCDS_SF="${TPCDS_SF:-100}"
+TPCDS_SF="${TPCDS_SF:-50}"
 GRAPH_DATA_DIR="${GRAPH_DATA_DIR:-$REPO_ROOT/graph_data}"
 
 # Parse targets

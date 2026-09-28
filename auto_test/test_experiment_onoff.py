@@ -167,7 +167,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
             elif os.environ.get("DUCKDB_SJ_KERNEL_TRACE"):
                 print("[SJ_KERNEL] BITMAP", file=sys.stderr)
             else:
-                if os.environ.get("TIMEOUT_CORRECTNESS"):
+                timeout_mode = os.environ.get("TIMEOUT_CORRECTNESS")
+                if timeout_mode == "1" or timeout_mode == ("off" if off else "on"):
                     sys.exit(124)
                 mismatch = os.environ.get("FAIL_CORRECTNESS_THREADS") == str(threads)
                 print("43" if mismatch and not off else "42")
@@ -395,22 +396,32 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertFalse(any(call["timing"] and call["threads"] == 16 for call in calls))
         self.assertFalse(any(call["profiling"] and call["threads"] == 16 for call in calls))
 
-    def test_correctness_timeout_is_recorded_once_without_retry(self):
-        result = self.run_harness(TIMEOUT_CORRECTNESS="1")
+    def assert_correctness_timeout(self, mode, execution_count):
+        result = self.run_harness(TIMEOUT_CORRECTNESS=mode)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(
-            self.root / "result.csv", 32, expected_correct="FALSE", expected_speedup="-"
+            self.root / "result.csv", 32, expected_correct="TIMEOUT", expected_speedup="-"
         )
+        for output in (result.stderr, report):
+            self.assertIn("result: correct=TIMEOUT", output)
+            self.assertNotIn("result: correct=FALSE", output)
+            self.assertIn(f"TIMEOUT (0s, {mode}): sample", output)
         row = self.read_row()
         self.assertEqual(row["note"], "TIMEOUT")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         executions = [call for call in calls if "EXPLAIN" not in call["sql"]]
-        self.assertEqual(len(executions), 1)
-        self.assertFalse(executions[0]["timing"])
-        self.assertFalse(executions[0]["profiling"])
+        self.assertEqual(len(executions), execution_count)
+        self.assertEqual(executions[-1]["off"], mode == "off")
         self.assertTrue(all(not call["timing"] for call in calls))
         self.assertTrue(all(not call["profiling"] for call in calls))
+        self.assertIn("correct=0", report)
         self.assertIn("timed=0", report)
+
+    def test_correctness_off_timeout_is_recorded_once_without_retry(self):
+        self.assert_correctness_timeout("off", 1)
+
+    def test_correctness_on_timeout_is_recorded_once_without_retry(self):
+        self.assert_correctness_timeout("on", 2)
 
     def test_timing_timeout_stops_query_without_retry_or_profile(self):
         result = self.run_harness(TIMEOUT_TIMING="1")

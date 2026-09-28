@@ -94,6 +94,23 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertFalse(fallback_row["valid_timing"])
         self.assertTrue(fallback_row["valid_speedup"])
 
+    def test_correctness_timeout_status_is_excluded_as_timeout(self):
+        good = self.frame().iloc[0].to_dict()
+        frame = pd.DataFrame([
+            good,
+            dict(good, query="timeout", correct="TIMEOUT", note="TIMEOUT", tm_on=None),
+            dict(good, query="wrong", correct="FALSE", note="NOT-EQUIV"),
+        ])
+        report = STATS.build_statistics(frame)
+        counts = report["groups"][0]["counts"]
+        self.assertEqual(counts["valid"], 1)
+        self.assertEqual(counts["timeouts"], 1)
+        self.assertEqual(counts["correctness_not_true"], 1)
+        timeout = next(row for row in report["queries"] if row["query"] == "timeout")
+        self.assertEqual(timeout["correct"], "TIMEOUT")
+        self.assertEqual(timeout["exclusion_reason"], "timeout")
+        self.assertIsNone(timeout["speedup"])
+
     def test_empty_statistics_and_timeout_only_shape_are_unavailable(self):
         frame = self.frame().iloc[:1].assign(correct=False, note="TIMEOUT", tm_on=None)
         report = STATS.build_statistics(frame)

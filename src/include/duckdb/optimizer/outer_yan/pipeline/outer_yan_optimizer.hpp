@@ -43,7 +43,7 @@ struct OuterYanCostGatePolicyResult {
 //! build the normal DuckDB baseline, build the OuterYan candidate, compare
 //! base-relation join groupings, optionally apply the common cost gate, and
 //! lower the winner. Supported root aggregation and DISTINCT queries use the
-//! same candidate construction with a stricter, non-relaxed cost gate; only an
+//! same candidate construction with a non-relaxed cost gate; only an
 //! accepted OuterYan candidate may receive OuterYan aggregate pushdown.
 class OuterYanOptimizer {
 public:
@@ -60,24 +60,21 @@ public:
 	//! showed that discount admitted candidates whose reducer work dominated the
 	//! realized execution time.
 	static constexpr double SEMIJOIN_COST_RATIO = 1.0;
-	//! GATED-mode selection threshold. A value of 1.0 selects OuterYan only
-	//! when its limiting estimated total cost does not exceed DuckDB's baseline
-	//! cost. Uncertain table filters are checked under both their estimated and
-	//! unfiltered-cardinality scenarios.
-	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.0;
-	//! Root aggregation/DISTINCT candidates must already show at least 10%
-	//! estimated join-work headroom. Aggregate-pushdown benefit is deliberately
-	//! not credited by the gate, so an accepted candidate has conservative
-	//! headroom before that additional optimization is applied.
-	static constexpr double AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO = 0.90;
-	//! Candidates that depend on a material estimated reduction need headroom
-	//! for selectivity error and reducer scheduling work. The August 30 corpus
-	//! showed that near-tie estimates in this regime consistently regressed.
-	static constexpr double LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO = 0.90;
+	//! GATED-mode selection threshold. All strict tiers currently allow up to
+	//! 20% higher limiting estimated total cost than DuckDB's baseline. This is
+	//! an estimated-work allowance, not a bound on runtime slowdown. Uncertain
+	//! table filters still use both estimated and unfiltered-cardinality scenarios.
+	static constexpr double MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
+	//! Root aggregation/DISTINCT uses the same ceiling without relaxed tiers.
+	//! Aggregate-pushdown benefit is deliberately not credited by the gate.
+	static constexpr double AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
+	//! Keep a separate knob for reduction-dependent candidates so experiments
+	//! can require extra headroom without tightening other candidates' gate.
+	static constexpr double LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
 	static constexpr double LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO = 0.90;
-	//! A changed candidate may use this relaxed ceiling only when the
-	//! confidence predicate succeeds. It is deliberately not a global
-	//! multiplier.
+	//! A changed candidate may use this ceiling when the confidence predicate
+	//! succeeds. With all strict limits at 1.20, the relaxed tiers add no further
+	//! allowance; their eligibility remains available for diagnostics and tuning.
 	static constexpr double STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO = 1.20;
 	//! Require a material real-join build/probe input reduction before allowing
 	//! the stretch tier.

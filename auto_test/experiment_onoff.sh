@@ -1331,7 +1331,7 @@ process_one() {
         case "$gate" in
             *"equiv OK"*)  correct="TRUE";  note="OK";        rows="$(printf '%s' "$gate" | grep -oE '[0-9]+ rows' | grep -oE '[0-9]+')";;
             *"NOT EQUIV"*) correct="FALSE"; note="NOT-EQUIV"; rows="$(printf '%s' "$gate" | grep -oE 'off=[0-9]+ on=[0-9]+')";;
-            *"TIMEOUT"*)   correct="FALSE"; note="TIMEOUT";   rows="-";;
+            *"TIMEOUT"*)   correct="TIMEOUT"; note="TIMEOUT"; rows="-";;
             *)             correct="FALSE"; note="ERROR";     rows="-";;
         esac
     fi

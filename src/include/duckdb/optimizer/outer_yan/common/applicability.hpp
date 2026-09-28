@@ -20,6 +20,7 @@ namespace duckdb {
 
 class LogicalComparisonJoin;
 class Expression;
+class ClientContext;
 
 //! Identifier for a base relation in the OuterYan join graph.
 using RelationId = idx_t;
@@ -46,7 +47,8 @@ struct ApplicabilityResult {
 };
 
 //! Applicability gate for OuterYan. Accepts iff:
-//!   - all joins are inner or LEFT/RIGHT/FULL outer (and at least one outer),
+//!   - all joins are inner or LEFT/RIGHT/FULL outer (an outer join is optional
+//!     when require_outer=false),
 //!   - join predicates are null-rejecting equi-comparisons between two base
 //!     relations,
 //!   - no semi/anti/mark joins, set ops, correlated subqueries, or window
@@ -63,14 +65,14 @@ public:
 	OuterYanApplicability();
 
 	//! Entry point. Runs the visitor and returns the populated result.
-	//! `require_outer=false` is used only by PostgreSQL replay after DuckDB's
-	//! filter pushdown may already have safely reduced every syntactic outer join
-	//! to INNER. Replay also requires stable intermediate filters because its
-	//! imported regrouping may change their evaluation count/scope. OuterYan
-	//! itself keeps both defaults.
+	//! Production OuterYan and PostgreSQL replay use `require_outer=false`:
+	//! DuckDB's filter pushdown may have reduced all syntactic outer joins to
+	//! INNER. Replay additionally requires stable intermediate filters because
+	//! its imported regrouping may change their evaluation count/scope.
 	static ApplicabilityResult Check(LogicalOperator &plan, bool require_outer = true,
 	                                 bool require_stable_intermediate_filters = false,
-	                                 bool allow_anchored_join_residuals = false);
+	                                 bool allow_anchored_join_residuals = false,
+	                                 optional_ptr<ClientContext> context = nullptr);
 
 	void VisitOperator(LogicalOperator &op) override;
 
@@ -87,6 +89,7 @@ public:
 	static bool FilterRequiresOriginalScope(const Expression &expr);
 
 private:
+	optional_ptr<ClientContext> context;
 	bool require_stable_intermediate_filters = false;
 	//! PGPlan preserves the exact imported split and all bound ON predicates. It
 	//! can therefore retain stable residuals anchored by one ordinary equality;

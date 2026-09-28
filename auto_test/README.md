@@ -41,7 +41,7 @@ corresponding environment values.
 | `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
-| `TPCDS_SF` | `100` | TPC-DS scale used when `tpcds_db` is built |
+| `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
 | `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
@@ -378,6 +378,31 @@ normal outer-join-simplified, join-ordered baseline from the same input plan.
 Grouping comparison uses stable base-table identities and ignores join type,
 child orientation, and inserted semi-join wrappers.
 
+Generated modulo and hash predicates participate in the cardinality estimates
+used by DP, including predicates pushed into scans. `x % k = 0` uses `1/k`;
+`hash(x) % k` comparisons use the fraction of matching residue buckets. Scan
+filters and residual filters share this estimator, and NDVs are capped at the
+filtered row estimate. These are uniform-distribution heuristics, so they do
+not qualify for relaxed confidence gates. Intermediate predicates move only
+after proving NULL rejection; a hash expression is evaluated with typed NULL
+inputs rather than assumed to propagate NULL. Queries that simplify to an
+all-INNER acyclic skeleton still enter OuterYan DP.
+
+Check DP coverage of all generated suites (including JOB regressions) without
+executing their joins:
+
+```bash
+python3 auto_test/check_outeryan_dp.py --out auto_test/results/dp_coverage.json
+```
+
+The check uses the release binary and existing `graph_db`, `tpch_db`,
+`tpcds_db`, and `job_db`; `DUCKDB_BIN` and the corresponding `*_DB` variables
+override them. It fails on planning errors or queries that do not complete
+DP. This is a planning check, not a correctness or performance benchmark.
+Aggregate pushdown is separately skipped when retained post-join filters or
+aggregate arguments reused as join/group keys still require raw input values;
+the selected join/SJ plan remains available.
+
 A same-grouping candidate always selects DuckDB. For a changed grouping, the
 source-level gate computes:
 
@@ -385,8 +410,11 @@ source-level gate computes:
 semijoin_raw_cost = round1_build + round1_probe + round2_build + round2_probe
 weighted_semijoin_cost = SEMIJOIN_COST_RATIO * semijoin_raw_cost
 candidate_total = candidate_join_cost + weighted_semijoin_cost
-strict_ratio_limit = 0.90 when semijoin_retained_cardinality_ratio < 0.90,
+strict_ratio_limit = LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO
+                     when semijoin_retained_cardinality_ratio < 0.90,
                      otherwise MAX_CANDIDATE_TO_BASELINE_RATIO
+if aggregate_query:
+    strict_ratio_limit = min(strict_ratio_limit, AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO)
 strict_threshold = strict_ratio_limit * baseline_cost
 
 select OuterYan on the strict tier iff candidate_total <= strict_threshold
@@ -398,8 +426,7 @@ below by the largest reduced leaf in its subtree. For table filters that used
 DuckDB's generic selectivity fallback, the candidate and baseline are also
 scored with unfiltered base cardinalities; the gate uses whichever scenario
 has the higher candidate/baseline ratio. These checks target false-positive
-selections in the slow tail without globally tightening the `1.0` limit and
-discarding unrelated wins.
+selections in the slow tail independently of the configured ratio limits.
 
 The uncertain-filter amplification guard also rejects a candidate when the
 largest input is at least `1000x` the uncertain filtered relation and the two
@@ -409,13 +436,19 @@ records the retention ratio, amplification, and guard result explicitly.
 Cost formula V9 uses the full modeled semi-join row-work (`1.0 *
 semijoin_raw_cost`) and a confidence-aware stretch tier without changing DP
 enumeration. The earlier `0.50` semi-join discount admitted regressions in the
-August 18 unified audit. Candidates whose reducer rounds are estimated to
-retain less than `90%` of input rows must beat the baseline by at least `10%`;
-this protects the strict tier when its apparent advantage depends on uncertain
-reduction estimates. The relaxed ceiling is `1.20`, but it is available only when all
-of the following planner-visible checks pass:
+August 18 unified audit. The current normal, low-retention, and aggregate strict
+limits are all `1.20`: a changed candidate may cost up to `20%` more than the
+baseline in the limiting estimation scenario. The low-retention knob applies
+when reducer rounds retain less than `90%` of estimated input rows; it remains
+separate so future experiments can require additional headroom in that regime.
+
+The stretch ceiling is also `1.20`, so it currently adds no allowance beyond
+the strict gate. Its eligibility checks remain available for diagnostics and
+experiments that lower the strict limits:
 
 ```text
+not a root aggregation/DISTINCT query
+no heuristic modulo/hash selectivity estimate
 no generic/default-filter upper-bound scenario
 no uncertain-filter amplification guard
 no active full-reduction cardinality lower-bound correction
@@ -427,9 +460,8 @@ semijoin_retained_cardinality_ratio >= 0.95
 `candidate_join_input_rows` and `baseline_join_input_rows` sum the left and
 right cardinalities processed by every real join, approximating hash
 build/probe work that the output-only join cost does not capture. An eligible
-candidate whose total lies in `(1.0, 1.20] * baseline_cost` is selected with
-reason `COST_OUTERYAN_STRETCH`. High-retention candidates otherwise retain the
-strict `1.0` limit; lower-retention candidates use the guarded `0.90` limit.
+candidate admitted only by this tier is selected with reason
+`COST_OUTERYAN_STRETCH`; with the current equal ceilings, no candidate needs it.
 These constants are experimental safety margins, not a runtime performance
 guarantee.
 
@@ -437,7 +469,7 @@ V9 also exposes a separate stats-backed unary-filter tier. Let `s` be the
 minimum filtered/base cardinality ratio among pre-join base scans. A predicate
 retained at root scope is not credited because it does not reduce join or
 semi-join inputs. If `s <= 0.35`,
-the estimate did not use DuckDB's generic filter fallback, the confidence
+the estimate is neither a modulo/hash heuristic nor DuckDB's generic filter fallback, the confidence
 guards above are clear, `candidate_join_cost < baseline_cost`, and the
 candidate/baseline join-input ratio is at most `0.75`, the gate computes:
 
@@ -447,11 +479,11 @@ low_selectivity_limit = strict_ratio_limit
                         + progress * (1.20 - strict_ratio_limit)
 ```
 
-The final relaxed limit is the maximum applicable tier. This is continuous at
-`0.35`: the threshold itself receives no discontinuous bonus, while lower
-selectivity makes selection progressively more likely. Generic/default 20%
-estimates never qualify. A candidate admitted only by this tier records
-`COST_OUTERYAN_LOW_SELECTIVITY`.
+The final relaxed limit is the maximum applicable tier. When the strict limit
+is below `1.20`, this formula continuously increases the allowance as selectivity
+decreases. With all strict limits at `1.20`, the formula stays at `1.20` for
+every selectivity. Generic/default 20% estimates never qualify. A nonaggregate
+candidate admitted only by this tier records `COST_OUTERYAN_LOW_SELECTIVITY`.
 
 The trace and CSV report two separate comparisons: `raw_cost_winner` compares
 `candidate_total` directly with `baseline_cost`, while `gate_result` compares
@@ -462,9 +494,9 @@ policy decisions.
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
-`GATED`, uses a semi-join ratio of `1.0`, a lower-retention limit of `0.90`,
-a normal strict limit of `1.0`, and the confidence-gated `1.20` stretch ceiling
-described above.
+`GATED`, uses a semi-join ratio of `1.0`, and sets the normal, lower-retention,
+and aggregate strict limits to `1.20`. Both confidence-gated ceilings remain
+`1.20`, so no tier admits a cost above `1.20 * baseline_cost`.
 Rebuild the CLI after changing these source-level settings.
 
 Set `SELECTION_MODE` to `SelectionMode::GATED` for the cost gate, or to
@@ -586,7 +618,8 @@ Decision reasons written to the trace and result files include:
 | `DUCKDB_PROVEN_EMPTY` | DuckDB's proof copy eliminates all real join work; use DuckDB without SJs |
 | `FORCE_OUTERYAN` | Changed candidate selected by the forced experiment mode |
 | `FORCE_OUTERYAN_DIAGNOSTIC` | Complete candidate forced past grouping and cost selection for a targeted correctness run |
-| `COST_OUTERYAN_BETTER` | Changed candidate passed the configured threshold |
+| `COST_OUTERYAN_BETTER` | Changed candidate passed the strict threshold and costs no more than DuckDB |
+| `COST_OUTERYAN_WITHIN_LIMIT` | Changed candidate costs more than DuckDB but passed the strict threshold |
 | `COST_OUTERYAN_STRETCH` | High-confidence candidate passed the relaxed `1.20` stretch threshold |
 | `COST_OUTERYAN_LOW_SELECTIVITY` | Stats-backed unary selectivity at or below `0.35` admitted the candidate through the continuous low-selectivity tier |
 | `COST_DUCKDB_BETTER` | Changed candidate exceeded the configured threshold |
@@ -595,7 +628,7 @@ Decision reasons written to the trace and result files include:
 | `OUTERYAN_FAILED` | OuterYan did not produce a complete candidate |
 
 Supported root aggregate and DISTINCT queries enter the same candidate pipeline.
-They use a stricter gate: `candidate_total <= 0.90 * baseline_cost`, with neither
+They use `candidate_total <= 1.20 * baseline_cost`, with neither
 the stretch tier nor the low-selectivity relaxation. The gate deliberately does
 not credit estimated aggregate-pushdown benefit. Aggregate pushdown runs only
 after this gate selects the OuterYan candidate; a rejected candidate returns the
