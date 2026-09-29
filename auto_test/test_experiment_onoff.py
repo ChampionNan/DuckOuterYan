@@ -23,32 +23,18 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.scripts = self.root / "auto_test"
         self.scripts.mkdir()
         for name in ("configs.sh", "thread_sweep.sh", "experiment_onoff.sh", "phase_profile.sh",
-                     "benchmark_statistics.py"):
+                     "gen_experiment_result.py", "benchmark_corpus.py"):
             shutil.copyfile(SCRIPT_DIR / name, self.scripts / name)
         corpus = self.root / "corpus" / "tpch"
         corpus.mkdir(parents=True)
         (corpus / "sample.sql").write_text("SELECT * FROM example;\n", encoding="utf-8")
-        v1_corpus = self.scripts / "outerjoin_benchmark" / "benchmark" / "tpch"
-        v1_corpus.mkdir(parents=True)
-        (v1_corpus / "sample.sql").write_text(
-            "SELECT * FROM example;\n", encoding="utf-8"
-        )
-        v2_corpus = self.scripts / "outerjoin_benchmark" / "v2" / "benchmark" / "tpch"
-        v2_corpus.mkdir(parents=True)
-        (v2_corpus / "sample.sql").write_text(
-            "SELECT * FROM example;\n", encoding="utf-8"
-        )
-        v3_corpus = self.scripts / "outerjoin_benchmark" / "v3" / "benchmark" / "tpch"
-        v3_corpus.mkdir(parents=True)
-        (v3_corpus / "sample.sql").write_text(
-            "SELECT COUNT(*) FROM example;\n", encoding="utf-8"
-        )
-        for version, scope in (("v2", "job_regressions"), ("v3", "selectivity_stress")):
-            scoped_corpus = self.scripts / "outerjoin_benchmark" / version / scope / "tpch"
-            scoped_corpus.mkdir(parents=True)
-            (scoped_corpus / "sample.sql").write_text(
-                "SELECT * FROM example;\n", encoding="utf-8"
-            )
+        canonical = self.scripts / "outerjoin_benchmark" / "benchmark"
+        family = canonical / "tpch"
+        family.mkdir(parents=True)
+        (family / "join__tpch__sample.sql").write_text("SELECT * FROM example;\n")
+        (family / "aggregate__tpch__sample.sql").write_text("SELECT COUNT(*) FROM example;\n")
+        (canonical / "selectivity_stress.txt").write_text("tpch/join__tpch__sample.sql\n")
+        (canonical / "job_regressions.txt").write_text("tpch/join__tpch__sample.sql\n")
         self.database = self.root / "tpch.db"
         self.database.touch()
         self.calls = self.root / "calls.jsonl"
@@ -209,7 +195,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertNotIn(None, row)
         self.assertFalse(any(key.startswith("t1_") for key in row))
         self.assertIn("profile_status", row)
-        for field in ("experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class"):
+        for field in ("experiment_group", "corpus_revision", "corpus_scope", "workload_category", "query_class"):
             self.assertIn(field, row)
         self.assertEqual(row["timing_threads"], str(threads))
         self.assertEqual(row["correct"], expected_correct)
@@ -223,7 +209,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 32)
-        self.assertIn("# corpus : version=v1", report)
+        self.assertIn("# corpus : revision=unique-semantic-20260929", report)
         for label in ("query=sample", "result: correct=TRUE", "context: family=tpch", "decision: plan="):
             self.assertIn(label, report)
         self.assertFalse((self.root / "result_t16.csv").exists())
@@ -261,99 +247,39 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["profile_directory"], "-")
         self.assertFalse((self.root / "result.profiles").exists())
 
-    def test_explicit_versions_are_recorded_and_invalid_versions_fail_early(self):
-        result = self.run_harness("--version", "v2")
+    def test_query_type_selects_only_matching_sql(self):
+        graph = self.scripts / "outerjoin_benchmark/benchmark/tpch/graph__tpch__sample.sql"
+        graph.write_text("SELECT * FROM example;\n")
+        for kind in ("aggregate", "graph"):
+            with self.subTest(query_type=kind):
+                result = self.run_harness("--query-type", kind, "--only", "all", USE_DEFAULT_CORPUS=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                row = self.read_row()
+                self.assertEqual(row["workload_category"], kind)
+                self.assertTrue(row["query"].startswith(kind + "__tpch__"))
+        invalid = self.run_harness("--version", "v2")
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("Version selection is retired", invalid.stderr)
+
+    def test_diagnostic_scope_references_the_same_canonical_sql(self):
+        result = self.run_harness("--only", "all", "--corpus-scope", "selectivity-stress",
+                                  USE_DEFAULT_CORPUS=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = self.assert_result(self.root / "result.csv", 32)
-        self.assertIn("# corpus : version=v2", report)
+        row = self.read_row()
+        self.assertEqual(row["query"], "join__tpch__sample")
+        self.assertEqual(row["corpus_scope"], "selectivity-stress")
+        self.assertEqual(row["workload_category"], "join")
 
-        self.calls.unlink()
-        result = self.run_harness("--version", "v3")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = self.assert_result(self.root / "result.csv", 32)
-        self.assertIn("# corpus : version=v3", report)
-
-        self.calls.unlink()
-        invalid = self.run_harness("--version", "v4")
-        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
-        self.assertIn("--version must be v1, v2, or v3", invalid.stderr)
-        self.assertFalse(self.calls.exists())
-
-    def test_versioned_scopes_are_explicit_and_v1_rejects_them(self):
-        result = self.run_harness(
-            "--version", "v3", "--corpus-scope", "selectivity-stress"
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = self.assert_result(self.root / "result.csv", 32)
-        self.assertIn("scope=selectivity-stress", report)
-        self.assertIn("/v3/selectivity_stress", report)
-
-        self.calls.unlink()
-        invalid = self.run_harness("--corpus-scope", "job-regressions")
-        self.assertEqual(invalid.returncode, 2, invalid.stdout + invalid.stderr)
-        self.assertIn("not available for --version v1", invalid.stderr)
-        self.assertFalse(self.calls.exists())
-
-    def test_all_runs_benchmarks_and_v3_stress_into_separate_result_files(self):
-        result = self.run_harness("--all")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        v1_report = self.assert_result(self.root / "result_v1.csv", 32)
-        v2_report = self.assert_result(self.root / "result_v2.csv", 32)
-        v3_report = self.assert_result(self.root / "result_v3.csv", 32)
-        stress_report = self.assert_result(
-            self.root / "result_v3_selectivity_stress.csv", 32
-        )
-        self.assertIn("# corpus : version=v1", v1_report)
-        self.assertIn("# corpus : version=v2", v2_report)
-        self.assertIn("# corpus : version=v3", v3_report)
-        self.assertIn("version=v3, scope=selectivity-stress", stress_report)
-        self.assertLess(
-            result.stderr.index("Running corpus version: v1"),
-            result.stderr.index("Running corpus version: v2"),
-        )
-        self.assertLess(
-            result.stderr.index("Running corpus version: v2 scope: benchmark"),
-            result.stderr.index("Running corpus version: v3 scope: benchmark"),
-        )
-        self.assertLess(
-            result.stderr.index("Running corpus version: v3 scope: benchmark"),
-            result.stderr.index("Running corpus version: v3 scope: selectivity-stress"),
-        )
-        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual(len([call for call in calls if call["timing"]]), 8)
-        with (self.root / "result_all.csv").open(newline="") as handle:
-            combined_rows = list(csv.DictReader(handle))
-        self.assertEqual(len(combined_rows), 4)
-        self.assertEqual(
-            {row["workload_category"] for row in combined_rows},
-            {"v1", "v2", "v3_aggregation", "v3_selectivity_stress"},
-        )
-        statistics = self.root / "result_statistics"
-        for name in ("benchmark_statistics.csv", "phase_summary.csv", "optimizer_summary.csv",
-                     "optimizer_phases.csv", "optimizer_phase_summary.csv", "STATISTICS.md", "statistics.json"):
-            self.assertTrue((statistics / name).is_file(), name)
-
-        conflict = self.run_harness("--all", "--version", "v2")
-        self.assertEqual(conflict.returncode, 2, conflict.stdout + conflict.stderr)
-        self.assertIn("--all cannot be combined with --version", conflict.stderr)
-
-    def test_no_version_flag_defaults_to_all(self):
+    def test_default_runs_each_query_once_in_one_result_file(self):
         result = self.run_harness(USE_DEFAULT_CORPUS=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for label in ("v1", "v2", "v3", "v3_selectivity_stress"):
-            self.assertTrue((self.root / f"result_{label}.csv").is_file(), label)
-        self.assertTrue((self.root / "result_all.csv").is_file())
-
-    def test_version_v3_includes_aggregation_and_selectivity_stress(self):
-        result = self.run_harness("--version", "v3", USE_DEFAULT_CORPUS=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((self.root / "result_v3.csv").is_file())
-        self.assertTrue((self.root / "result_v3_selectivity_stress.csv").is_file())
-        self.assertFalse((self.root / "result_v1.csv").exists())
-        with (self.root / "result_all.csv").open(newline="") as handle:
+        with (self.root / "result.csv").open(newline="") as handle:
             rows = list(csv.DictReader(handle))
-        self.assertEqual({row["workload_category"] for row in rows},
-                         {"v3_aggregation", "v3_selectivity_stress"})
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["workload_category"] for row in rows}, {"join", "aggregate"})
+        self.assertEqual(len(list(self.root.glob("result*.csv"))), 1)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len([call for call in calls if call["timing"]]), 4)
 
     def test_explicit_sweep_runs_16_then_32(self):
         result = self.run_harness("--threads", "16,32")

@@ -1,7 +1,0 @@
--- source: TPC-H Q8
--- transformation: connected join-subgraph adaptation; balanced INNER/LEFT/RIGHT/FULL left-deep source-derived form
--- business_semantics: Part-to-region market coverage through line items, orders, customers, and geography.
--- corpus_revision: v1-mixed-graph25-20260925
-SELECT *
-FROM (((((part p FULL OUTER JOIN lineitem l ON p.p_partkey = l.l_partkey) INNER JOIN orders o ON l.l_orderkey = o.o_orderkey) LEFT OUTER JOIN customer c ON o.o_custkey = c.c_custkey) RIGHT OUTER JOIN nation n ON c.c_nationkey = n.n_nationkey) FULL OUTER JOIN region r ON n.n_regionkey = r.r_regionkey)
-WHERE p.p_partkey % 1000 = 0;

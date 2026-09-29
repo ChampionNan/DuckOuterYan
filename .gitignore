@@ -379,10 +379,6 @@ tools/pythonpkg/duckdb_build/
 
 # own
 *_db*
-!/auto_test/pgplan/prepare_correctness_db.sh
-!/auto_test/postgres_replay/prepare_correctness_db.py
-!/auto_test/postgres_replay/prepare_correctness_db.sh
-!/auto_test/postgres_replay/test_correctness_db.py
 
 lsqb*
 *_data
@@ -409,6 +405,5 @@ run_all_chain.log
 watchdog.log
 test/sql/optimizer/outer_yan/data/*.csv
 /auto_test/results/
-/auto_test/pgplan/plans/
 /postgres/
 OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md

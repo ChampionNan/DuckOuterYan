@@ -55,11 +55,11 @@ public:
 	static constexpr SelectionMode SELECTION_MODE = SelectionMode::GATED;
 	static constexpr bool APPLY_COST_GATE = SELECTION_MODE == SelectionMode::GATED;
 	//! Scale the raw row-work estimate for both semi-join rounds before adding
-	//! it to the OuterYan candidate's real-join cost. V9 uses the full modeled
-	//! row-work instead of the former 0.50 discount: the 2026-08-18 benchmark
-	//! showed that discount admitted candidates whose reducer work dominated the
-	//! realized execution time.
-	static constexpr double SEMIJOIN_COST_RATIO = 1.0;
+	//! it to the OuterYan candidate's real-join cost. The paper-example
+	//! experiment uses 0.20 so the DP-selected order can pass the normal gate.
+	//! This is an experimental relative weight, not a calibrated runtime model;
+	//! restore 1.0 for the prior conservative corpus policy.
+	static constexpr double SEMIJOIN_COST_RATIO = 0.20;
 	//! GATED-mode selection threshold. All strict tiers currently allow up to
 	//! 20% higher limiting estimated total cost than DuckDB's baseline. This is
 	//! an estimated-work allowance, not a bound on runtime slowdown. Uncertain

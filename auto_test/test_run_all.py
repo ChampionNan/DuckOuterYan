@@ -92,7 +92,6 @@ class RunAllSelectionTest(unittest.TestCase):
                 "DUCKDB_BIN": str(self.duckdb),
                 "PYTHON_BIN": sys.executable,
                 "RUN_ALL_TEST_LOG": str(self.log),
-                "RUN_PGPLAN": "0",
                 "SKIP_BUILD": "1",
                 "SKIP_DATA": "1",
                 "OY_THREADS": "2",
@@ -114,33 +113,44 @@ class RunAllSelectionTest(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def test_default_regenerates_and_runs_all_versions(self):
+    def test_default_generates_and_runs_one_unique_corpus(self):
         result = self.run_driver()
         self.assertEqual(result.returncode, 0, result.stderr)
-        generated = [call["args"] for call in self.calls() if call["kind"] == "generate"]
-        self.assertEqual(
-            generated,
-            [["--version", "v1"], ["--version", "v2"], ["--version", "v3"]],
-        )
-        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
-        self.assertIn("--all", experiment["args"])
-        self.assertFalse(experiment["corpus_present"])
+        self.assertEqual([call["args"] for call in self.calls() if call["kind"] == "generate"], [[]])
+        self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
 
-    def test_v2_regenerates_dependencies_and_runs_only_v2(self):
-        result = self.run_driver("--version", "v2")
+    def test_query_type_is_forwarded_without_duplicate_generation(self):
+        result = self.run_driver("--query-type", "aggregate", "--timeout", "600")
         self.assertEqual(result.returncode, 0, result.stderr)
-        generated = [call["args"] for call in self.calls() if call["kind"] == "generate"]
-        self.assertEqual(generated, [["--version", "v1"], ["--version", "v2"]])
+        self.assertEqual([call["args"] for call in self.calls() if call["kind"] == "generate"], [[]])
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
-        version_index = experiment["args"].index("--version")
-        self.assertEqual(experiment["args"][version_index + 1], "v2")
-        self.assertNotIn("--all", experiment["args"])
-        self.assertFalse(experiment["corpus_present"])
+        self.assertIn("--query-type", experiment["args"])
+        self.assertIn("aggregate", experiment["args"])
+        self.assertIn("600", experiment["args"])
 
-    def test_version_and_all_are_mutually_exclusive(self):
-        result = self.run_driver("--version", "v1", "--all")
+    def test_retired_version_fails_before_build_or_generation(self):
+        result = self.run_driver("--version", "v1")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("--all cannot be combined with --version", result.stderr)
+        self.assertIn("Version selection is retired", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_thread_sweep_preserves_custom_corpus(self):
+        corpus = str(self.root / "custom")
+        result = self.run_driver("--threads", "16,32", OY_CORPUS=corpus)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiments = [call for call in self.calls() if call["kind"] == "experiment"]
+        self.assertEqual(len(experiments), 2)
+        for call, threads in zip(experiments, ("16", "32")):
+            self.assertTrue(call["corpus_present"])
+            self.assertNotIn("--all", call["args"])
+            self.assertEqual(call["args"][-4:-2], ["--threads", threads])
+            self.assertIn(f"_t{threads}.txt", call["args"][-1])
+
+    def test_retired_pgplan_request_does_not_run_another_comparison(self):
+        result = self.run_driver(RUN_PGPLAN="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PGPlan workflow has been removed", result.stderr)
+        self.assertEqual(self.calls(), [])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+-- source: TPC-DS Q51
+-- transformation: connected join-subgraph adaptation; balanced mixed secondary right-deep source-derived form
+-- business_semantics: web sales reporting period
+-- corpus_revision: semantic-ranges-20260929
+-- semantic_filter: tpcds_web_date; tier=low; web sales reporting period
+-- predicate: d.d_date BETWEEN DATE '2000-08-10' AND DATE '2000-09-19'
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT *
+FROM (store_sales ss LEFT OUTER JOIN (web_sales ws INNER JOIN date_dim d ON ws.ws_sold_date_sk = d.d_date_sk) ON ws.ws_item_sk = ss.ss_item_sk)
+WHERE d.d_date BETWEEN DATE '2000-08-10' AND DATE '2000-09-19';

@@ -603,14 +603,17 @@ association space.
 
 ## Reproduction
 
-From the repository root, use **Bash** to build and install the instrumented
-source, restart the managed postmaster with `PG_OJ_TRACE=1`, and run the
-witness file. The variable must be present in the postmaster environment;
-setting it only in the `psql` client is too late.
+The following is the historical **Bash** recipe for an already provisioned,
+instrumented PostgreSQL installation. The replay setup scripts and their
+configuration have been removed. To reuse this recipe, supply the installation,
+cluster, log, endpoint, and credential variables below explicitly. The variable
+`PG_OJ_TRACE=1` must be present in the postmaster environment; setting it only
+in the `psql` client is too late.
 
 ```sh
 set -euo pipefail
-source auto_test/configs.sh
+# PGPLAN_INSTALL_DIR, PGPLAN_DATA_DIR, PGPLAN_LOG_FILE, PGPLAN_HOST,
+# PGPLAN_PORT, PGPLAN_PASSWORD, PSQL_BIN, and PG_DSN must already be set.
 
 make -C postgres/postgresql-16.2 -j8
 make -C postgres/postgresql-16.2 install
@@ -641,8 +644,7 @@ PGPASSWORD="$PGPLAN_PASSWORD" "$PSQL_BIN" -X \
   -o "-h $PGPLAN_HOST -p $PGPLAN_PORT" -w start
 ```
 
-`configs.sh` supplies the managed database, user, password, and TCP endpoint;
-the command does not print the password. The observed validation used the
+`configs.sh` no longer supplies PostgreSQL settings. The observed validation used the
 pinned PostgreSQL 16.2 server, `geqo=off`, collapse limits `16`, and no parallel
 gather. On 2026-08-31, this exact file completed with exit status `0` and 788
 lines of output. The identity-3 and all-FULL records quoted above come from

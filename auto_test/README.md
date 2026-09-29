@@ -8,27 +8,99 @@ The script implementations are authoritative. The option and workflow summaries
 below mirror the current versions; `experiment_onoff.sh --help` prints its CLI
 synopsis.
 
-## Files
+## 脚本总览
 
-| Path | Purpose |
+`auto_test/` 顶层共有 **18 个脚本：13 个入口/依赖、5 个回归测试**。
+`results/` 只存实验产物，不再放一次性执行脚本。
+
+日常主流程：`run_all.sh` → 数据准备与 corpus 生成 → `experiment_onoff.sh` →
+CSV/日志 → `gen_experiment_result.py --date YYYYMMDD` → 汇总统计、图形与论文 LaTeX。
+
+常用命令只需：
+
+```bash
+python3 auto_test/gen_experiment_result.py --date 20260926
+```
+
+默认输出到 `auto_test/results/plots/20260926/`，无需填写输出路径。
+
+### 日常入口与诊断工具
+
+| 脚本 | 实际用途 | 何时使用 / 调用关系 |
+|---|---|---|
+| [`run_all.sh`](run_all.sh) | 编译、建库、生成 query 并运行完整工作流 | 一键入口；`--query-type join/graph/aggregate` 选择类型 |
+| [`build_db.sh`](build_db.sh) | 构建或复用 Graph、TPC-H、TPC-DS、JOB 数据库 | 被 `run_all.sh` 调用，也可单独指定 family；已有数据库默认复用 |
+| [`gen_outerjoin_benchmark.py`](gen_outerjoin_benchmark.py) | 生成去重 SQL、manifest、历史名称映射及三档语义过滤；`--audit-selectivity` 核验实际过滤比例 | 修改或重建 corpus 时；不运行性能查询 |
+| [`gen_queries.py`](gen_queries.py) | 重建固定的 legacy SQL 来源，供当前 corpus 的 graph 查询和来源追溯使用 | `gen_outerjoin_benchmark.py` 的 `regenerate_legacy_sources()` 仍直接调用；文件名旧但并非废弃依赖 |
+| [`experiment_onoff.sh`](experiment_onoff.sh) | 正常/OuterYan 的计划选择、裸查询正确性、计时和 profiling | 主实验入口；输出逐 query TXT/CSV，调用共享统计与 profiling 模块 |
+| [`check_outeryan_dp.py`](check_outeryan_dp.py) | 只用只读 `EXPLAIN` 检查各生成用例是否进入 DP，并记录选择的 plan 与原因 | 优化器覆盖与选择检查；需已有数据库和编译好的 CLI；不是性能测试 |
+| [`trace_outer_yan.sh`](trace_outer_yan.sh) | 记录单条 query 或失败 SQL 的优化阶段 trace | 使用 `--db DB -f QUERY.sql`；会实际执行裸查询，需显式指定数据库 |
+| [`reprocess_experiment_logs.py`](reprocess_experiment_logs.py) | 从已保存 TXT/CSV 恢复逐 query 结果和统计，保留已有 CSV 精度 | 日志恢复、统计阶段失败后的重处理；不执行 SQL |
+| [`gen_experiment_result.py`](gen_experiment_result.py) | 统一 CSV 合并、统计规则、Matplotlib 图形及论文 LaTeX 生成；内含 pandas/pyarrow 兼容处理 | `--date YYYYMMDD` 生成全部结果；实验 harness 和日志恢复也共用该文件的统计接口 |
+
+### 被主流程调用的内部依赖
+
+这些文件通常不直接运行，不能按“没有独立命令”判断为无用。
+
+| 模块 | 实际用途 | 调用方 |
+|---|---|---|
+| [`configs.sh`](configs.sh) | DuckDB/数据库路径、scale、线程、超时和 corpus 的统一默认配置 | `run_all.sh`、`build_db.sh`、`experiment_onoff.sh` |
+| [`benchmark_corpus.py`](benchmark_corpus.py) | 生成器、统计与复现共享的 SQL 身份、命名及历史路径解析 | 内部模块，无独立 CLI |
+| [`thread_sweep.sh`](thread_sweep.sh) | 解析线程列表、拒绝非法/重复线程数 | `run_all.sh`、`experiment_onoff.sh` 通过 `source` 使用 |
+| [`phase_profile.sh`](phase_profile.sh) | 单独采集 OFF/ON optimizer profile，并从同一 ON 样本解析 R1/R2/R3/Other CPU | `experiment_onoff.sh` 调用 `oy_optimizer_profile_pair` / `oy_phase_profile_from_json` |
+| [`legacy_corpus.py`](legacy_corpus.py) | 固定 legacy 成员、历史超时排除、来源与对照集合 | 两个 corpus 生成器；不依赖本机历史结果文件 |
+
+### 回归测试（不是临时实验脚本）
+
+| 测试 | 验证内容 |
 |---|---|
-| `configs.sh` | Shared DuckDB, corpus, timing, and PGPlan defaults |
-| `run_all.sh` | Build/data orchestration followed by the default DuckDB Original/OuterYan comparison; PGPlan is opt-in |
-| `pgplan/` | PostgreSQL 16.2 setup, cached logical-tree capture/import, comparison experiment, and documentation |
-| `build_db.sh` | Build or reuse graph, TPC-H, TPC-DS, and JOB databases |
-| `gen_outerjoin_benchmark.py` | Generate the provenance-backed paper benchmark and its manifests |
-| `gen_queries.py` | Reproduce the archived pre-design corpus under `outerjoin_query_old/` |
-| `experiment_onoff.sh` | ON/OFF equivalence, plan decision, kernel diagnostics, and multi-thread timing |
-| `audit_cost_gate.py` | Extract changed-grouping candidates and classify normal gate decisions against forced-candidate timings |
-| `representative_queries.txt` | Ordered P0/P1 cross-family validation manifest, including runnable 3–7 relation cases |
-| `trace_outer_yan.sh` | Write the optimizer-stage trace for one query |
-| `outerjoin_benchmark/` | Canonical mixed v1 view, expanded v2 selectivity workload, 102-query v3 aggregation workload, manifests, and paper text |
-| `outerjoin_query_old/` | 170 completed queries from the active pre-design corpus |
-| `outerjoin_query_timeout/` | Recoverable archive of the 84 legacy timeouts from the August 10 run |
-| `results/` | Generated text, CSV, trace output, and native phase profiles |
+| [`test_run_all.py`](test_run_all.py) | 主入口的默认版本、CLI 选择和 query 生成/运行衔接 |
+| [`test_experiment_onoff.py`](test_experiment_onoff.py) | 使用模拟 DuckDB 验证 shell harness、超时、正确性、计划与 profiling 行为 |
+| [`test_gen_outerjoin_benchmark.py`](test_gen_outerjoin_benchmark.py) | corpus 可重建性、成员、SQL/manifest 与不依赖历史结果文件的约束 |
+| [`test_gen_experiment_result.py`](test_gen_experiment_result.py) | 统计、图形、论文表格与统一 CLI；覆盖日期默认目录、多线程隔离、1 秒边界、profile 配对和无需 Matplotlib 的 harness 汇总 |
+| [`test_reprocess_experiment_logs.py`](test_reprocess_experiment_logs.py) | 日志恢复、CSV 精度、超时识别与不完整批次处理 |
 
-`trace_outer_yan.sh` has its own command-line/environment defaults and does not
-source `configs.sh`.
+运行脚本层测试（无需运行完整 benchmark）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
+  python3 -m unittest discover -s auto_test -p 'test_*.py'
+```
+
+### 本次移除与保留边界
+
+- 已删除旧 timeout SQL 档案、论文模板目录及 PostgreSQL replay/PGPlan 脚本。
+  主流程统一运行 DuckDB Original/OuterYan 对比；旧 timeout 仅保留排除元数据，
+  生成器不再读取已删除 SQL。论文统计和 LaTeX 仍由 `gen_experiment_result.py` 生成。
+- 原统计、绘图、论文和依赖加载四个实现已合并到 `gen_experiment_result.py`，旧入口删除，
+  对应测试也合并为 `test_gen_experiment_result.py`。`reprocess_experiment_logs.py` 只负责日志
+  恢复，继续复用统一统计接口，不另维护结果计算逻辑。
+
+- 删除旧 `audit_cost_gate.py` 和只测试该旧审计器的 `test_audit_cost_gate.py`：其
+  normal/forced 审计强制要求 `t1_off/t1_on/t1_speedup`，不兼容当前仅输出 TM 的
+  实验 CSV，也未接入当前主流程；相关旧双跑使用说明一并删除。
+- 删除 `results/optimizer_cost_gate_20260928/` 下的 `collect.py`、`analyze.py`、
+  `write_report.py` 和 `results/optimizer_selection_strict120_20260928/collect.py`：
+  它们依赖固定日期路径及当次阈值/数字，属于一次性分析。已有 decisions、analysis、
+  JSON/Markdown 报告保留为历史记录；旧报告不再提示运行已删除脚本。
+- 删除 `phase_profile.sh` 内无人调用的旧 `oy_phase_profile` 及其失败占位 helper，
+  保留主 harness 正在调用的单次 OFF/ON profile 与 JSON 解析实现。
+- `check_outeryan_dp.py` 可复查当前 DP 覆盖和 plan selection，但不替代历史
+  threshold replay 或被删除审计器的 forced-runtime 分类。
+- 保留 SQL corpus、manifest、原始实验数据、论文生成器和上述测试；它们是输入、
+  产物或有效依赖，不按文件数量删减。今后一次性脚本放 `/tmp`，可复用工具才加入
+  本目录并更新这份清单。
+
+### 数据与文档目录
+
+| 目录 | 用途 |
+|---|---|
+| `outerjoin_benchmark/` | 650 条唯一 SQL、stress/regression 子集清单、manifest 与历史档案 |
+| `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
+| `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
+| `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
+
+`trace_outer_yan.sh` 使用自己的命令行/环境默认值，不读取 `configs.sh`。
 
 ## Current configuration
 
@@ -37,40 +109,20 @@ corresponding environment values.
 
 | Variable | Current source default | Meaning |
 |---|---:|---|
-| `PYTHON_BIN` | `python3` | Python 3.7+ standard-library interpreter; may be an absolute repo-local path |
+| `PYTHON_BIN` | `python3` | Python 3.7+ interpreter; statistics require NumPy/pandas; may be an absolute repo-local path |
 | `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
 | `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
-| `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout; `0` disables it |
+| `OY_TIMEOUT_SECS` | `600` | Per-statement timeout (10 minutes); `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
-| `OY_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Canonical v1 corpus root |
-| `OY_CORPUS_SCOPE` | `benchmark` | Versioned view: v2 has `job-regressions`; v3 has `selectivity-stress` |
-| `RUN_PGPLAN` | `0` | Set to `1` to opt into PGPlan generation and three-way comparison |
-| `PGPLAN_SETUP` | `source` | PostgreSQL provider: repo-local source build, Docker, or an external DSN |
-| `PGPLAN_SOURCE_DIR` | `postgres` | Repo-local PostgreSQL source/build root used by `source` mode |
-| `PGPLAN_INSTALL_DIR` | `postgres/postgresql` | Repo-local PostgreSQL installation prefix used by `source` mode |
-| `PGPLAN_PASSWORD_FILE` | `postgres/postgresql/.pgplan-password` | Mode-`0600` generated secret for managed source and Docker servers |
-| `PGPLAN_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Corpus whose selected queries receive validated cached or freshly captured PGPlan artifacts |
-| `PGPLAN_SAMPLE_ROWS` | `1000` | Per-table PostgreSQL row cap for graph, TPC-DS, and JOB plan selection |
-| `PGPLAN_PLAN_CACHE` | `auto_test/pgplan/plans` | Persistent validated typed-plan cache; override with `--plan-cache` |
-| `PGPLAN_COMPARISON_MODE` | `both` | `both`, `pgplan-only` (`--skip1`), or `none` (`--performance-only`) |
-| `PGPLAN_RUNS` | `OY_RUNS` (`3`) | Positive odd TM measured-run count after one warm-up; no single-thread batch |
-| `PGPLAN_CORRECTNESS_MODE` | `target` | `target` compares complete target results; `bounded` is a diagnostic; `reuse` requires a sealed prior target receipt |
-| `PGPLAN_CORRECTNESS_FROM` | empty | Prior corpus root used by correctness-only `reuse` mode |
-| `PGPLAN_REUSE_FROM` | empty | Prior corpus root used to reuse both PGPlan artifacts and sealed correctness receipts |
-| `PGPLAN_CORRECTNESS_GRAPH_ROWS` | `500` | Bounded-mode deterministic graph prefix |
-| `PGPLAN_CORRECTNESS_JOB_ROWS` | `1000` | Bounded-mode deterministic JOB prefix |
-| `PGPLAN_CORRECTNESS_MAX_RESULT_ROWS` | `2000000` | Bounded-mode builder preflight result cap |
-| `PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS` | `30` | Bounded-mode builder preflight timeout |
-| `PGPLAN_CAPTURE_TIMEOUT_SECS` | `300` | PostgreSQL plain-`EXPLAIN` optimizer timeout; `0` disables it |
-| `PGPLAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` (`1800`) | Per DuckDB statement and requested correctness post-processing step |
-| `SKIP_PG_DATA` | `0` | Set to `1` to forbid TPC-H SF0.01 loading/repair and require verified existing data |
+| `OY_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Deduplicated corpus root |
+| `OY_CORPUS_SCOPE` | `benchmark` | Subset: `benchmark`, `job-regressions`, or `selectivity-stress` |
 | `DUCKDB_OY_FORCE_CANDIDATE` | unset | Set to `1` only to force a valid OuterYan candidate for correctness validation |
 
 Always inspect `configs.sh` before a server run because these experiment defaults
@@ -121,183 +173,33 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-The canonical v1 corpus is **v1-mixed**
-(`corpus_revision=v1-mixed-graph25-20260925`), the 224-query workload under
-`outerjoin_benchmark/benchmark/`. It contains all 170 source-derived structures
-and all 54 Graph/industry/schema-synthetic evaluation controls.
-The retired FULL-heavy v1 timeout hashes do not filter this corpus: changing
-join labels changes the SQL and invalidates both the old timing and timeout
-observations. `active_timeout_exclusions.csv` is therefore empty. Historical
-exclusions remain documented in `benchmark_timeouts.py` and
-[`active_corpus_coverage.md`](outerjoin_benchmark/active_corpus_coverage.md),
-but must not be interpreted as measurements of the current revision.
-Labels are SQL basenames without `.sql`; `--pattern` and `--exclude` match the
-entire label using shell-glob syntax.
+主查询集只有 `outerjoin_benchmark/benchmark/`，共 **650 条唯一 SQL**：
+480 条来源结构查询（`join`）、68 条图结构查询（`graph`）、102 条聚合查询（`aggregate`）。
+Graph/TPC-H/TPC-DS/JOB 分别为 **31/175/209/235** 条。
+`--query-type graph` 选择上述 68 条图结构查询；`--only graph` 选择 Graph 数据集的 31 条查询。
+旧结果中的 `control__` 名称仍可解析到改名后的 SQL。
+原 v1/v2 已合并，不再按版本运行或命名；相同 SQL 只执行一次。
+
+查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
+`join__tpch__q05_region_sales_ldmx__ilrf__sel_low`。
+过滤档位为 `(0,5%)`、`[5,40%)`、`[40,80%]`，使用业务语义谓词，不使用 mod/hash 采样。
+18 条 selectivity stress 和两条 JOB regression 是现有查询的子集标签及路径清单，不增加总数。
 
 ```bash
-# Regenerate or test v1 only.
 python3 auto_test/gen_outerjoin_benchmark.py
-bash auto_test/experiment_onoff.sh --version v1 --only all
-
-# Generate and test the 564-query expanded v2 corpus.
-python3 auto_test/gen_outerjoin_benchmark.py --version v2
-bash auto_test/experiment_onoff.sh --version v2 --only all
-
-# Generate v3, then test its 102 aggregation and 42 selectivity-stress queries.
-python3 auto_test/gen_outerjoin_benchmark.py --version v3
-bash auto_test/experiment_onoff.sh --version v3 --only all
-
-# Aggregation component only.
-bash auto_test/experiment_onoff.sh --version v3 --corpus-scope benchmark --only all
-
-# Default: run all benchmark versions plus v3 selectivity-stress sequentially.
-bash auto_test/experiment_onoff.sh --all
-# The following is equivalent:
 bash auto_test/experiment_onoff.sh
-
-# Metadata-selected balanced selectivity ablation; report separately.
-bash auto_test/experiment_onoff.sh --version v3 \
-  --corpus-scope selectivity-stress --only all
-
-# Reproduce the two confirmed JOB regressions only.
-bash auto_test/experiment_onoff.sh --version v2 \
-  --corpus-scope job-regressions --only job
+bash auto_test/experiment_onoff.sh --query-type join --only tpch
+bash auto_test/experiment_onoff.sh --query-type aggregate
+bash auto_test/experiment_onoff.sh --corpus-scope selectivity-stress
+python3 auto_test/check_outeryan_dp.py --out auto_test/results/unique_optimizer_audit_sj020.json
+python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout 600
 ```
 
-Version selection is therefore unambiguous: `--version v1`, `--version v2`,
-and `--version v3` run exactly that version (v3 includes both of its scopes
-unless `--corpus-scope` narrows it); `--all` runs v1, v2, v3 aggregation, and
-v3 selectivity stress: 224 + 564 + 102 + 42 = 932 query instances. With no
-version option, the harness behaves exactly as `--all`.
-
-V2 is stored under `outerjoin_benchmark/v2/` and does not replace v1. It applies
-three bounded deterministic selectivity tiers (approximately 0.1%, 1%, and 5%)
-to 170 source-derived structures, then adds the 54 v1 evaluation controls. Both
-v1 and v2 use the same mixed-join design. Every
-source seed still contributes the same five graph-preserving shapes, but their
-join edges use a deterministic cyclic assignment of `I/L/R/F`. Across the 170
-base structures, the 625 join edges contain 157 INNER and 156 each LEFT,
-RIGHT, and FULL labels. The three selectivity copies retain the same vector for
-each base. The 54 Graph, industry, and schema-synthetic controls are retained,
-but their existing relations, predicates, and grouping are relabeled with the
-same balancing rule. In the complete 224-query v1 union, the 801 edge
-occurrences contain 200 INNER, 201 LEFT, 200 RIGHT, and 200 FULL labels.
-Consequently, the complete 564-query v2 main workload has
-512 INNER, 513 LEFT, 513 RIGHT, and 513 FULL edge occurrences. It includes 75
-all-outer queries (using two or more of LEFT/RIGHT/FULL) and 489 queries that
-also contain INNER; no v2 main query has a single-kind vector such as all-FULL.
-These are input-expression labels; optimizer simplification and physical join
-selection are measured outcomes, not part of the corpus-balancing rule.
-
-The 170 structural bases remain traceable to 34 source queries from TPC-H,
-TPC-DS, JOB, and SQLStorm. Their relation instances and equality-edge graph are
-retained. Graph and industry/schema-synthetic queries are explicitly labeled
-as control strata in `benchmark/manifest.csv`, rather than being presented as
-source-derived benchmark queries. The manifest also records which strata are
-motivated by the 0916 advantage hypothesis, but all seeds, shapes, join-label
-rotations, and paired controls remain included independently of measured speed. See
-`outerjoin_benchmark/README.md` for the design and provenance fields.
-
-The generated `v3/selectivity_stress/` directory contains 42 variants of six
-metadata-selected mixed v2 counterparts of feasibility-screened v1 structures
-at approximately 0.025%, 0.05%, 0.2%, 10%,
-20%, 50%, and 80% target selectivity. The ablation domain is declared from
-static metadata: mixed joins with at least four relations and an applicable
-null-rejecting predicate. Two distinct source queries are selected from each
-of TPC-H, TPC-DS, and JOB; across the complete set there are two left-deep, two
-right-deep, and two bushy structures. Each family contributes one native
-benchmark source and one SQLStorm-derived source. Selection uses fixed family/shape/source slots
-and a salted SHA-256 rank over query identifiers and never reads measured
-runtimes. Every tier contains six queries
-and uses a common deterministic 4,000-bucket hash sample. This is equal
-representation per tier, not a claim of numerically uniform or realized
-selectivity. The manifest records `performance_selected=false` and marks every
-query `headline_eligible=false`; keep this correlated selectivity ablation
-separate from headline scores.
-
-The v3 aggregation component contains 102 queries: 42 global `COUNT(*)`, 30
-grouped `SUM`, 15 grouped `MIN`, and 15 grouped `MAX`. MIN and MAX split one
-extremum class equally. Each of the three structural slots receives exactly 14
-COUNT, 10 SUM, 5 MIN, and 5 MAX assignments from a static weighted schedule;
-the assignment never reads experimental results.
-The separate `v2/job_regressions/` directory contains the mixed-v2 counterparts
-of two historical FULL-heavy v1 JOB cases below 0.95x. Their structure remains in the
-main benchmark so difficult cases are not silently removed. Because changing
-join labels changes the query, the old v1 speedups are provenance only; both
-v2 counterparts are marked `requires_v2_remeasurement`.
-
-Generation is deterministic and writes query-level provenance manifests. Active
-query names use only `derived__` and `industry__`. The benchmark-derived core
-has 170 queries (TPC-H 25,
-TPC-DS 35, JOB 50, and SQLStorm 60), including 46 left-deep, 80 right-deep,
-and 44 genuinely bushy graph-preserving applicability inputs. Its 625 join
-edges contain 157 INNER and 156 each LEFT, RIGHT, and FULL. The 54-query
-evaluation component contains nine explainable business-role patterns, all 25
-completed Graph-generator patterns, and 20 schema-synthetic regression guards.
-The complete Graph set is included without consulting performance; seven rows
-retain historical speed-up only as provenance. The 25 Graph structures comprise
-10 bushy, seven left-deep, and eight right-deep expressions. The active
-224-query union contains the 170-query core plus all 54 controls.
-Run the complete component (which bypasses active timeout filtering)
-with:
-
-```bash
-OY_CORPUS=auto_test/outerjoin_benchmark/industry_inspired \
-  bash auto_test/experiment_onoff.sh --only all
-```
-
-The historical generator remains
-available as `gen_queries.py`; it writes to `outerjoin_query_old/` and applies
-the 84 timeout exclusions pinned in `legacy_corpus.py`. Both generators use
-this checked-in membership metadata, not local files under `results/`, so
-regeneration works on a fresh checkout or another server. The same 28
-performance-selected synthetic stress cases are also available as a focused
-component view under `outerjoin_benchmark/supplemental`. See
-`outerjoin_benchmark/README.md` for the transformation and terminology rules.
-`benchmark_timeouts.py` now documents only the retired FULL-heavy revision.
-The current active view applies none of those exclusions; any timeout policy
-must be rebuilt from a completed mixed-v1 run and pinned under a new revision.
-
-Query traversal is deterministic. Families are visited in the order selected by
-the harness; `--only bench` means `tpch`, then `tpcds`, then `job`. Within each
-family, SQL basenames are ordered bytewise (`LC_ALL=C`). A bushy-eligible seed
-emits `bdmx`, `bmx`, `ldmx`, `rdmx`, and `rduX`; a bushy-ineligible seed emits
-`alt`, `ldmx`, `rdax`, `rdmx`, and `rduX`. Here `X` is a legacy filename label;
-this is only filename order, not a semantic progression. A `--query-list` file
-overrides this order and is processed line by line.
-
-### Mixed v1/v2 core query variants
-
-The suffix records the binary join-tree traversal and remains stable for result
-continuity; it does not encode the join vector. Both current corpus versions
-assign every shape a deterministic mixed vector. For a query with four or more
-join edges, the vector contains all four join kinds; shorter queries contain
-consecutive two- or three-kind slices of the `I/L/R/F` cycle. This produces both
-all-outer (`L/R/F`) queries and queries that mix INNER with outer joins while
-keeping aggregate edge frequencies balanced. The manifest's `join_vector` is
-authoritative.
-
-| Suffix | Tree and join labeling | Meaning |
-|---|---|---|
-| `ldmx` | Primary left-deep mixed tree | Primary left-deep traversal of the fixed graph. |
-| `rdmx` | Primary right-deep mixed tree | Primary right-deep traversal of the fixed graph. |
-| `bmx` | Connected bushy mixed tree | Tests bushy grouping without a cross product; emitted only when both root subtrees can contain at least two relations. |
-| `bdmx` | Secondary connected bushy mixed tree | Uses another connected split/orientation of the same fixed graph. |
-| `alt` | Alternate left-deep mixed tree | Replaces `bmx` when a true cross-product-free bushy tree is unavailable. |
-| `rdax` | Secondary right-deep mixed tree | Replaces `bdmx` when the graph cannot form a true bushy root. |
-| `rduX` | Alternate right-deep mixed tree | Starts at the opposite graph side; `X` is a legacy filename label and does not override the manifest vector. |
-
-The core contains 46 left-deep, 80 right-deep, and 44 bushy queries. Every
-grouping is independently specified because outer joins are not generally
-associative. Every input contains at least two join kinds and at least one outer
-join. Global NULL-rejecting predicates remain selective, while the mixed
-vectors exercise both simplification and applicability boundaries.
-The two historical aggregate patterns in the active evaluation set are emitted
-as detail projections so they do not bypass OuterYan.
-
-Twenty schema-synthetic legacy regression guards remain explicitly labeled in
-the evaluation component. Other historical queries stay in
-`outerjoin_query_old/` as generation/provenance inputs.
+`--version` 已移除；`--all` 等同默认唯一查询集。
+去重身份保留 execution family、字符串常量、join 类型与括号结构，忽略注释和格式。
+所有 910 个历史名称（含两个 regression 副本）映射至 `benchmark/aliases.csv` 的 canonical ID。
+旧 SQL 已归档至 `revisions/`，旧结果 CSV 不修改。详细规则见
+[benchmark README](outerjoin_benchmark/README.md)。
 
 ## Experiment pipeline
 
@@ -433,10 +335,10 @@ largest input is at least `1000x` the uncertain filtered relation and the two
 reducer rounds retain at least `99%` of estimated input cardinality. The trace
 records the retention ratio, amplification, and guard result explicitly.
 
-Cost formula V9 uses the full modeled semi-join row-work (`1.0 *
-semijoin_raw_cost`) and a confidence-aware stretch tier without changing DP
-enumeration. The earlier `0.50` semi-join discount admitted regressions in the
-August 18 unified audit. The current normal, low-retention, and aggregate strict
+The current experimental V9 configuration uses `0.20 * semijoin_raw_cost` and
+a confidence-aware stretch tier without changing DP enumeration. The prior
+conservative configuration used `1.0`; report these configurations separately.
+The experimental weight is not a calibrated runtime coefficient. The current normal, low-retention, and aggregate strict
 limits are all `1.20`: a changed candidate may cost up to `20%` more than the
 baseline in the limiting estimation scenario. The low-retention knob applies
 when reducer rounds retain less than `90%` of estimated input rows; it remains
@@ -494,7 +396,7 @@ policy decisions.
 The policy knobs are `constexpr` members of `OuterYanOptimizer` in
 `src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp`; they
 are not environment variables or SQL settings. The current workspace selects
-`GATED`, uses a semi-join ratio of `1.0`, and sets the normal, lower-retention,
+`GATED`, uses the experimental semi-join ratio `0.20`, and sets the normal, lower-retention,
 and aggregate strict limits to `1.20`. Both confidence-gated ceilings remain
 `1.20`, so no tier admits a cost above `1.20 * baseline_cost`.
 Rebuild the CLI after changing these source-level settings.
@@ -516,7 +418,7 @@ diagnostic override:
 DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
   --only tpcds \
-  --pattern 'oy_ds_ds_bushy5b_v0' \
+  --query-type join --limit 1 \
   --runs 3 \
   --capture-plans
 ```
@@ -537,70 +439,6 @@ decision=[mode=FORCE_OUTERYAN_DIAGNOSTIC
           reason=FORCE_OUTERYAN_DIAGNOSTIC
           ... gate=SKIPPED ... outer_yan_selected=1 ...]
 ```
-
-#### Audit every changed-grouping candidate
-
-Cost-gate evaluation is an offline two-run procedure. First run the corpus in
-normal `GATED` mode. Extract forceable queries for which `outer_reordered=1`:
-
-```bash
-python3 auto_test/audit_cost_gate.py \
-  --normal-csv auto_test/results/experiment_onoff_core_TIMESTAMP.csv \
-  --write-query-list /tmp/outeryan_changed_queries.txt
-```
-
-Run that list again with the diagnostic candidate override. Both sides still
-execute the bare query, and an incorrect candidate is never considered a
-performance win:
-
-```bash
-DUCKDB_OY_FORCE_CANDIDATE=1 \
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
-bash auto_test/experiment_onoff.sh \
-  --only all \
-  --query-list /tmp/outeryan_changed_queries.txt \
-  --runs 3 \
-  --capture-plans \
-  --out auto_test/results/experiment_onoff_forced_TIMESTAMP.txt
-```
-
-Finally, join the normal and forced results:
-
-```bash
-python3 auto_test/audit_cost_gate.py \
-  --normal-csv auto_test/results/experiment_onoff_core_TIMESTAMP.csv \
-  --forced-csv auto_test/results/experiment_onoff_forced_TIMESTAMP.csv \
-  --output auto_test/results/cost_gate_audit_TIMESTAMP.csv
-```
-
-The default symmetric materiality band treats a speedup of at least `1.10` as
-faster, a speedup of at most `1/1.10` as slower, and values between those
-bounds as neutral. It can be changed with `--material-speedup`. The report
-derives speedup from the precise OFF and ON times rather than the rounded
-speedup column, and classifies multi-thread (`tm`) and single-thread (`t1`)
-measurements
-separately. A selected faster plan is a true positive; a rejected faster plan
-is a false negative; a selected slower plan is a false positive; and a rejected
-slower plan is a true negative. A disagreement between `tm` and `t1` is marked
-as thread-sensitive rather than collapsed into a single winner. Multi-thread
-timing is the default primary metric and can be changed with
-`--primary-metric t1`.
-
-The audit also requires the normal row to be a consistent `GATED` decision,
-the forced row to report a changed grouping under
-`FORCE_OUTERYAN_DIAGNOSTIC`, and the effective pass, query identity, result
-cardinality, formula, weights, and candidate cost inputs to agree. These checks
-are a deterministic-rerun proxy; the current trace does not export a grouping
-signature for direct comparison. Non-matching or incorrect rows are reported
-as non-comparable rather than scored. A changed candidate whose DuckDB
-baseline is proven empty cannot be diagnostic-forced, so it is excluded from
-the query list and counted as `proven_empty_excluded`.
-
-Normal and forced runs must use the same binary, corpus, database snapshot,
-thread count, and run count. Because the result CSV currently stores medians
-rather than confidence intervals over raw samples, these labels are
-provisional; repeat apparent wins and regressions independently before tuning
-the source-level gate constants.
 
 `reorder=0` means that the two candidates have the same base-relation grouping;
 it does not contradict `selected=OUTERYAN`. Use `kernel=bitmap(...)`,
@@ -634,7 +472,7 @@ not credit estimated aggregate-pushdown benefit. Aggregate pushdown runs only
 after this gate selects the OuterYan candidate; a rejected candidate returns the
 exact DuckDB baseline without an OuterYan-specific rewrite. Aggregation inside a
 join skeleton remains `INAPPLICABLE`. The enabled decomposition paths cover the
-v3 grouped `MIN`, `MAX`, and `SUM` queries. Global `COUNT(*)` is decomposed into
+grouped `MIN`, `MAX`, and `SUM` queries. Global `COUNT(*)` is decomposed into
 partial counts below the joins and a root sum, with the root projection restoring
 the original `BIGINT` type and empty-input value.
 
@@ -644,11 +482,11 @@ the original `BIGINT` type and empty-input value.
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration
-  -t, --timeout S     per-statement timeout
+  -t, --timeout S     per-statement timeout seconds (default 600; 10 minutes)
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
-      --version V     run exactly v1, v2, or v3 (v3 includes both scopes)
-      --all           run v1, v2, v3 aggregation, and v3 selectivity-stress (default)
-      --corpus-scope S  benchmark, v2 job-regressions, or v3 selectivity-stress
+      --query-type T  all|join|graph|aggregate (default all)
+      --all           run each unique SQL once (default)
+      --corpus-scope S  benchmark, job-regressions, or selectivity-stress
       --only FAMILY   select|agg|pred|graph|tpch|tpcds|job|bench|all
       --pattern GLOB  include matching labels
       --exclude GLOB  exclude matching labels; separate globs with |
@@ -664,23 +502,19 @@ The one-command build/data/experiment driver accepts the same built-in corpus
 selection:
 
 ```bash
-# Build release, prepare data, regenerate every version, and run all queries.
+# Build release, prepare data, regenerate the unique corpus, and run all queries.
 bash auto_test/run_all.sh
 
-# Build release, prepare data, regenerate the required dependency chain, and
-# run only the selected query version.
-bash auto_test/run_all.sh --version v1
-bash auto_test/run_all.sh --version v2
-bash auto_test/run_all.sh --version v3
+# Run only aggregate queries from the unique corpus.
+bash auto_test/run_all.sh --query-type aggregate
 
 # Explicit spelling of the default.
 bash auto_test/run_all.sh --all
 ```
 
 Unless `SKIP_BUILD=1` is set, every `run_all.sh` invocation compiles
-`build/release/duckdb` before running the experiments. `--version` controls
-which query version is executed; prerequisite versions may also be regenerated
-because v2 derives from v1 and v3 derives from v2.
+`build/release/duckdb` before running the experiments. `--query-type` selects the
+query type; generation always refreshes the complete unique corpus.
 
 `select`, `agg`, and `pred` currently alias the graph family; they do not filter
 the graph filenames further. `bench` expands to TPC-H, TPC-DS, and JOB. `--limit`
@@ -692,12 +526,12 @@ is global and follows that family order.
 # Four small graph queries, one 16-thread smoke run
 GRAPH_DATASET=bitcoin OY_THREADS=16 \
 bash auto_test/experiment_onoff.sh \
-  --only graph --pattern '*_N3_*_s0[15]' --limit 4 --runs 1 --timeout 60
+  --only graph --query-type graph --limit 4 --runs 1 --timeout 60
 
 # Two three-relation aggregate queries from each benchmark family
 TPCH_SF=1 TPCDS_SF=1 OY_THREADS=4 \
 bash auto_test/experiment_onoff.sh \
-  --only bench --pattern '*_agg[01]' --limit 6 --runs 1
+  --only bench --query-type aggregate --limit 6 --runs 1
 
 # Full TPC-H family
 bash auto_test/experiment_onoff.sh --only tpch
@@ -705,15 +539,14 @@ bash auto_test/experiment_onoff.sh --only tpch
 # Force one valid OuterYan candidate for a bare-query correctness comparison
 DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
-  --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
+  --only tpcds --query-type join --limit 1 --capture-plans
 
 # Skip JOB bushy-7 labels
-bash auto_test/experiment_onoff.sh --only bench --exclude '*jb_bushy7*'
+bash auto_test/experiment_onoff.sh --only bench --exclude '*bushy7*'
 
-# P0/P1 representative run using existing databases
-OY_CORPUS=auto_test/outerjoin_query_old \
+# Small unique-corpus run using existing databases
 SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=3 bash auto_test/run_all.sh \
-  --only all --query-list auto_test/representative_queries.txt --capture-plans
+  --only graph --limit 10 --capture-plans
 ```
 
 The release build enables TPCH and TPCDS but does not build HTTPFS.
@@ -736,18 +569,39 @@ auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.plans/
 auto_test/results/experiment_onoff_YYYYMMDD_HHMMSS_tN.profiles/
 ```
 
-The default all-version run additionally writes `*_v1.csv`, `*_v2.csv`,
-`*_v3.csv`, and `*_v3_selectivity_stress.csv`, plus one `*_all.csv` raw table.
-Every row explicitly records `experiment_group`, `corpus_version`,
-`corpus_scope`, `workload_category`, and `query_class`; the four headline
-categories are `v1`, `v2`, `v3_aggregation`, and `v3_selectivity_stress`.
-Its `*_statistics/` directory contains `benchmark_statistics.csv`,
-`phase_summary.csv`, `optimizer_summary.csv`, `optimizer_phases.csv`,
-`optimizer_phase_summary.csv`, `statistics.json`, and `STATISTICS.md`.
-
+Each row records `experiment_group`, `corpus_revision`, `corpus_scope`,
+`workload_category` and `query_class`. Query categories are `join`, `graph` and
+`aggregate`; there are no per-version output files. Diagnostic scopes select
+existing canonical query IDs.
 `run_all.sh` includes the corpus label, for example
 `experiment_onoff_benchmark_YYYYMMDD_HHMMSS_t16.csv` and
 `experiment_onoff_benchmark_YYYYMMDD_HHMMSS_t32.csv`.
+
+### Recover saved results after a statistics failure
+
+Per-corpus TXT/CSV results are saved before combined statistics run. A Python
+dependency failure during that final step does not require executing queries
+again. The CSV analysis loader ignores an incomplete optional `pyarrow` package
+that lacks `__version__`, with a warning; it changes no installed packages.
+NumPy and pandas are still required for statistics and plots.
+
+To reprocess all September 26 result logs, including v3 selectivity stress:
+
+```bash
+python3 auto_test/reprocess_experiment_logs.py \
+  'auto_test/results/experiment_onoff_benchmark_20260926*_v[123]*.txt' \
+  --output-dir auto_test/results/reprocessed_20260926
+```
+
+The separate output directory receives per-corpus CSVs, a combined CSV and
+statistics directory for each run/thread setting, and `recovery_manifest.json`.
+Original files are preserved. Matching sibling CSVs retain unrounded timings
+and full optimizer phase maps; TXT fills missing rows. TXT-only recovery leaves
+unlogged values unavailable. Historical `note=TIMEOUT` rows are labeled
+`correct=TIMEOUT`; other errors and result mismatches retain their status.
+Missing versions and incomplete query counts are reported, never filled with
+fabricated results. Add `--csv-only` for standard-library-only recovery without
+statistics dependencies.
 
 With `--out path/name.txt`, a sweep writes `path/name_t16.txt` and
 `path/name_t32.txt`, with matching CSV names. For a single configuration the
@@ -826,63 +680,91 @@ fields in machine-readable form, including the SQL-derived `relation_count`,
 `outer_reordered` and `outer_yan_selected`, and reports query, correct, and timed
 counts for every relation depth present in the run.
 
-`plot_speedup.py` writes one multi-page review PDF and, with
-`--split-output-dir`, the two publication figures used by the paper:
+### 统一实验结果入口
 
-- `speedup_all_queries.pdf`: panel (a) maps DuckDB runtime to the x-axis and
-  DuckOuterYan runtime to the y-axis for every measured query; panel (b) shows the
-  per-family distribution of `DuckDB / DuckOuterYan` on a log axis. Family is
-  encoded by color and includes fallback-skip defaults at `1.0`. In panel (a), a circle denotes faster/equal and an `X`
-  denotes slower. The diagonal and `1x` line denote parity. This figure is not
-  sampled.
-- `phase_breakdown_outeryan.pdf`: the left panel shows the Round 1, Round 2,
-  Round 3, and Other shares of accumulated profile CPU work. The right panel
-  directly pairs the unprofiled DuckDB and DuckOuterYan wall times for the same
-  query and prints the speed-up at the outer edge. Benchmark blocks are
-  separated by horizontal rules.
+```bash
+python3 auto_test/gen_experiment_result.py --date 20260926
+```
 
-The retired `runtime_outeryan_queries` and `representative_queries.json` files
-are removed on regeneration. The phase figure is emitted only when complete
-profiles exist. By default, it samples OuterYan-selected queries, including
-regressions. Each family receives up to `--representatives-per-benchmark`
-(default 15) slots; shapes are allocated round-robin and OFF-runtime ranks are
-sampled evenly within each shape. Sampling never ranks speed-up. The exact
-displayed query names, short IDs, order, phase values, and unprofiled baselines
-are written to `phase_queries.json`.
+该命令直接读取 `auto_test/results/experiment_onoff_*.csv`，一次性生成统计、
+Matplotlib 图形和论文 LaTeX。默认输出位置根据输入实验日期决定，为
+`auto_test/results/plots/20260926/`，与执行命令时的工作目录无关；只有需要覆盖
+默认位置时才使用 `--output-dir DIR`。
 
-Phase components are aggregate operator CPU work across threads. They sum to
-`profile_cpu_time_s`, not to `profile_wall_time_s`; parallel CPU work may exceed
-elapsed wall time. The plot therefore normalizes the left bars to CPU percent
-and keeps the wall-time comparison in a separate right panel. Short IDs use
-`G/H/D/J` for graph/TPC-H/TPC-DS/JOB and
-`LD/RD/B/S/A/I/O` for left-deep/right-deep/bushy/star/aggregate/industry/other.
+`--date` 也接受 `2026-09-26`。同一天存在多个线程数时，分别写入日期目录下的
+`t16/`、`t32/` 等子目录，绝不合并线程配置。省略日期则按输入日期分别输出。
+`--group-by run` 可将同一天的批次继续分开。显式传入 CSV 路径或 glob 也受支持。
 
-Complete descriptive statistics are exported as `STATISTICS.md` and
-`statistics.json`, in the split output directory unless `--statistics-dir`
-overrides it. Statistics use the full deduplicated run, not the displayed phase
-sample, and report all queries, OuterYan-selected queries, and DuckDB-selected
-queries separately. Generated groups include benchmark, input shape,
-benchmark-by-shape, and manifest-backed structural/evaluation components.
-Outputs include exact coverage, measured/fallback counts, min/max queries,
-arithmetic/geometric means,
-median and percentiles, sample dispersion, faster/slower bands, paired runtime
-totals, total-time speed-up, saved time, and complete phase-profile summaries.
-The JSON retains calculation precision; Markdown rounds to six decimals.
-Speed-up distributions include the explicit fallback default `1.0`; paired
-runtime distributions and totals use measured OFF/ON pairs only.
+同日同线程数组合按 SQL 身份跨旧版本去重，保留最新记录（包括失败），不按最快耗时挑选。
+`(workload_category, family, query)` 相同的记录取最新批次，包括失败；旧批次只补
+缺项。同批次 final CSV 优先于 attempts，per-version CSV 优先于 combined CSV。
+不同版本的同名 query 是不同实例。每条结果的来源写入 `plot_selection.json`。
 
-Result files are grouped by filename timestamp before plotting. A final CSV and
-its `.attempts.csv` companion form one logical run, not two. Duplicate
-`(family, query)` rows use the final CSV value; attempts only fill missing final
-queries. `_t16` and `_t32` runs remain separate. An explicit
-`--phase-placeholder-csv` is supported for historical results without current
-profiles, is visibly labeled, and never contributes to current runtime
-statistics.
+输出全部位于同一目录：
 
-The September 16 plots and statistics were produced from the retired FULL-heavy
-revision and are historical artifacts only. Regenerate figures and tables only
-after a complete `v1-mixed-graph25-20260925` run; do not combine its SQL with those old
-timings.
+| 文件 | 内容 |
+|---|---|
+| `overview.pdf` | 总览、形状/关系数、runtime 与 phase 的多页图 |
+| `speedup_all_queries.pdf/png` | 左图为全量实测 runtime 散点；右图只展示各 family 选中 OuterYan plan 的实测 speed-up；不显示顶部日期/版本标题 |
+| `phase_breakdown_outeryan.pdf/png` | 代表查询的 R1/R2/R3/Other CPU 比例和无 profiling 的运行时间对照；仅有完整 profile 时生成 |
+| `STATISTICS.md`, `statistics.json` | 有效实测统计、OuterYan-selected 性能综述、覆盖与排除原因、精确数值和输入哈希 |
+| `benchmark_statistics.csv`, `phase_summary.csv`, `optimizer_*.csv` | 可进一步处理的速度、phase、optimizer 汇总 |
+| `paper_statistics.tex` | 唯一的 LaTeX 输出，按 1–5 编号并用注释分隔线区分 benchmark 数量、性能分析、runtime 表、phase 表及优化开销表；重跑会清理旧版五个独立片段 |
+| `paper_statistics.json` | 论文精确数值、各维度分组、代表 query 的 SQL/schema 来源、哈希及参与列清单 |
+| `phase_queries.json`, `plot_selection.json` | phase 展示样本及所有输入记录的来源 |
+
+`results/experiment_onoff_*.csv` 是原始逐 query 实验输入，需要保留。
+日期输出目录内的 CSV 是统计汇总导出；JSON 保存精确统计、筛选/抽样记录、来源
+与文件哈希，用于复核和复现。它们是可重新生成的辅助结果，不是绘图必须读取的
+中间文件：脚本从原始 CSV 和 corpus manifest 重新计算，并在内存中绘图。
+
+有效 query 必须正确、有完整有限正数 OFF/ON 实测时间，且 **至少一方达到 1 秒**。
+双方都严格小于 1 秒的 pair、未执行 fallback、失败及超时均不计入有效总数。
+未执行 fallback 原始 CSV 的 `1×` 占位不进入任何性能统计。原始 CSV 不修改；
+JSON 的 `input_corpus` / `unique_queries` 保留过滤前输入数，`corpus` / `valid_queries`
+记录有效实测数，覆盖记录保留每条排除原因。
+论文性能综述和总体速度图只使用有效实测中 `selected_plan=OUTERYAN` 的 query；
+runtime 表仍分别列出所有有效实测与 OuterYan-selected 两个子集，明确区分口径。
+右图仅包含 `selected_plan=OUTERYAN` 且正确、实测时间完整的 query，speed-up
+由 OFF/ON 时间重新计算；实测恰好为 `1×` 或慢于 DuckDB 的 OuterYan plan 仍保留。
+右侧渐变箭头色块的实际上边缘与左图顶部对齐，绘图区底部及子图标题分别对齐；
+箭身填满色条高度，不以文字或外侧留白作为对齐依据。说明文字放在箭头上方。
+两图共享顶部的 benchmark 颜色图例。左图对角线下方用浅青蓝色标识 OuterYan 更快的区域。
+右图背景采用柔和玫瑰粉 → 白色 → 青蓝色的双色渐变，白色对应 `1×`，并保留该位置的竖线。
+右图上方的渐变箭头与背景共用同一颜色映射、横向范围和对数尺度，直接对应下方横坐标；
+箭头指向更高加速比，上方两端标注 `OuterYan slower` / `OuterYan faster`，不重复显示刻度标签。
+Geomean 对 query 等权，Total 为实测
+`sum(OFF)/sum(ON)`，不伪造缺失 runtime 或 timeout 时长。
+
+Phase 百分比按 operator CPU 秒加权，四部分之和对应 CPU time，不能解释为
+wall-time 比例。Phase 图每个 family 默认取最多 15 条，由
+`--phase-samples-per-benchmark N` 调整；优化表默认每个 family 最多 3 条，由
+`--representatives-per-benchmark N` 调整。两种抽样都按 shape 和 OFF runtime
+分位进行，不按 speed-up 挑选。全量统计不使用展示样本代替总体。
+
+`--exclude-selectivity-stress` 同时从图、统计和
+论文中排除 stress。生成这类不同口径时可指定另一个输出目录。
+Optimization ratio 为各配置自己的 optimizer 时间 / 完整 unprofiled query runtime，
+单位为百分比。
+
+Attributes 按 SQL 中去重后的 `(表别名, 列名)` 计数，覆盖 SELECT、JOIN、WHERE、
+GROUP BY、HAVING 和 ORDER BY。同一列重复出现只算一次，自连接的不同别名分别计数。
+投影中的 `*`/`alias.*` 按实际数据库 schema 展开；`COUNT(*)` 本身不增加列。
+脚本根据 canonical 路径或保留的原始类别和路径定位当前/历史 SQL，通过 DuckDB CLI
+只读查询 `information_schema.columns`，不执行 benchmark SQL。数据库和 CLI 路径
+沿用 `GRAPH_DB` / `TPCH_DB` / `TPCDS_DB` / `JOB_DB`、`DUCKDB_BIN` 的环境覆盖，
+否则使用仓库根目录默认数据库和 release/debug CLI。缺少 SQL/schema 或遇到超出
+当前单 SELECT join corpus 的语法时明确报错，不输出猜测值或 `--`；完整列清单与
+来源哈希写入 `paper_statistics.json`。
+
+论文可直接引用唯一的 `results/plots/YYYYMMDD/paper_statistics.tex`；编号和分隔线使用 LaTeX 注释，
+便于在源文件内定位，不会额外显示在论文正文中。
+例如：`\input{auto_test/results/plots/20260926/paper_statistics.tex}`。
+
+实验 harness 自动使用同一文件的 `--statistics-only` 内部接口生成批次统计，
+保留原本的批次 CSV 路径与输出协议。这条路径及日志恢复只需 NumPy/pandas，
+不会导入 Matplotlib；完整绘图才需要 Matplotlib。pandas 的可选 pyarrow 兼容处理
+也位于统一脚本中。旧 0916 结果是不同 corpus 的历史数据，不与 0926 混合。
 
 ## Optimizer trace
 
@@ -944,213 +826,27 @@ SET disabled_optimizers TO 'outer_yan';
 ## One-command and manual workflows
 
 ```bash
-# Build release and data, regenerate v1/v2/v3, then compare DuckDB Original and
-# OuterYan across all built-in query versions. No PG plan is generated or
-# executed by this default workflow.
+# Build release and data, regenerate unique SQL, and compare Original/OuterYan.
 bash auto_test/run_all.sh
 
-# Build release and data, but execute only one query version.
-bash auto_test/run_all.sh --version v1
-bash auto_test/run_all.sh --version v2
-bash auto_test/run_all.sh --version v3
+# Run only one query type.
+bash auto_test/run_all.sh --query-type join
+bash auto_test/run_all.sh --query-type aggregate
 
-# Explicitly opt into PGPlan generation and Original/PGPlan/OuterYan testing.
-RUN_PGPLAN=1 bash auto_test/run_all.sh
+# Reuse the existing binary, databases, and generated queries.
+SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 bash auto_test/run_all.sh
 
-# Check only (a) Original == PGPlan; OuterYan correctness is skipped, while
-# Original/PGPlan/OuterYan EXPLAIN and performance remain unchanged.
-RUN_PGPLAN=1 bash auto_test/run_all.sh --skip1
-
-# Skip both correctness comparisons for a manual performance-only rerun.
-# Cached PGPlan artifacts are reused; all EXPLAIN, verification, and TM
-# performance work still runs.
-RUN_PGPLAN=1 bash auto_test/run_all.sh --performance-only
-
-# Optionally use the pinned postgres:16.2 image instead of the default
-# repo-local source build.
-RUN_PGPLAN=1 PGPLAN_SETUP=docker bash auto_test/run_all.sh
-
-# Use an existing PostgreSQL 16.2 instance. Its public schema must contain
-# exact TPC-H SF0.01, and the role must be able to create sampled schemas.
-PGPLAN_SETUP=external \
-PG_DSN='host=127.0.0.1 port=5432 dbname=duckyan_tpch user=postgres' \
-PSQL_BIN=/absolute/path/to/psql \
-RUN_PGPLAN=1 bash auto_test/run_all.sh
-
-# Reuse existing DuckDB data; setup still verifies or prepares PostgreSQL's
-# independent minimal plan-selection data. Run only the TPC-H family.
-RUN_PGPLAN=1 SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only tpch
-
-# Performance rerun: reuse each query's PGPlan artifact and sealed target-data
-# correctness receipt. PostgreSQL setup/capture and result comparison are
-# skipped; Native, PGPlan, and OuterYan EXPLAIN/TM tests are otherwise the
-# same and are written to a new self-contained result directory.
-RUN_PGPLAN=1 bash auto_test/run_all.sh \
-  --reuse-from /absolute/path/to/prior/pgplan_corpus_YYYYMMDD_HHMMSS
-
-# The explicit spelling below is equivalent to the default two-way workflow.
-RUN_PGPLAN=0 bash auto_test/run_all.sh
-
-# Run PGPlan on another family-structured corpus root.
-RUN_PGPLAN=1 PGPLAN_CORPUS=auto_test/outerjoin_benchmark/core \
-  SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
-
-# Run one custom corpus through the default two-way harness.
-OY_CORPUS=auto_test/outerjoin_benchmark/core \
+# Run one custom corpus.
+OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The default comparison stage runs the v1, v2, and v3 aggregation corpora plus
-the v3 selectivity-stress scope. Use `--version v1` to walk only the 224 SQL
-files under `outerjoin_benchmark/benchmark`: 25 Graph, 54 TPC-H, 63 TPC-DS,
-and 82 JOB queries. The harness executes each eligible bare query
-with OuterYan disabled (Original) and enabled, verifies complete result
-equivalence, records the selected DuckDB/OuterYan plan, and then measures both
-configurations. It does not inspect the PGPlan cache, start PostgreSQL, capture
-PG plans, import PG plans, or run PGPlan correctness/timing.
-
-With `RUN_PGPLAN=1`, the opt-in comparison instead checks the persistent typed-
-plan cache under `auto_test/pgplan/plans`, captures missing or stale PostgreSQL
-artifacts, and runs the Original/PGPlan/OuterYan workflow.
-PostgreSQL is a planning oracle only: it receives plain `EXPLAIN`,
-never `EXPLAIN ANALYZE` and never a result-producing execution.
-`--only`, `--pattern`, and `--limit` select a smaller fail-closed run. Every
-attempt is recorded in `status.tsv`; there is no native-plan fallback when
-capture or PGPlan application fails. A PostgreSQL planning, DuckDB execution,
-or correctness post-processing timeout is recorded as `SKIP` and the next
-query continues. Both `SKIP` and `FAIL` make the corpus command return nonzero,
-so a successful run means every selected query completed correctness and both
-timing suites. For a quicker diagnostic without a target-scale correctness
-claim, set `PGPLAN_CORRECTNESS_MODE=bounded`.
-
-Override the plan cache with `PGPLAN_PLAN_CACHE` or `--plan-cache`. A cached
-entry must match the exact canonical query hash, artifact SHA-256, PostgreSQL
-version/settings, family schema/data identity, bounded planning-sample
-fingerprint, statistics epoch, and typed binary tree. Otherwise every selected
-query in that family is recaptured under one coherent `ANALYZE` epoch and
-replaced atomically. `--skip1` selects only Original-versus-PGPlan correctness.
-`--performance-only` (aliases: `--skip2`, `--performance_only`, and the accepted
-misspelling `--performace_only`) skips both result comparisons but retains all
-plan verification and performance phases. Its correctness status is honestly
-recorded as `NOT_RUN`.
-
-For repeat performance measurements, `--reuse-from PRIOR_CORPUS` verifies and
-reuses the prior target-scale correctness receipt and PGPlan artifact for the
-same family/query. It skips PostgreSQL setup, sampled-schema preparation, plan
-capture, and new CSV export/sort/comparison. Reuse is cryptographically bound
-to the exact query bytes, PostgreSQL artifact, DuckDB binary/version, and
-target database. A default complete target-correctness run and a sealed reuse
-run fingerprint each selected target database once. `skip1` and
-performance-only avoid that full-file read because they cannot create or
-consume a complete correctness receipt. Every mode still rejects a non-empty
-or unsafe DuckDB `.wal`; a missing receipt/artifact, hash mismatch, or path
-escaping the prior root is a per-query failure with no fresh-correctness or
-native-plan fallback. Remaining queries continue.
-`PGPLAN_CORRECTNESS_MODE=reuse` plus `PGPLAN_CORRECTNESS_FROM` remains the
-granular option when only correctness should be reused and fresh PostgreSQL
-plans are still desired.
-
-This is one comparison workflow with three timed configurations: Original,
-PGPlan, and OuterYan. Each successful query writes its TM medians under
-`runs/<family>/<query>/timing/summary.tsv`; no single-thread batch is run.
-`run_all.sh` runs the three-way corpus at 32 threads by default. An explicit
-`--threads "16 32"` sweep creates separate `_t16` / `_t32` output directories.
-A correctness-reuse receipt is thread-specific:
-use `--threads N` matching the source run when using `--reuse-from`.
-At corpus completion the runner also writes `comparison.tsv` and
-`comparison.csv` with one row for every selected query, a human-readable
-`comparison.log`, `summary.tsv` with all-family and per-family aggregate
-counts/speedups, and `failures.tsv` with every incomplete query and its
-phase/reason. During a normal corpus run, each terminal PASS/FAIL/SKIP is
-immediately streamed as a legacy-style, separator-delimited query block; the
-same blocks are retained in `comparison.log` beside the tabular reports. Its
-rows and values come from the same ordered comparison records as the TSV and
-CSV, so the screen-readable and machine-readable reports stay in parity.
-Timing and speedup fields are populated only for `PASS` rows.
-
-The comparison CSV/TSV starts with the `experiment_onoff.sh` decision/timing
-header prefix (excluding its appended `profile_*` fields), in its original
-order and with unchanged meanings. Appended fields are all
-identified by `pgplan` in their names and cover PGPlan verification/timing,
-comparison mode/status, and correctness provenance. Raw plan signatures remain in trace artifacts;
-they are not printed in the human log or copied into the CSV.
-
-The provenance columns distinguish `FRESH`, `PARTIAL`, `NOT_RUN`, and `REUSED`
-correctness. Reused rows retain their source/receipt hashes; legacy artifacts
-leave unavailable additive fields empty instead of guessing.
-
-Each successful block orders TM as Original, PGPlan, OuterYan, then
-prints only `Original/OuterYan` and `PGPlan/OuterYan` speedups. The original
-CSV `off/on` columns retain their Original/OuterYan meanings, while
-`tm_pgplan` adds PGPlan; legacy Original/PGPlan speedup fields remain for
-compatibility. TM uses one warm-up plus `PGPLAN_RUNS` measurements. No
-single-thread or phase-profile columns are emitted for new runs. When
-re-summarizing historical runs with a real `timing/t1_summary.tsv`, the report
-appends their `t1_*` fields and retains the corresponding human-log values.
-The workflow does not collect the legacy kernel-trace batch; its CSV kernel
-fields remain unavailable. Its
-original `rows` column is the complete target-scale result count by default. These
-reports are generated before a failure status is returned, so a mixed run
-remains inspectable without rerunning completed queries.
-
-An already completed corpus directory can be summarized without executing any
-query again:
-
-```sh
-bash auto_test/pgplan/summarize_corpus.sh \
-  --result-dir /absolute/path/to/pgplan_corpus_YYYYMMDD_HHMMSS
-```
-
-That command regenerates `comparison.log`; use `less` or `cat` to display it.
-It does not recapture a PostgreSQL plan or repeat correctness or timing
-executions.
-
-The workflow deliberately separates PostgreSQL plan-selection data from the
-DuckDB target data:
-
-1. PostgreSQL plan selection uses exact TPC-H SF0.01 or isolated graph,
-   TPC-DS, and JOB schemas capped by `PGPLAN_SAMPLE_ROWS` (1000 rows per table
-   by default), followed by `ANALYZE`. These rows select the typed logical tree
-   through plain `EXPLAIN` only.
-2. The configured target DuckDB files are used for both requested multiset
-comparisons, all three EXPLAIN plans, PGPlan semantic-signature verification,
-   and release timing. Correctness emits complete CSV and sorts it externally.
-   Timing uses `.mode trash`, which still executes and fully drains the bare
-   query while excluding CLI CSV serialization and filesystem output from the
-   DuckDB CLI's real wall-clock sample.
-
-`PGPLAN_CORRECTNESS_MODE=bounded` is an explicit diagnostic alternative. It
-builds deterministic small correctness databases and records their
-fingerprints, but its PASS is scoped only to that bounded data.
-
-Reuse does not make a new correctness claim: a reuse-mode PASS cites a sealed
-prior target-mode equality check whose fingerprints match the current inputs,
-then reruns all three plan verification and timing configurations. The new
-result copies the selected PGPlan artifact and receipt provenance so it does
-not depend on mutable files in the prior result directory after completion.
-
-Accordingly, a target-mode PGPlan PASS supports exact target-data
-Native/PGPlan/OuterYan result equality, PGPlan tree adherence, and target-data
-performance. It still does not represent execution of PostgreSQL's physical
-plan. See [`pgplan/README.md`](pgplan/README.md) for the manual
-`--correctness-db` interface and builder options.
-
-`PGPLAN_SETUP=source` follows the repo-local paths in `configs.sh` and pins
-PostgreSQL 16.2. If the managed binary is absent, it downloads the verified
-official source, builds and installs it, initializes a repo-local cluster, and
-starts it on the configured loopback endpoint. It deliberately does not depend
-on detecting a system PostgreSQL installation. Docker is optional; `docker`
-uses the pinned container, while `external` requires the caller's `PG_DSN` and
-`PSQL_BIN`. Both managed modes generate and reuse a private mode-`0600` secret
-unless a password is explicitly provided. An older Docker container with a
-different credential fails with instructions to recreate it or provide its
-current password. See
-[`pgplan/README.md`](pgplan/README.md) for the manual capture
-and PGPlan experiment workflow. External mode requires
-`PGPLAN_FORCE_SAMPLED_DATA=1` before replacing an existing graph, TPC-DS, or JOB
-sample schema. Existing `PG_REPLAY_*` environment names remain
-accepted only as compatibility aliases, but new commands and result labels use
-`PGPLAN_*` and `pgplan`.
+The comparison runs the 650 unique SQL files under `outerjoin_benchmark/benchmark`:
+31 Graph, 175 TPC-H, 209 TPC-DS and 235 JOB queries.
+The harness compares complete bare-query results with OuterYan disabled and
+enabled, records the selected plan, and times eligible correct queries.
+The default is 32 threads; `--threads "16 32"` produces separate result files.
+The PostgreSQL replay workflow and its public wrappers have been removed.
 
 Manual equivalent for the unified two-way benchmark stage:
 

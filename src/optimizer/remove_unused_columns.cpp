@@ -133,6 +133,14 @@ void RemoveUnusedColumns::ClearUnusedExpressions(vector<T> &list, TableIndex tab
 void RemoveUnusedColumns::VisitOperator(unique_ptr<LogicalOperator> &op_ref) {
 	auto &op = *op_ref;
 	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_SJ_BUILD:
+	case LogicalOperatorType::LOGICAL_SJ_PROBE: {
+		// SJ keys are stored as child column positions, not tracked expressions.
+		// Preserve this input schema so pruning cannot invalidate those positions.
+		RemoveUnusedColumns remove(*this, true);
+		remove.VisitOperator(op.children[0]);
+		return;
+	}
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY: {
 		// aggregate
 		auto &aggr = op.Cast<LogicalAggregate>();

@@ -28,76 +28,36 @@ The resulting CLI is `build/release/duckdb`. A debug build is available with
 
 ## One-command build and test
 
-From the repository root, the default PGPlan/OuterYan workflow is:
+From the repository root:
 
 ```bash
 bash auto_test/run_all.sh
 ```
 
-This command:
-
-1. builds the release DuckDB CLI and the configured target databases;
-2. checks the persistent PGPlan cache under `auto_test/pgplan/plans` before
-   starting PostgreSQL, and captures only missing or stale plan families;
-3. runs every query under `auto_test/outerjoin_benchmark/benchmark/{graph,tpch,tpcds,job}`;
-4. checks both `Original == PGPlan` and `Original == OuterYan` on target data;
-5. records Original, PGPlan, and OuterYan TM/T1 performance; and
-6. writes a timestamped result directory containing:
-
-```text
-auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.log
-auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.tsv
-auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/comparison.csv
-auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/summary.tsv
-auto_test/results/pgplan_corpus_YYYYMMDD_HHMMSS/failures.tsv
-```
-
-The comparison mode is controlled directly from the same command:
+This builds the release DuckDB CLI and target databases, generates 650 unique
+queries, and runs the DuckDB Original/OuterYan correctness and performance
+comparison. Results, decision traces, and statistics go under `auto_test/results/`.
+The default is 32 threads; `--threads "16 32"` runs both configurations.
 
 ```bash
-# Default: (a) Original == PGPlan and (b) Original == OuterYan.
-bash auto_test/run_all.sh
+# Select one query type; the default runs every unique SQL once.
+bash auto_test/run_all.sh --query-type join
 
-# skip1: run only comparison (a); retain every EXPLAIN and timing phase.
-bash auto_test/run_all.sh --skip1
+# Reuse the existing binary, databases, and generated queries.
+SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 bash auto_test/run_all.sh
 
-# skip2: skip both correctness comparisons; retain plan verification and
-# Original/PGPlan/OuterYan TM and T1 timing.
-bash auto_test/run_all.sh --performance-only
-
-# Accepted compatibility spelling requested by existing server scripts.
-bash auto_test/run_all.sh --performace_only
+# Generate figures, statistics, and paper tables from a completed date.
+python3 auto_test/gen_experiment_result.py --date 20260926
 ```
 
-`--skip2` and `--performance_only` are additional aliases for
-`--performance-only`. Performance-only records correctness as `NOT_RUN`; use
-`--reuse-from PRIOR_CORPUS` instead when the earlier target-data result must be
-validated from its sealed receipt.
-
-Generated typed plans remain in `auto_test/pgplan/plans/<family>/`. Override
-that location with `PGPLAN_PLAN_CACHE=/absolute/path` or
-`--plan-cache /absolute/path`. Each plan is accepted only with its matching
-sample/statistics identity sidecar. One cache miss recaptures the selected
-family under a coherent PostgreSQL `ANALYZE` epoch; an all-cache-hit run does
-not set up or start PostgreSQL.
-
-For a faster repeat performance run when the binary, databases, and generated
-queries already exist:
+The last command writes to `auto_test/results/plots/20260926/` by default.
+Existing databases are reused; rebuild explicitly when dataset or scale changes:
 
 ```bash
-SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 \
-  bash auto_test/run_all.sh --performance-only
+FORCE=1 bash auto_test/build_db.sh all
 ```
 
-Existing databases are reused. If dataset or scale settings changed and every
-database should be rebuilt, run:
-
-```bash
-FORCE=1 bash auto_test/run_all.sh
-```
-
-Set `RUN_PGPLAN=0` to use the historical DuckDB-versus-OuterYan two-way
-`experiment_onoff.sh` workflow instead.
+See [auto_test/README.md](auto_test/README.md) for configuration and output details.
 
 ## OuterYan plan selection
 
@@ -228,22 +188,20 @@ bash auto_test/experiment_onoff.sh
 
 # Start with a small graph correctness/performance sample.
 bash auto_test/experiment_onoff.sh \
-    --only graph --pattern 'line_N3_*' --limit 3 --runs 1
+    --only graph --query-type graph --limit 3 --runs 1
 
 # Run one exact TPC-H query label.
 bash auto_test/experiment_onoff.sh \
-    --only tpch --pattern 'oy_th_th_branch5a_v2'
+    --only tpch --pattern 'join__tpch__q05_region_sales_ldmx__ilrf__sel_low'
 
 # Force one complete OuterYan candidate, ignoring grouping equality and cost.
 DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
-    --only tpcds --pattern 'oy_ds_ds_bushy5b_v0' --capture-plans
+    --only tpcds --query-type join --limit 1 --capture-plans
 
-# Historical two-way P0/P1 representative validation (3–7 relations).
-RUN_PGPLAN=0 SKIP_DATA=1 OY_THREADS=48 OY_RUNS=3 bash auto_test/run_all.sh \
-    --only all \
-    --query-list auto_test/representative_queries.txt \
-    --capture-plans
+# Small unique-corpus validation using existing databases.
+SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=3 bash auto_test/run_all.sh \
+    --only graph --limit 10 --capture-plans
 ```
 
 `run_all.sh` does not build HTTPFS. The benchmark databases use
@@ -350,11 +308,9 @@ Useful runtime controls are:
 `DUCKDB_OY_SIMPLIFY_SCAN_FILTERS=1` is an experimental, generally unsound
 measurement switch. It must not be enabled for correctness conclusions.
 
-For the default PGPlan comparison workflow, run `bash auto_test/run_all.sh`;
-arguments are forwarded to `auto_test/pgplan/corpus_experiment.sh`. Set
-`RUN_PGPLAN=0` for the historical two-way workflow, where arguments are instead
-forwarded to `experiment_onoff.sh`. Existing databases are reused unless
-explicitly rebuilt.
+Run `bash auto_test/run_all.sh` for the Original/OuterYan workflow. Experiment
+arguments are forwarded to `experiment_onoff.sh`. Existing databases are reused
+unless explicitly rebuilt.
 
 ---
 

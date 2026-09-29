@@ -18,6 +18,7 @@ from unittest import mock
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+ARCHIVE = SCRIPT_DIR / "outerjoin_benchmark" / "revisions" / "semantic_ranges_20260929"
 with mock.patch.object(sys, "path", [str(SCRIPT_DIR)] + sys.path):
     import gen_outerjoin_benchmark as BENCHMARK
     import gen_queries as LEGACY
@@ -47,9 +48,70 @@ def forbid_result_access():
 
 
 class PortableBenchmarkGenerationTest(unittest.TestCase):
+    def test_band_boundaries_have_no_overlap_and_exclude_above_eighty_percent(self):
+        def memberships(value):
+            return [spec["name"] for spec in BENCHMARK.SEMANTIC_DESIGN["tiers"]
+                    if BENCHMARK.fraction_in_band(value, spec)]
+        self.assertEqual(memberships(0), [])
+        self.assertEqual(memberships(.049), ["low"])
+        self.assertEqual(memberships(.05), ["medium"])
+        self.assertEqual(memberships(.4), ["high"])
+        self.assertEqual(memberships(.8), ["high"])
+        self.assertEqual(memberships(.801), [])
+
+    def test_source_filter_families_are_retained(self):
+        seeds = {seed.seed_id: seed for seed in BENCHMARK.SEEDS}
+        expected = {
+            "tpch_q09_supply_chain": ("p.p_name", "LIKE"),
+            "tpcds_q93_return_reason": ("r.r_reason_desc", "="),
+            "job_17a_movie_annotations": ("n.name", "LIKE"),
+            "job_16a_skeleton": ("t.episode_nr", ">="),
+            "job_01a_skeleton": ("it.info", "="),
+        }
+        for seed_id, (column, operator) in expected.items():
+            metadata = BENCHMARK.seed_filter_metadata(seeds[seed_id], "low")
+            self.assertIn(f"{column} {operator}", metadata["selectivity_predicate"])
+            self.assertNotIn("synthetic control", metadata["source_filter_adaptation"])
+
+    def test_semantic_bands_are_nested_nonempty_business_cohorts(self):
+        for seed in BENCHMARK.SEEDS:
+            spec = BENCHMARK.SEMANTIC_DESIGN["seeds"][seed.seed_id]
+            self.assertEqual(spec["source_sha256"], seed.source_hash)
+            profile = BENCHMARK.SEMANTIC_DESIGN["profiles"][spec["profile"]]
+            if "bounds" in profile:
+                self.assertEqual(profile["bounds"], sorted(profile["bounds"]))
+            counts = profile["calibration"]["qualified_rows"]
+            self.assertEqual(counts, sorted(set(counts)))
+            self.assertGreater(counts[0], 0)
+            self.assertTrue(any(relation.split()[-1] == spec["column"].split(".")[0]
+                                for relation in seed.relations))
+            for tier in BENCHMARK.SEMANTIC_TIERS:
+                metadata = BENCHMARK.seed_filter_metadata(seed, tier)
+                self.assertEqual(metadata["calibration_in_range"], "true", (seed.seed_id, tier))
+                self.assertNotIn(".id", metadata["selectivity_predicate"])
+
+    def test_range_sweep_replaces_old_where_and_preserves_join_predicates(self):
+        sql = "SELECT * FROM a LEFT JOIN b ON a.id=b.id WHERE a.id % 1000=0 GROUP BY ALL;"
+        expected = "SELECT * FROM a LEFT JOIN b ON a.id=b.id WHERE b.price <= 50 GROUP BY ALL;"
+        self.assertEqual(BENCHMARK.replace_where(sql, "b.price <= 50"), expected)
+        # A surviving hash/mod conjunct is rejected even if a comment names the new predicate.
+        row = {"path": "example.sql", "selectivity_predicate": "b.price <= 50",
+               "filter_design_revision": BENCHMARK.V1_CORPUS_REVISION, "calibration_in_range": "true"}
+        with self.assertRaisesRegex(RuntimeError, "key sampling"):
+            BENCHMARK.validate_semantic_query(sql, row)
+        with self.assertRaisesRegex(RuntimeError, "WHERE differs"):
+            BENCHMARK.validate_semantic_query(expected.replace("<= 50", "<= 50 AND b.price > 49"), row)
+
+    def test_job_foreign_keys_are_never_substituted_with_unrelated_ids(self):
+        self.assertEqual(BENCHMARK.active_edge_predicate("chn.id = ci.person_role_id"),
+                         "chn.id = ci.person_role_id")
+        for seed in BENCHMARK.SEEDS:
+            if seed.family == "job":
+                self.assertTrue(any(relation.split()[0] == "title" for relation in seed.relations))
+
     def test_pinned_membership_matches_checked_in_manifests(self):
-        root = SCRIPT_DIR / "outerjoin_benchmark"
-        classification = csv_rows(root / "legacy_classification.csv")
+        root = ARCHIVE
+        classification = csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / "legacy_classification.csv")
         self.assertEqual(
             [query.path for query in MEMBERSHIP.LEGACY_QUERIES],
             [row["path"] for row in classification],
@@ -60,7 +122,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         self.assertTrue(MEMBERSHIP.COMPLETED_QUERY_PATHS.isdisjoint(MEMBERSHIP.TIMEOUT_QUERY_PATHS))
         self.assertEqual(
             MEMBERSHIP.TIMEOUT_QUERY_PATHS,
-            {row["path"] for row in csv_rows(root / "timeout_exclusions.csv")},
+            {row["path"] for row in csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / "timeout_exclusions.csv")},
         )
         self.assertEqual(
             MEMBERSHIP.LEGACY_OUTERYAN_WINS,
@@ -70,6 +132,10 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             ),
         )
         self.assertEqual(len(MEMBERSHIP.LEGACY_OUTERYAN_WINS), 28)
+        for row in classification:
+            if row["path"] in MEMBERSHIP.TIMEOUT_QUERY_PATHS:
+                self.assertEqual(row["content_status"], "removed_timeout_sql")
+                self.assertEqual(row["content_sha256"], "")
         for family, filename, speedup in MEMBERSHIP.LEGACY_OUTERYAN_WINS:
             self.assertIn(f"{family}/{filename}", MEMBERSHIP.COMPLETED_QUERY_PATHS)
             self.assertGreater(float(speedup), 1.0)
@@ -91,7 +157,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse((root / "results").exists())
 
-    def test_full_and_core_only_generation_without_result_access(self):
+    def test_unique_generation_is_complete_deterministic_and_ignores_results(self):
         with tempfile.TemporaryDirectory(prefix="outeryan-generation-") as directory:
             scratch = Path(directory)
             legacy_root = scratch / "legacy"
@@ -106,48 +172,34 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
             ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
-                for core_only, count in ((False, 224), (True, 170)):
-                    with self.subTest(core_only=core_only):
-                        root = scratch / ("core-only" if core_only else "full")
-                        argv = ["gen_outerjoin_benchmark.py", "--root", str(root)]
-                        if core_only:
-                            argv.append("--core-only")
-                        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(io.StringIO()):
-                            BENCHMARK.main()
-                        active = csv_rows(root / "benchmark" / "manifest.csv")
-                        self.assertEqual(len(active), count)
-                        self.assertEqual(
-                            len(csv_rows(root / "active_timeout_exclusions.csv")),
-                            0,
-                        )
-                        self.assertEqual(
-                            {str(path.relative_to(legacy_root)) for path in legacy_root.glob("*/*.sql")},
-                            MEMBERSHIP.COMPLETED_QUERY_PATHS,
-                        )
-                        manifests = ["manifest.csv", "timeout_exclusions.csv", "legacy_classification.csv"]
-                        if not core_only:
-                            manifests += [
-                                "benchmark/manifest.csv", "industry_inspired/manifest.csv",
-                                "supplemental/manifest.csv", "active_timeout_exclusions.csv",
-                            ]
-                        for manifest in manifests:
-                            self.assertEqual(
-                                csv_rows(root / manifest),
-                                csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / manifest),
-                                manifest,
-                            )
+                root = scratch / "unique"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    BENCHMARK.generate_unified(root)
+                active = csv_rows(root / "benchmark" / "manifest.csv")
+                self.assertEqual(len(active), 650)
+                self.assertEqual(len({row["sql_fingerprint"] for row in active}), 650)
+                self.assertEqual(Counter(row["query_class"] for row in active),
+                                 {"join": 480, "graph": 68, "aggregate": 102})
+                self.assertFalse((root / "v2").exists())
+                self.assertFalse((root / "v3").exists())
+                self.assertEqual(sum(row["selectivity_stress"] == "true" for row in active), 18)
+                self.assertEqual(sum(row["regression_guard"] == "true" for row in active), 2)
+                aliases = csv_rows(root / "benchmark" / "aliases.csv")
+                self.assertEqual(len(aliases), 910)
+                self.assertEqual({row["canonical_query_id"] for row in aliases},
+                                 {row["query_id"] for row in active})
+                self.assertEqual(active, csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / "benchmark" / "manifest.csv"))
+                before = (root / "benchmark" / "manifest.csv").read_bytes()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    BENCHMARK.generate_unified(root)
+                self.assertEqual(before, (root / "benchmark" / "manifest.csv").read_bytes())
 
-    def test_historical_timeout_exclusions_do_not_filter_mixed_v1(self):
-        root = SCRIPT_DIR / "outerjoin_benchmark"
+    def test_mixed_v1_preserves_all_source_queries(self):
+        root = ARCHIVE
         active = csv_rows(root / "benchmark" / "manifest.csv")
-        excluded = csv_rows(root / "active_timeout_exclusions.csv")
-        pins = BENCHMARK.active_timeouts.EXCLUDED_QUERY_HASHES
-        self.assertEqual(len(pins), 30)
-        self.assertEqual(len(BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES), 9)
-        self.assertEqual(excluded, [])
         active_paths = {row["path"] for row in active}
         expected = {
-            f"{row['family']}/derived__{row['query_id']}.sql"
+            f"{row['family']}/derived__sem__{row['query_id']}.sql"
             for row in csv_rows(root / "manifest.csv")
         }
         for row in csv_rows(root / "industry_inspired" / "manifest.csv"):
@@ -156,10 +208,9 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 if row["evaluation_role"].startswith("industry_pattern")
                 else "derived"
             )
-            expected.add(f"{row['family']}/{prefix}__{row['query_id']}.sql")
+            expected.add(f"{row['family']}/{BENCHMARK.active_query_id(prefix, row)}.sql")
         self.assertEqual(len(expected), 224)
         self.assertEqual(active_paths, expected)
-        self.assertTrue(set(pins) <= active_paths)
         self.assertEqual(
             {row["corpus_revision"] for row in active},
             {BENCHMARK.V1_CORPUS_REVISION},
@@ -170,10 +221,6 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             active_join_counts.update(row["join_vector"])
         self.assertLessEqual(
             max(active_join_counts.values()) - min(active_join_counts.values()), 1
-        )
-        active_by_path = {row["path"]: row for row in active}
-        self.assertTrue(
-            all(active_by_path[path]["content_sha256"] != digest for path, digest in pins.items())
         )
         graph_rows = [row for row in active if row["family"] == "graph"]
         self.assertEqual(len(graph_rows), 25)
@@ -206,7 +253,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             self.assertEqual(active.read_bytes(), before)
 
     def test_mixed_v1_requires_complete_core_coverage(self):
-        root = SCRIPT_DIR / "outerjoin_benchmark"
+        root = ARCHIVE
         core = csv_rows(root / "manifest.csv")
         active = csv_rows(root / "benchmark" / "manifest.csv")
         BENCHMARK.validate_active_coverage(core, active, True)
@@ -215,15 +262,6 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             BENCHMARK.validate_active_coverage(
                 core, [row for row in active if row is not removed], True
             )
-
-    def test_old_timeout_paths_reappear_only_with_new_content(self):
-        root = SCRIPT_DIR / "outerjoin_benchmark"
-        active = csv_rows(root / "benchmark" / "manifest.csv")
-        active_by_path = {row["path"]: row for row in active}
-        for path, old_hash in BENCHMARK.active_timeouts.T32_TIMEOUT_QUERY_HASHES.items():
-            with self.subTest(path=path):
-                self.assertIn(path, active_by_path)
-                self.assertNotEqual(active_by_path[path]["content_sha256"], old_hash)
 
     def test_regeneration_preserves_unmanaged_files_and_rejects_local_sql_edits(self):
         with tempfile.TemporaryDirectory(prefix="outeryan-active-view-") as directory:
@@ -246,19 +284,19 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="outeryan-v2-") as directory, forbid_result_access():
             root = Path(directory)
             self.assertEqual(BENCHMARK.generate_v2_core(root), 510)
-            self.assertEqual(BENCHMARK.generate_v2_benchmark(root), 564)
-            self.assertEqual(BENCHMARK.generate_v2_job_regressions(root), 2)
+            self.assertEqual(BENCHMARK.generate_v2_benchmark(root, ARCHIVE), 564)
+            self.assertEqual(BENCHMARK.generate_v2_job_regressions(root, ARCHIVE), 2)
             BENCHMARK.validate_v2_generated(root)
             core = csv_rows(root / "manifest.csv")
             active = csv_rows(root / "benchmark" / "manifest.csv")
             regressions = csv_rows(root / "job_regressions" / "manifest.csv")
             self.assertEqual(
                 {row["selectivity_tier"] for row in core},
-                {"sel001", "sel01", "sel05"},
+                {"sel_low", "sel_medium", "sel_high"},
             )
             self.assertEqual(
-                {row["selectivity_modulus"] for row in core},
-                {"1000", "100", "20"},
+                {row["calibration_in_range"] for row in core},
+                {"true"},
             )
             self.assertEqual(
                 {row["pattern_role"] for row in core},
@@ -275,7 +313,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 base_vectors.setdefault(row["base_query_id"], set()).add(row["join_vector"])
                 sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
                 self.assertIn("-- corpus_version: v2", sql)
-                self.assertIn(f"hash({row['selectivity_anchor']})", sql)
+                BENCHMARK.validate_semantic_query(sql, row)
                 self.assertGreaterEqual(len(set(row["join_vector"])), 2)
                 if int(row["relation_count"]) >= 5:
                     self.assertEqual(set(row["join_vector"]), {"I", "L", "R", "F"})
@@ -344,7 +382,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             root = Path(directory)
             self.assertEqual(BENCHMARK.generate_v3_core(root), 102)
             self.assertEqual(BENCHMARK.generate_v3_benchmark(root), 102)
-            self.assertEqual(BENCHMARK.generate_v3_selectivity_stress(root), 42)
+            self.assertEqual(BENCHMARK.generate_v3_selectivity_stress(root, ARCHIVE / "v2", ARCHIVE), 18)
             BENCHMARK.validate_v3_generated(root)
             core = csv_rows(root / "manifest.csv")
             active = csv_rows(root / "benchmark" / "manifest.csv")
@@ -396,25 +434,20 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             self.assertEqual({row["performance_selected"] for row in stress}, {"false"})
             self.assertEqual({row["query_class"] for row in stress}, {"selectivity_stress"})
             self.assertTrue(all("observed_base_tm_speedup" not in row for row in stress))
-            self.assertEqual({row["selectivity_hash_buckets"] for row in stress}, {"4000"})
             self.assertEqual(
-                {row["selectivity_bucket_threshold"] for row in stress},
-                {"1", "2", "8", "400", "800", "2000", "3200"},
+                {row["semantic_tier"] for row in stress},
+                {"low", "medium", "high"},
             )
-            self.assertEqual(
-                {row["target_fraction"] for row in stress},
-                {
-                    "0.000250", "0.000500", "0.002000", "0.100000",
-                    "0.200000", "0.500000", "0.800000",
-                },
-            )
+            for row in stress:
+                sql = (root / "selectivity_stress" / row["path"]).read_text()
+                BENCHMARK.validate_semantic_query(sql, row)
             self.assertEqual({row["tier_balance"] for row in stress}, {"6 queries per tier"})
             base_rows = {row["base_query_id"]: row for row in stress}
             self.assertEqual(len(base_rows), 6)
             self.assertEqual(
                 {
                     row["base_query_id"]
-                    for row in BENCHMARK.select_v3_stress_bases()
+                    for row in BENCHMARK.select_v3_stress_bases(ARCHIVE / "v2", ARCHIVE)
                 },
                 set(base_rows),
             )
@@ -430,6 +463,34 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 {row["source_benchmark"] for row in base_rows.values()},
                 {"TPC-H", "TPC-DS", "JOB", "SQLStorm"},
             )
+
+
+class UnifiedCorpusIdentityTest(unittest.TestCase):
+    def test_identity_ignores_only_comments_and_formatting(self):
+        fingerprint = BENCHMARK.sql_fingerprint
+        sql = "SELECT a.id FROM a LEFT JOIN b ON a.id=b.id WHERE a.name='Ab C';"
+        equivalent = "-- provenance\nselect a.id FROM a /* comment */ LEFT JOIN b ON a.id = b.id WHERE a.name = 'Ab C';"
+        self.assertEqual(fingerprint(sql, 'tpch'), fingerprint(equivalent, 'TPC-H'))
+        for changed in (sql.replace("'Ab C'", "'ab C'"), sql.replace('LEFT', 'RIGHT'),
+                        sql.replace('a.id=b.id', 'a.id=b.other')):
+            self.assertNotEqual(fingerprint(sql, 'tpch'), fingerprint(changed, 'tpch'))
+        self.assertNotEqual(fingerprint(sql, 'tpch'), fingerprint(sql, 'tpcds'))
+
+    def test_every_historical_alias_preserves_sql_and_has_one_canonical_target(self):
+        from benchmark_corpus import resolve_sql_path
+        root = SCRIPT_DIR / 'outerjoin_benchmark'
+        rows = csv_rows(root / 'benchmark/manifest.csv')
+        canonical = {row['query_id']: row for row in rows}
+        for row in rows:
+            if row['query_class'] == 'graph':
+                old_path = row['path'].replace('/graph__', '/control__', 1)
+                self.assertEqual(resolve_sql_path('control', old_path, root),
+                                 root / 'benchmark' / row['path'])
+        for alias in csv_rows(root / 'benchmark/aliases.csv'):
+            old = resolve_sql_path(alias['workload_category'], alias['sql_path'], root)
+            fingerprint = BENCHMARK.sql_fingerprint(old.read_text(), alias['family'])
+            self.assertEqual(fingerprint, canonical[alias['canonical_query_id']]['sql_fingerprint'])
+            self.assertEqual(hashlib.sha256(old.read_bytes()).hexdigest(), alias['content_sha256'])
 
 
 if __name__ == "__main__":

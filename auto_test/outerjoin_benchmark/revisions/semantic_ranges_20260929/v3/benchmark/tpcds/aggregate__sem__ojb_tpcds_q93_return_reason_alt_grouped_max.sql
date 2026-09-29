@@ -1,0 +1,13 @@
+-- source: TPC-DS Q93
+-- transformation: connected join-subgraph adaptation; balanced mixed alternate form; bushy grouping is structurally ineligible
+-- business_semantics: TPC-DS Q93 return-reason categories
+-- corpus_version: v3
+-- workload_role: source-derived aggregation coverage; no timing-based selection
+-- aggregate_variant: grouped_max; anchor=sr.sr_item_sk; group_key=ss.ss_item_sk
+-- semantic_filter: tpcds_return_reason; tier=high; TPC-DS Q93 return-reason categories
+-- predicate: (r.r_reason_desc = 'reason 28' OR r.r_reason_desc = 'Did not fit' OR r.r_reason_desc = 'Wrong size' OR r.r_reason_desc = 'Did not like the color' OR r.r_reason_desc = 'Did not like the make' OR r.r_reason_desc = 'Did not like the model' OR r.r_reason_desc = 'Not the product that was ordred' OR r.r_reason_desc = 'Does not work with a product that I have' OR r.r_reason_desc = 'Did not get it on time' OR r.r_reason_desc = 'Did not like the warranty' OR r.r_reason_desc = 'Found a better extended warranty in a store' OR r.r_reason_desc = 'Found a better price in a store' OR r.r_reason_desc = 'Gift exchange' OR r.r_reason_desc = 'Lost my job' OR r.r_reason_desc = 'No service location in my area' OR r.r_reason_desc = 'Not working any more' OR r.r_reason_desc = 'Package was damaged' OR r.r_reason_desc = 'Parts missing' OR r.r_reason_desc = 'Stopped working' OR r.r_reason_desc = 'duplicate purchase' OR r.r_reason_desc = 'unauthoized purchase')
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT ss.ss_item_sk AS group_key, MAX(sr.sr_item_sk) AS max_key
+FROM ((store_sales ss LEFT OUTER JOIN store_returns sr ON ss.ss_item_sk = sr.sr_item_sk) RIGHT OUTER JOIN reason r ON sr.sr_reason_sk = r.r_reason_sk)
+WHERE (r.r_reason_desc = 'reason 28' OR r.r_reason_desc = 'Did not fit' OR r.r_reason_desc = 'Wrong size' OR r.r_reason_desc = 'Did not like the color' OR r.r_reason_desc = 'Did not like the make' OR r.r_reason_desc = 'Did not like the model' OR r.r_reason_desc = 'Not the product that was ordred' OR r.r_reason_desc = 'Does not work with a product that I have' OR r.r_reason_desc = 'Did not get it on time' OR r.r_reason_desc = 'Did not like the warranty' OR r.r_reason_desc = 'Found a better extended warranty in a store' OR r.r_reason_desc = 'Found a better price in a store' OR r.r_reason_desc = 'Gift exchange' OR r.r_reason_desc = 'Lost my job' OR r.r_reason_desc = 'No service location in my area' OR r.r_reason_desc = 'Not working any more' OR r.r_reason_desc = 'Package was damaged' OR r.r_reason_desc = 'Parts missing' OR r.r_reason_desc = 'Stopped working' OR r.r_reason_desc = 'duplicate purchase' OR r.r_reason_desc = 'unauthoized purchase')
+GROUP BY ss.ss_item_sk;

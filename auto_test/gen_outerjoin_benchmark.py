@@ -8,31 +8,35 @@ projection/filter/join skeleton so that it remains inside the optimizer's
 current applicability envelope. V3 deliberately replaces only that projection
 with a root aggregation while preserving the same source graph.
 
-The active ``benchmark`` corpus is the timeout-filtered union used by the harness.
-Query names use only two reporting prefixes: ``derived__`` for generated/legacy synthetic
-queries and ``industry__`` for business-role patterns. The manifest preserves
-the more specific evaluation role, including whether a query was retained as
-a pinned legacy performance guard.
+The active ``benchmark`` corpus contains each SQL identity once, across join, graph and aggregate queries.
+Query names describe type, execution family, source/structure, join kinds and filter band.
+Historical suite names are retained only in aliases and archived definitions.
+The internal versioned builders are deterministic source-expansion stages; their
+intermediate SQL is created in a temporary directory, never an active workload.
 
-The ``core``, ``industry_inspired``, and ``supplemental`` directories remain as
-auditable component views of that one active benchmark.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as datetime_module
 import hashlib
 import importlib.util
+import json
+import os
 import re
 import shutil
 import stat
+import subprocess
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-import benchmark_timeouts as active_timeouts
+from benchmark_corpus import ARCHIVE_NAME, canonical_query_id, read_manifest, sql_fingerprint
+
 from legacy_corpus import (
     COMPLETED_QUERY_PATHS,
     LEGACY_OUTERYAN_WINS,
@@ -48,7 +52,6 @@ DEFAULT_ROOT = SCRIPT_DIR / "outerjoin_benchmark"
 DEFAULT_V2_ROOT = DEFAULT_ROOT / "v2"
 DEFAULT_V3_ROOT = DEFAULT_ROOT / "v3"
 LEGACY_ROOT = SCRIPT_DIR / "outerjoin_query_old"
-TIMEOUT_ROOT = SCRIPT_DIR / "outerjoin_query_timeout"
 CORE_QUERY_COUNT = 170
 GRAPH_CONTROL_FILENAMES = tuple(
     Path(path).name
@@ -62,27 +65,24 @@ if len(GRAPH_CONTROL_FILENAMES) != GRAPH_CONTROL_QUERY_COUNT:
         f"found {len(GRAPH_CONTROL_FILENAMES)}"
     )
 INDUSTRY_EVALUATION_QUERY_COUNT = 54
-V1_CORPUS_REVISION = "v1-mixed-graph25-20260925"
+SEMANTIC_DESIGN_PATH = DEFAULT_ROOT / "sources" / "semantic_filter_design.json"
+SEMANTIC_DESIGN = json.loads(SEMANTIC_DESIGN_PATH.read_text(encoding="utf-8"))
+SEMANTIC_TIERS = tuple(row["name"] for row in SEMANTIC_DESIGN["tiers"])
+V1_CORPUS_REVISION = SEMANTIC_DESIGN["revision"]
 ACTIVE_CORE_QUERY_COUNT = CORE_QUERY_COUNT
 ACTIVE_BENCHMARK_QUERY_COUNT = CORE_QUERY_COUNT + INDUSTRY_EVALUATION_QUERY_COUNT
-V2_SELECTIVITY_TIERS: tuple[tuple[str, int, str], ...] = (
-    ("sel001", 1000, "approximately 0.1% of the v1 anchor domain"),
-    ("sel01", 100, "approximately 1% of the v1 anchor domain"),
-    ("sel05", 20, "approximately 5% of the v1 anchor domain"),
+V2_SELECTIVITY_TIERS = tuple(
+    (f"sel_{row['name']}", row["target_fraction"],
+     f"{100 * row['lower_bound']:g}–{100 * row['upper_bound']:g}% of the calibration population")
+    for row in SEMANTIC_DESIGN["tiers"]
 )
 V2_CORE_QUERY_COUNT = CORE_QUERY_COUNT * len(V2_SELECTIVITY_TIERS)
 V2_EVALUATION_QUERY_COUNT = ACTIVE_BENCHMARK_QUERY_COUNT - ACTIVE_CORE_QUERY_COUNT
 V2_BENCHMARK_QUERY_COUNT = V2_CORE_QUERY_COUNT + V2_EVALUATION_QUERY_COUNT
 V2_0916_REFERENCE_RUN = "experiment_onoff_benchmark_20260916_211812_t32.csv"
-SELECTIVITY_STRESS_HASH_BUCKETS = 4000
-SELECTIVITY_STRESS_TIERS: tuple[tuple[str, int, float, str], ...] = (
-    ("stress0025", 1, 0.00025, "approximately 0.025% of hash buckets"),
-    ("stress005", 2, 0.0005, "approximately 0.05% of hash buckets"),
-    ("stress02", 8, 0.002, "approximately 0.2% of hash buckets"),
-    ("stress10", 400, 0.10, "approximately 10% of hash buckets"),
-    ("stress20", 800, 0.20, "approximately 20% of hash buckets"),
-    ("stress50", 2000, 0.50, "approximately 50% of hash buckets"),
-    ("stress80", 3200, 0.80, "approximately 80% of hash buckets"),
+SELECTIVITY_STRESS_TIERS = tuple(
+    (f"stress_{name}", name, target, description)
+    for name, (_, target, description) in zip(SEMANTIC_TIERS, V2_SELECTIVITY_TIERS)
 )
 SELECTIVITY_STRESS_FAMILIES = ("tpch", "tpcds", "job")
 SELECTIVITY_STRESS_TREE_SHAPES = ("left_deep", "right_deep", "bushy")
@@ -99,7 +99,7 @@ V3_STRESS_BASE_COUNT = (
     len(SELECTIVITY_STRESS_FAMILIES) * V3_STRESS_BASES_PER_FAMILY
 )
 V3_STRESS_QUERY_COUNT = V3_STRESS_BASE_COUNT * len(SELECTIVITY_STRESS_TIERS)
-V3_STRESS_SELECTION_SALT = "outeryan-v3-balanced-selectivity-v1"
+V3_STRESS_SELECTION_SALT = "outeryan-v3-semantic-selectivity-v1"
 V2_JOB_REGRESSIONS: tuple[tuple[str, str, str], ...] = (
     ("ojb_sqlstorm_job_11914_bdmx", "1af32617cb10164c5f999a0f99f196b23232059a40dd8f0f2ff5e1eb81af7836", "0.772"),
     ("oy_jb_jb_bushy4a_v2", "6dca40cd9267b67ea297a5245c6cd0d9b0fe7bf8653d1d6c6a643f89e9a82103", "0.857"),
@@ -207,6 +207,144 @@ JOIN_KEYWORD_PATTERN = re.compile(
 )
 SOURCE_BENCHMARKS = frozenset({"TPC-H", "TPC-DS", "JOB", "SQLStorm"})
 
+
+def semantic_filter(profile_id: str, column: str, tier: str) -> str:
+    """Render a frozen, interpretable business cohort, never a key sample."""
+    profile = SEMANTIC_DESIGN["profiles"][profile_id]
+    index = SEMANTIC_TIERS.index(tier)
+    if profile["kind"] == "predicates":
+        return profile["predicates"][index].format(column=column)
+    bound = profile["bounds"][index]
+    if profile["kind"] == "date_window":
+        center = datetime_module.date.fromisoformat(profile["pivot"])
+        radius = datetime_module.timedelta(days=int(bound))
+        return f"{column} BETWEEN DATE '{center - radius}' AND DATE '{center + radius}'"
+    operator, value = (">=", -bound) if profile["kind"] == "lower" else ("<=", bound)
+    return f"{column} {operator} {value:.10g}"
+
+
+def semantic_metadata(profile_id: str, column: str, tier: str) -> dict[str, str]:
+    profile = SEMANTIC_DESIGN["profiles"][profile_id]
+    calibration = profile["calibration"]
+    index = SEMANTIC_TIERS.index(tier)
+    spec = SEMANTIC_DESIGN["tiers"][index]
+    target, lower, upper = (spec[key] for key in
+                            ("target_fraction", "lower_bound", "upper_bound"))
+    qualified = calibration["qualified_rows"][index]
+    observed = qualified / calibration["n"]
+    return {
+        "filter_design_revision": V1_CORPUS_REVISION,
+        "selectivity_tier": f"sel_{tier}",
+        "semantic_tier": tier,
+        "target_fraction": f"{target:.6f}",
+        "target_min_fraction": f"{lower:.6f}",
+        "target_max_fraction": f"{upper:.6f}",
+        "target_min_inclusive": str(spec["include_lower"]).lower(),
+        "target_max_inclusive": str(spec["include_upper"]).lower(),
+        "selectivity_profile": profile_id,
+        "selectivity_anchor": column,
+        "selectivity_predicate": semantic_filter(profile_id, column, tier),
+        "filter_semantics": profile["meaning"],
+        "selectivity_denominator": profile["calibration_from"],
+        "calibration_rows": str(calibration["n"]),
+        "calibration_qualified_rows": str(qualified),
+        "calibration_fraction": f"{observed:.9f}",
+        "calibration_in_range": str(fraction_in_band(observed, spec)).lower(),
+        "selectivity_scope": "base entity (including NULLs in denominator), not joined output",
+        "parameter_policy": "frozen business literals; replace full WHERE; no runtime-based selection",
+        "source_filter_adaptation": "synthetic control with a business range on its base entity",
+    }
+
+
+def seed_filter_metadata(seed: Seed, tier: str | None = None) -> dict[str, str]:
+    spec = SEMANTIC_DESIGN["seeds"][seed.seed_id]
+    metadata = semantic_metadata(spec["profile"], spec["column"], tier or spec["default_tier"])
+    metadata["source_filter_adaptation"] = spec["adaptation"]
+    return metadata
+
+
+def fraction_in_band(value: float, spec: dict) -> bool:
+    lower_ok = value >= spec["lower_bound"] if spec["include_lower"] else value > spec["lower_bound"]
+    upper_ok = value <= spec["upper_bound"] if spec["include_upper"] else value < spec["upper_bound"]
+    return lower_ok and upper_ok
+
+
+def copy_filter_metadata(row: dict[str, str]) -> dict[str, str]:
+    return {key: row[key] for key in (
+        "filter_design_revision", "selectivity_tier", "semantic_tier", "target_fraction",
+        "target_min_fraction", "target_max_fraction", "selectivity_profile", "selectivity_anchor",
+        "target_min_inclusive", "target_max_inclusive", "source_filter_adaptation",
+        "selectivity_predicate", "filter_semantics", "selectivity_denominator", "calibration_rows",
+        "calibration_qualified_rows", "calibration_fraction", "calibration_in_range",
+        "selectivity_scope", "parameter_policy",
+    )}
+
+
+def semantic_comment(metadata: dict[str, str]) -> str:
+    return (f"-- semantic_filter: {metadata['selectivity_profile']}; "
+            f"tier={metadata['semantic_tier']}; {metadata['filter_semantics']}\n"
+            f"-- predicate: {metadata['selectivity_predicate']}\n"
+            "-- selectivity_scope: base-entity calibration; not a joined-output percentage\n")
+
+
+def replace_where(sql: str, predicate: str) -> str:
+    result, count = re.subn(r"\bWHERE\s+.*?(?=\s+GROUP\s+BY\b|;)",
+                            lambda _: f"WHERE {predicate}", sql, count=1,
+                            flags=re.IGNORECASE | re.DOTALL)
+    if count != 1:
+        raise ValueError("Expected one outer WHERE clause when replacing the semantic cohort")
+    return result
+
+
+def active_query_id(prefix: str, row: dict[str, str]) -> str:
+    base = row["query_id"]
+    if row["family"] == "graph":
+        instance = GRAPH_CONTROL_FILENAMES.index(f"{base}.sql") + 1
+        base = re.sub(r"_s\d+$", "", base) + f"_case{instance:02d}_" + row["selectivity_tier"]
+    return f"{prefix}__sem__{base}"
+
+
+def validate_semantic_query(sql: str, row: dict[str, str]) -> None:
+    """Check the emitted predicate, not just its provenance comment."""
+    statement = re.sub(r"--[^\n]*", "", sql)
+    operators = re.sub(r"'(?:''|[^'])*'", "''", statement)
+    if re.search(r"%|\b(?:MOD|HASH)\s*\(", operators, re.IGNORECASE):
+        raise RuntimeError(f"{row['path']}: key sampling is not a semantic filter")
+    where = re.search(r"\bWHERE\s+(.*?)(?=\s+GROUP\s+BY\b|;)",
+                      statement, re.IGNORECASE | re.DOTALL)
+    if not where or where.group(1).strip() != row["selectivity_predicate"]:
+        raise RuntimeError(f"{row['path']}: WHERE differs from the declared business cohort")
+    if (row["filter_design_revision"] != V1_CORPUS_REVISION
+            or row["calibration_in_range"] != "true"):
+        raise RuntimeError(f"{row['path']}: stale or out-of-band calibration")
+
+
+def control_filter_metadata(sql: str, family: str, index: int) -> dict[str, str]:
+    statement = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
+    relations = re.findall(
+        r"\b(?:FROM|JOIN)\s*\(*\s*(\w+)(?:\s+(?:AS\s+)?"
+        r"(?!ON\b|LEFT\b|RIGHT\b|FULL\b|INNER\b|JOIN\b|WHERE\b)([A-Za-z_]\w*))?",
+        statement, re.IGNORECASE,
+    )
+    tables = {table.lower(): alias or table for table, alias in relations}
+    options = {
+        "tpch": (("orders", "tpch_order_date", "o_orderdate"),
+                 ("partsupp", "tpch_supply_cost", "ps_supplycost"),
+                 ("supplier", "tpch_supplier_balance", "s_acctbal"),
+                 ("customer", "tpch_customer_balance", "c_acctbal")),
+        "tpcds": tuple((f"{channel}_sales", f"tpcds_{channel}_quantity", f"{prefix}_quantity")
+                       for channel, prefix in (("store", "ss"), ("web", "ws"), ("catalog", "cs"))),
+        "job": (("title", "job_release_year", "production_year"),),
+        "graph": (("r1", "graph_source_range", "src"),),
+    }[family]
+    for table, profile, column in options:
+        if table in tables:
+            available = [name for name in SEMANTIC_TIERS
+                         if semantic_metadata(profile, column, name)["calibration_in_range"] == "true"]
+            tier = available[index % len(available)]
+            return semantic_metadata(profile, f"{tables[table]}.{column}", tier)
+    raise ValueError(f"No semantic business attribute in {family} control: {tables}")
+
 ACTIVE_JOIN_SQL = "FULL OUTER JOIN"
 SIMPLE_EDGE_EQUALITY = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
@@ -232,8 +370,11 @@ class Seed:
     relations: tuple[str, ...]
     predicates: tuple[str, ...]
     projection: str
-    where: str
     semantic_vector: tuple[str, ...]
+
+    @property
+    def where(self) -> str:
+        return seed_filter_metadata(self)["selectivity_predicate"]
 
     def validate(self) -> None:
         edge_count = len(self.relations) - 1
@@ -305,7 +446,6 @@ def compact_seed(
     semantics: str,
     relations: Sequence[str],
     predicates: Sequence[str],
-    where: str,
     offset: int = 0,
 ) -> Seed:
     return Seed(
@@ -321,7 +461,6 @@ def compact_seed(
         relations=tuple(relations),
         predicates=tuple(predicates),
         projection="*",
-        where=where,
         semantic_vector=mixed_vector(len(relations) - 1, offset),
     )
 
@@ -402,7 +541,7 @@ def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
             ),
             relations=relations[:max_relations],
             predicates=ordered_predicates[: max_relations - 1],
-            where=where,
+
             offset=offset,
         )
     text = source.read_text(encoding="utf-8")
@@ -440,7 +579,10 @@ def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
     ordered_predicates: list[str] = []
     while len(ordered_relations) < min(max_relations, len(relations)):
         found = False
-        for alias, relation in zip(aliases, relations):
+        # Retain the source title relation before optional annotation leaves so
+        # release-year cohorts use a business attribute already in this graph.
+        ordered_candidates = sorted(zip(aliases, relations), key=lambda item: item[1].split()[0] != "title")
+        for alias, relation in ordered_candidates:
             if alias in included:
                 continue
             for left, right, predicate in edges:
@@ -457,7 +599,6 @@ def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
     if len(ordered_relations) < 3:
         raise ValueError(f"JOB {query_id}: could not extract a connected three-relation skeleton")
 
-    anchor = included[0]
     return compact_seed(
         family="job",
         seed_id=f"job_{query_id}_skeleton",
@@ -472,7 +613,7 @@ def job_seed(query_id: str, *, max_relations: int = 5, offset: int = 0) -> Seed:
         ),
         relations=ordered_relations,
         predicates=ordered_predicates,
-        where=f"{anchor}.id % 1000 = 0",
+
         offset=offset,
     )
 
@@ -481,7 +622,6 @@ def sqlstorm_seed(
     dataset: str,
     query_id: str,
     *,
-    anchor_filter: str,
     offset: int = 0,
 ) -> Seed:
     source_location = f"auto_test/outerjoin_benchmark/sources/sqlstorm/{dataset}/{query_id}.sql"
@@ -500,11 +640,11 @@ def sqlstorm_seed(
             topology=classify_topology(predicates),
             semantics=(
                 f"A SQLStorm {dataset} query pattern whose source relation graph is retained; "
-                "the anchor sample is enriched under controlled preservation semantics."
+                "a business cohort is enriched under controlled preservation semantics."
             ),
             relations=relations,
             predicates=predicates,
-            where=anchor_filter,
+
             offset=offset,
         )
     text = source.read_text(encoding="utf-8")
@@ -538,11 +678,11 @@ def sqlstorm_seed(
         topology=classify_topology(predicates),
         semantics=(
             f"A SQLStorm {dataset} query pattern whose source relation graph is retained; "
-            "the anchor sample is enriched under controlled preservation semantics."
+            "a business cohort is enriched under controlled preservation semantics."
         ),
         relations=relations,
         predicates=predicates,
-        where=anchor_filter,
+
         offset=offset,
     )
 
@@ -572,11 +712,7 @@ SEEDS: tuple[Seed, ...] = (
             "r.r_name, n.n_name, c.c_custkey, o.o_orderkey, "
             "l.l_linenumber, l.l_extendedprice"
         ),
-        where=(
-            "r.r_name = 'ASIA' "
-            "AND o.o_orderdate >= DATE '1994-01-01' "
-            "AND o.o_orderdate < DATE '1995-01-01'"
-        ),
+
         semantic_vector=("I", "L", "L", "L"),
     ),
     Seed(
@@ -603,7 +739,7 @@ SEEDS: tuple[Seed, ...] = (
             "p.p_partkey, p.p_name, l.l_orderkey, s.s_suppkey, "
             "ps.ps_supplycost, o.o_orderdate"
         ),
-        where="p.p_name LIKE '%green%'",
+
         semantic_vector=("L", "L", "F", "L"),
     ),
     Seed(
@@ -637,7 +773,7 @@ SEEDS: tuple[Seed, ...] = (
             "cs.cs_order_number, cs.cs_item_sk, cr.cr_return_quantity, "
             "w.w_state, i.i_item_id, d.d_date"
         ),
-        where="cs.cs_order_number % 1000 = 0",
+
         semantic_vector=("L", "I", "I", "I"),
     ),
     Seed(
@@ -664,7 +800,7 @@ SEEDS: tuple[Seed, ...] = (
             "cs.cs_order_number, cs.cs_item_sk, inv.inv_quantity_on_hand, "
             "w.w_warehouse_name, i.i_item_id, p.p_promo_name"
         ),
-        where="cs.cs_order_number % 1000 = 0",
+
         semantic_vector=("I", "I", "I", "L"),
     ),
     Seed(
@@ -675,23 +811,23 @@ SEEDS: tuple[Seed, ...] = (
         source_query="10a",
         source_location="benchmark/imdb_plan_cost/queries/10a.sql",
         source_hash="dcffd7d004228d834af7bf332e365837cc5a3fb60fb3859a55235da6d1455a89",
-        topology="branch",
+        topology="chain",
         semantics=(
             "Movie-credit coverage: qualifying titles retain cast records while "
-            "character, role, and company annotations may be absent."
+            "role and company annotations may be absent."
         ),
-        relations=("title t", "cast_info ci", "char_name chn", "role_type rt", "movie_companies mc"),
+        relations=("title t", "cast_info ci", "role_type rt", "movie_companies mc", "company_name cn"),
         predicates=(
             "t.id = ci.movie_id",
-            "chn.id = ci.person_role_id",
             "rt.id = ci.role_id",
             "t.id = mc.movie_id",
+            "cn.id = mc.company_id",
         ),
         projection=(
-            "t.id AS title_id, t.title, ci.person_id, chn.name AS character_name, "
+            "t.id AS title_id, t.title, ci.person_id, cn.name AS company_name, "
             "rt.role, mc.company_id"
         ),
-        where="t.production_year > 2005",
+
         semantic_vector=("I", "L", "I", "L"),
     ),
     Seed(
@@ -718,7 +854,7 @@ SEEDS: tuple[Seed, ...] = (
             "t.id AS title_id, t.title, n.id AS person_id, n.name, "
             "mk.keyword_id, k.keyword"
         ),
-        where="t.id % 1000 = 0",
+
         semantic_vector=("I", "I", "L", "L"),
     ),
     Seed(
@@ -737,7 +873,7 @@ SEEDS: tuple[Seed, ...] = (
         relations=("part p", "partsupp ps", "supplier s"),
         predicates=("p.p_partkey = ps.ps_partkey", "ps.ps_suppkey = s.s_suppkey"),
         projection="p.p_name, s.s_name, ps.ps_availqty",
-        where="p.p_partkey <= 1000",
+
         semantic_vector=("L", "F"),
     ),
     Seed(
@@ -764,7 +900,7 @@ SEEDS: tuple[Seed, ...] = (
             "c.c_customer_id, ca.ca_city, ss.ss_ticket_number, ss.ss_quantity, "
             "d.d_date, t.t_hour"
         ),
-        where="c.c_customer_sk % 1000 = 0",
+
         semantic_vector=("L", "I", "F", "R"),
     ),
     Seed(
@@ -790,7 +926,7 @@ SEEDS: tuple[Seed, ...] = (
             "ci.id AS cast_id, a.name AS actor_name, t.title AS movie_title, "
             "ci.nr_order, r.role"
         ),
-        where="ci.id % 1000 = 0",
+
         semantic_vector=("L", "I", "L"),
     ),
 )
@@ -808,7 +944,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
         semantics="Customer orders are the mandatory backbone and line items provide optional revenue detail.",
         relations=("customer c", "orders o", "lineitem l"),
         predicates=("c.c_custkey = o.o_custkey", "o.o_orderkey = l.l_orderkey"),
-        where="c.c_custkey % 1000 = 0",
+
         offset=0,
     ),
     compact_seed(
@@ -827,7 +963,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "o.o_custkey = c.c_custkey",
             "s.s_nationkey = n.n_nationkey",
         ),
-        where="s.s_suppkey % 100 = 0",
+
         offset=1,
     ),
     compact_seed(
@@ -847,7 +983,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "c.c_nationkey = n.n_nationkey",
             "n.n_regionkey = r.r_regionkey",
         ),
-        where="p.p_partkey % 1000 = 0",
+
         offset=2,
     ),
     compact_seed(
@@ -865,7 +1001,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ws.ws_sold_date_sk = d.d_date_sk",
             "ws.ws_web_site_sk = web.web_site_sk",
         ),
-        where="wr.wr_order_number % 1000 = 0",
+
         offset=0,
     ),
     compact_seed(
@@ -884,7 +1020,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_store_sk = s.s_store_sk",
             "ss.ss_item_sk = i.i_item_sk",
         ),
-        where="ss.ss_ticket_number % 1000 = 0",
+
         offset=1,
     ),
     compact_seed(
@@ -901,7 +1037,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_item_sk = sr.sr_item_sk AND ss.ss_ticket_number = sr.sr_ticket_number",
             "sr.sr_reason_sk = r.r_reason_sk",
         ),
-        where="ss.ss_ticket_number % 1000 = 0",
+
         offset=2,
     ),
     compact_seed(
@@ -918,7 +1054,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ws.ws_sold_date_sk = d.d_date_sk",
             "ws.ws_item_sk = ss.ss_item_sk AND ws.ws_sold_date_sk = ss.ss_sold_date_sk",
         ),
-        where="ws.ws_order_number % 1000 = 0",
+
         offset=3,
     ),
     compact_seed(
@@ -935,7 +1071,7 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
             "ss.ss_sold_date_sk = d.d_date_sk",
             "ss.ss_customer_sk = cs.cs_bill_customer_sk AND ss.ss_item_sk = cs.cs_item_sk",
         ),
-        where="ss.ss_ticket_number % 1000 = 0",
+
         offset=0,
     ),
     job_seed("01a", offset=0),
@@ -948,39 +1084,39 @@ ADDITIONAL_SEEDS: tuple[Seed, ...] = (
     job_seed("30a", offset=3),
     sqlstorm_seed(
         "tpch", "17751",
-        anchor_filter="p.p_partkey % 1000 = 0", offset=1,
+        offset=1,
     ),
     sqlstorm_seed(
         "tpch", "25509",
-        anchor_filter="p.p_partkey % 1000 = 0", offset=2,
+        offset=2,
     ),
     sqlstorm_seed(
         "tpch", "15031",
-        anchor_filter="p.p_partkey % 1000 = 0", offset=3,
+        offset=3,
     ),
     sqlstorm_seed(
         "tpcds", "11376",
-        anchor_filter="c.c_customer_sk % 1000 = 0", offset=1,
+        offset=1,
     ),
     sqlstorm_seed(
         "tpcds", "28643",
-        anchor_filter="C.c_customer_sk % 1000 = 0", offset=2,
+        offset=2,
     ),
     sqlstorm_seed(
         "tpcds", "14368",
-        anchor_filter="c.c_customer_sk % 1000 = 0", offset=3,
+        offset=3,
     ),
     sqlstorm_seed(
         "job", "11914",
-        anchor_filter="a.id % 1000 = 0", offset=1,
+        offset=1,
     ),
     sqlstorm_seed(
         "job", "18930",
-        anchor_filter="a.id % 1000 = 0", offset=2,
+        offset=2,
     ),
     sqlstorm_seed(
         "job", "13193",
-        anchor_filter="c.id % 1000 = 0", offset=3,
+        offset=3,
     ),
 )
 
@@ -1112,17 +1248,11 @@ def relation_alias(relation: str) -> str:
 
 
 def active_edge_predicate(predicate: str) -> str:
-    """Return one plain, type-compatible equality for the same graph edge."""
+    """Retain the source equality, including its actual foreign-key column."""
     match = SIMPLE_EDGE_EQUALITY.search(predicate)
     if not match:
         raise ValueError(f"join edge has no plain qualified equality: {predicate}")
-    equality = match.group(0)
-    # The local JOB load infers person_role_id as DOUBLE while char_name.id is
-    # INTEGER. Using ci.role_id keeps this graph edge column-to-column and
-    # avoids the implicit cast that is outside OuterYan's current envelope.
-    if equality == "chn.id = ci.person_role_id":
-        return "chn.id = ci.role_id"
-    return equality
+    return match.group(0)
 
 
 def sql_join_graph(sql: str) -> Counter[tuple[str, str]]:
@@ -1275,7 +1405,7 @@ def query_sql(seed: Seed, expression: str, variant: str, variant_semantics: str)
     return (
         f"-- source: {source}\n"
         f"-- transformation: connected join-subgraph adaptation; {variant_semantics}\n"
-        f"-- business_semantics: {seed.semantics}\n"
+        f"-- business_semantics: {seed_filter_metadata(seed)['filter_semantics']}\n"
         f"SELECT {seed.projection}\n"
         f"FROM {expression}\n"
         f"WHERE {seed.where};\n"
@@ -1542,23 +1672,17 @@ def v2_pattern_role(seed: Seed, suffix: str) -> str:
 
 
 def add_v2_selectivity(
-    sql: str, seed: Seed, tier: str, modulus: int, description: str,
+    sql: str, seed: Seed, tier: str, target: float, description: str,
 ) -> tuple[str, str]:
-    """Add a reproducible selectivity sweep to an existing v1 variant."""
-    anchor = selectivity_anchor(seed)
-    where = f"WHERE {seed.where};\n"
-    if sql.count(where) != 1:
-        raise ValueError(f"{seed.seed_id}: generated SQL has an unexpected WHERE clause")
+    """Replace the complete v1 filter with one semantic cohort."""
+    spec = seed_filter_metadata(seed, tier.removeprefix("sel_"))
     metadata = (
         f"-- corpus_version: v2\n"
-        f"-- selectivity_sweep: {tier}; {description}; anchor={anchor}; "
-        f"predicate=hash(anchor) % {modulus} = 0\n"
+        f"-- selectivity_sweep: {tier}; intended band {description}\n"
+        + semantic_comment(spec)
     )
-    filtered = sql.replace(
-        where,
-        f"WHERE ({seed.where})\n  AND hash({anchor}) % {modulus} = 0;\n",
-    )
-    return filtered.replace("SELECT ", metadata + "SELECT ", 1), anchor
+    filtered = replace_where(sql, spec["selectivity_predicate"])
+    return filtered.replace("SELECT ", metadata + "SELECT ", 1), spec["selectivity_anchor"]
 
 
 SELECT_LIST_PATTERN = re.compile(
@@ -1668,7 +1792,7 @@ def generate_core(root: Path) -> int:
                 raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
             sql = sql.replace(
                 "SELECT ",
-                f"-- corpus_revision: {V1_CORPUS_REVISION}\nSELECT ",
+                f"-- corpus_revision: {V1_CORPUS_REVISION}\n" + semantic_comment(seed_filter_metadata(seed)) + "SELECT ",
                 1,
             )
             (core / relative_path).write_text(sql, encoding="utf-8")
@@ -1684,14 +1808,15 @@ def generate_core(root: Path) -> int:
                     "source_query": seed.source_query,
                     "source_location": seed.source_location,
                     "source_sha256": seed.source_hash,
-                    "transformation": "connected_join_subgraph_adaptation",
+                    "transformation": "connected_join_subgraph_adaptation+semantic_business_cohort",
                     "topology": seed.topology,
                     "tree_shape": tree_shape,
                     "join_vector": vector,
                     "relation_count": str(len(seed.relations)),
                     "predicate_class": "null_rejecting_outeryan_applicable",
                     "semantic_role": variant_semantics,
-                    "semantics": seed.semantics,
+                    "semantics": seed_filter_metadata(seed)["filter_semantics"],
+                    **seed_filter_metadata(seed),
                 }
             )
 
@@ -1762,7 +1887,7 @@ def generate_industry_inspired(root: Path) -> int:
             return "chain", "left_deep"
         raise ValueError(f"unknown graph control structure: {filename}")
 
-    def relabel_control(source_sql: str, *, flatten_aggregate: bool) -> tuple[str, str, int]:
+    def relabel_control(source_sql: str, *, flatten_aggregate: bool) -> tuple[str, str, int, dict]:
         nonlocal control_index
         normalized = normalize_active_sql(
             source_sql,
@@ -1770,15 +1895,18 @@ def generate_industry_inspired(root: Path) -> int:
         )
         edge_count = sql_join_keyword_count(normalized)
         vector = next_balanced_control_vector(edge_count, join_counts, control_index)
+        filter_metadata = control_filter_metadata(normalized, family, control_index)
         control_index += 1
         join_counts.update(vector)
         mixed = rewrite_join_types(normalized, vector)
+        mixed = replace_where(mixed, filter_metadata["selectivity_predicate"])
         metadata = (
             f"-- corpus_revision: {V1_CORPUS_REVISION}\n"
             "-- workload_role: retained evaluation control with deterministic mixed joins\n"
-            f"-- join_vector: {''.join(vector)}; relation and predicate structure unchanged\n"
+            f"-- join_vector: {''.join(vector)}; relation graph retained; semantic filter replaced\n"
+            + semantic_comment(filter_metadata)
         )
-        return metadata + mixed, "".join(vector), edge_count
+        return metadata + mixed, "".join(vector), edge_count, filter_metadata
 
     wins = {
         (family, filename): speedup
@@ -1796,7 +1924,7 @@ def generate_industry_inspired(root: Path) -> int:
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_sql = source.read_text(encoding="utf-8")
-        normalized_sql, join_vector, edge_count = relabel_control(
+        normalized_sql, join_vector, edge_count, filter_metadata = relabel_control(
             source_sql,
             flatten_aggregate=(family, filename) in ACTIVE_AGGREGATE_SOURCES,
         )
@@ -1832,6 +1960,7 @@ def generate_industry_inspired(root: Path) -> int:
                 "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
                 "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
                 "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
+                **filter_metadata,
             }
         )
 
@@ -1844,7 +1973,7 @@ def generate_industry_inspired(root: Path) -> int:
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_sql = source.read_text(encoding="utf-8")
-        normalized_sql, join_vector, edge_count = relabel_control(
+        normalized_sql, join_vector, edge_count, filter_metadata = relabel_control(
             source_sql,
             flatten_aggregate=False,
         )
@@ -1876,6 +2005,7 @@ def generate_industry_inspired(root: Path) -> int:
                 "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
                 "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
                 "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
+                **filter_metadata,
             }
         )
 
@@ -1887,7 +2017,7 @@ def generate_industry_inspired(root: Path) -> int:
         destination = destination_root / family / filename
         destination.parent.mkdir(parents=True, exist_ok=True)
         source_sql = source.read_text(encoding="utf-8")
-        normalized_sql, join_vector, edge_count = relabel_control(
+        normalized_sql, join_vector, edge_count, filter_metadata = relabel_control(
             source_sql,
             flatten_aggregate=False,
         )
@@ -1920,6 +2050,7 @@ def generate_industry_inspired(root: Path) -> int:
                 "source_content_sha256": hashlib.sha256(source_sql.encode("utf-8")).hexdigest(),
                 "active_transformation": "graph_preserving_balanced_mixed_join_relabeling",
                 "content_sha256": hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest(),
+                **filter_metadata,
             }
         )
 
@@ -1964,7 +2095,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
     for row in core_rows:
         family = row["family"]
         source = root / "core" / row["path"]
-        query_id = f"derived__{row['query_id']}"
+        query_id = active_query_id("derived", row)
         content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         rows.append(
             {
@@ -1987,6 +2118,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                 "join_vector": row["join_vector"],
                 "relation_count": row["relation_count"],
                 "predicate_class": row["predicate_class"],
+                **copy_filter_metadata(row),
             }
         )
 
@@ -2011,7 +2143,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
             prefix, query_class = role_prefix[role]
             family = row["family"]
             source = root / "industry_inspired" / row["path"]
-            query_id = f"{prefix}__{row['query_id']}"
+            query_id = active_query_id(prefix, row)
             content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
             rows.append(
                 {
@@ -2034,6 +2166,7 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
                     "join_vector": row["join_vector"],
                     "relation_count": row["relation_count"],
                     "predicate_class": "evaluation_control",
+                    **copy_filter_metadata(row),
                 }
             )
 
@@ -2045,13 +2178,9 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
             f"expected={expected_count}, rows={len(rows)}, unique_paths={len(paths)}"
         )
 
-    # The pinned exclusions refer to the retired FULL-heavy SQL. Relabeling the
-    # joins changes both the query and its content hash, so those observations
-    # cannot be used to exclude any current v1-mixed query.
-    excluded_rows: list[dict[str, str]] = []
     expected_active_count = ACTIVE_BENCHMARK_QUERY_COUNT if include_industry else ACTIVE_CORE_QUERY_COUNT
     if len(rows) != expected_active_count:
-        raise RuntimeError(f"unexpected filtered benchmark count: {len(rows)}")
+        raise RuntimeError(f"unexpected active benchmark count: {len(rows)}")
     validate_active_coverage(core_rows, rows, include_industry)
 
     # Only replace files owned by the previous manifest; preserve unrelated
@@ -2102,17 +2231,6 @@ def generate_active_benchmark(root: Path, include_industry: bool = True) -> int:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
-    exclusion_fields = fields + ["reference_run", "reference_threads", "timeout_seconds", "timeout_phase"]
-    with (root / "active_timeout_exclusions.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=exclusion_fields, lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(
-            {
-                **row,
-                **active_timeouts.reference_metadata(row["path"]),
-            }
-            for row in excluded_rows
-        )
     return len(rows)
 
 
@@ -2121,9 +2239,8 @@ def validate_active_coverage(
 ) -> None:
     """Require complete current-revision coverage; old timeout pins are obsolete."""
     paths = {row["path"] for row in active_rows}
-    retained_core = [
-        row for row in core_rows if f"{row['family']}/derived__{row['query_id']}.sql" in paths
-    ]
+    retained_core = [row for row in core_rows
+                     if f"{row['family']}/{active_query_id('derived', row)}.sql" in paths]
     if len(retained_core) != ACTIVE_CORE_QUERY_COUNT:
         raise RuntimeError(f"unexpected active core count: {len(retained_core)}")
     for dimension in ("tree_shape", "topology", "relation_count", "join_vector"):
@@ -2165,17 +2282,17 @@ def classify_legacy(root: Path) -> int:
         for family, filename, _, _ in INDUSTRY_INSPIRED_PATTERNS
     }
     rows: list[dict[str, str]] = []
-    sources: list[tuple[Path, Path]] = []
     for query in LEGACY_QUERIES:
-        source_root = TIMEOUT_ROOT if query.timed_out else LEGACY_ROOT
-        source = source_root / query.path
-        if not source.is_file():
-            raise FileNotFoundError(f"classified legacy query not found: {source}")
-        sources.append((source, source_root))
-    for source, source_root in sources:
-        relative = str(source.relative_to(source_root))
+        relative = query.path
+        source = LEGACY_ROOT / relative
         family = source.parent.name
-        if is_dataless(source):
+        if query.timed_out:
+            # Only the exclusion metadata remains; the archived SQL was retired.
+            content_sha256 = ""
+            content_status = "removed_timeout_sql"
+        elif not source.is_file():
+            raise FileNotFoundError(f"classified legacy query not found: {source}")
+        elif is_dataless(source):
             content_sha256 = ""
             content_status = "icloud_dataless_not_read"
         else:
@@ -2284,7 +2401,7 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     if any(max(counts.values()) - min(counts.values()) > 3 for counts in grouped_join_counts.values()):
         raise RuntimeError(f"v1 family/shape join labels are imbalanced: {grouped_join_counts}")
     all_shapes = Counter(row["tree_shape"] for row in manifest_rows)
-    if all_shapes != Counter({"left_deep": 46, "right_deep": 80, "bushy": 44}):
+    if all_shapes != Counter({"left_deep": 45, "right_deep": 79, "bushy": 46}):
         raise RuntimeError(f"unexpected core shape distribution: {all_shapes}")
     predicate_classes = Counter(row["predicate_class"] for row in manifest_rows)
     if predicate_classes != Counter({"null_rejecting_outeryan_applicable": CORE_QUERY_COUNT}):
@@ -2310,6 +2427,7 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
         if any(re.search(pattern, statement) for pattern in null_tolerant_patterns):
             raise RuntimeError(f"{relative_path}: NULL-tolerant predicate is not allowed in the core")
         row = next(row for row in manifest_rows if row["path"] == relative_path)
+        validate_semantic_query(sql, row)
         if f"-- corpus_revision: {V1_CORPUS_REVISION}" not in sql:
             raise RuntimeError(f"{relative_path}: missing corpus revision")
         if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
@@ -2334,6 +2452,7 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
     for row in active_rows:
         relative_path = row["path"]
         sql = (active_root / relative_path).read_text(encoding="utf-8")
+        validate_semantic_query(sql, row)
         statement = "\n".join(
             line for line in sql.upper().splitlines() if not line.lstrip().startswith("--")
         )
@@ -2353,7 +2472,7 @@ def validate_generated(root: Path, include_industry: bool = True) -> None:
 
 
 def generate_v2_core(root: Path) -> int:
-    """Expand every source-derived mixed structural variant across three tiers."""
+    """Expand every source-derived structural variant across three semantic bands."""
     core = root / "core"
     reset_generated_dir(core)
     rows: list[dict[str, str]] = []
@@ -2378,11 +2497,11 @@ def generate_v2_core(root: Path) -> int:
             seed, seed_index
         ):
             base_query_id = f"ojb_{seed.seed_id}_{suffix}"
-            for tier, modulus, description in V2_SELECTIVITY_TIERS:
+            for tier, target, description in V2_SELECTIVITY_TIERS:
                 query_id = f"{base_query_id}_{tier}"
                 relative_path = f"{seed.family}/{query_id}.sql"
                 sql, anchor = add_v2_selectivity(
-                    base_sql, seed, tier, modulus, description
+                    base_sql, seed, tier, target, description
                 )
                 if sql_join_graph(sql) != expected_graph:
                     raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
@@ -2402,7 +2521,7 @@ def generate_v2_core(root: Path) -> int:
                         "source_sha256": seed.source_hash,
                         "transformation": (
                             "connected_join_subgraph_adaptation+"
-                            "deterministic_hash_selectivity_sweep"
+                            "semantic_business_range_sweep"
                         ),
                         "topology": seed.topology,
                         "tree_shape": tree_shape,
@@ -2410,11 +2529,8 @@ def generate_v2_core(root: Path) -> int:
                         "relation_count": str(len(seed.relations)),
                         "predicate_class": "null_rejecting_outeryan_applicable",
                         "semantic_role": variant_semantics,
-                        "semantics": seed.semantics,
-                        "selectivity_tier": tier,
-                        "target_fraction": f"{1.0 / modulus:.4f}",
-                        "selectivity_modulus": str(modulus),
-                        "selectivity_anchor": anchor,
+                        "semantics": seed_filter_metadata(seed)["filter_semantics"],
+                        **seed_filter_metadata(seed, tier.removeprefix("sel_")),
                         "pattern_role": v2_pattern_role(seed, suffix),
                         "design_basis": design_basis,
                     }
@@ -2497,6 +2613,7 @@ def generate_v3_core(root: Path) -> int:
             query_id = f"ojb_{seed.seed_id}_{suffix}_{aggregate_variant}"
             relative_path = f"{seed.family}/{query_id}.sql"
             sql, anchor = add_v3_aggregation(base_sql, seed, aggregate_variant)
+            sql = sql.replace("SELECT ", semantic_comment(seed_filter_metadata(seed)) + "SELECT ", 1)
             if sql_join_graph(sql) != expected_graph:
                 raise RuntimeError(f"{query_id}: emitted SQL changed the seed join graph")
             (core / relative_path).write_text(sql, encoding="utf-8")
@@ -2522,9 +2639,10 @@ def generate_v3_core(root: Path) -> int:
                     "relation_count": str(len(seed.relations)),
                     "predicate_class": "null_rejecting_outeryan_applicable",
                     "semantic_role": variant_semantics,
-                    "semantics": seed.semantics,
+                    "semantics": seed_filter_metadata(seed)["filter_semantics"],
                     "aggregate_variant": aggregate_variant,
                     "aggregate_anchor": anchor,
+                    **seed_filter_metadata(seed),
                     "design_basis": design_basis,
                 }
             )
@@ -2547,7 +2665,7 @@ def generate_v3_benchmark(root: Path) -> int:
     rows: list[dict[str, str]] = []
     for row in core_rows:
         source = root / "core" / row["path"]
-        query_id = f"aggregate__{row['query_id']}"
+        query_id = active_query_id("aggregate", row)
         destination_path = f"{row['family']}/{query_id}.sql"
         destination = destination_root / destination_path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2577,6 +2695,7 @@ def generate_v3_benchmark(root: Path) -> int:
                 "predicate_class": row["predicate_class"],
                 "aggregate_variant": row["aggregate_variant"],
                 "aggregate_anchor": row["aggregate_anchor"],
+                **copy_filter_metadata(row),
             }
         )
     fields = list(rows[0])
@@ -2677,7 +2796,7 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
     join_counts: Counter[str] = Counter()
     for row in core_rows:
         source = root / "core" / row["path"]
-        query_id = f"derived__{row['query_id']}"
+        query_id = active_query_id("derived", row)
         destination_path = f"{row['family']}/{query_id}.sql"
         content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         join_counts.update(row["join_vector"])
@@ -2706,10 +2825,7 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
                 "join_vector": row["join_vector"],
                 "relation_count": row["relation_count"],
                 "predicate_class": row["predicate_class"],
-                "selectivity_tier": row["selectivity_tier"],
-                "target_fraction": row["target_fraction"],
-                "selectivity_modulus": row["selectivity_modulus"],
-                "selectivity_anchor": row["selectivity_anchor"],
+                **copy_filter_metadata(row),
                 "pattern_role": row["pattern_role"],
             }
         )
@@ -2771,13 +2887,10 @@ def generate_v2_benchmark(root: Path, v1_root: Path = DEFAULT_ROOT) -> int:
                 "join_vector": "".join(vector),
                 "relation_count": str(edge_count + 1),
                 "predicate_class": "evaluation_control",
-                "selectivity_tier": "existing_v1_filter",
-                "target_fraction": "",
-                "selectivity_modulus": "",
-                "selectivity_anchor": "",
+                **copy_filter_metadata(row),
                 "pattern_role": (
                     "job_regression_guard"
-                    if row["query_id"] == "derived__oy_jb_jb_bushy4a_v2"
+                    if row["query_id"] == "derived__sem__oy_jb_jb_bushy4a_v2"
                     else "evaluation_control"
                 ),
             }
@@ -2805,13 +2918,6 @@ def v1_active_rows(v1_root: Path) -> dict[str, dict[str, str]]:
     with manifest.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     return {row["query_id"]: row for row in rows}
-
-
-SELECTIVITY_STRESS_SOURCE_FILTER = re.compile(
-    r"^\s*AND hash\((?P<anchor>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\) "
-    r"% (?P<source_modulus>[0-9]+) = 0;$",
-    re.MULTILINE,
-)
 
 
 def v3_stress_selection_rank(query_id: str) -> str:
@@ -2846,8 +2952,7 @@ def select_v3_stress_bases(
             continue
         source = v2_root / "core" / metadata["path"]
         source_sql = source.read_text(encoding="utf-8")
-        matches = list(SELECTIVITY_STRESS_SOURCE_FILTER.finditer(source_sql))
-        if len(matches) != 1:
+        if metadata["selectivity_predicate"] not in source_sql:
             continue
         candidate = dict(metadata)
         candidate.update(
@@ -2855,8 +2960,6 @@ def select_v3_stress_bases(
                 "core_query_id": metadata["query_id"],
                 "core_path": metadata["path"],
                 "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-                "selectivity_anchor": matches[0].group("anchor"),
-                "source_selectivity_modulus": matches[0].group("source_modulus"),
                 "selection_rank": v3_stress_selection_rank(metadata["base_query_id"]),
             }
         )
@@ -2898,7 +3001,7 @@ def select_v3_stress_bases(
 
 
 def generate_v3_selectivity_stress(
-    root: Path, v2_root: Path = DEFAULT_V2_ROOT
+    root: Path, v2_root: Path = DEFAULT_V2_ROOT, v1_root: Path = DEFAULT_ROOT
 ) -> int:
     """Generate a compact, paired selectivity ablation under v3."""
     destination_root = root / "selectivity_stress"
@@ -2913,42 +3016,34 @@ def generate_v3_selectivity_stress(
         "and one SQLStorm source per family, selected by fixed family/shape/source "
         "slots and salted SHA-256 rank; no timing or result input"
     )
-    for base in select_v3_stress_bases(v2_root):
+    for base in select_v3_stress_bases(v2_root, v1_root):
         base_query_id = base["base_query_id"]
         family = base["family"]
         source = v2_root / "core" / base["core_path"]
         source_sql = source.read_text(encoding="utf-8")
         if hashlib.sha256(source.read_bytes()).hexdigest() != base["content_sha256"]:
             raise RuntimeError(f"v3 selectivity-stress base changed: {base_query_id}")
-        matches = list(SELECTIVITY_STRESS_SOURCE_FILTER.finditer(source_sql))
-        if len(matches) != 1:
-            raise RuntimeError(f"stress base needs one simple modulo filter: {base_query_id}")
-        anchor = matches[0].group("anchor")
-        for tier, bucket_threshold, target_fraction, description in SELECTIVITY_STRESS_TIERS:
-            query_id = f"stress__{base_query_id}_{tier}"
+        for tier, semantic_tier, target_fraction, description in SELECTIVITY_STRESS_TIERS:
+            query_id = f"stress__sem__{base_query_id}_{tier}"
             relative_path = f"{family}/{query_id}.sql"
-            predicate = (
-                f"  AND hash({anchor}) % {SELECTIVITY_STRESS_HASH_BUCKETS} "
-                f"< {bucket_threshold};"
-            )
-            sql = SELECTIVITY_STRESS_SOURCE_FILTER.sub(predicate, source_sql, count=1)
+            filter_metadata = semantic_metadata(base["selectivity_profile"], base["selectivity_anchor"], semantic_tier)
+            filter_metadata["source_filter_adaptation"] = base["source_filter_adaptation"]
+            sql = replace_where(source_sql, filter_metadata["selectivity_predicate"])
             sql = sql.replace(
                 "-- corpus_version: v2\n",
                 "-- corpus_version: v3\n-- derived_from_corpus_version: v2\n",
                 1,
             )
             sql = re.sub(
-                r"^-- selectivity_sweep:.*\n",
+                r"^-- (?:selectivity_sweep|semantic_filter|predicate|selectivity_scope):.*\n",
                 "",
                 sql,
-                count=1,
                 flags=re.MULTILINE,
             )
             metadata = (
                 "-- workload_role: metadata-selected balanced selectivity ablation\n"
-                f"-- selectivity_stress: {tier}; {description}; anchor={anchor}; "
-                f"predicate=hash({anchor}) % {SELECTIVITY_STRESS_HASH_BUCKETS} "
-                f"< {bucket_threshold}\n"
+                f"-- selectivity_stress: {tier}; {description}\n"
+                + semantic_comment(filter_metadata)
             )
             sql = sql.replace("SELECT ", metadata + "SELECT ", 1)
             destination = destination_root / relative_path
@@ -2985,19 +3080,15 @@ def generate_v3_selectivity_stress(
                         "static metadata only: mixed I/L/R/F, relation_count>=4, "
                         "null-rejecting OuterYan-applicable predicate"
                     ),
+                    **filter_metadata,
                     "selectivity_tier": tier,
-                    "target_fraction": f"{target_fraction:.6f}",
-                    "selectivity_hash_buckets": str(SELECTIVITY_STRESS_HASH_BUCKETS),
-                    "selectivity_bucket_threshold": str(bucket_threshold),
-                    "selectivity_anchor": anchor,
-                    "source_selectivity_modulus": base["source_selectivity_modulus"],
                     "tier_balance": f"{V3_STRESS_BASE_COUNT} queries per tier",
                     "distribution_claim": (
                         "balanced tier counts; numeric levels and realized selectivity "
                         "are not claimed to be uniform"
                     ),
                     "benefit_hypothesis": (
-                        "seven paired selectivity levels measure where intermediate-result "
+                        "three paired selectivity levels measure where intermediate-result "
                         "reduction helps, plateaus, or becomes overhead"
                     ),
                 }
@@ -3027,13 +3118,14 @@ def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int
         expected_base_id = (
             base_query_id
             if base_query_id.startswith("ojb_")
-            else f"derived__{base_query_id}"
+            else f"derived__sem__{base_query_id}"
         )
         candidates = [
             row for row in benchmark_rows
             if row["base_query_id"] == expected_base_id
             and row["family"] == "job"
-            and row["selectivity_tier"] in {"sel01", "existing_v1_filter"}
+            and (row["evaluation_role"] != "benchmark_derived_v2"
+                 or row["selectivity_tier"] == "sel_medium")
         ]
         if len(candidates) != 1:
             raise RuntimeError(f"missing mixed v2 JOB counterpart: {expected_base_id}")
@@ -3042,7 +3134,7 @@ def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int
         content_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
         if content_sha256 != source_row["content_sha256"]:
             raise RuntimeError(f"mixed v2 JOB counterpart changed: {expected_base_id}")
-        query_id = f"regression__{base_query_id}"
+        query_id = f"regression__sem__{base_query_id}"
         relative_path = f"job/{query_id}.sql"
         destination = destination_root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -3129,9 +3221,8 @@ def validate_v2_generated(root: Path) -> None:
         raise RuntimeError(f"v2 family/shape join labels are imbalanced: {grouped_join_counts}")
     for row in core_rows:
         sql = (root / "core" / row["path"]).read_text(encoding="utf-8")
-        predicate = (
-            f"hash({row['selectivity_anchor']}) % {row['selectivity_modulus']} = 0"
-        )
+        validate_semantic_query(sql, row)
+        predicate = row["selectivity_predicate"]
         if predicate not in sql or "-- corpus_version: v2" not in sql:
             raise RuntimeError(f"{row['path']}: missing v2 selectivity provenance")
         if " ON 1=1" in sql.upper():
@@ -3159,7 +3250,7 @@ def validate_v2_generated(root: Path) -> None:
     }
     if regression_roles != {
         "ojb_sqlstorm_job_11914_bdmx": "job_regression_guard",
-        "derived__oy_jb_jb_bushy4a_v2": "job_regression_guard",
+        "derived__sem__oy_jb_jb_bushy4a_v2": "job_regression_guard",
     }:
         raise RuntimeError(f"unexpected v2 JOB regression tags: {regression_roles}")
     if any(len(set(row["join_vector"])) < 2 for row in active_rows):
@@ -3168,6 +3259,7 @@ def validate_v2_generated(root: Path) -> None:
     for row in active_rows:
         active_join_counts.update(row["join_vector"])
         sql = (active_root / row["path"]).read_text(encoding="utf-8")
+        validate_semantic_query(sql, row)
         if hashlib.sha256(sql.encode("utf-8")).hexdigest() != row["content_sha256"]:
             raise RuntimeError(f"{row['path']}: output content hash mismatch")
         if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
@@ -3254,6 +3346,7 @@ def validate_v3_generated(root: Path) -> None:
         if len(set(row["join_vector"])) < 2:
             raise RuntimeError(f"{row['path']}: v3 contains a single-kind join vector")
         sql = (active_root / row["path"]).read_text(encoding="utf-8")
+        validate_semantic_query(sql, row)
         if hashlib.sha256(sql.encode("utf-8")).hexdigest() != row["content_sha256"]:
             raise RuntimeError(f"{row['path']}: output content hash mismatch")
         if sql_join_kind_counts(sql) != Counter(row["join_vector"]):
@@ -3316,10 +3409,8 @@ def validate_v3_generated(root: Path) -> None:
         raise RuntimeError("v3 selectivity-stress base is outside the static target domain")
     for row in stress_rows:
         sql = (stress_root / row["path"]).read_text(encoding="utf-8")
-        predicate = (
-            f"hash({row['selectivity_anchor']}) % {row['selectivity_hash_buckets']} "
-            f"< {row['selectivity_bucket_threshold']}"
-        )
+        validate_semantic_query(sql, row)
+        predicate = row["selectivity_predicate"]
         if (
             predicate not in sql
             or "workload_role: metadata-selected" not in sql
@@ -3329,60 +3420,253 @@ def validate_v3_generated(root: Path) -> None:
             raise RuntimeError(f"{row['path']}: missing selectivity-stress provenance")
 
 
+def archive_versioned_corpus(root: Path) -> None:
+    """Move the pre-merge definitions once; result CSVs remain immutable."""
+    manifest = root / "benchmark" / "manifest.csv"
+    if not manifest.exists() or "sql_fingerprint" in read_manifest(manifest)[0]:
+        return
+    archive = root / "revisions" / ARCHIVE_NAME
+    names = ("benchmark", "core", "industry_inspired", "supplemental", "v2", "v3", "manifest.csv")
+    # Check every destination before moving anything.
+    for name in names:
+        if (root / name).exists() and (archive / name).exists():
+            raise FileExistsError(f"Refusing to overwrite historical definitions: {archive / name}")
+    archive.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        if (root / name).exists():
+            shutil.move(str(root / name), str(archive / name))
+
+
+def generate_unified(root: Path) -> int:
+    """Build source variants privately, then emit each SQL identity exactly once."""
+    previous = root / "benchmark" / "manifest.csv"
+    managed = read_manifest(previous) if previous.is_file() else []
+    if managed and "sql_fingerprint" in managed[0]:
+        validate_unified(root / "benchmark")
+    with tempfile.TemporaryDirectory(prefix="outeryan-corpus-") as directory:
+        scratch = Path(directory)
+        first, sweep, aggregate = (scratch / name for name in ("base", "sweep", "aggregate"))
+        for path in (first, sweep, aggregate):
+            path.mkdir()
+        regenerate_legacy_sources()
+        generate_core(first)
+        generate_industry_inspired(first)
+        generate_active_benchmark(first)
+        generate_v2_core(sweep)
+        generate_v2_benchmark(sweep, first)
+        generate_v2_job_regressions(sweep, first)
+        generate_v3_core(aggregate)
+        generate_v3_benchmark(aggregate)
+        generate_v3_selectivity_stress(aggregate, sweep, first)
+        scopes = (
+            ("v2", sweep / "benchmark"), ("v1", first / "benchmark"),
+            ("v3_aggregation", aggregate / "benchmark"),
+            ("v3_selectivity_stress", aggregate / "selectivity_stress"),
+            ("v2_job_regressions", sweep / "job_regressions"),
+        )
+        groups = {}
+        for category, source_root in scopes:
+            for row in read_manifest(source_root / "manifest.csv"):
+                sql = (source_root / row["path"]).read_text(encoding="utf-8")
+                fingerprint = sql_fingerprint(sql, row["family"])
+                if category == "v2_job_regressions":
+                    if fingerprint not in groups:
+                        raise ValueError("Regression guard is not present in the main corpus")
+                else:
+                    validate_semantic_query(sql, row)
+                groups.setdefault(fingerprint, []).append((category, row, sql))
+
+        output = scratch / "unified"
+        output.mkdir()
+        records, aliases, names = [], [], set()
+        for fingerprint, members in groups.items():
+            _, source, sql = members[0]
+            query_id = canonical_query_id(source)
+            if query_id in names:
+                query_id += "__" + fingerprint[:10]
+            if query_id in names:
+                raise RuntimeError(f"Canonical query name collision: {query_id}")
+            names.add(query_id)
+            category = query_id.split("__", 1)[0]
+            relative = f"{source['family']}/{query_id}.sql"
+            body = "\n".join(line for line in sql.splitlines()
+                             if not line.lstrip().startswith("--")).strip() + "\n"
+            content = (f"-- query_type: {category}; family: {source['family']}\n"
+                       + f"-- source: {source.get('source_benchmark', '')} {source.get('source_query', '')}".rstrip() + "\n"
+                       + semantic_comment(source) + body)
+            destination = output / relative
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_text(content, encoding="utf-8")
+            stress = any(item[0] == "v3_selectivity_stress" for item in members)
+            regression = any(item[0] == "v2_job_regressions" for item in members)
+            record = {key: value for key, value in source.items() if key not in (
+                "query_id", "path", "corpus_version", "source_path", "source_content_sha256",
+                "base_query_id", "pattern_role", "corpus_revision")}
+            record.update(
+                query_id=query_id, path=relative, query_class=category, workload_category=category,
+                corpus_revision="unique-semantic-20260929", sql_fingerprint=fingerprint,
+                content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+                source_component="core" if category in ("join", "aggregate") else "evaluation",
+                evaluation_role="benchmark_derived" if category == "join" else
+                                "benchmark_aggregate" if category == "aggregate" else source["evaluation_role"],
+                selectivity_stress="true" if stress else "false",
+                regression_guard="true" if regression else "false",
+            )
+            records.append(record)
+            for old_category, old, _ in members:
+                aliases.append(dict(
+                    workload_category=old_category, query_id=old["query_id"], family=old["family"],
+                    sql_path=old["path"], content_sha256=old["content_sha256"],
+                    canonical_query_id=query_id, canonical_path=relative,
+                    canonical_category=category, sql_fingerprint=fingerprint,
+                ))
+        records.sort(key=lambda row: row["path"])
+        fields = list(dict.fromkeys(key for row in records for key in row))
+        with (output / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(records)
+        with (output / "aliases.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(aliases[0]), lineterminator="\n")
+            writer.writeheader()
+            writer.writerows(sorted(aliases, key=lambda row: (row["workload_category"], row["query_id"])))
+        for flag, filename in (("selectivity_stress", "selectivity_stress.txt"),
+                               ("regression_guard", "job_regressions.txt")):
+            (output / filename).write_text("".join(row["path"] + "\n" for row in records
+                                                   if row[flag] == "true"), encoding="utf-8")
+        validate_unified(output)
+        root.mkdir(parents=True, exist_ok=True)
+        archive_versioned_corpus(root)
+        if managed and "sql_fingerprint" in managed[0]:
+            retained = {row["path"] for row in records}
+            for row in managed:
+                if row["path"] not in retained:
+                    (root / "benchmark" / row["path"]).unlink()
+        for source in output.rglob("*"):
+            if source.is_file():
+                destination = root / "benchmark" / source.relative_to(output)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+    counts = Counter(row["query_class"] for row in records)
+    print(f"Generated {len(records)} unique queries: {dict(counts)}; {len(aliases)} historical aliases")
+    return len(records)
+
+
+def validate_unified(benchmark: Path) -> None:
+    rows = read_manifest(benchmark / "manifest.csv")
+    fingerprints = set()
+    for row in rows:
+        sql = (benchmark / row["path"]).read_text(encoding="utf-8")
+        validate_semantic_query(sql, row)
+        fingerprint = sql_fingerprint(sql, row["family"])
+        if fingerprint != row["sql_fingerprint"] or fingerprint in fingerprints:
+            raise ValueError(f"Duplicate or incorrect SQL identity: {row['path']}")
+        fingerprints.add(fingerprint)
+        if re.search(r"(?:^|_)v\d+(?:_|$)", row["query_id"]):
+            raise ValueError(f"Version in canonical query name: {row['query_id']}")
+        if hashlib.sha256(sql.encode()).hexdigest() != row["content_sha256"]:
+            raise ValueError(f"SQL hash mismatch: {row['path']}")
+    if {row["path"] for row in rows} != {str(path.relative_to(benchmark)) for path in benchmark.glob("*/*.sql")}:
+        raise ValueError("Unified manifest does not match SQL files")
+    identities = {row["query_id"]: row for row in rows}
+    for alias in read_manifest(benchmark / "aliases.csv"):
+        if identities[alias["canonical_query_id"]]["sql_fingerprint"] != alias["sql_fingerprint"]:
+            raise ValueError("Historical alias changed SQL identity")
+
+
+def audit_selectivity(root: Path, binary: Path, output: Path, timeout: int) -> bool:
+    """Recount frozen cohorts on a target scale without executing workload queries."""
+    used: dict[str, set[str]] = {}
+    manifests = {}
+    distributions = {}
+    for scope in ("benchmark",):
+        path = root / scope / "manifest.csv"
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        manifests[scope] = hashlib.sha256(path.read_bytes()).hexdigest()
+        distributions[scope] = dict(Counter(row["semantic_tier"] for row in rows))
+        for row in rows:
+            if row["filter_design_revision"] != V1_CORPUS_REVISION:
+                raise ValueError(f"Regenerate {scope} before auditing the semantic revision")
+            used.setdefault(row["selectivity_profile"], set()).add(row["semantic_tier"])
+
+    report_rows = []
+    for profile_id, tiers in sorted(used.items()):
+        profile = SEMANTIC_DESIGN["profiles"][profile_id]
+        family = profile["family"]
+        database = Path(os.environ.get(f"{family.upper()}_DB", REPO_ROOT / f"{family}_db")).expanduser().resolve()
+        if not database.is_file():
+            raise FileNotFoundError(f"Set {family.upper()}_DB to an existing database: {database}")
+        ordered = [tier for tier in SEMANTIC_TIERS if tier in tiers]
+        predicates = [semantic_filter(profile_id, profile["column"], tier) for tier in ordered]
+        aggregates = ["COUNT(*) AS n"] + [
+            f"COUNT(*) FILTER (WHERE {predicate}) AS c{index}"
+            for index, predicate in enumerate(predicates)
+        ]
+        sql = ("SET disabled_optimizers='outer_yan'; SET threads=4; SELECT "
+               + ", ".join(aggregates) + " FROM " + profile["calibration_from"] + ";")
+        result = subprocess.run(
+            [str(binary), "-readonly", "-no-init", "-bail", "-json", str(database), "-c", sql],
+            capture_output=True, text=True, timeout=timeout, check=True,
+        )
+        counts = json.loads(result.stdout)[0]
+        for index, (tier, predicate) in enumerate(zip(ordered, predicates)):
+            metadata = semantic_metadata(profile_id, profile["column"], tier)
+            fraction = counts[f"c{index}"] / counts["n"] if counts["n"] else 0.0
+            spec = SEMANTIC_DESIGN["tiers"][SEMANTIC_TIERS.index(tier)]
+            in_range = fraction_in_band(fraction, spec)
+            report_rows.append({
+                "profile": profile_id, "family": family, "tier": tier,
+                "database": str(database), "predicate": predicate,
+                "denominator": profile["calibration_from"], "total_rows": counts["n"],
+                "qualified_rows": counts[f"c{index}"], "observed_fraction": fraction,
+                "frozen_calibration_fraction": float(metadata["calibration_fraction"]),
+                "target_min_fraction": float(metadata["target_min_fraction"]),
+                "target_max_fraction": float(metadata["target_max_fraction"]),
+                "include_lower": spec["include_lower"], "include_upper": spec["include_upper"],
+                "in_range": in_range,
+            })
+        failed = [row["tier"] for row in report_rows if row["profile"] == profile_id and not row["in_range"]]
+        print(f"{profile_id}: {counts['n']} base rows; "
+              + (f"OUT OF RANGE: {', '.join(failed)}" if failed else "all used bands verified"), flush=True)
+    success = all(row["in_range"] for row in report_rows)
+    report = {
+        "revision": V1_CORPUS_REVISION, "all_used_bands_in_range": success,
+        "scope": "base-entity filter fractions, not joined output or cost-model estimates",
+        "manifest_sha256": manifests, "query_distribution": distributions, "profiles": report_rows,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Selectivity audit: {len(report_rows)} profile/band pairs; report: {output}")
+    return success
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", choices=("v1", "v2", "v3"), default="v1")
+    parser.add_argument("--version", help=argparse.SUPPRESS)
     parser.add_argument("--root", type=Path)
-    parser.add_argument("--core-only", action="store_true")
+    parser.add_argument("--core-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--audit-selectivity", action="store_true",
+                        help="count base-entity cohorts on existing databases; do not regenerate or run workload SQL")
+    parser.add_argument("--audit-output", type=Path,
+                        default=SCRIPT_DIR / "results" / "semantic_selectivity_audit.json")
+    parser.add_argument("--duckdb", type=Path,
+                        default=Path(os.environ.get("DUCKDB_BIN", REPO_ROOT / "build/release/duckdb")))
+    parser.add_argument("--audit-timeout", type=int, default=120,
+                        help="per-profile count timeout in seconds (default: 120)")
     args = parser.parse_args()
 
-    default_roots = {"v1": DEFAULT_ROOT, "v2": DEFAULT_V2_ROOT, "v3": DEFAULT_V3_ROOT}
-    root = args.root or default_roots[args.version]
-    root.mkdir(parents=True, exist_ok=True)
-    if args.version == "v2":
-        if args.core_only:
-            parser.error("--core-only is only supported for v1")
-        core_count = generate_v2_core(root)
-        benchmark_count = generate_v2_benchmark(root)
-        regression_count = generate_v2_job_regressions(root)
-        validate_v2_generated(root)
-        print(
-            f"generated v2 with {benchmark_count} active queries: {core_count} "
-            f"selectivity-sweep core and {V2_EVALUATION_QUERY_COUNT} v1 evaluation controls "
-            f"under {root}; also generated {regression_count} focused JOB regression guards"
-        )
-        return
-    if args.version == "v3":
-        if args.core_only:
-            parser.error("--core-only is only supported for v1")
-        core_count = generate_v3_core(root)
-        benchmark_count = generate_v3_benchmark(root)
-        stress_count = generate_v3_selectivity_stress(root)
-        validate_v3_generated(root)
-        print(
-            f"generated v3 with {benchmark_count} aggregation queries from "
-            f"{len(SEEDS)} source-derived seeds under {root}; "
-            "aggregate mix is COUNT=42, SUM=30, MIN=15, MAX=15; "
-            f"also generated {stress_count} selectivity-ablation queries"
-        )
+    if args.audit_selectivity:
+        if args.audit_timeout <= 0:
+            parser.error("--audit-timeout must be positive")
+        if not audit_selectivity(args.root or DEFAULT_ROOT, args.duckdb.resolve(),
+                                 args.audit_output, args.audit_timeout):
+            raise SystemExit(1)
         return
 
-    core_count = generate_core(root)
-    if not args.core_only:
-        regenerate_legacy_sources()
-    supplemental_count = 0 if args.core_only else generate_supplemental(root)
-    industry_count = 0 if args.core_only else generate_industry_inspired(root)
-    benchmark_count = generate_active_benchmark(root, include_industry=not args.core_only)
-    timeout_count = generate_timeout_manifest(root)
-    legacy_count = classify_legacy(root)
-    validate_generated(root, include_industry=not args.core_only)
-    print(
-        f"generated {benchmark_count} active benchmark, {core_count} derived core, "
-        f"{industry_count} industry-evaluation, and {supplemental_count} supplemental queries; "
-        "applied no historical timeout exclusions because the mixed-join SQL is new; "
-        f"archived {timeout_count} historical timeouts and classified {legacy_count} legacy queries "
-        f"under {root}"
-    )
+    if args.version or args.core_only:
+        parser.error("Versioned generation is retired; run without --version/--core-only for the unique corpus")
+    generate_unified(args.root or DEFAULT_ROOT)
 
 
 if __name__ == "__main__":

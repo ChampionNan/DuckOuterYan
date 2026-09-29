@@ -3,14 +3,13 @@
 # run_all.sh — One-shot script: build + data + experiment (Linux server)
 #
 # Assumes the repo is already cloned. Run from the repo root:
-#   bash auto_test/run_all.sh [--all | --version v1|v2|v3]
+#   bash auto_test/run_all.sh [--query-type all|join|graph|aggregate]
 #
 # What it does:
 #   1. Compile DuckDB release with required extensions (tpch, tpcds)
 #   2. Build the databases required by the selected benchmark strata
 #   3. Regenerate the benchmark and provenance manifests
-#   4. Skip PostgreSQL work by default
-#   5. Run the Original/OuterYan bare-query comparison for the corpus
+#   4. Run the Original/OuterYan bare-query comparison for the corpus
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
@@ -20,54 +19,29 @@
 #   OY_THREADS       Override with one multi-thread timing count
 #   OY_PROFILE       Separate ON phase-profile batch (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
-#   OY_RUNS          Legacy timed iterations and PGPLAN_RUNS fallback (default 3)
-#   PGPLAN_RUNS      PGPlan TM measured iterations (default OY_RUNS)
+#   OY_RUNS          Timed iterations after one warm-up (default 3)
+#   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 600; 10 minutes)
+#   --timeout S      CLI timeout override; 0 disables the timeout
 #   JOBS             Make parallelism (default: nproc)
 #   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
 #   SKIP_DATA        Set to 1 to skip target DuckDB database generation
 #   SKIP_QUERY_GEN   Set to 1 to keep the existing generated benchmark
-#   --version V      Generate and run exactly v1, v2, or v3
-#   --all            Generate and run v1, v2, v3, and v3 selectivity-stress
-#                    (default for the Original/OuterYan workflow)
-#   RUN_PGPLAN       Set to 1 to opt into PGPlan generation/testing (default 0)
-#   PGPLAN_SETUP     source (default, auto-installs) | docker | external
-#   SKIP_PG_DATA     Set to 1 to require existing exact TPC-H SF0.01 data
-#   PGPLAN_CORPUS    PGPlan corpus root (default: outerjoin_benchmark/benchmark)
-#   PGPLAN_SAMPLE_ROWS  Per-table graph/TPC-DS/JOB plan sample (default 1000)
-#   PGPLAN_PLAN_CACHE  Persistent typed-plan cache (default auto_test/pgplan/plans)
-#   PGPLAN_COMPARISON_MODE  both (default) | pgplan-only | none
-#   --comparison-mode MODE  CLI equivalent
-#   --skip1          Alias for --comparison-mode pgplan-only
-#   --skip2, --performance-only, --performance_only, --performace_only
-#                    Aliases for --comparison-mode none
-#   PGPLAN_CORRECTNESS_MODE  target (default) | bounded | reuse
-#   PGPLAN_CORRECTNESS_FROM  Prior target-mode corpus root required by reuse
-#   PGPLAN_REUSE_FROM  One-parameter prior corpus for plan+correctness reuse
-#   --reuse-from DIR  CLI equivalent; automatically sets all three SKIP_* flags
-#   PGPLAN_CORRECTNESS_GRAPH_ROWS  Bounded-mode graph prefix (default 500)
-#   PGPLAN_CORRECTNESS_JOB_ROWS  Bounded-mode JOB prefix (default 1000)
-#   PGPLAN_CORRECTNESS_MAX_RESULT_ROWS  Bounded-mode result cap (default 2000000)
-#   PGPLAN_CORRECTNESS_QUERY_TIMEOUT_SECS  Bounded-mode preflight limit (default 30)
-#   PGPLAN_CAPTURE_TIMEOUT_SECS  Plain PG EXPLAIN limit (default 300)
-#   PGPLAN_TIMEOUT_SECS  DuckDB/per-postprocess step limit (default 1800)
+#   --query-type T   all (default), join, graph, or aggregate
+#   --all            Alias for the full deduplicated corpus
 #   OY_CORPUS        Custom corpus for the default two-way mode
 #
-# Docker is optional. With no PostgreSQL override, source mode downloads,
-# verifies, builds, installs, initializes, and starts PostgreSQL 16.2 under the
-# repository when the managed installation is absent.
 # ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# configs.sh supplies all DuckDB/PostgreSQL paths and timing defaults. Capture
+# configs.sh supplies DuckDB paths and timing defaults. Capture
 # the caller's corpus first: configs.sh also assigns the normal corpus default,
 # which must not accidentally activate run_all's custom-corpus mode.
 CALLER_OY_CORPUS="${OY_CORPUS:-}"
 CALLER_DUCKDB_BIN="${DUCKDB_BIN:-}"
-CALLER_PGPLAN_THREADS="${PGPLAN_THREADS:-${PG_REPLAY_THREADS:-}}"
 . "$SCRIPT_DIR/configs.sh"
 . "$SCRIPT_DIR/thread_sweep.sh"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -92,117 +66,46 @@ fi
 "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 7) else 1)' || \
     err "Python 3.7 or newer is required: $PYTHON_BIN"
 
-START_TIME=$SECONDS
-RAW_EXPERIMENT_ARGS=("$@")
-EXPERIMENT_ARGS=()
-PGPLAN_ARGS=()
-RESULT_TXTS=()
-PGPLAN_RESULT_DIRS=()
-RUN_STATUS=0
-RUN_PGPLAN="${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}"
-CUSTOM_CORPUS="$CALLER_OY_CORPUS"
-REUSE_SHORTCUT_FROM="${PGPLAN_REUSE_FROM:-}"
-THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
-if [ "$RUN_PGPLAN" = 1 ] && [ -n "$CALLER_PGPLAN_THREADS" ]; then
-    THREAD_COUNTS="$CALLER_PGPLAN_THREADS"
+# Fail early for retired workflow requests instead of running a different comparison.
+if [ "${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}" != 0 ]; then
+    err "PGPlan workflow has been removed; unset RUN_PGPLAN/RUN_PG_REPLAY to run Original/OuterYan"
 fi
 
-# Normalize the built-in corpus selection here instead of relying on the
-# child harness to interpret a corpus path supplied by run_all. This keeps
-# query generation and execution on the same version. The default two-way
-# workflow covers every version, matching experiment_onoff.sh.
-QUERY_ALL=1
-QUERY_VERSION=""
-QUERY_SELECTOR_CLI=0
-QUERY_VERSION_CLI=0
-QUERY_ALL_CLI=0
+START_TIME=$SECONDS
+RAW_EXPERIMENT_ARGS=("$@")
+EXPERIMENT_ARGS=(--query-type all)
+RESULT_TXTS=()
+RUN_STATUS=0
+CUSTOM_CORPUS="$CALLER_OY_CORPUS"
+THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
+
+# The built-in corpus is already deduplicated; selection is by query type.
 argument_index=0
 while [ "$argument_index" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ]; do
     argument="${RAW_EXPERIMENT_ARGS[$argument_index]}"
     case "$argument" in
         --version|--corpus-version)
-            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
-                err "$argument requires v1, v2, or v3"
-            [ "$QUERY_ALL_CLI" = 0 ] || err "--all cannot be combined with $argument"
-            QUERY_VERSION="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
-            case "$QUERY_VERSION" in
-                v1|v2|v3) ;;
-                *) err "$argument must be v1, v2, or v3 (got: $QUERY_VERSION)" ;;
-            esac
-            QUERY_ALL=0
-            QUERY_SELECTOR_CLI=1
-            QUERY_VERSION_CLI=1
-            argument_index=$((argument_index + 2))
-            ;;
-        --all)
-            [ "$QUERY_VERSION_CLI" = 0 ] || err "--all cannot be combined with --version"
-            QUERY_ALL=1
-            QUERY_VERSION=""
-            QUERY_SELECTOR_CLI=1
-            QUERY_ALL_CLI=1
-            argument_index=$((argument_index + 1))
-            ;;
+            err "Version selection is retired; use --query-type join, graph, or aggregate";;
         --threads)
-            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
-                err "--threads requires a value"
+            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || err "--threads requires a value"
             THREAD_COUNTS="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
-            EXPERIMENT_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
-            PGPLAN_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
-            argument_index=$((argument_index + 2))
-            ;;
-        --reuse-from)
-            [ "$((argument_index + 1))" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ] || \
-                err "--reuse-from requires a prior corpus directory"
-            REUSE_SHORTCUT_FROM="${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}"
-            EXPERIMENT_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
-            PGPLAN_ARGS+=("$argument" "${RAW_EXPERIMENT_ARGS[$((argument_index + 1))]}")
-            argument_index=$((argument_index + 2))
-            ;;
+            EXPERIMENT_ARGS+=("$argument" "$THREAD_COUNTS")
+            argument_index=$((argument_index + 2));;
         *)
             EXPERIMENT_ARGS+=("$argument")
-            PGPLAN_ARGS+=("$argument")
-            argument_index=$((argument_index + 1))
-            ;;
+            argument_index=$((argument_index + 1));;
     esac
 done
-if [ -n "$CUSTOM_CORPUS" ] && [ "$QUERY_SELECTOR_CLI" = 1 ]; then
-    err "--version/--all cannot be combined with OY_CORPUS; unset OY_CORPUS to select a built-in version"
-fi
-if [ "$RUN_PGPLAN" = 1 ] && [ "$QUERY_SELECTOR_CLI" = 1 ]; then
-    err "--version/--all select the Original/OuterYan corpus; use PGPLAN_CORPUS with RUN_PGPLAN=1"
-fi
-if [ -z "$CUSTOM_CORPUS" ] && [ "$RUN_PGPLAN" != 1 ]; then
-    if [ "$QUERY_ALL" = 1 ]; then
-        EXPERIMENT_ARGS+=(--all)
-    else
-        EXPERIMENT_ARGS+=(--version "$QUERY_VERSION")
-    fi
-fi
 oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
-if [ -n "$REUSE_SHORTCUT_FROM" ]; then
-    for skip_name in SKIP_BUILD SKIP_DATA SKIP_QUERY_GEN; do
-        if [ "${!skip_name+x}" = "x" ] && [ "${!skip_name}" != "1" ]; then
-            err "$skip_name=${!skip_name} conflicts with --reuse-from; reuse requires the existing binary, databases, and query bytes"
-        fi
-        printf -v "$skip_name" '%s' 1
-        export "$skip_name"
-    done
-    log "Reuse mode: preserving existing DuckDB binary, databases, and queries from the sealed run inputs"
-fi
-
-case "$RUN_PGPLAN" in
-    0|1) ;;
-    *) err "RUN_PGPLAN must be 0 or 1 (got: $RUN_PGPLAN)" ;;
-esac
 
 # --- Step 1: Compile ---------------------------------------------------------
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
-    log "Step 1/5: Building DuckDB release (BUILD_TPCH=1 BUILD_TPCDS=1)"
+    log "Step 1/4: Building DuckDB release (BUILD_TPCH=1 BUILD_TPCDS=1)"
     JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
     BUILD_TPCH=1 BUILD_TPCDS=1 make release -j"$JOBS" 2>&1 | tee -a "$RUN_LOG"
     log "Build complete ($(elapsed $((SECONDS - START_TIME))))"
 else
-    log "Step 1/5: Skipping build (SKIP_BUILD=1)"
+    log "Step 1/4: Skipping build (SKIP_BUILD=1)"
 fi
 
 # If this invocation built release and the caller did not select a binary,
@@ -217,186 +120,27 @@ export DUCKDB_BIN
 
 # --- Step 2: Build databases -------------------------------------------------
 if [ "${SKIP_DATA:-0}" != "1" ]; then
-    log "Step 2/5: Building required databases"
+    log "Step 2/4: Building required databases"
     STEP2_START=$SECONDS
     bash "$SCRIPT_DIR/build_db.sh" all 2>&1 | tee -a "$RUN_LOG"
     log "Databases ready ($(elapsed $((SECONDS - STEP2_START))))"
 else
-    log "Step 2/5: Skipping data build (SKIP_DATA=1)"
+    log "Step 2/4: Skipping data build (SKIP_DATA=1)"
 fi
 
 # --- Step 3: Generate benchmark ---------------------------------------------
 if [ "${SKIP_QUERY_GEN:-0}" != "1" ]; then
-    generation_versions=(v1)
-    if [ -z "$CUSTOM_CORPUS" ] && [ "$RUN_PGPLAN" != 1 ]; then
-        if [ "$QUERY_ALL" = 1 ]; then
-            generation_versions=(v1 v2 v3)
-        elif [ "$QUERY_VERSION" = v2 ]; then
-            generation_versions=(v1 v2)
-        elif [ "$QUERY_VERSION" = v3 ]; then
-            generation_versions=(v1 v2 v3)
-        fi
-    fi
-    log "Step 3/5: Regenerating benchmark query versions: ${generation_versions[*]}"
-    for generation_version in "${generation_versions[@]}"; do
-        "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" \
-            --version "$generation_version" 2>&1 | tee -a "$RUN_LOG"
-    done
+    log "Step 3/4: Regenerating the deduplicated benchmark"
+    "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" 2>&1 | tee -a "$RUN_LOG"
 else
-    log "Step 3/5: Skipping benchmark generation (SKIP_QUERY_GEN=1)"
+    log "Step 3/4: Skipping benchmark generation (SKIP_QUERY_GEN=1)"
 fi
 
-# --- Step 4/5: PostgreSQL-backed comparison corpus ---------------------------
-run_pgplan_corpus() {
-    local corpus out_dir corpus_status=0 argument_index=0
-    local correctness_mode correctness_from reuse_from comparison_mode plan_cache
-    local -a corpus_command
-    corpus="${PGPLAN_CORPUS:-${CUSTOM_CORPUS:-$SCRIPT_DIR/outerjoin_benchmark/benchmark}}"
-    out_dir="${PGPLAN_OUT:-$SCRIPT_DIR/results/pgplan_corpus_${RUN_TS}}"
-    correctness_mode="${PGPLAN_CORRECTNESS_MODE:-target}"
-    correctness_from="${PGPLAN_CORRECTNESS_FROM:-}"
-    reuse_from="${PGPLAN_REUSE_FROM:-}"
-    comparison_mode="${PGPLAN_COMPARISON_MODE:-both}"
-    plan_cache="${PGPLAN_PLAN_CACHE:-$SCRIPT_DIR/pgplan/plans}"
-    [ -x "$SCRIPT_DIR/pgplan/corpus_experiment.sh" ] || \
-        err "PGPlan corpus helper not found: $SCRIPT_DIR/pgplan/corpus_experiment.sh"
-
-    # Forwarded corpus arguments follow the defaults below, so their last
-    # --out value wins. Track that same location for the final handoff.
-    while [ "$argument_index" -lt "${#EXPERIMENT_ARGS[@]}" ]; do
-        case "${EXPERIMENT_ARGS[$argument_index]}" in
-            --out)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    out_dir="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            --correctness-mode)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    correctness_mode="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            --correctness-from)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    correctness_from="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            --reuse-from)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    reuse_from="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    correctness_mode="reuse"
-                    correctness_from="$reuse_from"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            --comparison-mode)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    comparison_mode="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            --skip1)
-                comparison_mode="pgplan-only"
-                argument_index=$((argument_index + 1))
-                ;;
-            --skip2|--performance-only|--performance_only|--performace_only)
-                comparison_mode="none"
-                argument_index=$((argument_index + 1))
-                ;;
-            --plan-cache)
-                if [ "$((argument_index + 1))" -lt "${#EXPERIMENT_ARGS[@]}" ]; then
-                    plan_cache="${EXPERIMENT_ARGS[$((argument_index + 1))]}"
-                    argument_index=$((argument_index + 2))
-                else
-                    argument_index=$((argument_index + 1))
-                fi
-                ;;
-            *) argument_index=$((argument_index + 1)) ;;
-        esac
-    done
-    if [ -n "$reuse_from" ]; then
-        correctness_mode="reuse"
-        correctness_from="$reuse_from"
-    fi
-    if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
-        out_dir="${out_dir}_t${OY_THREADS}"
-    fi
-
-    # Record the handoff location before running the corpus. The corpus returns
-    # nonzero when any query fails, but its status and aggregate reports are
-    # still the useful output of the completed comparison experiment.
-    PGPLAN_RESULT_DIRS+=("$out_dir")
-
-    corpus_command=(
-        bash "$SCRIPT_DIR/pgplan/corpus_experiment.sh"
-        --corpus "$corpus"
-        --duckdb-bin "$DUCKDB_BIN"
-        --pg-dsn "$PG_DSN"
-        --rows "${PGPLAN_SAMPLE_ROWS:-1000}"
-        --threads "${PGPLAN_THREADS:-${OY_THREADS:-1}}"
-        --correctness-mode "${PGPLAN_CORRECTNESS_MODE:-target}"
-        --comparison-mode "${PGPLAN_COMPARISON_MODE:-both}"
-        --plan-cache "${PGPLAN_PLAN_CACHE:-$SCRIPT_DIR/pgplan/plans}"
-        --out "$out_dir"
-    )
-    if [ -n "${PGPLAN_CORRECTNESS_FROM:-}" ]; then
-        corpus_command+=(--correctness-from "$PGPLAN_CORRECTNESS_FROM")
-    fi
-    if [ -n "${PGPLAN_REUSE_FROM:-}" ]; then
-        corpus_command+=(--reuse-from "$PGPLAN_REUSE_FROM")
-    fi
-    if [ "${#PGPLAN_ARGS[@]}" -gt 0 ]; then
-        corpus_command+=("${PGPLAN_ARGS[@]}")
-    fi
-    corpus_command+=(--threads "$OY_THREADS" --out "$out_dir")
-
-    if [ "$comparison_mode" = "none" ]; then
-        log "Step 4/5: Checking the persistent PGPlan cache and preparing cache misses (correctness disabled)"
-    elif [ "$comparison_mode" = "pgplan-only" ]; then
-        log "Step 4/5: Checking the persistent PGPlan cache and preparing Original-versus-PGPlan correctness"
-    else
-        case "$correctness_mode" in
-            bounded)
-                log "Step 4/5: Checking the persistent PGPlan cache and preparing bounded correctness databases"
-                ;;
-            reuse)
-                if [ -n "$reuse_from" ]; then
-                    log "Step 4/5: Reusing PGPlan artifacts and sealed target correctness from $reuse_from (PostgreSQL setup skipped)"
-                else
-                    log "Step 4/5: Checking the persistent PGPlan cache (reusing sealed target correctness from $correctness_from)"
-                fi
-                ;;
-            *)
-                log "Step 4/5: Checking the persistent PGPlan cache and preparing exact target-data comparisons"
-                ;;
-        esac
-    fi
-    log "Step 5/5: Comparison mode=$comparison_mode across $corpus (plan cache: $plan_cache)"
-    if "${corpus_command[@]}" 2>&1 | tee -a "$RUN_LOG"; then
-        corpus_status=0
-    else
-        corpus_status=$?
-    fi
-    return "$corpus_status"
-}
-
-# --- Step 5: Run corpus experiments -----------------------------------------
+# --- Step 4: Run corpus experiments -----------------------------------------
 run_experiment() {
     local label="$1" corpus="$2" default_only="$3" out experiment_status=0
     out="$SCRIPT_DIR/results/experiment_onoff_${label}_${RUN_TS}_t${OY_THREADS}.txt"
-    log "Step 5/5: Running $label on/off experiment (threads=$OY_THREADS)"
+    log "Step 4/4: Running $label on/off experiment (threads=$OY_THREADS)"
     if [ -n "$corpus" ]; then
         if OY_CORPUS="$corpus" bash "$SCRIPT_DIR/experiment_onoff.sh" \
             --only "$default_only" "${EXPERIMENT_ARGS[@]}" --threads "$OY_THREADS" -o "$out" \
@@ -422,16 +166,11 @@ run_experiment() {
 STEP4_START=$SECONDS
 for thread_count in "${OY_THREAD_VALUES[@]}"; do
     export OY_THREADS="$thread_count" OY_THREAD_COUNTS="$thread_count"
-    export PGPLAN_THREADS="$thread_count" PG_REPLAY_THREADS="$thread_count"
     log "Multi-thread configuration: threads=$thread_count"
     thread_status=0
-    if [ "$RUN_PGPLAN" = "1" ]; then
-        run_pgplan_corpus || thread_status=$?
-    elif [ -n "$CUSTOM_CORPUS" ]; then
-        log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
+    if [ -n "$CUSTOM_CORPUS" ]; then
         run_experiment "custom" "$CUSTOM_CORPUS" "all" || thread_status=$?
     else
-        log "Step 4/5: PGPlan disabled; running default Original/OuterYan workflow"
         run_experiment "benchmark" "" "all" || thread_status=$?
     fi
     case "$thread_status" in
@@ -454,27 +193,12 @@ if [ "${#RESULT_TXTS[@]}" -gt 0 ]; then
     for result_txt in "${RESULT_TXTS[@]}"; do
         echo "Results TXT: $result_txt"
         echo "Final CSV: ${result_txt%.txt}.csv"
-        echo "Attempts CSV: ${result_txt%.txt}.attempts.csv"
+        echo "Statistics: ${result_txt%.txt}_statistics/"
         if [ -d "${result_txt%.txt}.plans" ]; then
             echo "Plan artifacts: ${result_txt%.txt}.plans"
         fi
     done
 fi
-if [ "$RUN_PGPLAN" = "1" ]; then
-    if [ "${#PGPLAN_RESULT_DIRS[@]}" -gt 0 ]; then
-        for result_dir in "${PGPLAN_RESULT_DIRS[@]}"; do
-            echo "Comparison result directory: $result_dir"
-            echo "Comparison status TSV: $result_dir/status.tsv"
-            echo "Comparison TSV: $result_dir/comparison.tsv"
-            echo "Comparison CSV: $result_dir/comparison.csv"
-            echo "Comparison detailed log: $result_dir/comparison.log"
-            echo "Comparison summary TSV: $result_dir/summary.tsv"
-            echo "Comparison failures TSV: $result_dir/failures.tsv"
-            echo "Comparison plan artifacts: $result_dir/artifacts"
-        done
-    fi
-fi
-
 # Preserve the corpus helper's failure status, but only after handing all
 # generated status, timing, and failure-report paths back to the caller.
 if [ "$RUN_STATUS" -ne 0 ]; then

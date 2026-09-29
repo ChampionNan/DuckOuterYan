@@ -1,0 +1,12 @@
+-- source: SQLStorm v1.0/tpch/queries/15031.sql
+-- transformation: connected join-subgraph adaptation; balanced mixed alternate form; bushy grouping is structurally ineligible
+-- business_semantics: SQLStorm available-stock minimum
+-- corpus_version: v3
+-- workload_role: source-derived aggregation coverage; no timing-based selection
+-- aggregate_variant: global_count; anchor=ps.ps_partkey; group_key=p.p_partkey
+-- semantic_filter: tpch_stock_available; tier=high; SQLStorm available-stock minimum
+-- predicate: ps.ps_availqty > 4000
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT COUNT(*) AS row_count
+FROM ((part p FULL OUTER JOIN partsupp ps ON p.p_partkey = ps.ps_partkey) INNER JOIN supplier s ON ps.ps_suppkey = s.s_suppkey)
+WHERE ps.ps_availqty > 4000;

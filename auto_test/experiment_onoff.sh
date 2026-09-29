@@ -22,7 +22,7 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       positive odd timed iterations per config (default 3)
-#   -t,--timeout S    per-statement timeout sec (default 1800). DuckDB enforces S
+#   -t,--timeout S    per-statement timeout sec (default 600). DuckDB enforces S
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1)×S for 1 warm-up + N timed executions.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
@@ -31,11 +31,10 @@
 #      --exclude GLOB  skip labels matching any '|'-separated glob
 #      --limit N       cap number of queries (0 = no cap, default 0)
 #      --query-list FILE  ordered corpus-relative SQL paths (requires --only all)
-#      --version V         run v1, v2, or both v3 scopes (`--corpus-version` alias)
-#      --corpus-scope S    benchmark (default); v2 also has job-regressions,
-#                          while v3 also has selectivity-stress
-#      --all             run v1/v2/v3 benchmarks, then v3 selectivity-stress
-#                        (default); also writes one combined CSV and reports
+#      --query-type all|join|graph|aggregate  select a query type (default all)
+#      --all            run the deduplicated corpus once (default)
+#      --corpus-scope benchmark|selectivity-stress|job-regressions
+#                       diagnostic scopes reference existing unique SQL
 #      --capture-plans   save OFF/ON EXPLAIN, trace, and detailed cost artifacts
 #      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
 #      --profile         collect ON phase plus OFF/ON optimizer metrics (default)
@@ -46,8 +45,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CALLER_OY_CORPUS_SET="${OY_CORPUS+x}"
-CALLER_OY_VERSION_SET="${OY_CORPUS_VERSION+x}"
-CALLER_OY_SCOPE_SET="${OY_CORPUS_SCOPE+x}"
 # Unified config: defines DUCKDB_BIN, GRAPH_DATASET, TPCH_SF/TPCDS_SF,
 # OY_TIMEOUT_SECS, OY_RUNS.
 . "$SCRIPT_DIR/configs.sh"
@@ -55,19 +52,12 @@ CALLER_OY_SCOPE_SET="${OY_CORPUS_SCOPE+x}"
 . "$SCRIPT_DIR/phase_profile.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 CORPUS="${OY_CORPUS:-}"
-CORPUS_VERSION="${OY_CORPUS_VERSION:-v1}"
-CORPUS_VERSION_CLI=0
+CORPUS_REVISION="unique-semantic-20260929"
 CORPUS_SCOPE="${OY_CORPUS_SCOPE:-benchmark}"
-CORPUS_SCOPE_CLI=0
-if [ -n "$CALLER_OY_VERSION_SET" ] && [ -z "$CALLER_OY_CORPUS_SET" ]; then
-    CORPUS=""
-fi
-ALL_CORPORA=1
-ALL_CORPORA_CLI=0
-V3_ALL_SCOPES=0
-if [ -n "$CALLER_OY_CORPUS_SET" ] || [ -n "$CALLER_OY_VERSION_SET" ] || [ -n "$CALLER_OY_SCOPE_SET" ]; then
-    ALL_CORPORA=0
-fi
+QUERY_TYPE="all"
+[ -z "${OY_CORPUS_VERSION:-}" ] || {
+    echo "OY_CORPUS_VERSION is retired; unset it and select --query-type instead" >&2; exit 2;
+}
 
 RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
@@ -83,9 +73,10 @@ while [ $# -gt 0 ]; do case "$1" in
     --exclude) EXCLUDE="$2"; shift 2;;
     --limit) LIMIT="$2"; shift 2;;
     --query-list) QUERY_LIST="$2"; shift 2;;
-    --version|--corpus-version) CORPUS_VERSION="$2"; CORPUS_VERSION_CLI=1; ALL_CORPORA=0; shift 2;;
-    --corpus-scope) CORPUS_SCOPE="$2"; CORPUS_SCOPE_CLI=1; shift 2;;
-    --all) ALL_CORPORA=1; ALL_CORPORA_CLI=1; shift;;
+    --version|--corpus-version) echo "Version selection is retired; use --query-type join, graph, or aggregate" >&2; exit 2;;
+    --query-type) QUERY_TYPE="$2"; shift 2;;
+    --corpus-scope) CORPUS_SCOPE="$2"; shift 2;;
+    --all) QUERY_TYPE="all"; shift;;
     --capture-plans) CAPTURE_PLANS=1; shift;;
     --profile) PROFILE=1; shift;;
     --no-profile) PROFILE=0; shift;;
@@ -95,91 +86,24 @@ while [ $# -gt 0 ]; do case "$1" in
     -o|--out) OUT="$2"; shift 2;;
     -h|--help) sed -n '2,/^set /p' "${BASH_SOURCE[0]}"; exit 0;;
     *) echo "Unknown arg: $1" >&2; exit 2;; esac; done
-[ -z "$QUERY_LIST" ] || [ "$ONLY" = "all" ] || {
-    echo "--query-list requires --only all" >&2; exit 2;
-}
-[ "$ALL_CORPORA_CLI" = 0 ] || [ "$CORPUS_VERSION_CLI" = 0 ] || {
-    echo "--all cannot be combined with --version" >&2; exit 2;
-}
-if [ "$ALL_CORPORA" = 0 ] && [ "$CORPUS_VERSION_CLI" = 1 ] && \
-   [ "$CORPUS_VERSION" = v3 ] && [ "$CORPUS_SCOPE_CLI" = 0 ] && \
-   [ -z "$CALLER_OY_CORPUS_SET" ]; then
-    # V3 comprises both the aggregation benchmark and its selectivity-stress
-    # component. An explicit --corpus-scope remains the single-scope escape.
-    ALL_CORPORA=1
-    V3_ALL_SCOPES=1
-fi
-[ "$ALL_CORPORA" = 0 ] || [ "$CORPUS_SCOPE" = "benchmark" ] || {
-    echo "--all chooses the v1/v2/v3 benchmark and v3 selectivity-stress scopes itself" >&2; exit 2;
-}
-if [ "$ALL_CORPORA" = 1 ]; then
-    [ -z "$QUERY_LIST" ] || { echo "--all cannot be combined with --query-list" >&2; exit 2; }
-    if [ "$V3_ALL_SCOPES" = 1 ]; then
-        CORPUS_VERSION="v3"
-        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/benchmark"
-    else
-        CORPUS_VERSION="v1"
-        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/benchmark"
-        for required_version in v2 v3; do
-            [ -d "$SCRIPT_DIR/outerjoin_benchmark/$required_version/benchmark" ] || {
-                echo "$required_version corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version $required_version" >&2
-                exit 2
-            }
-        done
-    fi
-    [ -d "$SCRIPT_DIR/outerjoin_benchmark/v3/selectivity_stress" ] || {
-        echo "v3 selectivity-stress corpus not found; generate it with: python3 auto_test/gen_outerjoin_benchmark.py --version v3" >&2
-        exit 2
-    }
-else
-    [ "$CORPUS_VERSION_CLI" = 0 ] || CORPUS=""
-    case "$CORPUS_VERSION" in
-        v1)
-            [ "$CORPUS_SCOPE" = "benchmark" ] || {
-                echo "--corpus-scope $CORPUS_SCOPE is not available for --version v1" >&2; exit 2;
-            }
-            [ -n "$CORPUS" ] || CORPUS="$SCRIPT_DIR/outerjoin_benchmark/benchmark"
-            ;;
-        v2)
-            if [ -z "$CORPUS" ]; then
-                case "$CORPUS_SCOPE" in
-                    benchmark) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/benchmark";;
-                    job-regressions) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v2/job_regressions";;
-                    *)
-                        echo "v2 --corpus-scope must be benchmark or job-regressions (got: $CORPUS_SCOPE)" >&2
-                        exit 2
-                        ;;
-                esac
-            fi
-            ;;
-        v3)
-            if [ -z "$CORPUS" ]; then
-                case "$CORPUS_SCOPE" in
-                    benchmark) CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/benchmark";;
-                    selectivity-stress|advantage-stress)
-                        CORPUS_SCOPE="selectivity-stress"
-                        CORPUS="$SCRIPT_DIR/outerjoin_benchmark/v3/selectivity_stress"
-                        ;;
-                    *)
-                        echo "v3 --corpus-scope must be benchmark or selectivity-stress (got: $CORPUS_SCOPE)" >&2
-                        exit 2
-                        ;;
-                esac
-            fi
-            ;;
-        *) echo "--version must be v1, v2, or v3 (got: $CORPUS_VERSION)" >&2; exit 2;;
-    esac
-fi
-case "$CORPUS_VERSION:$CORPUS_SCOPE" in
-    v1:benchmark) WORKLOAD_CATEGORY="v1"; QUERY_CLASS="base";;
-    v2:benchmark) WORKLOAD_CATEGORY="v2"; QUERY_CLASS="selectivity_sweep";;
-    v2:job-regressions) WORKLOAD_CATEGORY="v2_job_regressions"; QUERY_CLASS="regression";;
-    v3:benchmark) WORKLOAD_CATEGORY="v3_aggregation"; QUERY_CLASS="aggregation";;
-    v3:selectivity-stress) WORKLOAD_CATEGORY="v3_selectivity_stress"; QUERY_CLASS="selectivity_stress";;
-    *) WORKLOAD_CATEGORY="${CORPUS_VERSION}_${CORPUS_SCOPE//-/_}"; QUERY_CLASS="custom";;
+case "$QUERY_TYPE" in
+    all|join|graph|aggregate) ;;
+    *) echo "--query-type must be all, join, graph, or aggregate" >&2; exit 2;;
 esac
+case "$CORPUS_SCOPE" in
+    benchmark) ;;
+    selectivity-stress|job-regressions)
+        [ -z "$QUERY_LIST" ] || { echo "--corpus-scope cannot be combined with --query-list" >&2; exit 2; }
+        QUERY_LIST="$CORPUS/${CORPUS_SCOPE//-/_}.txt";;
+    *) echo "--corpus-scope must be benchmark, selectivity-stress, or job-regressions" >&2; exit 2;;
+esac
+[ -z "$QUERY_LIST" ] || [ "$ONLY" = "all" ] || {
+    echo "Query-list and diagnostic scopes require --only all" >&2; exit 2;
+}
+WORKLOAD_CATEGORY="$QUERY_TYPE"
+QUERY_CLASS="$QUERY_TYPE"
 [ -d "$CORPUS" ] || {
-    echo "Corpus directory not found: $CORPUS (generate with: python3 auto_test/gen_outerjoin_benchmark.py --version $CORPUS_VERSION)" >&2
+    echo "Corpus directory not found: $CORPUS (generate with: python3 auto_test/gen_outerjoin_benchmark.py)" >&2
     exit 2
 }
 case "$RUNS" in
@@ -196,75 +120,6 @@ oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 _now="$(date '+%Y%m%d_%H%M%S|%F %T')"
 START_TS="${_now%%|*}"; START_HUMAN="${_now##*|}"
 EXPERIMENT_GROUP="${OY_EXPERIMENT_GROUP:-$START_TS}"
-if [ "$ALL_CORPORA" = 1 ]; then
-    all_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
-    all_status=0
-    all_pid=""
-    all_forward_args=()
-    all_csv_files=()
-    for ((arg_index=0; arg_index<${#ORIGINAL_ARGS[@]}; arg_index++)); do
-        arg="${ORIGINAL_ARGS[$arg_index]}"
-        case "$arg" in
-            --all) ;;
-            -o|--out|--version|--corpus-version|--corpus-scope) arg_index=$((arg_index + 1));;
-            *) all_forward_args+=("$arg");;
-        esac
-    done
-    oy_stop_all_corpora() {
-        trap '' INT TERM
-        if [ -n "$all_pid" ]; then
-            kill -TERM "$all_pid" 2>/dev/null || true
-            wait "$all_pid" 2>/dev/null || true
-        fi
-        exit "$1"
-    }
-    trap 'oy_stop_all_corpora 130' INT
-    trap 'oy_stop_all_corpora 143' TERM
-    if [ "$V3_ALL_SCOPES" = 1 ]; then
-        corpus_targets=(v3:benchmark v3:selectivity-stress)
-    else
-        corpus_targets=(v1:benchmark v2:benchmark v3:benchmark v3:selectivity-stress)
-    fi
-    for corpus_target in "${corpus_targets[@]}"; do
-        corpus_version="${corpus_target%%:*}"
-        corpus_scope="${corpus_target##*:}"
-        result_label="$corpus_version"
-        [ "$corpus_scope" = "benchmark" ] || result_label="${corpus_version}_${corpus_scope//-/_}"
-        version_out="${all_out%.txt}_${result_label}.txt"
-        echo "--- Running corpus version: $corpus_version scope: $corpus_scope ---" >&2
-        OY_CORPUS="" OY_CORPUS_VERSION="$corpus_version" OY_CORPUS_SCOPE="$corpus_scope" \
-            OY_EXPERIMENT_GROUP="$EXPERIMENT_GROUP" OY_DEFER_STATISTICS=1 \
-            bash "$SCRIPT_DIR/experiment_onoff.sh" "${all_forward_args[@]}" \
-            --version "$corpus_version" --corpus-scope "$corpus_scope" \
-            --out "$version_out" &
-        all_pid=$!
-        wait "$all_pid"
-        version_status=$?
-        all_pid=""
-        case "$version_status" in
-            130|143) exit "$version_status";;
-            0) ;;
-            *) all_status="$version_status";;
-        esac
-        [ "$version_status" = 0 ] && all_csv_files+=("${version_out%.txt}.csv")
-    done
-    if [ "$all_status" = 0 ]; then
-        combined_csv="${all_out%.txt}_all.csv"
-        statistics_dir="${all_out%.txt}_statistics"
-        if "${PYTHON_BIN:-python3}" "$SCRIPT_DIR/benchmark_statistics.py" \
-            --output-dir "$statistics_dir" --combined-csv "$combined_csv" \
-            --run "$START_TS" "${all_csv_files[@]}"; then
-            echo "Combined CSV written to $combined_csv"
-            echo "Statistics written to $statistics_dir"
-            echo "RESULT_COMBINED_CSV=$combined_csv"
-            echo "RESULT_STATISTICS_DIR=$statistics_dir"
-        else
-            echo "Failed to generate combined statistics" >&2
-            all_status=1
-        fi
-    fi
-    exit "$all_status"
-fi
 if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
     sweep_out="${OUT:-$SCRIPT_DIR/results/experiment_onoff_${START_TS}.txt}"
     sweep_status=0
@@ -299,7 +154,7 @@ if [ "${#OY_THREAD_VALUES[@]}" -gt 1 ]; then
 fi
 export OY_THREADS="${OY_THREAD_VALUES[0]}"
 _scope_suffix=""
-[ "$CORPUS_SCOPE" = "benchmark" ] || _scope_suffix="_${CORPUS_VERSION}_${CORPUS_SCOPE}"
+[ "$CORPUS_SCOPE" = "benchmark" ] || _scope_suffix="_${CORPUS_SCOPE}"
 _default_out="$SCRIPT_DIR/results/experiment_onoff${_scope_suffix}_${START_TS}_t${OY_THREADS}.txt"
 OUT="${OUT:-$_default_out}"
 mkdir -p "$(dirname "$OUT")"
@@ -319,7 +174,7 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=1800}"
+: "${OY_TIMEOUT_SECS:=600}"
 : "${OY_BATCH_GRACE_SECS:=30}"
 case "$OY_TIMEOUT_SECS" in
     ''|*[!0-9]*) echo "--timeout must be a non-negative integer (got: $OY_TIMEOUT_SECS)" >&2; exit 2;;
@@ -927,8 +782,16 @@ case "$ONLY" in
     all)    FAMS="graph tpch tpcds job";;
     *) echo "Unknown --only: $ONLY (select|agg|pred|tpch|tpcds|job|graph|bench|all)" >&2; exit 2;;
 esac
+if [ -n "$QUERY_LIST" ]; then
+    [ -f "$QUERY_LIST" ] || { echo "Query list not found: $QUERY_LIST" >&2; exit 2; }
+    FAMS="$(awk -F/ '!/^[[:space:]]*(#|$)/ {print $1}' "$QUERY_LIST" | LC_ALL=C sort -u | tr '\n' ' ')"
+fi
 need_graph=0; need_tpch=0; need_tpcds=0; need_job=0
-for fam in $FAMS; do case "$fam" in
+for fam in $FAMS; do
+    if [ "$QUERY_TYPE" != all ] && ! compgen -G "$CORPUS/$fam/${QUERY_TYPE}__*.sql" >/dev/null; then
+        continue
+    fi
+    case "$fam" in
     graph) need_graph=1;; tpch) need_tpch=1;; tpcds) need_tpcds=1;;
     job) need_job=1;; esac; done
 
@@ -967,7 +830,7 @@ fi
 # ============================================================================
 # COLLECT QUERIES — each tagged with its family DB
 # ============================================================================
-LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=()
+LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=(); QUERY_TYPES=()
 
 # Corpus queries are deliberately flat: one FROM relation followed by explicit
 # JOIN relations (no CTEs or subqueries). Count those SQL tokens instead of
@@ -998,7 +861,11 @@ db_for_family() {
 
 append_query() {
     local family="$1" rel="$2" fdb existing query_sql relation_count
-    local full="$CORPUS/$rel"
+    local full="$CORPUS/$rel" query_type
+    query_type="$(basename "$full" .sql)"
+    query_type="${query_type%%__*}"
+    case "$query_type" in join|graph|aggregate) ;; *) query_type="custom";; esac
+    [ "$QUERY_TYPE" = all ] || [ "$QUERY_TYPE" = "$query_type" ] || return 0
     [ -f "$full" ] || { echo "Missing query: $rel" >&2; exit 2; }
     for existing in "${SQL_PATHS[@]:-}"; do
         [ "$existing" != "$rel" ] || { echo "Duplicate query in selection: $rel" >&2; exit 2; }
@@ -1008,6 +875,7 @@ append_query() {
     query_sql="$(<"$full")"
     relation_count="$(oy_relation_count "$query_sql")"
     [ "$relation_count" != "-" ] || { echo "Could not count relations in $rel" >&2; exit 2; }
+    QUERY_TYPES+=("$query_type")
     LABELS+=("$(basename "$full" .sql)")
     SQLS+=("$query_sql")
     DBS+=("$fdb")
@@ -1092,7 +960,7 @@ csv_result_row() {
 }
 
 CSV_HEADER=(
-    experiment_group corpus_version corpus_scope workload_category query_class
+    experiment_group corpus_revision corpus_scope workload_category query_class
     query family sql_path relation_count aggregate_query aggregate_pushdown_applied reorder outer_reordered cost_gate_applied outer_yan_selected selected_plan
     baseline_proven_empty decision_reason formula_id selection_mode raw_cost_winner gate_result
     default_filter_upper_bound_checked default_filter_upper_bound_selected
@@ -1129,7 +997,7 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
 {
     echo "# OuterYan on/off experiment   started $START_HUMAN"
     echo "# binary : $DUCKDB_BIN"
-    echo "# corpus : version=$CORPUS_VERSION, scope=$CORPUS_SCOPE, $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
+    echo "# corpus : revision=$CORPUS_REVISION, scope=$CORPUS_SCOPE, $ONLY  (pattern=$PATTERN limit=$LIMIT) — ${#LABELS[@]} queries from $CORPUS"
     echo "# class  : workload_category=$WORKLOAD_CATEGORY query_class=$QUERY_CLASS"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
@@ -1188,6 +1056,7 @@ process_one() {
     local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
     local family="${QUERY_FAMILIES[i]}" sql_path="${SQL_PATHS[i]}"
     local nrel="${RELATION_COUNTS[i]}"
+    local WORKLOAD_CATEGORY="${QUERY_TYPES[i]}" QUERY_CLASS="${QUERY_TYPES[i]}"
     local gate="" correct="FALSE" note="ERROR" rows="-"
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
     local formula_id="-" selection_mode="-" aggregate_query="-" aggregate_pushdown_applied="-" selected_plan="-" proven_empty="-" raw_winner="-" gate_result="-"
@@ -1595,7 +1464,7 @@ process_one() {
         printf '%s\n%s\n%s\n%s\n' "$query_line" "$result_line" "$context_line" "$decision_line"
     } >&2
     csv_result_row \
-        "$EXPERIMENT_GROUP" "$CORPUS_VERSION" "$CORPUS_SCOPE" "$WORKLOAD_CATEGORY" "$QUERY_CLASS" \
+        "$EXPERIMENT_GROUP" "$CORPUS_REVISION" "$CORPUS_SCOPE" "$WORKLOAD_CATEGORY" "$QUERY_CLASS" \
         "$id" "$family" "$sql_path" "$nrel" "$aggregate_query" "$aggregate_pushdown_applied" "$reg" "$outer_reordered" "$gate_applied" "$selected" "$selected_plan" \
         "$proven_empty" "$decision" "$formula_id" "$selection_mode" "$raw_winner" "$gate_result" \
         "$default_filter_upper_checked" "$default_filter_upper_selected" "$full_reduction_lower_bound" \
@@ -1715,7 +1584,7 @@ if [ "$CAPTURE_PLANS" = 1 ]; then
 fi
 if [ "${OY_DEFER_STATISTICS:-0}" != 1 ]; then
     STATISTICS_DIR="${OUT%.txt}_statistics"
-    if "${PYTHON_BIN:-python3}" "$SCRIPT_DIR/benchmark_statistics.py" \
+    if "${PYTHON_BIN:-python3}" "$SCRIPT_DIR/gen_experiment_result.py" --statistics-only \
         --output-dir "$STATISTICS_DIR" --run "$EXPERIMENT_GROUP" "$CSV_FINAL"; then
         echo "Statistics written to $STATISTICS_DIR"
     else

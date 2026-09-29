@@ -111,6 +111,10 @@ void ColumnLifetimeAnalyzer::VisitOperator(LogicalOperator &op) {
 		//! We still need to project all values from these operators so the projection
 		//! on top of them can select from only the table values being inserted.
 	case LogicalOperatorType::LOGICAL_GET:
+	// SJ build/probe keys use positional indexes into the child's output.
+	// Keep FILTER/JOIN projection maps below them from changing that schema.
+	case LogicalOperatorType::LOGICAL_SJ_BUILD:
+	case LogicalOperatorType::LOGICAL_SJ_PROBE:
 	case LogicalOperatorType::LOGICAL_UNION:
 	case LogicalOperatorType::LOGICAL_EXCEPT:
 	case LogicalOperatorType::LOGICAL_INTERSECT:

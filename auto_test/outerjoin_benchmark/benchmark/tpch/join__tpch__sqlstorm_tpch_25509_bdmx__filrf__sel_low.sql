@@ -1,0 +1,8 @@
+-- query_type: join; family: tpch
+-- source: SQLStorm v1.0/tpch/queries/25509.sql
+-- semantic_filter: sqlstorm_order_period; tier=low; SQLStorm 25509 order reporting period
+-- predicate: o.o_orderdate BETWEEN DATE '1996-01-01' AND DATE '1996-03-15'
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT *
+FROM ((part p LEFT OUTER JOIN ((orders o RIGHT OUTER JOIN lineitem l ON l.l_orderkey = o.o_orderkey) FULL OUTER JOIN customer c ON o.o_custkey = c.c_custkey) ON p.p_partkey = l.l_partkey) FULL OUTER JOIN (supplier s INNER JOIN partsupp ps ON ps.ps_suppkey = s.s_suppkey) ON p.p_partkey = ps.ps_partkey)
+WHERE o.o_orderdate BETWEEN DATE '1996-01-01' AND DATE '1996-03-15';

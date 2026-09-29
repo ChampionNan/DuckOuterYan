@@ -1,1 +1,0 @@
-query_id,path,query_class,evaluation_role,family,source_component,source_path,source_content_sha256,content_sha256,corpus_revision,provenance_class,source_benchmark,source_query,source_location,topology,tree_shape,join_vector,relation_count,predicate_class,reference_run,reference_threads,timeout_seconds,timeout_phase

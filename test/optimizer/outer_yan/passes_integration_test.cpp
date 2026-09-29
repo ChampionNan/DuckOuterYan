@@ -1723,7 +1723,7 @@ TEST_CASE("outer_yan policy: uniform cost ceiling and confidence boundaries",
 	REQUIRE(OuterYanOptimizer::AGGREGATE_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
 	REQUIRE(OuterYanOptimizer::LOW_RETENTION_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
 	REQUIRE(OuterYanOptimizer::LOW_RETENTION_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.90));
-	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(1.0));
+	REQUIRE(OuterYanOptimizer::SEMIJOIN_COST_RATIO == Approx(0.20));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_CANDIDATE_TO_BASELINE_RATIO == Approx(1.20));
 	REQUIRE(OuterYanOptimizer::STRETCH_MAX_JOIN_INPUT_RATIO == Approx(0.30));
 	REQUIRE(OuterYanOptimizer::STRETCH_MIN_SEMIJOIN_RETAINED_CARDINALITY_RATIO == Approx(0.95));
@@ -1934,6 +1934,39 @@ TEST_CASE("outer_yan policy: uncertain tiny filter without reduction keeps DuckD
 	const auto forced_plan = ExplainOptimizedPlan(con, "", sql);
 	REQUIRE(forced_plan.find("SJ_BUILD") != string::npos);
 	REQUIRE(forced_plan.find("SJ_PROBE") != string::npos);
+}
+
+TEST_CASE("outer_yan execution: column pruning preserves positional SJ keys",
+          "[outer_yan][passes][equivalence][sj_column_pruning]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE customer(c_custkey INTEGER, c_name VARCHAR)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE orders(o_orderkey INTEGER, o_custkey INTEGER, o_orderdate DATE)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE lineitem(l_orderkey INTEGER, l_extendedprice DECIMAL(10,2))"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO customer VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO orders VALUES (1, 1, '1995-01-02'), (2, 1, '1995-06-01'), "
+	                          "(3, 2, '1994-01-01'), (4, 2, '1995-01-03')"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO lineitem VALUES (1, 10), (1, 10), (2, 12), (3, 30), (7, 70)"));
+	REQUIRE_NO_FAIL(con.Query("ANALYZE"));
+
+	for (const string residual : {string(), string(" AND o_orderkey + o_custkey > 0")}) {
+		const string sql = "SELECT c_name, o_orderkey, l_extendedprice FROM customer LEFT JOIN "
+		                   "(orders JOIN lineitem ON o_orderkey = l_orderkey "
+		                   "AND o_orderdate >= DATE '1995-01-01' AND o_orderdate < DATE '1996-01-01'" +
+		                   residual + ") ON c_custkey = o_custkey";
+		CAPTURE(residual);
+		// Force only within this regression so a policy fallback cannot hide the
+		// executor defect. The paper experiment separately verifies default ON.
+		AssertOuterYanPreservesResults(con, sql);
+		ScopedOuterYanCandidateForce force_candidate;
+		const auto plan = ExplainOptimizedPlan(con, "", sql);
+		REQUIRE(plan.find("SJ_PROBE") != string::npos);
+		REQUIRE_NO_FAIL(con.Query("PRAGMA enable_verification"));
+		auto verified = con.Query(sql);
+		REQUIRE_NO_FAIL(*verified);
+		REQUIRE(verified->RowCount() == 5);
+		REQUIRE_NO_FAIL(con.Query("PRAGMA disable_verification"));
+	}
 }
 
 // ---- 4d Resimplification: a de-simplified edge reverts; the flag is recorded.
