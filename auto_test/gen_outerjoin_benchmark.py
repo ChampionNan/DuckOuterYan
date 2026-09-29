@@ -1675,7 +1675,7 @@ def add_v2_selectivity(
     sql: str, seed: Seed, tier: str, target: float, description: str,
 ) -> tuple[str, str]:
     """Replace the complete v1 filter with one semantic cohort."""
-    spec = seed_filter_metadata(seed, tier.removeprefix("sel_"))
+    spec = seed_filter_metadata(seed, tier[4:] if tier.startswith("sel_") else tier)
     metadata = (
         f"-- corpus_version: v2\n"
         f"-- selectivity_sweep: {tier}; intended band {description}\n"
@@ -2530,7 +2530,7 @@ def generate_v2_core(root: Path) -> int:
                         "predicate_class": "null_rejecting_outeryan_applicable",
                         "semantic_role": variant_semantics,
                         "semantics": seed_filter_metadata(seed)["filter_semantics"],
-                        **seed_filter_metadata(seed, tier.removeprefix("sel_")),
+                        **seed_filter_metadata(seed, tier[4:] if tier.startswith("sel_") else tier),
                         "pattern_role": v2_pattern_role(seed, suffix),
                         "design_basis": design_basis,
                     }

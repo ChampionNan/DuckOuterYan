@@ -19,6 +19,23 @@ STATS = PLOT = PAPER = RESULT
 
 
 class BenchmarkStatisticsTest(unittest.TestCase):
+    def test_generated_file_cleanup_supports_python37_and_preserves_errors(self):
+        original_unlink = Path.unlink
+
+        # Python 3.7 accepts no missing_ok argument, even on newer test runtimes.
+        def unlink_python37(path):
+            return original_unlink(path)
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(Path, "unlink", unlink_python37):
+            root = Path(directory)
+            output = root / "obsolete.tex"
+            output.write_text("obsolete output")
+            RESULT.remove_generated_file(output)
+            self.assertFalse(output.exists())
+            RESULT.remove_generated_file(output)
+            with self.assertRaises(OSError):
+                RESULT.remove_generated_file(root)
+
     @staticmethod
     def frame():
         return pd.DataFrame([

@@ -30,6 +30,15 @@ def csv_rows(path):
         return list(csv.DictReader(handle))
 
 
+class Python37String(str):
+    """Exercise generation without string APIs added after Python 3.7."""
+
+    def __getattribute__(self, name):
+        if name in ("removeprefix", "removesuffix"):
+            raise AttributeError(name)
+        return super().__getattribute__(name)
+
+
 @contextlib.contextmanager
 def forbid_result_access():
     """Cover both builtin open() and pathlib/io.open() reads."""
@@ -169,9 +178,13 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 "TPCDS_DIR": str(legacy_root / "tpcds"),
                 "JOB_DIR": str(legacy_root / "job"),
             }
+            tiers = tuple((Python37String(tier), target, description)
+                          for tier, target, description in BENCHMARK.V2_SELECTIVITY_TIERS)
             with mock.patch.multiple(LEGACY, **legacy_paths), mock.patch.object(
                 BENCHMARK, "LEGACY_ROOT", legacy_root
-            ), mock.patch.dict(sys.modules, {"gen_queries": LEGACY}), forbid_result_access():
+            ), mock.patch.object(BENCHMARK, "V2_SELECTIVITY_TIERS", tiers), mock.patch.dict(
+                sys.modules, {"gen_queries": LEGACY}
+            ), forbid_result_access():
                 root = scratch / "unique"
                 with contextlib.redirect_stdout(io.StringIO()):
                     BENCHMARK.generate_unified(root)

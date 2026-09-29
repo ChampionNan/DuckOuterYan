@@ -2418,6 +2418,14 @@ def resolve_inputs(patterns: list[str], base_directory: Path) -> list[str]:
     return list(dict.fromkeys(path for path in paths if path.lower().endswith(".csv")))
 
 
+def remove_generated_file(path: Path) -> None:
+    """Remove an obsolete output if present, using the Python 3.7 pathlib API."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def write_standalone_runtime_figures(
     output_directory: Path, frame: pd.DataFrame, run: str, metric: str,
     sample_per_family: int = REPRESENTATIVE_QUERIES_PER_FAMILY,
@@ -2433,14 +2441,14 @@ def write_standalone_runtime_figures(
         "runtime_representative_queries.pdf", "runtime_representative_queries.png",
         "representative_queries.json",
     ):
-        (output_directory / filename).unlink(missing_ok=True)
+        remove_generated_file(output_directory / filename)
     outputs = []
     correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
     if not positive_runtime_rows(frame.loc[correct], metric).empty:
         outputs.append(("speedup_all_queries", lambda pdf: page_speedup_scatter(pdf, frame, run, metric)))
     else:
         for suffix in (".pdf", ".png"):
-            (output_directory / ("speedup_all_queries" + suffix)).unlink(missing_ok=True)
+            remove_generated_file(output_directory / ("speedup_all_queries" + suffix))
     phase_frame, notice = phase_source(frame, phase_placeholder)
     _, phases = paired_representative_samples(frame, phase_frame, sample_per_family, representative_scope)
     if not phases.empty:
@@ -2461,7 +2469,7 @@ def write_standalone_runtime_figures(
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     else:
         for filename in ("phase_breakdown_outeryan.pdf", "phase_breakdown_outeryan.png", "phase_queries.json"):
-            (output_directory / filename).unlink(missing_ok=True)
+            remove_generated_file(output_directory / filename)
     paths: list[Path] = []
     for stem, draw in outputs:
         paths.append(write_figure_pair(output_directory, stem, draw))
@@ -2887,7 +2895,7 @@ def write_paper_statistics(output_directory: Path, frame: pd.DataFrame, sources:
     )
     # Retire only the generated fragments from older versions, after writing the combined file.
     for name, _, _ in parts:
-        (output_directory / f"{name}.tex").unlink(missing_ok=True)
+        remove_generated_file(output_directory / f"{name}.tex")
     return paper
 
 
