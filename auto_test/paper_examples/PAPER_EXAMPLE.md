@@ -99,6 +99,99 @@ ON/OFF 完整结果多重集一致，保留重复行。筛选后的客户有 2,7
 [semantic_results.json](../results/paper_cost_tuning_20260929/semantic_results.json)。
 最终余额与市场类别组合在计时前确定；11 个原始耗时样本全部保留。
 
+## 保留当前参数，单独验证候选计划（2026-09-30）
+
+本节及下一节的 `auto_test/results/` 链接指向本机实验产物，该目录按仓库规则不提交。
+SQL 和测试入口随仓库保存；重新运行命令会生成带新时间戳的结果目录。
+
+重新核对的本地源码与 Release decision trace 均为 SJ 权重 `0.20`、gate 上限 `1.20`，
+原 BUILDING 实例仍正常通过 gate。本次没有修改任何优化器源码、参数、统计或 join condition。
+若另一构建的 gate 拒绝该候选，可使用现有的进程级诊断模式：
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/building_customers_fulfilled_orders.sql \
+  --threads 10 --runs 11 --force-candidate
+```
+
+此命令分别测 OFF、正常 ON 和 forced。脚本只在 forced 子进程设置
+`DUCKDB_OY_FORCE_CANDIDATE=1`，不修改常量，也不将它传给正常 ON/OFF。
+DP 仍按原算法产生候选；开关跳过最终 cost gate 和同 grouping 回退，不能保证任意 SQL 都改变 grouping。
+本例应检查 `outer_reordered=1` 以及 profile 中的 customer–orders 分组。
+forced 的原因是 `FORCE_OUTERYAN_DIAGNOSTIC`，论文应将其报告为候选计划执行实验，不能当作正常成本模型接受的证据。
+
+### 调整 orders 日期范围的检查
+
+检查了 12 个日期窗口（多年、年、半年、季度、月、周和单日范围），分别应用于：
+保留 BUILDING + F 条件、用日期替代 F 条件、以及最初含 AIR 的 SQL，共 36 个变体及 1 个无日期对照。
+同一家族内所有窗口的 DP / gate 决策及成本均相同：
+
+| 条件家族 | DP 改变 grouping | 最终选择 | 候选 / baseline 成本 |
+|---|---|---|---:|
+| BUILDING + 高余额 + F + 日期范围 | 是 | OuterYan | 0.942773 |
+| BUILDING + 高余额 + 日期范围（去掉 F） | 是 | DuckDB | 1.435469 |
+| 原始 AIR 例子，仅改变日期范围 | 否 | DuckDB | 2.048085 |
+
+当前 `RelationStatisticsHelper::InspectTableFilter` 对这些日期不等式不按区间宽度估计选择率：
+只有日期范围时使用默认 20%；与 `o_orderstatus = 'F'` 并存时沿用等值估计，日期不会进一步降低该估计。
+所以调整实际时间窗口会改变执行数据量，但这些窗口没有改变模型成本；不能依靠它绕过拒绝的 gate。
+这不是对所有 SQL 谓词形式的穷尽结论。
+参见[筛选决策](../results/paper_date_ranges_20260930_091300/results.json)和
+[统计实现](../../src/optimizer/join_order/relation_statistics_helper.cpp)。
+
+另存的 [1995 年版本](tpch/building_customers_fulfilled_orders_1995.sql) 只给 BUILDING 实例增加订单日期范围，
+语义为“这些客户在 1995 年下单的已完成订单明细”。10 线程、每模式 11 次，完整结果均为 5,114 行，
+ON 和 forced 的物理 profile 都确认先 customer–orders，且均包含三个 SJ probes。
+OFF / ON / forced 中位数分别为 **7.696 / 17.330 / 17.015 ms**：这次日期收窄使重排更慢，
+因此该变体只验证计划与正确性，不替代前述性能正例，也不能沿用前述 1.331× 加速结论。
+原始数据见[结果](../results/paper_building_customers_fulfilled_orders_1995_20260930_091523/result.json)及
+[物理 grouping 验证](../results/paper_building_customers_fulfilled_orders_1995_20260930_091523/verified_physical_groupings.json)。
+
+## 只替换 lineitem 谓词并正常通过门控（2026-09-30）
+
+对于最初的论文 SQL，保持 1995 年订单范围和两个连接条件，只将
+`l_shipmode = 'AIR'` 替换成 `l_receiptdate > l_commitdate`，可以正常通过当前门控。
+这个谓词只引用 lineitem，仍是一元过滤；业务含义为实际收货日晚于承诺日的订单行。
+查询保留没有此类订单明细的客户。见[完整 SQL](tpch/customer_orders_late_receipts_1995.sql)。
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/customer_orders_late_receipts_1995.sql \
+  --threads 10 --runs 11
+```
+
+没有使用 force、改变 join condition、修改 DP 或任何 cost 参数；使用现有权重 `0.20` 和上限 `1.20`。
+本实例自然选中 customer–orders 先连接，并经真实执行 profile 验证。
+
+| 模型项 | 数值 |
+|---|---:|
+| DuckDB baseline | 7,027,350.201 |
+| 候选 real-join 成本 | 1,873,511.465 |
+| 候选原始 SJ 工作量 | 31,386,419 |
+| 候选总成本（SJ 权重 0.20） | 8,150,795.265 |
+| 上限（baseline × 1.20） | 8,432,820.242 |
+| 候选 / baseline | 1.159868 |
+
+决策为 `selection_mode=GATED outer_reordered=1 cost_gate_applied=1 selected_plan=OUTERYAN`
+及 `reason=COST_OUTERYAN_WITHIN_LIMIT`。模型估计候选成本高约 16%，因在现有 20% 容许范围内被接受，
+不能将其表述为“模型认为候选成本更低”。当前模型对这个列间日期比较也没有精确选择率估计；
+本例的成本与移除 lineitem 过滤的对照相同。
+
+SF1、10 线程、各 11 次：OFF / ON 中位数为 **20.881 / 32.275 ms**，完整结果多重集一致，均为 641,926 行。
+OFF 首个真实 join（orders–lineitem）输出 576,370 行，ON 首个真实 join（customer–orders）输出 275,041 行。
+ON 包含三个 SJ probes；总耗时包括 SJ 工作。因此该例证明正常模型接受并执行重排，**没有证明性能收益**。
+
+对三个固定的 customer/orders 条件家族分别测试了 16 个 lineitem 条件（包括无过滤对照），共 48 个 EXPLAIN。
+其中“BUILDING + 高余额 + 日期，去掉 F”的 16 个变体仍全部被 gate 拒绝；
+“BUILDING + 高余额 + F + 日期”本来就能通过，加入 `l_returnflag = 'R'` 等条件也能通过。
+最初含 AIR 的查询则是 DP grouping 未变，不能与“DP 已改变但 gate 拒绝”的版本混淆。
+这次谓词筛选不是所有一元谓词的穷尽证明。
+
+证据：[谓词筛选及决策](../results/paper_lineitem_predicates_20260930_093251/results.json)、
+[可复现筛选脚本](../results/paper_lineitem_predicates_20260930_093251/search.py)、
+[完整实测结果](../results/paper_customer_orders_late_receipts_1995_20260930_093320/result.json)、
+[物理 grouping 验证](../results/paper_customer_orders_late_receipts_1995_20260930_093320/verified_physical_groupings.json)。
+
 ## 必要的执行修复与验证
 
 候选此前会因列裁剪使 SJ 的预解析列位置失效而越界。现在在 RemoveUnusedColumns 和 ColumnLifetimeAnalyzer 中，
