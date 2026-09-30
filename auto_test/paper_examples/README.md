@@ -3,9 +3,101 @@
 这个目录只保存手工指定的论文 SQL，不加入现有 benchmark corpus。
 目前包含用户提供的 `customer LEFT JOIN (orders JOIN lineitem)` 例子；未指定论文名称或编号。
 
-**当前论文候选：** [有业务语义的 SQL、算法决策与 SF1 数据](PAPER_EXAMPLE.md)。
+**较强收益的备选：** [超过 90 天的延期交付审计](tpch/orders_before_1997_receipts_over_90_days_late.sql)。
+orders 使用 `o_orderdate < DATE '1997-01-01'`，lineitem 仅使用
+`l_receiptdate > l_commitdate + INTERVAL '90 days'`，各一个比较条件。
+当前 `0.20 / 1.20` 参数下正常通过 DP 和 gate；SF1、10 线程、独立 11 次为 **1.283×**，
+追加 32 对交替计时为 **1.315×**，31 对 ON 更快，完整裸查询结果一致。
+90 天是从 Q21 延期关系派生的业务阈值，并非标准 Q21 原文；这个业务范围比普通发货期间报表更窄。
+普通截止点的初测高值没有稳定复现，详细对照和全部数据见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+在已有的真实 SF100 数据库上测试该版本（将 `--db` 替换为实际路径）：
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/orders_before_1997_receipts_over_90_days_late.sql \
+  --db /path/to/tpch_sf100.duckdb \
+  --threads 10 --runs 11 --timeout 600
+```
+
+使用当前 Release 构建；脚本不会生成数据，也不会通过 `--db` 自动改变 scale。
+`--runs 11` 为每模式正式计时次数，`--timeout 600` 为每条语句的秒数上限。
+正确性检查比较完整结果多重集，其 Python 内存需求随结果行数增长。
+现有 SF100 统计外推仅验证计划选择，没有 SF100 性能实测结论。
+
+**当前推荐，常见日期过滤且每表一个比较：** [已全部发货订单中、截止日前发货的明细](tpch/fulfilled_orders_shipped_before_april_1992.sql)。
+使用 `o_orderstatus = 'F'` 和 `l_shipdate < DATE '1992-04-01'`，正常重排，参数保持 `0.20 / 1.20`。
+SF1、10 线程、每模式 11 次为 **1.050×**，追加 32 对交替计时为 **1.097×**，31 对 ON 更快。
+
+若允许一个 `BETWEEN` 日期范围谓词，[1994 年第一季度发货版本](tpch/fulfilled_orders_shipped_q1_1994.sql)
+独立验证为 **1.145×**，交替复测为 **1.168×**，32 对中 30 对 ON 更快。
+两个版本都完成裸查询完整结果校验和实际物理 grouping 验证；SQL、计数及所有样本见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+BETWEEN 在内部会拆为两个边界比较；严格要求单个比较时使用截止日版本。
+
+**此前日期关系版本：** [截止日前下单、承诺日当天收货](tpch/orders_before_1997_received_on_commit_date.sql)。
+使用 `o_orderdate < DATE '1997-01-01'` 和 `l_receiptdate = l_commitdate`，customer 不过滤，连接条件保持原样。
+这是 Q3 截止日形式与 Q21 日期关系的业务变体：报告日期调整为 1997 年初，Q21 的 `>` 改为 `=`。
+沿用当前 `0.20 / 1.20` 成本参数，正常采用 customer–orders 顺序；SF1、10 线程、每模式 11 次，
+**27.757 → 19.228 ms（1.444×）**，完整结果 157,320 行，多重集一致。
+语义、选择性和验证数据见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/orders_before_1997_received_on_commit_date.sql \
+  --threads 10 --runs 11
+```
+
+若需追加一个不改变当前实际选择性的条件，可使用 [Q12 发货条件版本](tpch/orders_before_1997_on_commit_date_early_shipment.sql)，
+增加 `l_shipdate < l_commitdate`。dbgen 的收货日期总晚于发货日期，因此在 `l_receiptdate = l_commitdate` 下，
+新增条件不再过滤记录；SF1 前后均为 49,736 条 lineitem，完整查询结果也一致。
+当前成本比和正常计划选择不变；新版本本次 11 次计时为 **28.762 → 18.463 ms（1.558×）**，
+不能将跨轮计时差异归因于新增条件本身。详细证据见上述文档。
+
+若将等号改成 [大于](tpch/orders_before_1997_received_after_commit_date.sql) 或
+[小于](tpch/orders_before_1997_received_before_commit_date.sql)，并取消发货条件，仍正常选中目标 grouping，
+但本次 SF1 未观察到稳定加速：每模式 11 次分别为 0.978× / 0.908×；
+同连接三版本轮换、各 32 对交替计时分别为 0.972× / 0.932×（等号版 1.328×）。
+实际 lineitem 保留比例从 0.83% 增至 63.21% / 35.96%，而成本比仍同为 1.159868。
+完整对照、行数和原始样本见上述文档。
+
+**两个 lineitem 条件的备选，原样使用标准谓词：** [已发货订单的延期折扣明细](tpch/fulfilled_orders_q6_discount_late_receipts.sql)。
+orders 使用 Q21 的 `o_orderstatus = 'F'`；lineitem 使用 Q21 的 `l_receiptdate > l_commitdate`
+和 Q6 的 `l_discount BETWEEN 0.05 AND 0.07`。客户不加过滤，连接条件不变，不使用 EXTRACT。
+沿用当前 `0.20 / 1.20` 成本参数，DP 和 gate 正常选中 customer–orders；SF1、10 线程、每模式 11 次，
+46.776 → 32.914 ms（1.421×），完整结果多重集一致。追加 32 对交替计时为 1.535×，32 对均加速。
+它将此前的 orders 时间条件换回状态条件。语义、谓词来源和全部证据见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/fulfilled_orders_q6_discount_late_receipts.sql \
+  --threads 10 --runs 11
+```
+
+以下保留先前候选和诊断结果。
+
+**不引入额外数值阈值的版本：** [已完成订单中承诺日当天收货的明细](tpch/fulfilled_orders_received_on_commit_date.sql)。
+使用 `o_orderstatus = 'F'` 和 `l_receiptdate = l_commitdate`，各表一个 unary predicate。
+它借鉴 Q21 的日期比较业务，正常接受 customer–orders 顺序；SF1 追加 32 对交替计时加速 1.160×，
+此前两轮独立验证为 1.199× / 1.025×。详细方法与全部结果见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+若 orders 也要时间条件，可用 [Q3 截止日版本](tpch/orders_before_cutoff_received_on_commit_date.sql)：
+`o_orderdate < DATE '1995-03-15'` 配合 `l_receiptdate = l_commitdate`，正常重排，SF1 本次加速 1.140×。
+
+[1997 截止日的跨年交付版本](tpch/orders_before_1997_cross_year_on_commit_date.sql) 是先前使用 EXTRACT 的探索记录，
+SF1 独立验证为 1.537×，交替对照为 1.412×。对照显示较大收益主要来自截止日变化；
+仅在原 1995 截止日追加谓词未显示明显增强，不能把收益归因于跨年谓词本身。
+
+**各轮论文候选：** [有业务语义的 SQL、算法决策与 SF1 数据](PAPER_EXAMPLE.md)。
 该实例只调整 unary predicates，由 DP 自然选择 customer–orders 先连接，默认 ON 实际采用该计划。
 当前实验构建将 SJ 成本权重设为 0.20；下文先前的 SF1/SF100/门控诊断使用权重 1.0，属于历史对照。
+
+**只调整 orders / lineitem 的性能正例：** [已完成订单的延期折扣明细](tpch/fulfilled_orders_late_discounted_lines.sql)。
+customer 不加过滤，保持当前参数并正常通过 gate；SF1 两轮独立验证各 11 次，分别加速 1.221× / 1.250×。
+完整 SQL、成本决策、复现命令和原始数据位置见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+更简单的 [单一 lineitem 谓词版本](tpch/fulfilled_orders_large_quantity_lines.sql) 保持订单状态条件，
+仅使用 `l_quantity >= 50`；正常接受 customer–orders 顺序，SF1 两轮实测加速 1.210× / 1.137×。
+它替换业务筛选条件，与前述三谓词查询不等价。
 
 在仓库根目录运行：
 
