@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--threads", type=int, default=10)
     parser.add_argument("--runs", type=int, default=9, help="Timed executions per mode after warm-up")
     parser.add_argument("--timeout", type=int, default=120, help="Per-statement limit in seconds")
+    parser.add_argument("--skip-correctness", action="store_true",
+                        help="Skip result export/comparison; report SKIPPED and time all modes")
     parser.add_argument("--force-candidate", action="store_true", help="Also run diagnostic forced ON")
     parser.add_argument("--out", type=Path, help="New result directory (must not already exist)")
     args = parser.parse_args()
@@ -79,6 +81,19 @@ def main():
             )
         return (out / f"{label}.stdout.txt").read_text()
 
+    def read_decision(label):
+        records = [line for line in (out / f"{label}.trace.txt").read_text().splitlines()
+                   if line.startswith("[OY_DECISION] ")]
+        if not records:
+            raise RuntimeError(f"Missing OuterYan decision for {label}")
+        return dict(token.split("=", 1) for token in records[-1].split()[1:])
+
+    def verify_bare_decision(mode, label):
+        actual = read_decision(label)
+        for key in ("selected_plan", "outer_reordered", "reason"):
+            if actual[key] != report["modes"][mode]["decision"][key]:
+                raise RuntimeError(f"Bare query and EXPLAIN disagree: {mode} {key}")
+
     metadata = json.loads(run("metadata", setup("off") + ".mode json\n" +
         "SELECT table_name, estimated_size FROM duckdb_tables() WHERE schema_name='main';\n"))
     report = {
@@ -86,6 +101,7 @@ def main():
         "binary_sha256": hashlib.sha256(args.bin.read_bytes()).hexdigest(),
         "platform": platform.platform(), "threads": args.threads, "runs": args.runs,
         "tables": metadata, "modes": {},
+        "correctness_check": "skipped" if args.skip_correctness else "full_multiset",
         "timing_method": "Bare SELECT, profiling/traces off, CLI trash mode, two warm-ups; "
                          "alternating mode order across two batches; includes optimization and result draining.",
     }
@@ -96,13 +112,7 @@ def main():
         raw = run(label, setup(mode) + ".mode json\nPRAGMA explain_output='all';\nEXPLAIN " + query,
                   mode, trace=mode != "off")
         (out / f"{mode}.plan.txt").write_text(raw)
-        decision = {}
-        if mode != "off":
-            records = [line for line in (out / f"{label}.trace.txt").read_text().splitlines()
-                       if line.startswith("[OY_DECISION] ")]
-            if not records:
-                raise RuntimeError(f"Missing OuterYan decision for {mode}")
-            decision = dict(token.split("=", 1) for token in records[-1].split()[1:])
+        decision = read_decision(label) if mode != "off" else {}
         report["modes"][mode] = {"decision": decision}
         print(f"{mode}: selected={decision.get('selected_plan', 'DUCKDB')} "
               f"reordered={decision.get('outer_reordered', 'n/a')} "
@@ -111,7 +121,12 @@ def main():
     # Compare complete CSV record multisets, preserving duplicates and embedded newlines.
     # This single-example runner intentionally uses memory proportional to the result.
     baseline = None
+    rows = None
     for mode in modes:
+        if args.skip_correctness:
+            report["modes"][mode]["correctness"] = "SKIPPED"
+            print(f"{mode}: correctness SKIPPED (--skip-correctness)", flush=True)
+            continue
         label = f"{mode}.correctness"
         try:
             run(label, setup(mode) + ".mode csv\n.headers off\n.nullvalue __PAPER_SQL_NULL__\n" + query,
@@ -126,12 +141,7 @@ def main():
                 raise
             continue
         if mode != "off":
-            records = [line for line in (out / f"{label}.trace.txt").read_text().splitlines()
-                       if line.startswith("[OY_DECISION] ")]
-            actual = dict(token.split("=", 1) for token in records[-1].split()[1:])
-            for key in ("selected_plan", "outer_reordered", "reason"):
-                if actual[key] != report["modes"][mode]["decision"][key]:
-                    raise RuntimeError(f"Bare query and EXPLAIN disagree: {mode} {key}")
+            verify_bare_decision(mode, label)
         with (out / f"{label}.stdout.txt").open(newline="") as source:
             rows = collections.Counter(tuple(row) for row in csv.reader(source))
         if baseline is None:
@@ -145,7 +155,7 @@ def main():
         print(f"{mode}: correctness PASS ({sum(rows.values())} rows)", flush=True)
         (out / f"{label}.stdout.txt").unlink()
     del baseline, rows
-    valid_modes = [mode for mode in modes if report["modes"][mode]["correctness"] == "PASS"]
+    valid_modes = [mode for mode in modes if report["modes"][mode]["correctness"] in ("PASS", "SKIPPED")]
 
     # Two separate processes per mode, reversing order in batch two. Each warms
     # its own buffer pool twice. No EXPLAIN, tracing, output formatting or CTAS.
@@ -173,9 +183,16 @@ def main():
     # Profiles are separate from timing and retain actual cardinalities/operator times.
     for mode in valid_modes:
         profile_path = str(out / f"{mode}.profile.json").replace("'", "''")
-        run(f"{mode}.profile", setup(mode) + query + "\n" +
+        label = f"{mode}.profile"
+        trace = args.skip_correctness and mode != "off"
+        run(label, setup(mode) + query + "\n" +
             f"CALL enable_profiling(format='json', save_location='{profile_path}');\n" + query,
-            mode, executions=2)
+            mode, trace=trace, executions=2)
+        if args.skip_correctness:
+            if trace:
+                verify_bare_decision(mode, label)
+            profile = json.loads((out / f"{mode}.profile.json").read_text())
+            report["modes"][mode].update(rows=profile["rows_returned"], rows_source="profile")
 
     (out / "result.json").write_text(json.dumps(report, indent=2) + "\n")
     lines = ["# Single paper example", "", f"Threads: {args.threads}; timed runs/mode: {args.runs}.",
@@ -188,7 +205,11 @@ def main():
         lines.append(f"| {mode} | {decision.get('selected_plan', 'DUCKDB')} | "
                      f"{decision.get('outer_reordered', 'n/a')} | {result['correctness']} | "
                      f"{result.get('rows', '—')} | {median} | {speedup} |")
-    lines += ["", "Only modes whose result multisets match OFF are timed. "
+    correctness_note = (
+        "Result comparison skipped (--skip-correctness); row counts come from separate profiles. "
+        if args.skip_correctness else "Only modes whose result multisets match OFF are timed. "
+    )
+    lines += ["", correctness_note +
               "Forced mode is diagnostic, not default selection.",
               "", report["timing_method"], "", "See result.json for raw samples and selection reasons."]
     for mode in modes:

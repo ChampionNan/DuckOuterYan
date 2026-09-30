@@ -3,6 +3,52 @@
 这个目录只保存手工指定的论文 SQL，不加入现有 benchmark corpus。
 目前包含用户提供的 `customer LEFT JOIN (orders JOIN lineitem)` 例子；未指定论文名称或编号。
 
+**后续性能实验按用户要求跳过完整结果比对：** 在命令中加 `--skip-correctness`。
+这会跳过 CSV 导出和 Python 多重集比较，结果标为 `SKIPPED`；行数来自单独采集的 profile。
+仍保留 EXPLAIN、实际裸查询的计划选择检查、计时和 profile，不额外执行结果比对查询。
+下面已完成实验的历史 `PASS` 记录保持不变。省略该开关时仍可执行原有完整比对流程。
+
+**当前推荐，真实 SF100 已达标：**
+[1998 年 7 月前下单、收货延期超过 100 天](tpch/orders_before_july_1998_receipts_over_100_days_late.sql)。
+orders 为 `o_orderdate < DATE '1998-07-01'`，lineitem 为 `l_receiptdate - l_commitdate > 100`，
+各一个比较条件，customer 不过滤，连接条件不变。
+服务器实测 10 线程、独立每模式 11 次：**2,780.068 → 1,775.566 ms（1.566×）**；
+追加 11 对交替计时：**2,766.287 → 1,794.220 ms（1.542×）**，11 对全部 ON 更快。
+完整裸查询多重集一致，16,082,149 行，实际 profile 确认 customer–orders 先连接。
+沿用现有 `0.20 / 1.20` 参数，正常 DP 和 gate 选中，无 force 或统计注入。
+业务语义、完整 SQL、物理行数、服务器版本及全部验证记录见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/orders_before_july_1998_receipts_over_100_days_late.sql \
+  --db tpch_db --bin build/release/duckdb \
+  --threads 10 --runs 11 --timeout 600 --skip-correctness
+```
+
+一次比较四个固定版本（原 90 天 INTERVAL、90 天差值、原截止日 100 天差值、最终候选）：
+
+```bash
+python3 auto_test/paper_examples/compare_sf100_candidates.py \
+  --db tpch_db --bin build/release/duckdb --threads 10 --runs 11 --min-speedup 1.4 \
+  --skip-correctness
+```
+
+比较脚本逐个调用单例 harness，传递跳过比对开关，再检查执行 profile 的 grouping，保留所有结果。
+`--min-speedup` 只影响报告中的达标判断，不影响优化器。
+SF1 运行不会被标为 SF100 达标。未达到门槛是实验结果，不是脚本错误；查看 `comparison.json`。
+
+以下保留之前的候选与未达标结果。
+
+**新候选的真实 SF100 检查：** [90 天 DATE 差值版本](tpch/orders_before_1997_receipts_over_90_days_late_date_difference.sql)
+使用 `l_receiptdate - l_commitdate > 90`，保持原有语义，减少 TIMESTAMP 运算。
+10 线程、每模式 11 次为 **2,794.181 / 2,164.612 ms（1.291×）**，完整结果校验和目标 grouping 通过，
+仍低于当前 1.4× 目标。详细 profile 分析见 [PAPER_EXAMPLE.md](PAPER_EXAMPLE.md)。
+
+**SF100 原例子结果：低于 1.4× 目标。** 用户在真实 SF100、10 线程、每模式 11 次下测试
+严重延期版本，OFF / ON 中位数为 **5,224.974 / 4,576.127 ms（1.142×）**，
+正常选择 OUTERYAN 并重排，完整结果校验 PASS，19,869,795 行。
+已通过 SSH 核验原始样本及 profile。下述 SF1 收益不能视为 SF100 达标。
+
 **较强收益的备选：** [超过 90 天的延期交付审计](tpch/orders_before_1997_receipts_over_90_days_late.sql)。
 orders 使用 `o_orderdate < DATE '1997-01-01'`，lineitem 仅使用
 `l_receiptdate > l_commitdate + INTERVAL '90 days'`，各一个比较条件。
@@ -23,7 +69,7 @@ python3 auto_test/paper_examples/run_example.py \
 使用当前 Release 构建；脚本不会生成数据，也不会通过 `--db` 自动改变 scale。
 `--runs 11` 为每模式正式计时次数，`--timeout 600` 为每条语句的秒数上限。
 正确性检查比较完整结果多重集，其 Python 内存需求随结果行数增长。
-现有 SF100 统计外推仅验证计划选择，没有 SF100 性能实测结论。
+此前 SF100 统计外推仅验证计划选择；用户随后提供的真实 SF100 耗时见本文开头。
 
 **当前推荐，常见日期过滤且每表一个比较：** [已全部发货订单中、截止日前发货的明细](tpch/fulfilled_orders_shipped_before_april_1992.sql)。
 使用 `o_orderstatus = 'F'` 和 `l_shipdate < DATE '1992-04-01'`，正常重排，参数保持 `0.20 / 1.20`。

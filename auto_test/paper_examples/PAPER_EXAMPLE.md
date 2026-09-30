@@ -1,5 +1,132 @@
 # 有业务语义、由 DP 自然选中的三表重排例子
 
+## 当前推荐：真实 SF100 两轮均超过 1.5×（2026-09-30）
+
+[完整 SQL](tpch/orders_before_july_1998_receipts_over_100_days_late.sql)：
+
+```sql
+SELECT c_name, o_orderkey, l_extendedprice
+FROM customer
+LEFT OUTER JOIN (
+    orders JOIN lineitem
+        ON o_orderkey = l_orderkey
+       AND o_orderdate < DATE '1998-07-01'
+       AND l_receiptdate - l_commitdate > 100
+) ON c_custkey = o_custkey;
+```
+
+业务含义：审计 **1998 年 7 月前下单、实际收货比承诺日期晚超过 100 天** 的订单明细，
+并保留没有此类明细的客户。orders / lineitem 各一个比较谓词，customer 不过滤，两个连接条件不变。
+下单截止日形式来自 Q3，延期日期关系来自 Q21；截止日和 100 天阈值是本例的报告参数，
+**不是原样标准 Q3/Q21 查询**。DATE 差值以天为单位，避免原 INTERVAL 写法的 TIMESTAMP 运算。
+
+已在 `bchenba@yikecpu8.cse.ust.hk` 的 `/home/data/bchenba/DuckYanOuter/tpch_db` 上实际执行：
+customer 15,000,000 行，orders 150,000,000 行，lineitem 600,037,902 行。
+使用服务器原有 Release、10 线程，未改源码、统计或成本参数。
+正常 DP 选择 customer–orders 先连接，物理 profile 验证该 grouping 和三个 SJ probes；
+EXPLAIN 和裸 SELECT 的选择一致。完整裸查询结果多重集一致，共 **16,082,149 行**。
+
+| 验证方式 | OFF 中位数 | ON 中位数 | OFF / ON |
+|---|---:|---:|---:|
+| 独立验证，每模式 11 次 | 2,780.068 ms | 1,775.566 ms | **1.566×** |
+| 追加 11 对相邻 OFF/ON 交替计时 | 2,766.287 ms | 1,794.220 ms | **1.542×** |
+
+追加复测 11 / 11 对 ON 更快。第一轮沿用 `run_example.py` 的两批独立进程、反转模式顺序方法；
+第二轮在同一连接中交替模式顺序，每模式预热三次，SET 不计时。
+两轮均执行裸 SELECT 并完整消费结果，timing 时关闭 trace/profile，保存全部样本。
+每个比值均比较 **同一 SQL** 的 OFF/ON；没有将旧 SQL 的 OFF 与新 SQL 的 ON 相除。
+
+成本模型仍为 `SEMIJOIN_COST_RATIO=0.20`、gate 上限 `1.20`、`SelectionMode::GATED`。
+候选 / baseline 估计成本比为 **1.091347**，正常接受原因 `COST_OUTERYAN_WITHIN_LIMIT`，无 force。
+候选的原始估计成本略高于 baseline，处于现有 gate 允许范围内。
+
+实际过滤和约简过程：
+
+- lineitem 日期谓词保留 **4,798,025 / 600,037,902（约 0.80%）** 行。
+- orders 日期谓词保留 **147,942,513** 行，SJ 将其约简到 **4,657,627** 行。
+- 两个真实 join 的输入行数合计由 **172,472,629** 降至 **40,397,403**。
+- OFF 先连接 orders–lineitem；ON 在 SJ 约简后先连接 customer–orders。
+  收益属于包含 SJ 和重排的完整 OuterYan 方案，未单独隔离重排本身的收益。
+
+本轮还保留了未达标结果：原 90 天 INTERVAL 为 1.142×；90 天差值版为 1.291×；
+1997 年初截止的 100 天差值版为 1.378×。
+随后限定八个候选进行初筛，五个正常重排；1996、1997 年初、1997 年中、1998 年初、1998 年中
+截止点的初筛比分别为 1.225×、1.368×、1.410×、1.468×、1.499×。
+另两个早期明细日期条件被 gate 拒绝，AIR 条件使用 DuckDB 计划。
+只对筛出的最终候选做上述完整校验及独立复测，没有将初筛的最大值作为最终结果。
+
+标准目录中的后续性能测试命令（按用户后续要求跳过结果比对；上表历史数据实际做过比对）：
+
+```bash
+python3 auto_test/paper_examples/run_example.py \
+  --query auto_test/paper_examples/tpch/orders_before_july_1998_receipts_over_100_days_late.sql \
+  --db tpch_db --bin build/release/duckdb \
+  --threads 10 --runs 11 --timeout 600 --skip-correctness
+```
+
+本次服务器源码工作树保持干净，所有新增远端文件位于忽略的实验目录。
+当前无需重新编译来运行新 SQL；以后源码有变化时，先 `make release`。
+服务器 Git HEAD 为 `8819af336efb00ab9ad52be4f190a69e96778110`，
+其文件树与 `062427250e` 相同；本次 Release SHA256 为
+`9d96cb04a707575bda709360766086d7e42b42f6ea1d87d7a6a655bf8b0925bc`。
+
+远端完整产物位于
+`/home/data/bchenba/DuckYanOuter/auto_test/results/paper_sf100_search_20260930_1623/`：
+`july1998_late100/` 为完整验证，`july1998_late100_paired/` 为交替复测，
+`cutoff_screen/` 为全部初筛记录，`runner/tpch/` 包含本次实际运行的 SQL。
+本地保存了 [独立结果](../results/paper_sf100_search_20260930_1623/july1998_late100/result.json)、
+[执行 grouping](../results/paper_sf100_search_20260930_1623/july1998_late100/verified_physical_groupings.json)、
+[交替复测](../results/paper_sf100_search_20260930_1623/july1998_late100_paired/result.json)、
+[全部初筛结果](../results/paper_sf100_search_20260930_1623/screening.json)。原始产物不随 Git 提交。
+
+## 真实 SF100：去除日期谓词的 TIMESTAMP 运算（2026-09-30）
+
+[按天数比较的 90 天版本](tpch/orders_before_1997_receipts_over_90_days_late_date_difference.sql)
+将 lineitem 条件写为 `l_receiptdate - l_commitdate > 90`。
+对 TPC-H 的有限 DATE 值，这与原来的 90 天 INTERVAL 比较语义一致，
+但执行计划中不再把收货日期转换为 TIMESTAMP。
+仍保留一个 orders 条件、一个 lineitem 条件，customer 不过滤，连接条件和成本参数不变。
+
+在 `bchenba@yikecpu8.cse.ust.hk` 的真实 SF100 上，使用现有 Release、10 线程，
+每模式 11 次，完整裸查询多重集一致，物理 profile 确认 customer–orders 先连接：
+
+| 版本 | OFF 中位数 | ON 中位数 | OFF / ON | 行数 |
+|---|---:|---:|---:|---:|
+| 原 90 天 INTERVAL 写法（此前运行） | 5,224.974 ms | 4,576.127 ms | 1.142× | 19,869,795 |
+| 90 天 DATE 差值写法 | 2,794.181 ms | 2,164.612 ms | 1.291× | 19,869,795 |
+| 100 天 DATE 差值写法 | 2,342.006 ms | 1,699.395 ms | 1.378× | 15,678,393 |
+
+两版分开运行，跨版本绝对耗时变化由 profile 辅助解释；每行加速比均比较同一 SQL 的 OFF/ON。
+新写法的 ON FILTER 累计 CPU 时间约 2.48 秒，旧版约 26.85 秒。
+这项改写明显减少共同开销，但 **90 天新版本仍未达到 1.4×**，不能作为达标结果。
+进一步将延期阈值调整到 [100 天](tpch/orders_before_1997_receipts_over_100_days_late.sql)，
+完整校验及物理 grouping 通过，但独立 11 次结果为 **1.378×**，仍不达标；不四舍五入为 1.4×。
+正常成本比为 1.091347，SJ 权重 0.20、gate 上限 1.20，三个 SJ probes，无强制候选。
+远端产物：`auto_test/results/paper_sf100_search_20260930_1623/datediff90/`。
+100 天版本产物位于同级 `datediff100/`。
+
+SF1 的同一 DATE 差值版本独立验证为 1.419×，不能由此预测 SF100 达标。
+本地完整裸查询还验证了 INTERVAL 与 DATE 差值版本的结果多重集一致。
+
+## SF100 原例子结果：低于 1.4× 目标（2026-09-30）
+
+用户在真实 SF100、10 线程上运行严重延期版本，每模式正式计时 11 次，报告如下：
+
+| 模式 | 最终选择 | 重排 | 正确性 | 结果行数 | 中位数 | OFF / mode |
+|---|---|---|---|---:|---:|---:|
+| OFF | DUCKDB | — | PASS | 19,869,795 | 5,224.974 ms | 1.000× |
+| ON | OUTERYAN | 1 | PASS | 19,869,795 | 4,576.127 ms | 1.142× |
+
+这说明该版本已被正常选中，但没有达到 **真实 SF100 至少 1.4×** 的目标
+（最初要求 1.5×，用户随后调整为 1.4×）。
+以下 SF1 结果和统计外推均不能替代这一验收条件。
+本表最初来自用户提供的 harness 汇总，随后已通过 SSH 核验远端原始样本及 profile。
+ON 的 FILTER 累计 CPU 时间约 26.85 秒，占查询累计 CPU 时间约 60.5%；
+OFF 同一 FILTER 约 26.89 秒。并行算子的累计 CPU 时间不等于查询墙钟耗时。
+两侧 profile 的磁盘溢写峰值均为 0，因此该次 profile 没有显示溢写瓶颈。
+远端产物目录为
+`/home/data/bchenba/DuckYanOuter/auto_test/results/paper_orders_before_1997_receipts_over_90_days_late_20260930_160353`。
+
 ## 更强收益的备选：单一严重延期条件（2026-09-30）
 
 在每个过滤表仅一个比较条件、保持普通业务语义和当前参数的约束下，
@@ -59,7 +186,8 @@ python3 auto_test/paper_examples/run_example.py \
 
 ### 该严重延期版本的 SF100 统计外推检查
 
-工作区只有 SF1 的 `tpch_db`，尚无该查询的真实 SF100 性能结果。
+以下为真实 SF100 测试之前的规划诊断。本地工作区只有 SF1 的 `tpch_db`；
+后续用户提供的真实 SF100 结果见本文开头。
 对当前 SQL 使用现有 planning-only 工具，将表行数、四个连接键的 NDV 和键最大值放大 100 倍，
 其他统计保持 SF1 值；只读原库，不执行 SF100 查询。这不是真实 SF100 采集统计。
 SF1 对照的成本和决策与此前裸查询一致，放大行数及 NDV 已校验。
