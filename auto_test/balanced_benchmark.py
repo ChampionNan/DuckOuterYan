@@ -33,7 +33,8 @@ FAMILIES = ("graph", "tpch", "tpcds", "job")
 TIERS = ("low", "medium", "high")
 SHAPES = ("left_deep", "right_deep", "bushy")
 TARGET = 180
-QUALIFICATION_TIMEOUT_SECONDS = 900
+QUALIFICATION_TIMEOUT_SECONDS = 600
+GRAPH_RELATION_WEIGHTS = {4: 4, 5: 5, 6: 1}
 HISTORICAL_ROLE = "historical_slow_baseline_case"
 HISTORICAL_CASES = {
     "q80_alt": ("derived__ojb_tpcds_q80_store_channel_alt",
@@ -411,6 +412,16 @@ def candidate_rows(design, evidence, root=ROOT):
     return groups
 
 
+def graph_relation_quotas(group_count):
+    """Largest-remainder 40/50/10 allocation; each structure pairs three tiers."""
+    denominator = sum(GRAPH_RELATION_WEIGHTS.values())
+    quotas = {n: group_count * weight // denominator for n, weight in GRAPH_RELATION_WEIGHTS.items()}
+    order = sorted(quotas, key=lambda n: (-(group_count * GRAPH_RELATION_WEIGHTS[n] % denominator), n))
+    for n in order[:group_count - sum(quotas.values())]:
+        quotas[n] += 1
+    return quotas
+
+
 def select_groups(groups, per_family=180, batch=0):
     """Independent of candidate speed-ups: balance shapes, source reuse and edge kinds."""
     if per_family <= 0 or per_family % 9 or batch < 0:
@@ -423,9 +434,13 @@ def select_groups(groups, per_family=180, batch=0):
             controls = 0
             pool = [g for g in family_groups if g[0]["tree_shape"] == shape]
             quota = per_family // 9
+            relation_quotas = graph_relation_quotas(quota)
+            used_relations = Counter()
             # Earlier batches are deterministic disjoint reserves, not renamed copies.
             chosen = []
-            for _ in range((batch+1)*quota):
+            for position in range((batch+1)*quota):
+                if position % quota == 0:
+                    used_relations.clear()
                 if not pool:
                     raise ValueError(f"Insufficient distinct candidates for {family}/{shape}/batch{batch}")
                 def rank(g):
@@ -435,13 +450,18 @@ def select_groups(groups, per_family=180, batch=0):
                             used_sources[r["source_seed"]], used_topologies[r["topology"]],
                             max(kinds[k] for k in "ILRF")-min(kinds[k] for k in "ILRF"),
                             hashlib.sha256(r["expression_fingerprint"].encode()).hexdigest())
-                group = min(pool, key=rank)
+                candidates = [g for g in pool if family != "graph" or
+                              used_relations[int(g[0]["relation_count"])] < relation_quotas[int(g[0]["relation_count"])]]
+                if not candidates:
+                    raise ValueError(f"Insufficient relation-count quota for {family}/{shape}/batch{batch}")
+                group = min(candidates, key=rank)
                 pool.remove(group)
                 row = group[0]
                 controls += row["provenance_class"] == "industry_synthetic_control"
                 used_sources[row["source_seed"]] += 1
                 used_topologies[row["topology"]] += 1
                 used_kinds.update(row["join_vector"])
+                used_relations[int(row["relation_count"])] += 1
                 chosen.append(group)
             selected.extend(chosen[batch*quota:])
     return selected
@@ -515,6 +535,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             "supplementary_counts": dict(Counter(r["family"] for r in records if is_historical_case(r))),
             "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
             "family_shapes": {f:dict(Counter(r["tree_shape"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
+            "graph_relation_counts": dict(Counter(r["relation_count"] for r in balanced_records if r["family"] == "graph")),
+            "graph_relation_weights": GRAPH_RELATION_WEIGHTS,
             "historical_exclusion_observations": len(evidence["excluded"]),
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "

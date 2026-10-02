@@ -1225,6 +1225,42 @@ TEST_CASE("outer_yan policy: GROUP BY + SUM over LEFT chain remains equivalent",
 	                                     "GROUP BY a.id");
 }
 
+TEST_CASE("outer_yan COUNT pushdown preserves multiplicity across NULL-padded branches",
+          "[outer_yan][passes][equivalence][aggregate_policy][count_annotation]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	for (idx_t i = 1; i <= 5; i++) {
+		REQUIRE_NO_FAIL(con.Query("CREATE TABLE R" + std::to_string(i) + "(src INTEGER, dst INTEGER)"));
+	}
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO R1 VALUES (1,10), (1,10)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO R2 VALUES (10,20), (10,20), (10,20)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO R3 VALUES (20,99), (20,30), (NULL,30)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO R4 VALUES (20,40), (20,40), (20,40), (20,40), (20,40)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO R5 VALUES (30,50), (30,50), (30,50), (30,50), (NULL,50)"));
+	// The two R3 branches contribute 30 unmatched rows and 120 matched rows.
+	// Additional NULL base keys must not match each other through equality.
+	const vector<string> branches {
+	    "(R3 LEFT JOIN R5 ON R3.dst=R5.src)",
+	    "(R5 RIGHT JOIN R3 ON R3.dst=R5.src)",
+	    "(R3 FULL JOIN R5 ON R3.dst=R5.src)"
+	};
+	for (const auto &branch : branches) {
+		const string sql = "SELECT COUNT(*) FROM " + branch +
+		                   " LEFT JOIN (R1 FULL JOIN (R4 INNER JOIN R2 ON R2.dst=R4.src) "
+		                   "ON R1.dst=R2.src) ON R2.dst=R3.src WHERE R1.src <= 2";
+		INFO(sql);
+		AssertOuterYanPreservesResults(con, sql);
+		ScopedOuterYanCandidateForce force_candidate;
+		const auto plan = ExplainOptimizedPlan(con, "", sql);
+		REQUIRE(plan.find("GROUP_BY") != string::npos);
+		REQUIRE(plan.find("COALESCE") != string::npos);
+		auto result = con.Query(sql);
+		REQUIRE_FALSE(result->HasError());
+		REQUIRE(result->types[0] == LogicalType::BIGINT);
+		REQUIRE(result->GetValue<int64_t>(0, 0) == 150);
+	}
+}
+
 TEST_CASE("outer_yan policy: GROUP BY + COUNT/MIN/MAX remains equivalent",
           "[outer_yan][passes][equivalence][aggregate_policy]") {
 	DuckDB db(nullptr);

@@ -125,7 +125,7 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
-        self.assertEqual(experiment["timeout_seconds"], "900")
+        self.assertEqual(experiment["timeout_seconds"], "600")
         self.assertEqual(experiment["timing_runs"], "1")
         self.assertEqual(experiment["check_correctness"], "1")
 

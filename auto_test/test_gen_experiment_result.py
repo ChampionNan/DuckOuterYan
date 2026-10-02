@@ -19,6 +19,29 @@ STATS = PLOT = PAPER = RESULT
 
 
 class BenchmarkStatisticsTest(unittest.TestCase):
+    def test_independent_timeouts_preserve_completed_side_but_exclude_pairs(self):
+        frame = self.frame()
+        frame["correct"] = frame["correct"].astype(str)
+        frame["timeout_seconds"] = "NA"
+        frame["duckdb_timeout_seconds"] = 600
+        frame["outeryan_timeout_seconds"] = 300
+        frame["duckdb_status"] = ["timeout", "measured", "measured"]
+        frame["outeryan_status"] = ["measured", "timeout", "measured"]
+        frame["duckdb_timeout_stage"] = ["correctness", "-", "-"]
+        frame["outeryan_timeout_stage"] = ["-", "timing", "-"]
+        frame.loc[0, ["correct", "note", "tm_off"]] = ["TIMEOUT", "TIMEOUT-OFF-CORRECTNESS", float("nan")]
+        frame.loc[1, ["note", "tm_on"]] = ["TIMEOUT-ON-TIMING", float("nan")]
+        detail = RESULT.prepare_queries(frame, "tm")
+        self.assertEqual(detail["valid_timing"].tolist(), [False, False, True])
+        report = RESULT.build_timeout_statistics(detail)
+        self.assertIsNone(report["limit_seconds"])
+        self.assertEqual(report["recorded_limits_seconds"], [300, 600])
+        self.assertEqual(report["per_engine"]["duckdb"]["timeout_queries"], 1)
+        self.assertEqual(report["per_engine"]["outeryan"]["timeout_queries"], 1)
+        self.assertEqual(report["per_engine"]["duckdb"]["stages"], {"correctness": 1})
+        self.assertEqual(report["queries"][0]["on_s"], 2)
+        self.assertIsNone(report["queries"][0]["off_s"])
+
     def test_timeout_uses_recorded_limit_without_relabeling_legacy_data(self):
         frame = self.frame()
         for timeout in (900, 1800):
@@ -1415,7 +1438,7 @@ class PaperStatisticsTest(unittest.TestCase):
             ])
             self.assertNotIn("\t", output)
             self.assertNotIn("assigned the policy default", output)
-            self.assertIn("-minute per-statement limit", output)
+            self.assertIn("-minute per-engine statement limit", output)
             self.assertIn(r"\fix{1} of \fix{18}", output)
             self.assertIn(r"\# Attributes", output)
             self.assertIn(r"\label{tab:shape-effect}", output)

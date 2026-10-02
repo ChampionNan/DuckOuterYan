@@ -31,7 +31,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 | [`run_all.sh`](run_all.sh) | 编译、建库、生成 query 并运行完整工作流 | 一键入口；`--query-type join/graph/aggregate` 选择类型 |
 | [`build_db.sh`](build_db.sh) | 构建或复用 Graph、TPC-H、TPC-DS、JOB 数据库 | 被 `run_all.sh` 调用，也可单独指定 family；已有数据库默认复用 |
 | [`gen_outerjoin_benchmark.py`](gen_outerjoin_benchmark.py) | 生成去重 SQL、manifest、历史名称映射及三档语义过滤；`--audit-selectivity` 核验实际过滤比例 | 修改或重建 corpus 时；不运行性能查询 |
-| [`qualify_benchmark.py`](qualify_benchmark.py) | 按 cpu9 实测、15 分钟超时、双侧 >1s、speed-up >=0.8 和实际 selectivity 筛选 | 输出排除原因、每 family/tier 的有效数量/缺口和统计，不修改原始结果 |
+| [`qualify_benchmark.py`](qualify_benchmark.py) | 按 cpu9 实测、双方各 10 分钟超时、双侧 >1s、speed-up >=0.8 和实际 selectivity 筛选 | 输出排除原因、每 family/tier 的有效数量/缺口和统计，不修改原始结果 |
 | [`gen_queries.py`](gen_queries.py) | 重建固定的 legacy SQL 来源，供当前 corpus 的 graph 查询和来源追溯使用 | `gen_outerjoin_benchmark.py` 的 `regenerate_legacy_sources()` 仍直接调用；文件名旧但并非废弃依赖 |
 | [`experiment_onoff.sh`](experiment_onoff.sh) | 正常/OuterYan 的计划选择、裸查询正确性、计时和 profiling | 主实验入口；输出逐 query TXT/CSV，调用共享统计与 profiling 模块 |
 | [`check_outeryan_dp.py`](check_outeryan_dp.py) | 只用只读 `EXPLAIN` 检查各生成用例是否进入 DP，并记录选择的 plan 与原因 | 优化器覆盖与选择检查；需已有数据库和编译好的 CLI；不是性能测试 |
@@ -119,7 +119,9 @@ corresponding environment values.
 | `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
-| `OY_TIMEOUT_SECS` | `900` | Per-statement timeout (15 minutes), no retry; `0` disables it |
+| `OY_TIMEOUT_SECS` | `600` | Shared default per statement (10 minutes); `0` disables it |
+| `OY_DUCKDB_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` | Independent OFF limit; timeout does not skip ON |
+| `OY_OUTERYAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` | Independent ON limit; timeout does not skip OFF |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `1` | First unprofiled execution after warm-up/profile; explicit odd N uses a median |
 | `OY_CHECK_CORRECTNESS` | `1` | Compare one bare OFF/ON result pair for every query, including fallbacks |
@@ -178,9 +180,11 @@ bash auto_test/run_all.sh --all
 若已确认两库实际都是 SF50，则不必重建。环境中的 `TPCH_SF/TPCDS_SF` 会覆盖默认值，
 切换后应清除旧覆盖值或都设为 50。原始 SF100 结果保留，不能和 SF50 结果当成同一次实验混合。
 换库后重新执行 selectivity audit 和计划选择审计；此前本地计划选择数不代表 cpu9 的 SF50 结果。
-当前默认超时为 900 秒（15 分钟）/statement；不自动延长或重试。
-旧 `OY_TIMEOUT_SECS` 环境值或显式 `--timeout` 仍会覆盖默认值；需要时 `unset OY_TIMEOUT_SECS`。
-本次超时调整不修改代价模型或 723 条 query 的 SQL。
+当前默认 DuckDB/OFF 和 OuterYan/ON **各 600 秒（10 分钟）/statement**，独立计时；
+只停止超时的一侧，不自动延长或重试，另一侧继续执行。
+`--timeout 600` 设置双方；`--duckdb-timeout` / `--outeryan-timeout` 分别覆盖它，
+且具体侧的 CLI 参数优先于共同参数。旧 timeout 环境值仍会覆盖默认值。
+本次不修改代价模型；Graph 的 relation 数配额已调整（见下文）。
 
 ```bash
 # Small TPC databases
@@ -204,6 +208,8 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 其中 **720 条配平候选**：
 Graph/TPC-H/TPC-DS/JOB **各 180 条**。每 family 的三档 selectivity 各 60，
 left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mixed。
+Graph 的 4/5/6 relation 数量分别为 **72/90/18**（原为 36/78/66），
+每个 selectivity×shape 单元为 8/10/2；数据库及图数据集不变。
 类型为 `join` 384、`graph` 162（含 industry controls）、`aggregate` 174。
 `--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。
@@ -216,14 +222,15 @@ left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mi
 只测这三条可用：
 
 ```bash
-bash auto_test/experiment_onoff.sh --all --timeout 900 \
+bash auto_test/experiment_onoff.sh --all --timeout 600 \
   --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
 ```
 
-默认 15 分钟测试可用 `bash auto_test/run_all.sh --all`，但 Q80-alt
+默认双方各 10 分钟测试可用 `bash auto_test/run_all.sh --all`，但 Q80-alt
 旧 DuckDB 时间为 1137.5 秒（约 19 分钟），SF50 下能否完成需重测。
-默认及配平资格政策均为 900 秒；旧 1800 秒结果保留原记录，不混作新的 900 秒资格测量。
-当前默认不做正确性比较；OFF 预热/profiling/计时超时仍会停止该 query，不代表 OuterYan 侧也超时。
+默认及配平资格政策均为双方各 600 秒；旧 900/1800 秒结果保留原记录，不混作新的资格测量。
+默认检查所有 query 的等价性。任何一侧超时都不阻止另一侧执行；若等价性阶段超时，
+`correct=TIMEOUT`，仍保留完成侧的时间/profile，精确 speed-up 为 `NA`，不混入有效配对统计。
 
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
 `join__tpch__q05_region_sales_ldmx__ilrf__sel_low`（新名称还带 expression hash）。
@@ -255,7 +262,7 @@ python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout
 ```bash
 cd /home/data/bchenba/DuckYanOuter
 git pull --ff-only
-bash auto_test/run_all.sh --all --timeout 900
+bash auto_test/run_all.sh --all --timeout 600
 python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout 600 \
   --audit-output auto_test/results/cpu9_selectivity_audit.json
 python3 auto_test/qualify_benchmark.py \
@@ -269,7 +276,7 @@ python3 auto_test/qualify_benchmark.py \
 CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
 `qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
 `qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
-最终要求双侧运行时间 >1s、<900s、speed-up >=0.8；正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
+最终要求双侧运行时间 >1s、<600s、speed-up >=0.8；正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
 缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
 
 ## Experiment pipeline
@@ -289,7 +296,9 @@ For every corpus query included in the run at each thread count, `experiment_ono
    but still undergoes the default correctness check.
 2. **Correctness comparison is on by default for every query.** Run the bare
    query once OFF and once ON and compare their complete result multisets.
-   A mismatch/error/timeout stops that query before profiling or timing.
+   A mismatch/error stops that query before profiling or timing. Both correctness
+   executions are attempted independently. A timeout stops only that side;
+   the completed side can proceed, with equivalence unverified and speed-up `NA`.
    A verified fallback records `correct=TRUE`, `timing_status=fallback-skip`,
    no measured runtimes, and policy-default speed-up 1.0 excluded from statistics.
    A failed fallback records the actual failure, never a default 1.0 speed-up.
@@ -318,10 +327,17 @@ The compact profiling trace is emitted only while the native profiler is enabled
 it does not write during formal timing. **Rebuild the binary** for this behavior:
 use `run_all.sh`, not a stale CLI with `experiment_onoff.sh`.
 
-Each statement retains the same 900-second default limit. The process watchdog
+Each engine has an independent 600-second default per statement. The process watchdog
 covers `(1 + profile + runs) * limit + grace`, not a larger per-query allowance.
-The first timeout in any stage stops that query with no retry. A profiling
-execution timeout now occurs *before* timing, so it cannot yield a measured pair.
+The first timeout stops only the affected engine, with no retry. A profiling
+timeout occurs *before* timing, so that engine cannot yield a measured runtime.
+The other engine still runs; its runtime and profile remain available. CSV/TXT
+record `duckdb_status` / `outeryan_status`, their `*_timeout_seconds`,
+`*_timeout_stage`, and `*_correctness_status`. Partial optimizer profiles have
+status `PARTIAL`, unavailable totals/overhead are `NA`, and censored pairs do not
+contribute to exact speed-up statistics. If only later timing times out, a
+completed correctness check remains `TRUE`. `statistics.json` additionally reports
+per-engine timeout counts by stage and workload family.
 If executions finish but profile JSON validation fails, retain the independently
 valid unprofiled timing pair and report the missing diagnostic as an error.
 
@@ -336,9 +352,13 @@ Do not pool old three-run medians and the new single-sample protocol as one
 measurement configuration; qualification rejects mixed protocols.
 
 The read-only diagnostic [`graph_count_annotation_check.sql`](diagnostics/graph_count_annotation_check.sql)
-reproduces the count-weight arithmetic behind the known `graph_branch5_forward`
+reproduces the count-weight arithmetic behind the previously incorrect `graph_branch5_forward`
 `bushy/rlfi/global_count` mismatch without materializing its large join result.
-It is not a substitute for bare-query equivalence and does not fix the optimizer.
+The optimizer fix normalizes each COUNT multiplicity before multiplication:
+`COALESCE(left_annot,1) * COALESCE(right_annot,1)`, rather than repairing only the
+final product. It adds no row filters and does not change SUM/MIN/MAX NULL semantics.
+The diagnostic still reproduces the old arithmetic for comparison; it is not a
+substitute for bare-query equivalence.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -560,7 +580,9 @@ the original `BIGINT` type and empty-input value.
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration (default 1)
-  -t, --timeout S     per-statement timeout seconds (default 900; 15 minutes)
+  -t, --timeout S     set both per-statement limits (default 600 each; 10 minutes)
+      --duckdb-timeout S    independent DuckDB/OFF limit
+      --outeryan-timeout S  independent OuterYan/ON limit
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
       --query-type T  all|join|graph|aggregate (default all)
       --all           run each unique SQL once (default)

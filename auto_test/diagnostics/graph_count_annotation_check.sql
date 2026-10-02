@@ -7,7 +7,8 @@
 -- At the subsequent INNER JOIN, the other subtree has multiplicity b.multiplicity.
 -- COUNT(*) requires b.multiplicity * COALESCE(d5.n, 1), not
 -- COALESCE(b.multiplicity * d5.n, 1). The latter loses b.multiplicity - 1.
--- Bitcoin Alpha expected rows (tier, correct_count, current_pushdown_count, lost):
+-- The old bug is fixed by normalizing each factor before multiplication.
+-- Bitcoin Alpha expected rows (tier, correct_count, previous_buggy_count, lost):
 -- high, 88309370031, 88091106867, 218263164
 -- low,   3085879285,  3067788222,  18091063
 SET disabled_optimizers TO 'outer_yan';
@@ -33,7 +34,7 @@ WITH tiers(tier, lim) AS (
 )
 SELECT b.tier,
        sum(b.multiplicity * coalesce(d5.n, 1)) AS correct_count,
-       sum(coalesce(b.multiplicity * d5.n, 1)) AS current_pushdown_count,
+       sum(coalesce(b.multiplicity * d5.n, 1)) AS previous_buggy_count,
        sum(CASE WHEN d5.n IS NULL THEN b.multiplicity - 1 ELSE 0 END) AS lost_count
 FROM R3
 INNER JOIN b ON R3.src = b.dst

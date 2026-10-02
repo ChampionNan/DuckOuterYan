@@ -131,6 +131,7 @@ PY
 oy_warm_profile_time() {
     local db="$1" setting="$2" query="$3" threads="$4" runs="$5"
     local profiledir="$6" mode="$7" profile="$8"
+    local OY_TIMEOUT_SECS="${9:-$OY_TIMEOUT_SECS}"
     local sqlf rawf profilef tracef rc=0 saved_to="$OY_TIMEOUT_SECS" i
     sqlf=$(mktemp) || return 1
     rawf="$profiledir/optimizer_${mode}.log"
@@ -200,17 +201,14 @@ PY
 #   off_other|on_other|samples|off_phases_json|on_phases_json|
 #   comparable_delta_json|outeryan_focus
 oy_optimizer_profile_from_files() {
-    local profiledir="$1" query="$2"
-    local rawf="$profiledir/optimizer_duckdb.log" duck_rc=0
-    local tracef="$profiledir/optimizer_outeryan.trace"
-    "${PYTHON_BIN:-python3}" - "$rawf" "$profiledir" "${query%;}" "$duck_rc" "$tracef" <<'PY' \
-        || return $?
+    local profiledir="$1" query="$2" mode="${3:-both}"
+    "${PYTHON_BIN:-python3}" - "$profiledir" "${query%;}" "$mode" <<'PY'
 import json
 import math
 import os
 import sys
 
-raw_path, profile_dir, expected_query, duck_rc_text, trace_path = sys.argv[1:]
+profile_dir, expected_query, requested_mode = sys.argv[1:]
 failure = "|".join(["NA"] * 13)
 
 
@@ -232,111 +230,80 @@ def compact(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-try:
-    with open(raw_path, encoding="utf-8", errors="replace") as handle:
-        raw = handle.read()
-    if int(duck_rc_text) != 0:
-        errors = [line.strip() for line in raw.splitlines() if "Error:" in line]
-        detail = f": {errors[-1]}" if errors else ""
-        raise ValueError(f"duckdb exited with status {duck_rc_text}{detail}")
-    if "Error:" in raw:
-        raise ValueError("duckdb reported an error")
+def number(value):
+    return "NA" if value is None else f"{value:.9f}"
 
+
+try:
+    if requested_mode not in ("both", "duckdb", "outeryan"):
+        raise ValueError("invalid requested profile side")
+    modes = ("duckdb", "outeryan") if requested_mode == "both" else (requested_mode,)
+    totals, phase_sums, others, phases = {}, {}, {}, {}
     expected = normalize_query(expected_query)
-    selected = {}
-    for mode in ("duckdb", "outeryan"):
-        path = os.path.join(profile_dir, f"optimizer_{mode}_1.json")
-        with open(path, encoding="utf-8") as handle:
+    for mode in modes:
+        with open(os.path.join(profile_dir, f"optimizer_{mode}.log"), encoding="utf-8", errors="replace") as handle:
+            if "Error:" in handle.read():
+                raise ValueError(f"{mode} reported an execution error")
+        with open(os.path.join(profile_dir, f"optimizer_{mode}_1.json"), encoding="utf-8") as handle:
             root = json.load(handle)
-        missing = sorted({"query_name", "all_optimizers"}.difference(root))
-        if missing:
-            raise ValueError(f"optimizer profile {mode} is missing keys: {', '.join(missing)}")
+        if not {"query_name", "all_optimizers"}.issubset(root):
+            raise ValueError(f"optimizer profile {mode} is missing required keys")
         if normalize_query(root["query_name"]) != expected:
             raise ValueError(f"optimizer profile {mode} query_name does not match")
         total = seconds(root["all_optimizers"], "all_optimizers")
         if total <= 0:
             raise ValueError(f"optimizer profile {mode} has non-positive total")
-        selected[mode] = (total, root)
+        if mode == "duckdb":
+            workflow = {
+                "duckdb_simplification": seconds(root.get("optimizer_outer_join_simplification", 0.0), "simplification"),
+                "duckdb_join_reorder": seconds(root.get("optimizer_join_order", 0.0), "join_order"),
+            }
+        else:
+            with open(os.path.join(profile_dir, "optimizer_outeryan.trace"), encoding="utf-8") as handle:
+                decisions = [line.strip() for line in handle if line.startswith("[OY_DECISION]")]
+            if len(decisions) != 1:
+                raise ValueError("ON execution must emit exactly one profiled OuterYan decision record")
+            fields = dict(token.split("=", 1) for token in decisions[0].split()[1:] if "=" in token)
+            names = (
+                "applicability", "build_ot", "simplification", "semijoin_pair_planning",
+                "desimplification", "outeryan_join_reorder", "duckdb_simplification",
+                "duckdb_join_reorder", "cost_model", "resimplification",
+                "aggregate_pushdown_marking", "plan_lowering", "semijoin_insertion",
+                "aggregate_pushdown",
+            )
+            workflow = {name: seconds(fields[f"phase_{name}_s"], name)
+                        for name in names if fields.get(f"phase_{name}_s") not in (None, "NA")}
+            # Cost comparison is outside named RunOptimizer timers; all other
+            # workflow phases are already included in all_optimizers.
+            total += workflow.get("cost_model", 0.0)
+        phase_sum = sum(workflow.values())
+        if phase_sum > total + max(1e-9, total * .02):
+            raise ValueError(f"{mode} workflow phases exceed adjusted optimizer total")
+        totals[mode] = total
+        phase_sums[mode] = phase_sum
+        others[mode] = max(0.0, total - phase_sum)
+        phases[mode] = dict(workflow, other_optimizer=others[mode])
 
-    off_total, off_root = selected["duckdb"]
-    on_all_optimizers, _ = selected["outeryan"]
-    off_phases = {
-        "duckdb_simplification": seconds(
-            off_root.get("optimizer_outer_join_simplification", 0.0),
-            "optimizer_outer_join_simplification",
-        ),
-        "duckdb_join_reorder": seconds(
-            off_root.get("optimizer_join_order", 0.0), "optimizer_join_order"
-        ),
-    }
-
-    with open(trace_path, encoding="utf-8", errors="replace") as handle:
-        decisions = [line.strip() for line in handle if line.startswith("[OY_DECISION]")]
-    if not decisions:
-        raise ValueError("ON execution emitted no OuterYan decision record")
-    fields = {}
-    for token in decisions[-1].split()[1:]:
-        if "=" in token:
-            key, value = token.split("=", 1)
-            fields[key] = value
-    phase_names = (
-        "applicability", "build_ot", "simplification", "semijoin_pair_planning",
-        "desimplification", "outeryan_join_reorder", "duckdb_simplification",
-        "duckdb_join_reorder", "cost_model", "resimplification",
-        "aggregate_pushdown_marking", "plan_lowering", "semijoin_insertion",
-        "aggregate_pushdown",
-    )
-    on_phases = {}
-    for name in phase_names:
-        key = f"phase_{name}_s"
-        if fields.get(key) in (None, "NA"):
-            continue
-        on_phases[name] = seconds(fields[key], key)
-
-    # DuckDB's `all_optimizers` is the sum of named RunOptimizer phases. The
-    # OuterYan cost comparison deliberately sits between those named phases, so
-    # DuckDB does not include it. Add that one uncovered, non-overlapping phase
-    # to the ON total; every other custom workflow phase is already inside a
-    # named optimizer timer.
-    on_total = on_all_optimizers + on_phases.get("cost_model", 0.0)
-    off_phase_sum = sum(off_phases.values())
-    on_phase_sum = sum(on_phases.values())
-    tolerance = max(1e-9, on_total * 0.02)
-    if on_phase_sum > on_total + tolerance:
-        raise ValueError(
-            f"OuterYan workflow phases {on_phase_sum:.9f}s exceed adjusted optimizer total {on_total:.9f}s"
-        )
-    off_other = max(0.0, off_total - off_phase_sum)
-    on_other = max(0.0, on_total - on_phase_sum)
-    off_phases["other_optimizer"] = off_other
-    on_phases["other_optimizer"] = on_other
-    deltas = {
-        "optimizer_total": on_total - off_total,
-        "duckdb_simplification": on_phases.get("duckdb_simplification", 0.0)
-        - off_phases.get("duckdb_simplification", 0.0),
-        "duckdb_join_reorder": on_phases.get("duckdb_join_reorder", 0.0)
-        - off_phases.get("duckdb_join_reorder", 0.0),
-    }
-    focus_names = (
-        "simplification", "desimplification", "outeryan_join_reorder",
-        "resimplification", "aggregate_pushdown",
-    )
-    focus = ",".join(f"{name}={on_phases.get(name, 0.0):.9f}" for name in focus_names)
-    values = (
-        f"{off_total:.9f}",
-        f"{on_total:.9f}",
-        f"{on_total - off_total:.9f}",
-        f"{on_total / off_total:.9f}",
-        f"{off_phase_sum:.9f}",
-        f"{on_phase_sum:.9f}",
-        f"{off_other:.9f}",
-        f"{on_other:.9f}",
-        "1",
-        compact(off_phases),
-        compact(on_phases),
-        compact(deltas),
-        focus,
-    )
+    off_total, on_total = totals.get("duckdb"), totals.get("outeryan")
+    off_phases, on_phases = phases.get("duckdb", {}), phases.get("outeryan", {})
+    paired = requested_mode == "both"
+    delta = on_total - off_total if paired else None
+    ratio = on_total / off_total if paired else None
+    deltas = {}
+    if paired:
+        deltas = {
+            "optimizer_total": delta,
+            "duckdb_simplification": on_phases.get("duckdb_simplification", 0.0) - off_phases.get("duckdb_simplification", 0.0),
+            "duckdb_join_reorder": on_phases.get("duckdb_join_reorder", 0.0) - off_phases.get("duckdb_join_reorder", 0.0),
+        }
+    focus_names = ("simplification", "desimplification", "outeryan_join_reorder", "resimplification", "aggregate_pushdown")
+    focus = ",".join(f"{name}={on_phases.get(name, 0.0):.9f}" for name in focus_names) if on_phases else "-"
+    values = [
+        number(off_total), number(on_total), number(delta), number(ratio),
+        number(phase_sums.get("duckdb")), number(phase_sums.get("outeryan")),
+        number(others.get("duckdb")), number(others.get("outeryan")), "1",
+        compact(off_phases), compact(on_phases), compact(deltas), focus,
+    ]
     print("|".join(values))
 except Exception as exc:
     print(f"OPTIMIZER-PROFILE-ERROR: {exc}", file=sys.stderr)

@@ -30,8 +30,15 @@ class BalancedBenchmarkTest(unittest.TestCase):
                          {(f, t, s):20 for f in b.FAMILIES for t in b.TIERS for s in b.SHAPES})
         self.assertTrue(all(len(set(r["join_vector"])) >= 2 for r in rows))
         self.assertFalse(any(r["source_seed"] == "tpcds_q72_fulfillment" for r in rows))
-        self.assertEqual(self.design["curation"]["timeout_seconds"], 900)
-        self.assertTrue(all(r["qualification_timeout_seconds"] == "900" for r in rows))
+        self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
+        self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
+        graph = [r for r in rows if r["family"] == "graph"]
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 72, 5: 90, 6: 18})
+        for tier in b.TIERS:
+            for shape in b.SHAPES:
+                self.assertEqual(Counter(int(r["relation_count"]) for r in graph
+                                         if r["semantic_tier"] == tier and r["tree_shape"] == shape),
+                                 {4: 8, 5: 10, 6: 2})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
         self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows))
@@ -103,7 +110,7 @@ class QualificationTest(unittest.TestCase):
                           design_sha256=b.digest(b.DESIGN), profiles=[dict(profile="p", tier="low",
                           in_range=True, database_signature="db")])
         self.result = dict(corpus_revision=b.REVISION, sql_content_sha256="sql", corpus_manifest_sha256="manifest",
-                           execution_host="cpu9", database_signature="db", timeout_seconds="900", correct="TRUE",
+                           execution_host="cpu9", database_signature="db", timeout_seconds="600", correct="TRUE",
                            timing_status="measured", note="OK", tm_off="8", tm_on="10")
 
     def status(self, **changes):
@@ -113,16 +120,17 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(self.status(), "eligible")
         self.assertEqual(self.status(tm_off="7.999"), "speedup_below_0.8")
         self.assertEqual(self.status(tm_off="1", tm_on="1"), "runtime_not_above_1s")
-        self.assertEqual(self.status(tm_off="899.9", tm_on="899.9"), "eligible")
-        self.assertEqual(self.status(tm_on="900"), "runtime_at_or_above_timeout")
+        self.assertEqual(self.status(tm_off="599.9", tm_on="599.9"), "eligible")
+        self.assertEqual(self.status(tm_on="600"), "runtime_at_or_above_timeout")
         self.assertEqual(self.status(tm_on="nan"), "invalid_timing")
         self.assertEqual(q.classify(self.candidate, None, self.audit, "manifest"), "pending_measurement")
 
     def test_failures_never_become_measured(self):
-        self.assertEqual(self.status(note="OFF-TIMEOUT"), "timeout_at_900s")
+        self.assertEqual(self.status(note="OFF-TIMEOUT"), "timeout_at_600s")
         self.assertEqual(self.status(timing_status="fallback-skip", tm_off="NA"), "fallback_not_measured")
-        self.assertEqual(self.status(timeout_seconds="600", note="TIMEOUT"), "requires_900s_run")
-        self.assertEqual(self.status(timeout_seconds="1800"), "requires_900s_run")
+        self.assertEqual(self.status(timeout_seconds="900", note="TIMEOUT"), "requires_600s_run")
+        self.assertEqual(self.status(timeout_seconds="1800"), "requires_600s_run")
+        self.assertEqual(self.status(duckdb_timeout_seconds="600", outeryan_timeout_seconds="900"), "requires_600s_run")
         self.assertEqual(self.status(correct="FALSE"), "correctness_not_verified")
 
     def test_evidence_identity(self):
@@ -148,7 +156,7 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["balanced_candidates"], 720)
             self.assertEqual(report["historical_supplementary_candidates"], 3)
             self.assertEqual(report["historical_supplementary_observations"], 0)
-            self.assertEqual(report["qualification_timeout_seconds"], 900)
+            self.assertEqual(report["qualification_timeout_seconds"], 600)
 
     def test_historical_results_preserved_separately_including_timeouts(self):
         corpus = b.ROOT / "benchmark"
@@ -213,7 +221,7 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual((root / "pass/qualified_query_paths.txt").read_text().strip(), candidate["path"])
             failed = q.qualify([corpus], [audit_path], [first, last], root / "fail")
             self.assertEqual(failed["selected"], 0)
-            self.assertEqual(failed["reasons"]["timeout_at_900s"], 1)
+            self.assertEqual(failed["reasons"]["timeout_at_600s"], 1)
 
 
 if __name__ == "__main__":

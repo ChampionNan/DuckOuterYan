@@ -20,6 +20,11 @@ not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
 approximately balanced, not claimed exactly equal.
 
+Graph now has **72 four-relation, 90 five-relation, and 18 six-relation queries**
+(previously 36/78/66). Each selectivity-by-shape cell uses the same 8/10/2 split.
+This changes query selection, not the graph database or dataset. Both active
+and reserve batches follow this relation-count quota.
+
 Balanced types: 384 `join`, 162 `graph` (including 27 industry-inspired controls), and
 174 `aggregate`. Aggregates comprise 66 COUNT, 36 MIN, 36 MAX and 36 SUM queries.
 Type and family differ: `--only graph` runs 180 Graph-family candidates, whereas
@@ -55,17 +60,18 @@ audits explicitly list these cases as outside the three-band audit.
 To test only these cases using an already compiled binary:
 
 ```bash
-bash auto_test/experiment_onoff.sh --all --timeout 900 \
+bash auto_test/experiment_onoff.sh --all --timeout 600 \
   --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
 ```
 
-A uniform 15-minute run is now the default (`run_all.sh --all`),
+A 10-minute limit for each engine is now the default (`run_all.sh --all`),
 but Q80-alt historically needed about 19 minutes on the DuckDB side. SF50 may be
-faster; it is not guaranteed to fit within 900 seconds. The default and balanced
-qualification policy are both 900 seconds. Old 1800-second results retain their
-recorded limits and are not qualified under the new 900-second policy.
+faster; it is not guaranteed to fit within 600 seconds. The default and balanced
+qualification policy are both 600 seconds **per engine, independently**. Old
+900/1800-second results retain their recorded limits and are not qualified under
+the new 600-second policy.
 Correctness comparison is enabled by default for every query, including fallbacks.
-An OFF timeout stops that stage before ON; it does not establish an OuterYan timeout.
+An OFF timeout does not stop ON or establish an OuterYan timeout (and vice versa).
 
 ## Sources and screening
 
@@ -104,25 +110,29 @@ databases and back up `tpch_db`, `tpcds_db` and any WAL files. Then explicitly r
 `FORCE=1 TPCH_SF=50 TPCDS_SF=50 bash auto_test/build_db.sh tpch tpcds` after pulling.
 This replaces only the two TPC databases. Skip rebuilding if both existing files
 are already known to be SF50. Remove stale scale environment overrides before
-running the main workflow. Graph/JOB, SQL definitions and cost model are unchanged;
-the default timeout is now 900 seconds. Re-audit selectivity/plan choices on the new
+running the main workflow. Changing the TPC scale does not change Graph/JOB data
+or the cost model. The default timeout is now 600 seconds per engine. Re-audit selectivity/plan choices on the new
 databases; do not pool measurements across SF100 and SF50.
 
 ```bash
 cd /home/data/bchenba/DuckYanOuter
 git pull --ff-only
 export TPCH_SF=50 TPCDS_SF=50
-bash auto_test/run_all.sh --all --timeout 900
+bash auto_test/run_all.sh --all --timeout 600
 ```
 
 `run_all.sh` builds, reuses/builds databases, regenerates and runs the candidates.
-`experiment_onoff.sh` alone **does not compile**. Default timeout is 15 minutes
-per statement; a timeout ends that query's test without doubling or retrying.
+`experiment_onoff.sh` alone **does not compile**. Default timeout is 10 minutes
+per statement per engine; a timeout stops only that engine, without doubling or
+retrying. The other engine still executes. `--timeout` sets both limits;
+`--duckdb-timeout` and `--outeryan-timeout` override them independently.
 Each side uses a fresh process with one ordinary warm-up, one detailed profile,
 then one unprofiled timed execution in that same process. Preparatory executions
 do not contribute to runtime; optimizer and execution phases share the profile.
 Before these stages, every query runs one bare OFF/ON equivalence pair by default.
-A mismatch/error/timeout stops the query before profiling/timing. Verified
+A mismatch/error stops the query before profiling/timing. A timeout leaves
+equivalence unverified but preserves the completed engine's measurements;
+speed-up is `NA`, and censored pairs are excluded from paired statistics. Verified
 fallbacks skip performance measurements, not equivalence. There is also one
 separate ON kernel diagnostic for selected plans, so a completed selected query
 uses nine executions, but only the final OFF/ON pair supplies running times.
@@ -132,9 +142,10 @@ disables it. With diagnostic `--no-check-correctness`, measured rows remain
 `--no-profile` retains one ordinary
 warm-up before timing. Explicit `--runs N` can request multiple timed samples;
 the default is one. Rebuild via `run_all.sh` for profile-only trace emission.
-Thus 15 minutes is not a total budget for all stages of a successful query.
-An existing `OY_TIMEOUT_SECS` environment variable or explicit `--timeout` still
-overrides the default; unset stale overrides when using the default workflow.
+Thus 10 minutes is not a total budget for all stages of a successful query.
+`OY_TIMEOUT_SECS` supplies a shared default; `OY_DUCKDB_TIMEOUT_SECS` and
+`OY_OUTERYAN_TIMEOUT_SECS` independently override it. CLI per-engine limits take
+precedence over the common `--timeout`; unset stale overrides for default runs.
 
 After the run, audit the actual cpu9 databases and qualify the exact result CSV:
 
@@ -151,11 +162,11 @@ Replace `TIMESTAMP` with the actual run timestamp. The audit's 600-second limit
 is for read-only base counts, not workload timing. Database overrides are
 `GRAPH_DB`, `TPCH_DB`, `TPCDS_DB`, `JOB_DB`; run and audit must use the same files.
 Qualification checks SQL/manifest hashes, host, database path/size/mtime signature,
-15-minute configuration and audited bands. Database changes require re-audit and
+10-minute-per-engine configuration and audited bands. Database changes require re-audit and
 remeasurement. The signature is a guard, not a full database checksum.
 
 Final eligibility: correctness verified **or explicitly unchecked**, both measured runtimes **>1 s and
-<900 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
+<600 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
 Unchecked rows remain performance-only evidence, not a correctness claim.
 Qualification rejects mixed timing protocols/sample counts/correctness modes;
 do not combine old three-run medians and new single-run timings as one experiment.
@@ -187,7 +198,7 @@ using its achieved speed-up.
 python3 auto_test/gen_outerjoin_benchmark.py --batch 1 \
   --root auto_test/outerjoin_benchmark/reserve_1
 OY_CORPUS=auto_test/outerjoin_benchmark/reserve_1/benchmark \
-  bash auto_test/experiment_onoff.sh --all --timeout 900
+  bash auto_test/experiment_onoff.sh --all --timeout 600
 python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity \
   --root auto_test/outerjoin_benchmark/reserve_1 \
   --audit-timeout 600 --audit-output auto_test/results/cpu9_reserve_1_audit.json

@@ -62,8 +62,18 @@
       "bushy": 60
     }
   },
+  "graph_relation_counts": {
+    "5": 90,
+    "6": 18,
+    "4": 72
+  },
+  "graph_relation_weights": {
+    "4": 4,
+    "5": 5,
+    "6": 1
+  },
   "historical_exclusion_observations": 138,
-  "design_sha256": "51ee7b8c7f8d38bba086fc8c4afe05d3495a90fbfba658a0c125bac86b1ca6f5",
+  "design_sha256": "2af1b9473f5568f78fe2feb3e17d20a18242193e8a59dbcef719cf4df1d7c4c1",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
   "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. Historical supplementary cases are outside balanced quotas; their old timings are not reused."
 }

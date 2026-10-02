@@ -147,6 +147,8 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         "aggregate_query", "aggregate_pushdown_applied", "selected_plan", "correct", "note", "timing_status",
         "timing_threads", "sql_path", "timeout_seconds", "correctness_check",
         "timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side",
+        "duckdb_timeout_seconds", "outeryan_timeout_seconds", "duckdb_status", "outeryan_status",
+        "duckdb_timeout_stage", "outeryan_timeout_stage", "duckdb_correctness_status", "outeryan_correctness_status",
     ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
     detail["family"] = detail["family"].map(normalize_family)
@@ -272,17 +274,37 @@ def build_timeout_statistics(detail: pd.DataFrame) -> dict:
         "query", "family", "workload_category", "relation_count", "tree_shape",
         "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
         "aggregate_query", "selected_plan", "timing_status", "note", "sql_path",
+        "off_s", "on_s", "duckdb_timeout_seconds", "outeryan_timeout_seconds",
+        "duckdb_status", "outeryan_status", "duckdb_timeout_stage", "outeryan_timeout_stage",
+        "duckdb_correctness_status", "outeryan_correctness_status",
     ) if column in timeout_rows]
     selected_counts = timeout_rows["selected_plan"].value_counts().sort_index().to_dict()
     limits = sorted(pd.to_numeric(detail.get("timeout_seconds", pd.Series(dtype=float)),
                                   errors="coerce").dropna().unique().tolist())
-    # Older CSVs lack this field; do not relabel them using today's timeout default.
-    limit = limits[0] if len(limits) == 1 else TIMEOUT_SECONDS if not limits else None
+    engine_limits = {side: sorted(pd.to_numeric(detail.get(f"{side}_timeout_seconds", pd.Series(dtype=float)),
+                                              errors="coerce").dropna().unique().tolist())
+                     for side in ("duckdb", "outeryan")}
+    recorded_limits = sorted(set(limits + engine_limits["duckdb"] + engine_limits["outeryan"]))
+    has_limit_columns = any(c in detail for c in ("timeout_seconds", "duckdb_timeout_seconds", "outeryan_timeout_seconds"))
+    # Legacy records with no limit columns keep the historical default. Unknown
+    # or asymmetric limits in modern records must not be fabricated as 600 s.
+    limit = recorded_limits[0] if len(recorded_limits) == 1 else TIMEOUT_SECONDS if not has_limit_columns else None
+    per_engine = {}
+    for side in ("duckdb", "outeryan"):
+        column = f"{side}_status"
+        if column not in timeout_rows:
+            continue  # Old logs do not reliably identify which side timed out.
+        mask = timeout_rows[column].eq("timeout")
+        stages = timeout_rows.loc[mask, f"{side}_timeout_stage"].value_counts().to_dict() if f"{side}_timeout_stage" in timeout_rows else {}
+        per_engine[side] = {"timeout_queries": int(mask.sum()), "stages": {str(k): int(v) for k, v in stages.items()},
+                            "family_counts": {str(k): int(v) for k, v in timeout_rows.loc[mask, "family"].value_counts().to_dict().items()}}
     return {
         "limit_seconds": limit,
         "limit_minutes": limit / 60 if limit is not None else None,
-        "recorded_limits_seconds": limits,
-        "limit_source": "recorded_csv" if limits else "legacy_default",
+        "recorded_limits_seconds": recorded_limits,
+        "engine_limits_seconds": engine_limits,
+        "per_engine": per_engine,
+        "limit_source": "recorded_csv" if has_limit_columns else "legacy_default",
         "total": len(timeout_rows),
         "input_total": len(detail),
         "rate": len(timeout_rows) / len(detail) if len(detail) else None,
@@ -1082,6 +1104,9 @@ def write_statistics(output_directory: Path, frame: pd.DataFrame, metric: str = 
         "query", "family", "workload_category", "relation_count", "tree_shape",
         "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
         "aggregate_query", "selected_plan", "timing_status", "note", "sql_path",
+        "off_s", "on_s", "duckdb_timeout_seconds", "outeryan_timeout_seconds",
+        "duckdb_status", "outeryan_status", "duckdb_timeout_stage", "outeryan_timeout_stage",
+        "duckdb_correctness_status", "outeryan_correctness_status",
     ]
     pd.DataFrame(report["timeouts"]["queries"]).reindex(columns=timeout_query_columns).to_csv(
         output_directory / "timeout_queries.csv", index=False
@@ -2989,8 +3014,11 @@ def overall_tex(report: dict) -> str:
     }
     ordered_families = [family for family in ("Graph", "TPC-H", "TPC-DS", "JOB") if family in family_counts]
     family_text = ", ".join(f"{family_counts[family]} {family}" for family in ordered_families)
-    text += (f"With a {number(timeout['limit_minutes'], 0)}-minute per-statement limit, "
-             f"{number(timeout['total'], 0)} of {number(timeout['input_total'], 0)} queries time out")
+    if timeout["limit_minutes"]:
+        text += f"With a {number(timeout['limit_minutes'], 0)}-minute per-engine statement limit, "
+    else:
+        text += "Under the recorded per-engine statement limits, "
+    text += f"{number(timeout['total'], 0)} of {number(timeout['input_total'], 0)} queries have at least one timeout"
     if family_text:
         text += f" ({family_text})"
     text += ". Timeout runtimes are treated as censored and are not replaced with the cutoff. "

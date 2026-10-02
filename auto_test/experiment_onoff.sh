@@ -9,7 +9,8 @@
 #      A DuckDB fallback, or an aggregate query without an actual aggregate
 #      pushdown, skips performance measurements after the correctness check.
 #   2. CORRECTNESS — enabled by default for every query, including fallbacks.
-#      Compare one OFF/ON bare-query result pair. A failure is never timed.
+#      Compare one OFF/ON bare-query result pair. A mismatch is never timed.
+#      A timeout stops only that side; preserve the other side's measurements.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
@@ -22,9 +23,11 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       positive odd timed iterations per config (default 1)
-#   -t,--timeout S    per-statement timeout sec (default 900). DuckDB enforces S
+#   -t,--timeout S    set both per-engine statement limits (default 600 each)
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1+profile)×S plus startup grace per side.
+#      --duckdb-timeout S    independent DuckDB/OFF limit
+#      --outeryan-timeout S  independent OuterYan/ON limit
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
 #                     (default all); bench = tpch+tpcds+job
 #      --pattern GLOB  only queries whose label matches (default *)
@@ -66,11 +69,15 @@ QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 PROFILE="${OY_PROFILE:-1}"
 CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-1}"
 THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
+DUCKDB_TIMEOUT_CLI=""; OUTERYAN_TIMEOUT_CLI=""
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do case "$1" in
     -b|--bin) export DUCKDB_BIN="$2"; shift 2;;
     -n|--runs) RUNS="$2"; shift 2;;
-    -t|--timeout) export OY_TIMEOUT_SECS="$2"; shift 2;;
+    -t|--timeout)
+        export OY_TIMEOUT_SECS="$2" OY_DUCKDB_TIMEOUT_SECS="$2" OY_OUTERYAN_TIMEOUT_SECS="$2"; shift 2;;
+    --duckdb-timeout) DUCKDB_TIMEOUT_CLI="$2"; shift 2;;
+    --outeryan-timeout) OUTERYAN_TIMEOUT_CLI="$2"; shift 2;;
     --only) ONLY="$2"; shift 2;;
     --pattern) PATTERN="$2"; shift 2;;
     --exclude) EXCLUDE="$2"; shift 2;;
@@ -196,16 +203,24 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=900}"
+: "${OY_TIMEOUT_SECS:=600}"
+[ -z "$DUCKDB_TIMEOUT_CLI" ] || OY_DUCKDB_TIMEOUT_SECS="$DUCKDB_TIMEOUT_CLI"
+[ -z "$OUTERYAN_TIMEOUT_CLI" ] || OY_OUTERYAN_TIMEOUT_SECS="$OUTERYAN_TIMEOUT_CLI"
 : "${OY_BATCH_GRACE_SECS:=30}"
 case "$OY_TIMEOUT_SECS" in
     ''|*[!0-9]*) echo "--timeout must be a non-negative integer (got: $OY_TIMEOUT_SECS)" >&2; exit 2;;
 esac
+for side_limit in "$OY_DUCKDB_TIMEOUT_SECS" "$OY_OUTERYAN_TIMEOUT_SECS"; do
+    case "$side_limit" in
+        ''|*[!0-9]*) echo "Engine timeout must be a non-negative integer (got: $side_limit)" >&2; exit 2;;
+    esac
+done
+RECORDED_TIMEOUT="NA"
+[ "$OY_DUCKDB_TIMEOUT_SECS" != "$OY_OUTERYAN_TIMEOUT_SECS" ] || RECORDED_TIMEOUT="$OY_DUCKDB_TIMEOUT_SECS"
 case "$OY_BATCH_GRACE_SECS" in
     ''|*[!0-9]*) echo "OY_BATCH_GRACE_SECS must be a non-negative integer" >&2; exit 2;;
 esac
 OY_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
-[ "${OY_TIMEOUT_SECS}" = "0" ] && OY_TIMEOUT_BIN=""
 OY_QUERY_SEPARATOR="===================================================================================================="
 
 # DuckDB enforces this limit independently for every statement. The external
@@ -285,7 +300,7 @@ oy_duck() {
     # its stdin redirected from /dev/null unless stdin is explicitly redirected,
     # which would make duckdb read no SQL. `<&0` dups the caller's stdin (the
     # SQL file) into the child so the query actually runs.
-    if [ -n "$OY_TIMEOUT_BIN" ]; then
+    if [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != 0 ]; then
         "$OY_TIMEOUT_BIN" "$OY_TIMEOUT_SECS" "$DUCKDB_BIN" -no-init -bail "$@" <&0 &
     else
         "$DUCKDB_BIN" -no-init -bail "$@" <&0 &
@@ -302,64 +317,65 @@ oy_duck() {
 # result sets as order-independent multisets. Both optimizer configurations
 # execute the bare query; sorting happens on the emitted CSV files so the
 # correctness check cannot change the optimized plan.
-# Enabled by default, this is a precondition for timing: a query that fails
-# this check (mismatch / error / timeout) is NOT timed. Each OFF/ON bare-query
-# process has the same fixed per-statement and external timeout.
+# Enabled by default. A mismatch/error blocks paired timing. A timeout stops
+# only that engine: the other engine may still be measured, without claiming
+# equivalence or an exact speed-up. Each process has its own fixed timeout.
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
     local db="$1" label="$2" query="$3"
-    local off on eoff eon esort sql roff=0 ron=0 rc=0 off_rows=0 on_rows=0
+    local off on eoff eon esort sql side setting output errors status duck_rc
+    local off_rows=0 on_rows=0 rc=0 OY_TIMEOUT_SECS
     off=$(mktemp); on=$(mktemp); eoff=$(mktemp); eon=$(mktemp); esort=$(mktemp); sql=$(mktemp)
-    local prag="CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"
-
-    printf '%s\n%s\n%s;\n' "$prag" "$OY_OFF" "${query%;}" > "$sql"
-    if oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; then roff=0; else roff=$?; fi
-    if grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$eoff"; then roff=124; fi
-    if [ "$roff" -eq 124 ]; then
-        echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, off): $label"; rc=3
-    elif [ "$roff" -ne 0 ] || grep -qE 'Error:' "$eoff"; then
-        echo "  ERROR (off rc=$roff): $label"
-        { grep -m1 -E 'Error:' "$eoff" || sed -n '1p' "$eoff"; } | sed 's/^/        /'
-        rc=2
-    else
-        off_rows="$(wc -l < "$off" | tr -d ' ')"
-        if ! LC_ALL=C sort -o "$off" "$off" 2>"$esort"; then
-            echo "  ERROR (sort off): $label"
-            sed -n '1p' "$esort" | sed 's/^/        /'
-            rc=2
-        fi
-    fi
-
-    if [ "$rc" -eq 0 ]; then
-        printf '%s\n%s\n%s;\n' "$prag" "$OY_ON" "${query%;}" > "$sql"
-        if oy_duck "$db" -csv -noheader < "$sql" > "$on" 2>"$eon"; then ron=0; else ron=$?; fi
-        if grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$eon"; then ron=124; fi
-        if [ "$ron" -eq 124 ]; then
-            echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, on): $label"; rc=3
-        elif [ "$ron" -ne 0 ] || grep -qE 'Error:' "$eon"; then
-            echo "  ERROR (on rc=$ron): $label"
-            { grep -m1 -E 'Error:' "$eon" || sed -n '1p' "$eon"; } | sed 's/^/        /'
-            rc=2
+    # Called directly, not in a command substitution: these outcomes gate each
+    # engine independently after both bare-query attempts have completed.
+    OY_EQ_DUCKDB_STATUS=not-run
+    OY_EQ_OUTERYAN_STATUS=not-run
+    for side in off on; do
+        if [ "$side" = off ]; then
+            OY_TIMEOUT_SECS="$OY_DUCKDB_TIMEOUT_SECS"
+            setting="$OY_OFF"; output="$off"; errors="$eoff"
         else
-            on_rows="$(wc -l < "$on" | tr -d ' ')"
-            : > "$esort"
-            if ! LC_ALL=C sort -o "$on" "$on" 2>"$esort"; then
-                echo "  ERROR (sort on): $label"
+            OY_TIMEOUT_SECS="$OY_OUTERYAN_TIMEOUT_SECS"
+            setting="$OY_ON"; output="$on"; errors="$eon"
+        fi
+        printf '%s\n%s\n%s;\n' \
+            "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+            "$setting" "${query%;}" > "$sql"
+        duck_rc=0
+        oy_duck "$db" -csv -noheader < "$sql" > "$output" 2>"$errors" || duck_rc=$?
+        status=ok
+        if [ "$duck_rc" -eq 124 ] || grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$errors"; then
+            echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, $side): $label"
+            status=timeout
+        elif [ "$duck_rc" -ne 0 ] || grep -q 'Error:' "$errors"; then
+            echo "  ERROR ($side rc=$duck_rc): $label"
+            { grep -m1 'Error:' "$errors" || sed -n '1p' "$errors"; } | sed 's/^/        /'
+            status=error
+        else
+            if [ "$side" = off ]; then off_rows="$(wc -l < "$output" | tr -d ' ')"
+            else on_rows="$(wc -l < "$output" | tr -d ' ')"; fi
+            if ! LC_ALL=C sort -o "$output" "$output" 2>"$esort"; then
+                echo "  ERROR (sort $side): $label"
                 sed -n '1p' "$esort" | sed 's/^/        /'
-                rc=2
+                status=error
             fi
         fi
-    fi
-    if [ "$rc" -ne 0 ]; then
-        :
+        if [ "$side" = off ]; then OY_EQ_DUCKDB_STATUS="$status"
+        else OY_EQ_OUTERYAN_STATUS="$status"; fi
+    done
+    if [ "$OY_EQ_DUCKDB_STATUS" = timeout ] || [ "$OY_EQ_OUTERYAN_STATUS" = timeout ]; then
+        rc=3
+    elif [ "$OY_EQ_DUCKDB_STATUS" != ok ] || [ "$OY_EQ_OUTERYAN_STATUS" != ok ]; then
+        rc=2
     elif diff -q "$off" "$on" >/dev/null; then
-        echo "  equiv OK: $label ($off_rows rows)"; rc=0
+        echo "  equiv OK: $label ($off_rows rows)"
     else
         echo "  NOT EQUIV: $label (off=$off_rows on=$on_rows)"
-        diff "$off" "$on" | head -6 | sed 's/^/        /'; rc=1
+        diff "$off" "$on" | head -6 | sed 's/^/        /'
+        rc=1
     fi
     rm -f "$off" "$on" "$eoff" "$eon" "$esort" "$sql"
-    return $rc
+    return "$rc"
 }
 
 
@@ -521,6 +537,7 @@ oy_reset_decision() {
 }
 
 oy_decision() {
+    local OY_TIMEOUT_SECS="$OY_OUTERYAN_TIMEOUT_SECS"
     local db="$1" query="$2" trace_dest="${3:-}" cost_dest="${4:-}"
     local sqlf tracef rc record
     local trace_was_set trace_saved
@@ -659,6 +676,8 @@ oy_decision() {
 
 oy_capture_plan() {
     local db="$1" setting="$2" query="$3" output="$4" sqlf rc
+    local OY_TIMEOUT_SECS="$OY_OUTERYAN_TIMEOUT_SECS"
+    [ "$setting" != "$OY_OFF" ] || OY_TIMEOUT_SECS="$OY_DUCKDB_TIMEOUT_SECS"
     sqlf=$(mktemp)
     printf "PRAGMA explain_output='all';\n%s\n%s\nEXPLAIN %s;\n" \
         "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
@@ -680,6 +699,7 @@ oy_capture_plan() {
 # OuterYan execution completed but finalized no SJ filter; `not-run` is used
 # only when the trace execution itself failed.
 oy_kernel() {
+    local OY_TIMEOUT_SECS="$OY_OUTERYAN_TIMEOUT_SECS"
     local db="$1" query="$2" sqlf errf nbm nhash label rc
     local nforce nbudget nineligible noverflow reasons="" separator=""
     sqlf=$(mktemp); errf=$(mktemp)
@@ -954,6 +974,8 @@ CSV_HEADER=(
     profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
     timeout_seconds sql_content_sha256 execution_host database_signature corpus_manifest_sha256
     correctness_check timing_protocol timing_samples timing_estimator warmup_runs_per_side
+    duckdb_timeout_seconds outeryan_timeout_seconds duckdb_status outeryan_status
+    duckdb_timeout_stage outeryan_timeout_stage duckdb_correctness_status outeryan_correctness_status
 )
 EXECUTION_HOST="$(hostname)"
 CORPUS_MANIFEST_SHA256="-"
@@ -978,7 +1000,7 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo "# phases : workflow optimizer phases and execution R1/R2/R3 share the same measured ON execution"
     echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time"
     echo "#          successful raw profiles are deleted; failure artifacts, if any: $PROFILE_DIR"
-    echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1 + PROFILE) + OY_BATCH_GRACE_SECS ))s; no retry"
+    echo "# timeout: DuckDB=${OY_DUCKDB_TIMEOUT_SECS}s OuterYan=${OY_OUTERYAN_TIMEOUT_SECS}s per statement; independent engines, no retry after a side times out"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: check=$CORRECTNESS_MODE; NOT-CHECKED means result equivalence was not verified"
     echo "# fallback: correctness is still checked when enabled; verified fallbacks skip profiling/timing, use timing_status=fallback-skip and policy-default speed-up=1.0"
@@ -1020,7 +1042,7 @@ QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FIL
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
 # process_one <i> — run the pipeline for query i (decision -> optional check -> kernel
-# -> each side's warm-up/profile/timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# -> each side's warm-up/profile/timing) under its independent timeout, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
@@ -1070,7 +1092,9 @@ PY
     local optimizer_duckdb_phases="{}" optimizer_outeryan_phases="{}" optimizer_phase_delta="{}"
     local optimizer_focus="-"
     local decision_issue="" plan_issue=""
-    local stop_after_timeout=0
+    local duckdb_status="not-run" outeryan_status="not-run"
+    local duckdb_timeout_stage="-" outeryan_timeout_stage="-"
+    local duckdb_correctness_status="disabled" outeryan_correctness_status="disabled"
     if [ "$PROFILE" = 1 ]; then
         profile_status="not-correct"
         optimizer_status="not-correct"
@@ -1172,7 +1196,13 @@ PY
         note="OK;CORRECTNESS-NOT-CHECKED"
         [ "$fallback_skip" = 0 ] || correct="SKIPPED"
     else
-        gate="$(oy_equiv_check "$db" "$id" "$sql")"
+        local gate_file
+        gate_file="$(mktemp)" || return 1
+        oy_equiv_check "$db" "$id" "$sql" > "$gate_file"
+        gate="$(< "$gate_file")"
+        rm -f "$gate_file"
+        duckdb_correctness_status="$OY_EQ_DUCKDB_STATUS"
+        outeryan_correctness_status="$OY_EQ_OUTERYAN_STATUS"
         case "$gate" in
             *"equiv OK"*)  correct="TRUE";  note="OK";        rows="$(printf '%s' "$gate" | grep -oE '[0-9]+ rows' | grep -oE '[0-9]+')";;
             *"NOT EQUIV"*) correct="FALSE"; note="NOT-EQUIV"; rows="$(printf '%s' "$gate" | grep -oE 'off=[0-9]+ on=[0-9]+')";;
@@ -1180,178 +1210,179 @@ PY
             *)             correct="FALSE"; note="ERROR";     rows="-";;
         esac
     fi
-    if [ "$fallback_skip" = 1 ] && { [ "$correct" = TRUE ] || [ "$correct" = SKIPPED ]; }; then
-        note="FALLBACK-SKIP"
-        timing_status="fallback-skip"
-        offm="NA"
-        onm="NA"
-        ratiom="1.000"
-        profile_status="fallback-skip"
-        optimizer_status="fallback-skip"
+    local off_ready=0 on_ready=0
+    case "$correct" in
+        TRUE|NOT-CHECKED) off_ready=1; on_ready=1;;
+        TIMEOUT)
+            # The completed side can still be measured, but a censored pair
+            # cannot establish equivalence or an exact speed-up.
+            [ "$duckdb_correctness_status" != ok ] || off_ready=1
+            [ "$outeryan_correctness_status" != ok ] || on_ready=1;;
+        FALSE) duckdb_status=correctness-failed; outeryan_status=correctness-failed;;
+    esac
+    if [ "$duckdb_correctness_status" = timeout ]; then
+        duckdb_status=timeout; duckdb_timeout_stage=correctness
+        note="${note};TIMEOUT-OFF-CORRECTNESS"
+    fi
+    if [ "$outeryan_correctness_status" = timeout ]; then
+        outeryan_status=timeout; outeryan_timeout_stage=correctness
+        note="${note};TIMEOUT-ON-CORRECTNESS"
+    fi
+    if [ "$fallback_skip" = 1 ]; then
+        [ "$off_ready" = 0 ] || duckdb_status=fallback-skip
+        [ "$on_ready" = 0 ] || outeryan_status=fallback-skip
+        if [ "$correct" = TRUE ] || [ "$correct" = SKIPPED ]; then
+            note="FALLBACK-SKIP"; timing_status=fallback-skip
+            duckdb_status=fallback-skip; outeryan_status=fallback-skip
+            offm="NA"; onm="NA"; ratiom="1.000"
+            profile_status=fallback-skip; optimizer_status=fallback-skip
+        fi
+        off_ready=0; on_ready=0
     fi
     [ -z "$decision_issue" ] || note="${note};$decision_issue"
     [ -z "$plan_issue" ] || note="${note};$plan_issue"
 
-    if [ "$fallback_skip" = 0 ] && { [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ]; }; then
-        if [ "$selected_plan" = "OUTERYAN" ]; then
-            local kraw
-            kraw="$(oy_kernel "$db" "$sql")"
-            IFS='|' read -r ker kdetail kreasons kernel_status <<< "$kraw"
-            if [ "$kernel_status" = "timeout" ]; then
-                note="TIMEOUT-KERNEL"
-                timing_status="timeout"
-                offm="NA"; onm="NA"; ratiom="NA"
-                profile_status="timeout"
-                optimizer_status="timeout"
-                stop_after_timeout=1
-            elif [ "$kernel_status" != "ok" ]; then
-                note="${note};KERNEL-TRACE-ERROR"
+    if [ "$on_ready" = 1 ] && [ "$selected_plan" = OUTERYAN ]; then
+        local kraw
+        kraw="$(oy_kernel "$db" "$sql")"
+        IFS='|' read -r ker kdetail kreasons kernel_status <<< "$kraw"
+        if [ "$kernel_status" = timeout ]; then
+            note="${note};TIMEOUT-ON-KERNEL"
+            outeryan_status=timeout; outeryan_timeout_stage=kernel
+            on_ready=0
+        elif [ "$kernel_status" != ok ]; then
+            note="${note};KERNEL-TRACE-ERROR"
+        fi
+    fi
+    kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
+
+    if [ "$off_ready" = 1 ] || [ "$on_ready" = 1 ]; then
+        local measurement_root="$OY_RUN_TMPDIR"
+        [ "$PROFILE" = 0 ] || measurement_root="$PROFILE_DIR"
+        optimizer_profile_directory="$(mktemp -d "$measurement_root/${family}__${id}.optimizer.XXXXXX")" || {
+            note="${note};MEASUREMENT-DIRECTORY-ERROR"
+            [ "$off_ready" = 0 ] || duckdb_status=error
+            [ "$on_ready" = 0 ] || outeryan_status=error
+            off_ready=0; on_ready=0
+            optimizer_profile_directory="-"
+        }
+    fi
+    local side setting limit ready measured measurement_rc stage
+    for side in duckdb outeryan; do
+        if [ "$side" = duckdb ]; then
+            ready="$off_ready"; setting="$OY_OFF"; limit="$OY_DUCKDB_TIMEOUT_SECS"
+        else
+            ready="$on_ready"; setting="$OY_ON"; limit="$OY_OUTERYAN_TIMEOUT_SECS"
+        fi
+        [ "$ready" = 1 ] || continue
+        measured="$(oy_warm_profile_time "$db" "$setting" "$sql" "$OY_THREADS" "$RUNS" \
+                    "$optimizer_profile_directory" "$side" "$PROFILE" "$limit")"
+        measurement_rc=$?
+        if [ "$measurement_rc" = 0 ]; then
+            if [ "$side" = duckdb ]; then
+                offm="${measured%% *}"; duckdb_status=measured
+            else
+                onm="${measured%% *}"; outeryan_status=measured
+            fi
+        elif [ "$measurement_rc" = 124 ]; then
+            stage="$(awk -F: '/^OY_STAGE:/ {stage=$2} END {print stage ? stage : "batch"}' \
+                      "$optimizer_profile_directory/optimizer_${side}.log")"
+            if [ "$side" = duckdb ]; then
+                duckdb_status=timeout; duckdb_timeout_stage="$stage"
+                note="${note};TIMEOUT-OFF-$(printf '%s' "$stage" | tr '[:lower:]' '[:upper:]')"
+            else
+                outeryan_status=timeout; outeryan_timeout_stage="$stage"
+                note="${note};TIMEOUT-ON-$(printf '%s' "$stage" | tr '[:lower:]' '[:upper:]')"
             fi
         else
-            ker="not-run"; kdetail="b0h0"; kreasons="-"; kernel_status="not-run"
+            if [ "$side" = duckdb ]; then duckdb_status=error; note="${note};OFF-TIMING-ERROR"
+            else outeryan_status=error; note="${note};ON-TIMING-ERROR"; fi
         fi
-        kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
-        if [ "$stop_after_timeout" = 0 ]; then
-            local measurement_root="$OY_RUN_TMPDIR"
-            [ "$PROFILE" = 0 ] || measurement_root="$PROFILE_DIR"
-            optimizer_profile_directory="$(mktemp -d "$measurement_root/${family}__${id}.optimizer.XXXXXX")" || {
-                note="${note};MEASUREMENT-DIRECTORY-ERROR"
-                timing_status="error"
-                stop_after_timeout=1
-            }
-        fi
-        local local_rom local_rnm off_timing_rc=0 on_timing_rc=0
-        if [ "$stop_after_timeout" = 0 ]; then
-            local_rom="$(oy_warm_profile_time "$db" "$OY_OFF" "$sql" "$OY_THREADS" "$RUNS" "$optimizer_profile_directory" duckdb "$PROFILE")"
-            off_timing_rc=$?
-            if [ "$off_timing_rc" -eq 124 ]; then
-                note="TIMEOUT-OFF-$(awk -F: '/^OY_STAGE:/ {stage=$2} END {print toupper(stage ? stage : "batch")}' "$optimizer_profile_directory/optimizer_duckdb.log")"
-                timing_status="timeout"
-                offm="NA"; onm="NA"; ratiom="NA"
-                profile_status="timeout"
-                optimizer_status="timeout"
-                stop_after_timeout=1
-            elif [ "$off_timing_rc" -ne 0 ]; then
-                note="${note};OFF-TIMING-ERROR"
-                timing_status="error"
-                offm="NA"; onm="NA"; ratiom="NA"
-                profile_status="not-run"
-                optimizer_status="not-run"
-                stop_after_timeout=1
-            else
-                offm="$(echo "$local_rom" | awk '{print $1}')"
-            fi
-        fi
-        if [ "$stop_after_timeout" = 0 ]; then
-            local_rnm="$(oy_warm_profile_time "$db" "$OY_ON" "$sql" "$OY_THREADS" "$RUNS" "$optimizer_profile_directory" outeryan "$PROFILE")"
-            on_timing_rc=$?
-            if [ "$on_timing_rc" -eq 124 ]; then
-                note="TIMEOUT-ON-$(awk -F: '/^OY_STAGE:/ {stage=$2} END {print toupper(stage ? stage : "batch")}' "$optimizer_profile_directory/optimizer_outeryan.log")"
-                timing_status="timeout"
-                onm="NA"; ratiom="NA"
-                profile_status="timeout"
-                optimizer_status="timeout"
-                stop_after_timeout=1
-            elif [ "$on_timing_rc" -ne 0 ]; then
-                note="${note};ON-TIMING-ERROR"
-                timing_status="error"
-                onm="NA"; ratiom="NA"
-                profile_status="not-run"
-                optimizer_status="not-run"
-                stop_after_timeout=1
-            else
-                onm="$(echo "$local_rnm" | awk '{print $1}')"
-            fi
-        fi
-        if [ "$stop_after_timeout" = 0 ]; then
-            ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN{ if(off!="NA"&&on!="NA"&&on+0>0) printf "%.3f", off/on; else print "NA" }')"
-            case "$ratiom" in NA|-|'') timing_status="error";; *) timing_status="measured";; esac
-        fi
-        if [ "$PROFILE" = 1 ] && [ "$stop_after_timeout" = 0 ]; then
-            local optimizer_result optimizer_rc=0 optimizer_raw
-            local -a optimizer_fields=()
-            optimizer_status="ERROR"
-            optimizer_result="$(mktemp)" || optimizer_rc=1
-            if [ "$optimizer_rc" = 0 ]; then
-                oy_optimizer_profile_from_files "$optimizer_profile_directory" "$sql" \
-                    > "$optimizer_result" || optimizer_rc=$?
-                optimizer_raw="$(< "$optimizer_result")"
-                IFS='|' read -r -a optimizer_fields <<< "$optimizer_raw"
-                rm -f "$optimizer_result"
-            fi
+    done
+
+    if [ "$duckdb_status" = measured ] && [ "$outeryan_status" = measured ]; then
+        timing_status=measured
+        ratiom="$(awk -v off="$offm" -v on="$onm" 'BEGIN {printf "%.3f", off/on}')"
+    elif [ "$duckdb_status" = timeout ] || [ "$outeryan_status" = timeout ]; then
+        timing_status=timeout; ratiom="NA"
+    elif [ "$duckdb_status" = error ] || [ "$outeryan_status" = error ]; then
+        timing_status=error; ratiom="NA"
+    fi
+    if [ "$timing_status" != not-run ]; then
+        [ "$duckdb_status" = measured ] || offm="NA"
+        [ "$outeryan_status" = measured ] || onm="NA"
+    fi
+    if [ "$PROFILE" = 1 ] && [ "$timing_status" = timeout ]; then
+        optimizer_status=not-run
+        profile_status=not-run
+        [ "$outeryan_status" != timeout ] || profile_status=timeout
+    fi
+
+    if [ "$PROFILE" = 1 ] && [ "$optimizer_profile_directory" != "-" ]; then
+        local profile_mode="" optimizer_raw optimizer_rc=0
+        local -a optimizer_fields=()
+        if [ "$duckdb_status" = measured ] && [ "$outeryan_status" = measured ]; then profile_mode=both
+        elif [ "$duckdb_status" = measured ]; then profile_mode=duckdb
+        elif [ "$outeryan_status" = measured ]; then profile_mode=outeryan; fi
+        optimizer_status=not-run
+        profile_status=not-run
+        [ "$outeryan_status" != timeout ] || profile_status=timeout
+        if [ -n "$profile_mode" ]; then
+            optimizer_raw="$(oy_optimizer_profile_from_files "$optimizer_profile_directory" "$sql" "$profile_mode")" \
+                || optimizer_rc=$?
+            IFS='|' read -r -a optimizer_fields <<< "$optimizer_raw"
             if [ "$optimizer_rc" = 0 ] && [ "${#optimizer_fields[@]}" -eq 13 ] && \
-               [ "${optimizer_fields[0]}" != "NA" ]; then
+               { [ "${optimizer_fields[0]}" != NA ] || [ "${optimizer_fields[1]}" != NA ]; }; then
                 IFS='|' read -r optimizer_duckdb_total optimizer_outeryan_total optimizer_overhead \
                     optimizer_ratio optimizer_duckdb_phase_sum optimizer_outeryan_phase_sum \
                     optimizer_duckdb_other optimizer_outeryan_other optimizer_samples \
                     optimizer_duckdb_phases optimizer_outeryan_phases optimizer_phase_delta optimizer_focus \
                     <<< "$optimizer_raw"
-                optimizer_status="OK"
+                optimizer_status=PARTIAL
+                [ "$profile_mode" != both ] || optimizer_status=OK
             else
-                if [ "$optimizer_rc" -eq 124 ]; then
-                    optimizer_status="TIMEOUT"
-                    profile_status="timeout"
-                    note="TIMEOUT-PROFILE"
-                    profile_directory="$optimizer_profile_directory"
-                    stop_after_timeout=1
-                else
-                    note="${note};OPTIMIZER-PROFILE-ERROR"
-                fi
-                echo "OPTIMIZER-PROFILE-ERROR: $id; see ${optimizer_profile_directory:-unavailable}/optimizer_duckdb.log" >&2
+                optimizer_status=ERROR
+                note="${note};OPTIMIZER-PROFILE-ERROR"
+                echo "OPTIMIZER-PROFILE-ERROR: $id; see $optimizer_profile_directory" >&2
             fi
-
-            if [ "$profile_status" != "timeout" ]; then
-                profile_status="not-selected"
-            fi
-            if [ "$optimizer_status" = "OK" ] && [ "$selected_plan" = "OUTERYAN" ]; then
-                local profile_result profile_rc=0 praw
+        fi
+        if [ "$outeryan_status" = measured ]; then
+            profile_status=not-selected
+            if [ "$selected_plan" = OUTERYAN ]; then
+                local praw profile_rc=0
                 local -a profile_fields=()
                 profile_threads="$OY_THREADS"
-                profile_status="ERROR"
-                profile_result="$(mktemp)" || profile_rc=1
-                if [ "$profile_rc" = 0 ]; then
-                    oy_phase_profile_from_json \
+                profile_status=ERROR
+                if [ "$optimizer_status" = OK ] || [ "$optimizer_status" = PARTIAL ]; then
+                    praw="$(oy_phase_profile_from_json \
                         "$optimizer_profile_directory/optimizer_outeryan_1.json" "$sql" "$selected_plan" \
-                        "$round1_pairs" "$round2_pairs" "$proven_empty" \
-                        > "$profile_result" || profile_rc=$?
-                    praw="$(< "$profile_result")"
+                        "$round1_pairs" "$round2_pairs" "$proven_empty")" || profile_rc=$?
                     read -r -a profile_fields <<< "$praw"
-                    rm -f "$profile_result"
+                    if [ "$profile_rc" = 0 ] && [ "${#profile_fields[@]}" -eq 15 ] && \
+                       [ "${profile_fields[3]}" != NA ]; then
+                        read -r r1sj r2sj realjoin profile_wall profile_cpu r1ratio r2ratio sjratio \
+                            realjoin_ratio other other_ratio r1_operators r2_operators realjoin_operators \
+                            profile_samples <<< "$praw"
+                        profile_status=OK
+                    fi
                 fi
-                if [ "$profile_rc" = 0 ] && [ "${#profile_fields[@]}" -eq 15 ] && \
-                   [ "${profile_fields[3]}" != "NA" ]; then
-                    read -r r1sj r2sj realjoin profile_wall profile_cpu r1ratio r2ratio sjratio \
-                        realjoin_ratio other other_ratio r1_operators r2_operators realjoin_operators \
-                        profile_samples <<< "$praw"
-                    profile_status="OK"
-                else
-                    # Do not discard valid unprofiled timing pairs after a profile failure.
+                if [ "$profile_status" = ERROR ]; then
                     note="${note};PROFILE-ERROR"
-                    profile_directory="$optimizer_profile_directory"
-                    echo "PROFILE-ERROR: $id; see ${optimizer_profile_directory:-unavailable}/optimizer_outeryan_1.json" >&2
-                fi
-            elif [ "$selected_plan" = "OUTERYAN" ] && [ "$profile_status" != "timeout" ]; then
-                profile_status="ERROR"
-                profile_directory="$optimizer_profile_directory"
-                note="${note};PROFILE-ERROR"
-            fi
-            if [ "$optimizer_status" = "OK" ] && [ "$profile_status" != "ERROR" ]; then
-                rm -f "$optimizer_profile_directory/optimizer_duckdb_1.json" \
-                    "$optimizer_profile_directory/optimizer_outeryan_1.json" \
-                    "$optimizer_profile_directory/optimizer_outeryan.trace" \
-                    "$optimizer_profile_directory/optimizer_duckdb.trace" \
-                    "$optimizer_profile_directory/optimizer_outeryan.log" \
-                    "$optimizer_profile_directory/optimizer_duckdb.log"
-                if rmdir "$optimizer_profile_directory" 2>/dev/null; then
-                    optimizer_profile_directory="-"
-                    profile_directory="-"
-                else
-                    echo "OPTIMIZER-PROFILE-CLEANUP-WARNING: could not remove $optimizer_profile_directory" >&2
+                    echo "PROFILE-ERROR: $id; see $optimizer_profile_directory" >&2
                 fi
             fi
         fi
-    fi
-    if [ "$stop_after_timeout" = 1 ] && [ "$optimizer_profile_directory" != "-" ]; then
+        if [ "$optimizer_status" = OK ] && [ "$profile_status" != ERROR ]; then
+            rm -f "$optimizer_profile_directory/optimizer_duckdb_1.json" \
+                "$optimizer_profile_directory/optimizer_outeryan_1.json" \
+                "$optimizer_profile_directory/optimizer_outeryan.trace" \
+                "$optimizer_profile_directory/optimizer_duckdb.trace" \
+                "$optimizer_profile_directory/optimizer_outeryan.log" \
+                "$optimizer_profile_directory/optimizer_duckdb.log"
+            if rmdir "$optimizer_profile_directory" 2>/dev/null; then
+                optimizer_profile_directory="-"
+            fi
+        fi
         profile_directory="$optimizer_profile_directory"
     fi
     # Store final state for the summary.
@@ -1394,12 +1425,13 @@ PY
         "$offm" "$onm" "$ratiom" "$optimizer_status" "$optimizer_duckdb_total" \
         "$optimizer_outeryan_total" "$optimizer_overhead" "$optimizer_ratio" "$optimizer_samples"
     result_line+=" measurement=[check=$CORRECTNESS_MODE protocol=$TIMING_PROTOCOL samples=$RUNS estimator=$TIMING_ESTIMATOR warmups=$((1 + PROFILE))]"
+    result_line+=" engine_status=[DuckDB=$duckdb_status OuterYan=$outeryan_status DuckDB_timeout_s=$OY_DUCKDB_TIMEOUT_SECS OuterYan_timeout_s=$OY_OUTERYAN_TIMEOUT_SECS DuckDB_timeout_stage=$duckdb_timeout_stage OuterYan_timeout_stage=$outeryan_timeout_stage DuckDB_check=$duckdb_correctness_status OuterYan_check=$outeryan_correctness_status]"
     printf -v context_line \
         '  context: family=%s category=%s nrel=%s pass=%s note=%s rows=%s sql=%s breakdown_s=[status=%s CPU=%s R1=%s R2=%s R3=%s Other=%s wall=%s samples=%s]' \
         "$family" "$WORKLOAD_CATEGORY" "$nrel" "$PASS" "$note" "$rows" "$sql_path" \
         "$profile_status" "$profile_cpu" "$r1sj" "$r2sj" "$realjoin" "$other" "$profile_wall" "$profile_samples"
     decision_line='  decision:'
-    if [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ] || [ "$timing_status" = "fallback-skip" ]; then
+    if [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ] || [ "$correct" = "TIMEOUT" ] || [ "$timing_status" = "fallback-skip" ]; then
         printf -v detail_suffix \
             ' plan=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
             "$selection_mode" \
@@ -1448,7 +1480,8 @@ PY
                 "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
             decision_line+="$detail_suffix"
         fi
-    else
+    fi
+    if [ "$correct" != TRUE ] && [ "$correct" != NOT-CHECKED ] && [ "$timing_status" != fallback-skip ]; then
         gate_detail="$(printf '%s' "${gate:-ERROR: correctness gate produced no diagnostic}" | tr '\n' ' ')"
         printf -v detail_suffix ' gate_detail=[%s]' "$gate_detail"
         decision_line+="$detail_suffix"
@@ -1491,8 +1524,10 @@ PY
         "$r1_operators" "$r2_operators" "$realjoin_operators" \
         "$profile_wall" "$profile_cpu" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
         "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory" \
-        "$OY_TIMEOUT_SECS" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256" \
-        "$CORRECTNESS_MODE" "$TIMING_PROTOCOL" "$RUNS" "$TIMING_ESTIMATOR" "$((1 + PROFILE))"
+        "$RECORDED_TIMEOUT" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256" \
+        "$CORRECTNESS_MODE" "$TIMING_PROTOCOL" "$RUNS" "$TIMING_ESTIMATOR" "$((1 + PROFILE))" \
+        "$OY_DUCKDB_TIMEOUT_SECS" "$OY_OUTERYAN_TIMEOUT_SECS" "$duckdb_status" "$outeryan_status" \
+        "$duckdb_timeout_stage" "$outeryan_timeout_stage" "$duckdb_correctness_status" "$outeryan_correctness_status"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============
@@ -1582,7 +1617,7 @@ if [ "$PROFILE" = 1 ]; then
     if rmdir "$PROFILE_DIR" 2>/dev/null; then
         echo "No profile error artifacts retained"
     else
-        echo "Profile error artifacts written to $PROFILE_DIR"
+        echo "Partial/error profile artifacts retained in $PROFILE_DIR"
     fi
 fi
 if [ "$CAPTURE_PLANS" = 1 ]; then

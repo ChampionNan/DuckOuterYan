@@ -40,6 +40,8 @@ profile_round1_operator_count profile_round2_operator_count profile_round3_opera
 profile_total_time_s profile_cpu_time_s profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
 profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
 correctness_check timing_protocol timing_samples timing_estimator warmup_runs_per_side
+timeout_seconds duckdb_timeout_seconds outeryan_timeout_seconds duckdb_status outeryan_status
+duckdb_timeout_stage outeryan_timeout_stage duckdb_correctness_status outeryan_correctness_status
 """.split()
 
 
@@ -60,7 +62,12 @@ def mapped(row, text, mapping):
 
 
 def normalize_timeout(row):
-    if "TIMEOUT" in row.get("note", "").upper():
+    # Modern records distinguish a correctness timeout from a later timing one.
+    # Preserve a completed equivalence check when only warm-up/profile/timing failed.
+    if "duckdb_correctness_status" in row or "outeryan_correctness_status" in row:
+        if any(row.get(f"{side}_correctness_status") == "timeout" for side in ("duckdb", "outeryan")):
+            row["correct"] = "TIMEOUT"
+    elif "TIMEOUT" in row.get("note", "").upper():
         row["correct"] = "TIMEOUT"
 
 
@@ -74,6 +81,15 @@ def parse_record(query, result, context, decision):
     row["reorder"] = "Yes" if row.get("outer_reordered") == "1" else "No"
     row["kernel"] = row.get("kernel_detail", "").split("(", 1)[0]
     mapped(row, section(result, "runtime_s"), {"DuckDB": "tm_off", "OuterYan": "tm_on"})
+    mapped(row, section(result, "engine_status"), {
+        "DuckDB": "duckdb_status", "OuterYan": "outeryan_status",
+        "DuckDB_timeout_s": "duckdb_timeout_seconds", "OuterYan_timeout_s": "outeryan_timeout_seconds",
+        "DuckDB_timeout_stage": "duckdb_timeout_stage", "OuterYan_timeout_stage": "outeryan_timeout_stage",
+        "DuckDB_check": "duckdb_correctness_status", "OuterYan_check": "outeryan_correctness_status",
+    })
+    if "duckdb_timeout_seconds" in row:
+        row["timeout_seconds"] = (row["duckdb_timeout_seconds"]
+                                  if row["duckdb_timeout_seconds"] == row.get("outeryan_timeout_seconds") else "NA")
     mapped(row, result, {"speedup": "tm_speedup"})
     mapped(row, section(result, "measurement"), {
         "check": "correctness_check", "protocol": "timing_protocol", "samples": "timing_samples",

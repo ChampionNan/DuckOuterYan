@@ -21,8 +21,10 @@
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
 #   OY_RUNS          Timed iterations after warm-up/profiling (default 1)
 #   OY_CHECK_CORRECTNESS  Compare every query's result multisets (default 1)
-#   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 900; 15 minutes)
-#   --timeout S      CLI timeout override; 0 disables the timeout
+#   OY_TIMEOUT_SECS  Shared default per statement (600 seconds; 10 minutes)
+#   OY_DUCKDB_TIMEOUT_SECS / OY_OUTERYAN_TIMEOUT_SECS  Independent engine limits
+#   --timeout S      Set both limits; 0 disables the timeout
+#   --duckdb-timeout S / --outeryan-timeout S  Per-engine overrides
 #   JOBS             Make parallelism (default: nproc)
 #   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)

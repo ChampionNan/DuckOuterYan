@@ -50,13 +50,14 @@ class MultiThreadExperimentTest(unittest.TestCase):
             timing = ".timer on" in sql
             profiling = "CALL enable_profiling(" in sql
             off = "disabled_optimizers TO 'outer_yan'" in sql
+            side = "off" if off else "on"
             if profiling and timing and not (sql.index("CALL enable_profiling(") < sql.index("PRAGMA disable_profiling;") < sql.index(".timer on")):
                 sys.exit("Error: profile was not disabled before timing")
             with open(os.environ["HARNESS_CALLS"], "a") as log:
                 log.write(json.dumps({"threads": threads, "timing": timing, "profiling": profiling,
                                       "off": off, "sql": sql}) + "\n")
             if profiling:
-                if os.environ.get("FAIL_PROFILE"):
+                if os.environ.get("FAIL_PROFILE") in ("1", side):
                     print("OY_STAGE:profile")
                     print("Error: profile timeout", file=sys.stderr)
                     sys.exit(124)
@@ -147,7 +148,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 print("plan")
             if timing:
                 print("OY_STAGE:timing")
-                if os.environ.get("TIMEOUT_TIMING") and off:
+                if os.environ.get("TIMEOUT_TIMING") in ("1", side):
                     sys.exit(124)
                 if os.environ.get("FAIL_TIMING_THREADS") == str(threads):
                     sys.exit("Error: timing failed")
@@ -214,14 +215,16 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertNotIn("T1:", report)
         return report
 
-    def test_default_timeout_is_fifteen_minutes_and_is_recorded(self):
+    def test_default_timeout_is_ten_minutes_per_engine_and_is_recorded(self):
         result = self.run_harness(OY_TIMEOUT_SECS="")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.read_row()["timeout_seconds"], "900")
+        self.assertEqual(self.read_row()["timeout_seconds"], "600")
+        self.assertEqual(self.read_row()["duckdb_timeout_seconds"], "600")
+        self.assertEqual(self.read_row()["outeryan_timeout_seconds"], "600")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertTrue(calls)
-        self.assertTrue(all("SET max_execution_time=900000;" in call["sql"] for call in calls))
-        self.assertIn("hard 900s/statement", (self.root / "result.txt").read_text())
+        self.assertTrue(all("SET max_execution_time=600000;" in call["sql"] for call in calls))
+        self.assertIn("DuckDB=600s", (self.root / "result.txt").read_text())
 
     def test_default_warms_and_profiles_before_single_timing_in_each_process(self):
         result = self.run_harness()
@@ -357,41 +360,59 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertFalse(any(call["timing"] and call["threads"] == 16 for call in calls))
         self.assertFalse(any(call["profiling"] and call["threads"] == 16 for call in calls))
 
-    def assert_correctness_timeout(self, mode, execution_count):
-        result = self.run_harness("--check-correctness", TIMEOUT_CORRECTNESS=mode)
+    def assert_correctness_timeout(self, mode, **overrides):
+        result = self.run_harness("--check-correctness", TIMEOUT_CORRECTNESS=mode, **overrides)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(
-            self.root / "result.csv", 32, expected_correct="TIMEOUT", expected_speedup="-"
+            self.root / "result.csv", 32, expected_correct="TIMEOUT", expected_speedup="NA"
         )
         for output in (result.stderr, report):
             self.assertIn("result: correct=TIMEOUT", output)
             self.assertNotIn("result: correct=FALSE", output)
             self.assertIn(f"TIMEOUT (0s, {mode}): sample", output)
         row = self.read_row()
-        self.assertEqual(row["note"], "TIMEOUT")
+        failed, completed = ("duckdb", "outeryan") if mode == "off" else ("outeryan", "duckdb")
+        self.assertIn(f"TIMEOUT-{mode.upper()}-CORRECTNESS", row["note"])
+        self.assertEqual(row[f"{failed}_status"], "timeout")
+        self.assertEqual(row[f"{failed}_timeout_stage"], "correctness")
+        self.assertEqual(row[f"{completed}_status"], "measured")
+        self.assertEqual(row[f"{completed}_correctness_status"], "ok")
+        self.assertEqual(row["tm_off" if mode == "off" else "tm_on"], "NA")
+        self.assertGreater(float(row["tm_on" if mode == "off" else "tm_off"]), 0)
+        self.assertEqual(row["optimizer_profile_status"], "PARTIAL")
+        self.assertGreater(float(row[f"optimizer_{completed}_total_s"]), 0)
+        self.assertEqual(row[f"optimizer_{failed}_total_s"], "NA")
+        self.assertEqual(row["optimizer_overhead_s"], "NA")
+        self.assertEqual(row["profile_status"], "OK" if mode == "off" else "timeout")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         executions = [call for call in calls if "EXPLAIN" not in call["sql"]]
-        self.assertEqual(len(executions), execution_count)
-        self.assertEqual(executions[-1]["off"], mode == "off")
-        self.assertTrue(all(not call["timing"] for call in calls))
-        self.assertTrue(all(not call["profiling"] for call in calls))
+        # Both equivalence executions occur; the timed-out side is never retried.
+        self.assertEqual([c["off"] for c in executions[:2]], [True, False])
+        self.assertEqual(len([c for c in executions if c["off"] == (mode == "off")]), 1)
+        timed = [c for c in executions if c["timing"]]
+        self.assertEqual(len(timed), 1)
+        self.assertEqual(timed[0]["off"], mode != "off")
         self.assertIn("correct=0", report)
         self.assertIn("timed=0", report)
 
     def test_correctness_off_timeout_is_recorded_once_without_retry(self):
-        self.assert_correctness_timeout("off", 1)
+        self.assert_correctness_timeout("off")
 
     def test_correctness_on_timeout_is_recorded_once_without_retry(self):
-        self.assert_correctness_timeout("on", 2)
+        self.assert_correctness_timeout("on")
 
     def test_native_correctness_timeout_is_not_misclassified_as_error(self):
-        result = self.run_harness(TIMEOUT_CORRECTNESS="off", NATIVE_TIMEOUT="1")
+        self.assert_correctness_timeout("off", NATIVE_TIMEOUT="1")
+
+    def test_both_correctness_timeouts_are_attempted_once_without_measurement(self):
+        result = self.run_harness(TIMEOUT_CORRECTNESS="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.read_row()["correct"], "TIMEOUT")
-        self.assertEqual(self.read_row()["note"], "TIMEOUT")
+        self.assertEqual(self.read_row()["duckdb_status"], "timeout")
+        self.assertEqual(self.read_row()["outeryan_status"], "timeout")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
-        self.assertEqual(len([call for call in calls if "EXPLAIN" not in call["sql"]]), 1)
+        self.assertEqual(len([call for call in calls if "EXPLAIN" not in call["sql"]]), 2)
 
     def test_explicit_correctness_opt_out_remains_unchecked(self):
         result = self.run_harness("--no-check-correctness")
@@ -405,17 +426,21 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(self.read_row()["correct"], "TRUE")
         self.assertEqual(self.read_row()["correctness_check"], "enabled")
 
-    def test_timing_timeout_stops_query_without_retry_or_profile(self):
-        result = self.run_harness(TIMEOUT_TIMING="1")
+    def test_off_timing_timeout_does_not_stop_outeryan(self):
+        result = self.run_harness(TIMEOUT_TIMING="off")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(
             self.root / "result.csv", 32, expected_speedup="NA"
         )
         row = self.read_row()
-        self.assertEqual(row["note"], "TIMEOUT-OFF-TIMING")
+        self.assertIn("TIMEOUT-OFF-TIMING", row["note"])
+        self.assertEqual(row["duckdb_status"], "timeout")
+        self.assertEqual(row["outeryan_status"], "measured")
+        self.assertEqual(row["tm_on"], "2.500000000")
+        self.assertEqual(row["optimizer_profile_status"], "PARTIAL")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         timed = [call for call in calls if call["timing"]]
-        self.assertEqual(len(timed), 1)
+        self.assertEqual(len(timed), 2)
         self.assertTrue(timed[0]["off"])
         self.assertTrue(timed[0]["profiling"])
         self.assertIn("timed=0", report)
@@ -425,6 +450,57 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 16, expected_speedup="NA")
         self.assertIn("timed=0", report)
+
+    def test_side_specific_timeouts_override_common_limit(self):
+        result = self.run_harness("--duckdb-timeout", "0", "--outeryan-timeout", "7", "--timeout", "600")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["timeout_seconds"], "NA")
+        self.assertEqual(row["duckdb_timeout_seconds"], "0")
+        self.assertEqual(row["outeryan_timeout_seconds"], "7")
+        for call in [json.loads(line) for line in self.calls.read_text().splitlines()]:
+            if call["off"]:
+                self.assertNotIn("SET max_execution_time=", call["sql"])
+            else:
+                self.assertIn("SET max_execution_time=7000;", call["sql"])
+
+    def test_side_specific_environment_limits(self):
+        result = self.run_harness(OY_DUCKDB_TIMEOUT_SECS="11", OY_OUTERYAN_TIMEOUT_SECS="13")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for call in [json.loads(line) for line in self.calls.read_text().splitlines()]:
+            self.assertIn(f"SET max_execution_time={11000 if call['off'] else 13000};", call["sql"])
+
+    def test_profile_and_timing_failures_preserve_other_engine_measurements(self):
+        for failure in ("FAIL_PROFILE", "TIMEOUT_TIMING"):
+            for side in ("off", "on"):
+                with self.subTest(failure=failure, side=side):
+                    if self.calls.exists():
+                        self.calls.unlink()
+                    result = self.run_harness(**{failure: side})
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    row = self.read_row()
+                    failed, completed = ("duckdb", "outeryan") if side == "off" else ("outeryan", "duckdb")
+                    self.assertEqual(row[f"{failed}_status"], "timeout")
+                    self.assertEqual(row[f"{completed}_status"], "measured")
+                    self.assertEqual(row[f"tm_{side}"], "NA")
+                    self.assertGreater(float(row["tm_on" if side == "off" else "tm_off"]), 0)
+                    self.assertEqual(row["tm_speedup"], "NA")
+                    self.assertEqual(row["optimizer_profile_status"], "PARTIAL")
+                    calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+                    self.assertEqual(len([c for c in calls if c["timing"]]), 2)
+
+    def test_timeout_metadata_round_trips_without_losing_verified_correctness(self):
+        from auto_test import reprocess_experiment_logs as recover
+        result = self.run_harness(TIMEOUT_TIMING="off")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.root / "result.txt").read_text().splitlines()
+        parts = [next(line.split(f"{key}: ", 1)[1] for line in lines if line.startswith(f"  {key}: "))
+                 for key in ("result", "context", "decision")]
+        parsed = recover.parse_record("sample", *parts)
+        row = self.read_row()
+        for field in ("correct", "tm_on", "tm_off", "timeout_seconds", "duckdb_status", "outeryan_status",
+                      "duckdb_timeout_stage", "duckdb_correctness_status", "outeryan_correctness_status"):
+            self.assertEqual(parsed[field], row[field], field)
 
     def test_stale_binary_cannot_publish_trace_contaminated_timings(self):
         result = self.run_harness(STALE_PROFILE_BINARY="1")
@@ -438,13 +514,14 @@ class MultiThreadExperimentTest(unittest.TestCase):
         result = self.run_harness(FAIL_PROFILE="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.read_row()
-        self.assertEqual(row["note"], "TIMEOUT-OFF-PROFILE")
+        self.assertIn("TIMEOUT-OFF-PROFILE", row["note"])
+        self.assertIn("TIMEOUT-ON-PROFILE", row["note"])
         self.assertEqual(row["timing_status"], "timeout")
         self.assertEqual(row["tm_off"], "NA")
         self.assertEqual(row["tm_on"], "NA")
         self.assertEqual(row["correct"], "TRUE")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertEqual(len([c for c in calls if c["profiling"]]), 1)
+        self.assertEqual(len([c for c in calls if c["profiling"]]), 2)
         self.assertTrue(Path(row["profile_directory"]).is_dir())
 
     def test_explicit_three_samples_still_exclude_all_warmup_work(self):
@@ -483,19 +560,21 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["profile_status"], "OK")
 
-    def test_native_kernel_timeout_stops_before_warmup_profile_or_timing(self):
+    def test_native_kernel_timeout_stops_only_outeryan_not_duckdb(self):
         result = self.run_harness(TIMEOUT_KERNEL="1")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.read_row()
         self.assertEqual(row["timing_status"], "timeout")
-        self.assertEqual(row["note"], "TIMEOUT-KERNEL")
-        self.assertEqual(row["tm_off"], "NA")
+        self.assertIn("TIMEOUT-ON-KERNEL", row["note"])
+        self.assertGreater(float(row["tm_off"]), 0)
         self.assertEqual(row["tm_on"], "NA")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
+        timed = [call for call in calls if call["timing"]]
+        self.assertEqual(len(timed), 1)
+        self.assertTrue(timed[0]["off"])
         execution = [call for call in calls if "EXPLAIN" not in call["sql"]]
-        self.assertEqual(len(execution), 3)
-        self.assertIn(".mode trash", execution[-1]["sql"])
+        self.assertEqual(len(execution), 4)
+        self.assertIn(".mode trash", execution[2]["sql"])
 
     def test_nonaggregate_duckdb_fallback_checks_equivalence_but_skips_timing(self):
         result = self.run_harness(SELECTED_PLAN="DUCKDB")

@@ -31,6 +31,10 @@
 
 namespace duckdb {
 
+namespace {
+unique_ptr<Expression> MakeCoalesceWithOne(unique_ptr<Expression> annot, const LogicalType &type);
+}
+
 // ===========================================================================
 // AggregatePushdownRewriter
 // ===========================================================================
@@ -103,8 +107,14 @@ unique_ptr<LogicalOperator> AggregatePushdownRewriter::Rewrite(unique_ptr<Logica
 		const bool right_has = FindAnnotAttribute(*join.children[1], right_annot, right_type);
 		if (left_has && right_has) {
 			vector<unique_ptr<Expression>> mult_children;
-			mult_children.push_back(make_uniq<BoundColumnRefExpression>(left_type, left_annot));
-			mult_children.push_back(make_uniq<BoundColumnRefExpression>(right_type, right_annot));
+			// NULL padding represents one unmatched tuple, not an unknown
+			// multiplicity. Normalize each factor before multiplying: repairing
+			// only the final product would turn 5 * NULL into 1 instead of 5.
+			// This also applies to INNER joins above an earlier outer join.
+			mult_children.push_back(
+			    MakeCoalesceWithOne(make_uniq<BoundColumnRefExpression>(left_type, left_annot), left_type));
+			mult_children.push_back(
+			    MakeCoalesceWithOne(make_uniq<BoundColumnRefExpression>(right_type, right_annot), right_type));
 			FunctionBinder function_binder(context);
 			ErrorData error;
 			auto mult_expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "*", std::move(mult_children), error,
@@ -270,8 +280,9 @@ AggregateFunction LookupAggregate(ClientContext &context, const string &name, co
 //! pushdown: over an outer join the annot column is NULL on every NULL-padded
 //! (unmatched) row, and SQL `sum` skips NULLs (treats them as 0) — but COUNT(*)
 //! must count each such row as 1. Wrapping the summed annot in COALESCE(.,1)
-//! restores that. It is a no-op for inner joins (annot is never NULL there),
-//! and is deliberately NOT applied to SUM/MIN/MAX/DISTINCT pushdown, whose
+//! restores that. Normalize multiplication operands too: even an INNER join
+//! can receive NULL annotations from an outer join lower in its input tree.
+//! This is deliberately NOT applied to SUM/MIN/MAX/DISTINCT pushdown, whose
 //! NULL semantics must pass through unchanged.
 unique_ptr<Expression> MakeCoalesceWithOne(unique_ptr<Expression> annot, const LogicalType &type) {
 	auto coalesce = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_COALESCE, type);

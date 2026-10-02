@@ -81,9 +81,12 @@ unset _oy_thread_defaults
 # ===========================================================================
 # 5) Timeouts
 # ===========================================================================
-# Per-statement timeout (seconds; default 15 minutes), enforced by DuckDB's max_execution_time.
+# Independent per-engine statement limits (seconds; default 10 minutes each).
+# OY_TIMEOUT_SECS remains a common override; engine-specific values take precedence.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
-export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-900}"
+export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-600}"
+export OY_DUCKDB_TIMEOUT_SECS="${OY_DUCKDB_TIMEOUT_SECS:-$OY_TIMEOUT_SECS}"
+export OY_OUTERYAN_TIMEOUT_SECS="${OY_OUTERYAN_TIMEOUT_SECS:-$OY_TIMEOUT_SECS}"
 # Extra seconds for CLI startup and teardown around a timing batch.
 export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 
@@ -126,7 +129,7 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  TPCH_SF/TPCDS_SF = $TPCH_SF / $TPCDS_SF"
         echo "  OY_THREADS       = $OY_THREADS"
         echo "  OY_THREAD_COUNTS = $OY_THREAD_COUNTS (sequential)"
-        echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per statement"
+        echo "  TIMEOUT          = DuckDB ${OY_DUCKDB_TIMEOUT_SECS}s / OuterYan ${OY_OUTERYAN_TIMEOUT_SECS}s per statement"
         echo "  BATCH GRACE      = ${OY_BATCH_GRACE_SECS}s"
         echo "  OY_RUNS          = $OY_RUNS (1 = first post-warm-up sample; odd N >1 = median)"
         echo "  CHECK_CORRECTNESS = $OY_CHECK_CORRECTNESS (0 = NOT-CHECKED)"

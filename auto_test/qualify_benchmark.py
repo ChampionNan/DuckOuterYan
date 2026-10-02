@@ -104,7 +104,9 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
     if result.get("database_signature") != profiles[0]["database_signature"]:
         return "database_mismatch"
     timeout = benchmark.QUALIFICATION_TIMEOUT_SECONDS
-    if result.get("timeout_seconds") != str(timeout):
+    limits = [result.get(f"{side}_timeout_seconds", result.get("timeout_seconds"))
+              for side in ("duckdb", "outeryan")]
+    if any(limit != str(timeout) for limit in limits):
         return f"requires_{timeout}s_run"
     if "TIMEOUT" in result.get("note", "").upper() or "timeout" in result.get("timing_status", "").lower():
         return f"timeout_at_{timeout}s"
