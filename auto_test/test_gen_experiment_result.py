@@ -1392,6 +1392,10 @@ class PaperStatisticsTest(unittest.TestCase):
 
     def test_real_manifest_roles_and_distinct_dimensions(self):
         provenance = PLOT.benchmark_provenance()
+        supplementary = provenance[provenance["evaluation_role"].eq("historical_slow_baseline_case")]
+        self.assertEqual(len(supplementary), 3)
+        self.assertEqual(set(supplementary["workload_component"]), {"evaluation"})
+        self.assertEqual(set(supplementary["selectivity_level"]), {"Legacy modulo (unverified)"})
         historical = provenance[provenance["filter_design_revision"].isna()]
         self.assertEqual(len(historical), 932)
         provenance = provenance[provenance["filter_design_revision"].eq("balanced-screened-20261002")]

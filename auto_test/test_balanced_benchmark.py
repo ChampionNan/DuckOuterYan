@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import balanced_benchmark as b
 import qualify_benchmark as q
@@ -21,6 +22,9 @@ class BalancedBenchmarkTest(unittest.TestCase):
 
     def test_active_matrix_and_mixed_kinds(self):
         rows = b.validate(b.ROOT / "benchmark")
+        self.assertEqual(len(rows), 723)
+        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=180, tpch=180, tpcds=183, job=180))
+        rows = [r for r in rows if not b.is_historical_case(r)]
         self.assertEqual(len(rows), 720)
         self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in rows),
                          {(f, t, s):20 for f in b.FAMILIES for t in b.TIERS for s in b.SHAPES})
@@ -29,6 +33,30 @@ class BalancedBenchmarkTest(unittest.TestCase):
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
         self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows))
+
+    def test_historical_cases_preserve_sql_and_are_not_band_calibrated(self):
+        corpus = b.ROOT / "benchmark"
+        rows = [r for r in b.validate(corpus) if b.is_historical_case(r)]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(set((corpus / "historical_cases.txt").read_text().splitlines()),
+                         {r["path"] for r in rows})
+        for row in rows:
+            original = b.legacy.REPO_ROOT / row["source_location"]
+            self.assertEqual((corpus / row["path"]).read_bytes(), original.read_bytes())
+            self.assertEqual(row["semantic_tier"], "historical_unbanded")
+            self.assertEqual(row["target_min_fraction"], "")
+            self.assertEqual(row["target_max_fraction"], "")
+            self.assertEqual(row["calibration_in_range"], "not_applicable")
+            self.assertEqual(row["qualification_status"], "PENDING_CPU9_MEASUREMENT")
+
+    def test_reserve_generation_does_not_repeat_historical_cases(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), forbid_result_access():
+            root = Path(tmp)
+            b.generate(root, per_family=9, batch=1)
+            rows = b.validate(root / "benchmark")
+            self.assertEqual(len(rows), 36)
+            self.assertFalse(any(b.is_historical_case(r) for r in rows))
+            self.assertEqual((root / "benchmark/historical_cases.txt").read_text(), "")
 
     def test_composite_edges_are_complete(self):
         predicate = "a.item = b.item AND a.ticket = b.ticket AND a.store = b.store"
@@ -108,6 +136,48 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
+            self.assertEqual(report["balanced_candidates"], 720)
+            self.assertEqual(report["historical_supplementary_candidates"], 3)
+            self.assertEqual(report["historical_supplementary_observations"], 0)
+
+    def test_historical_results_preserved_separately_including_timeouts(self):
+        corpus = b.ROOT / "benchmark"
+        candidates = [r for r in b.read_manifest(corpus / "manifest.csv") if b.is_historical_case(r)]
+        results = [dict(self.result, family=r["family"], query=r["query_id"],
+                        note="OFF-TIMEOUT" if i == 0 else "OK", tm_off="NA" if i == 0 else "712.5")
+                   for i, r in enumerate(candidates)]
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            source = root / "results.csv"
+            b.write_csv(source, results)
+            report = q.qualify([corpus], [], [source], root / "report")
+            self.assertEqual(report["selected"], 0)
+            self.assertEqual(report["historical_supplementary_observations"], 3)
+            supplementary = b.read_manifest(root / "report/supplementary_results.csv")
+            self.assertEqual(len(supplementary), 3)
+            self.assertEqual(supplementary[0]["note"], "OFF-TIMEOUT")
+            self.assertEqual(supplementary[0]["tm_off"], "NA")
+            self.assertEqual(supplementary[1]["tm_off"], "712.5")
+            self.assertTrue(all(r["evaluation_role"] == b.HISTORICAL_ROLE for r in supplementary))
+
+    def test_band_audit_explicitly_excludes_historical_cases(self):
+        rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
+        candidate = next(r for r in rows if not b.is_historical_case(r))
+        historical = [r for r in rows if b.is_historical_case(r)]
+        design = json.loads(b.DESIGN.read_text())
+        calibration = design["profiles"][candidate["selectivity_profile"]]["calibration"]
+        counts = dict(n=calibration["n"], c0=calibration["qualified_rows"][b.TIERS.index(candidate["semantic_tier"])])
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(b, "validate", return_value=[candidate] + historical), \
+                mock.patch.object(q, "database_signature", return_value="db"), \
+                mock.patch.object(q.subprocess, "run", return_value=mock.Mock(stdout=json.dumps([counts]))) as run:
+            output = Path(tmp) / "audit.json"
+            self.assertTrue(q.audit_selectivity(b.ROOT, Path("duckdb"), output, 600))
+            report = json.loads(output.read_text())
+            self.assertEqual(report["historical_cases_outside_band_audit"], [r["query_id"] for r in historical])
+            self.assertEqual(len(report["profiles"]), 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertNotIn("% 1000", run.call_args[0][0][-1])
 
     def test_latest_failure_replaces_prior_success_in_report(self):
         corpus = b.ROOT / "benchmark"

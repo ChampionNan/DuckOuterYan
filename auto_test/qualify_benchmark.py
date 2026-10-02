@@ -37,6 +37,8 @@ def audit_selectivity(root, binary, output, timeout):
     design = json.loads(benchmark.DESIGN.read_text())
     used = defaultdict(set)
     for row in rows:
+        if benchmark.is_historical_case(row):
+            continue
         used[row["selectivity_profile"]].add(row["semantic_tier"])
     measurements = []
     for name, tiers in sorted(used.items()):
@@ -69,6 +71,8 @@ def audit_selectivity(root, binary, output, timeout):
                          manifest_sha256=benchmark.digest(corpus / "manifest.csv"),
                          design_sha256=benchmark.digest(benchmark.DESIGN), profiles=measurements,
                          all_used_bands_in_range=success,
+                         historical_cases_outside_band_audit=[r["query_id"] for r in rows
+                                                             if benchmark.is_historical_case(r)],
                          scope="Base-entity cohorts including NULL rows in denominator, not join-output selectivity"))
     print(f"Selectivity audit: {'PASS' if success else 'OUT OF BAND'}; {output}")
     return success
@@ -76,6 +80,10 @@ def audit_selectivity(root, binary, output, timeout):
 
 def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
     """Return one auditable exclusion reason; fail closed on missing provenance."""
+    if benchmark.is_historical_case(candidate):
+        # These exact legacy definitions are not part of the three-band design.
+        # Preserve every observed result separately, without claiming qualification.
+        return "historical_case_reported_separately"
     if result is None:
         return "pending_measurement"
     if not audit:
@@ -208,6 +216,15 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     fields += [k for row in qualified_results for k in row if k not in fields]
     fields = list(dict.fromkeys(fields))
     benchmark.write_csv(output / "qualified_results.csv", qualified_results, fields)
+    supplementary_results = []
+    for key, candidate in candidates.items():
+        if benchmark.is_historical_case(candidate) and key in observed:
+            supplementary_results.append(dict(
+                observed[key], qualification_policy="historical_case_unqualified_raw_result",
+                evaluation_role=candidate["evaluation_role"], source_component=candidate["source_component"],
+                selectivity_tier=candidate["selectivity_tier"], selectivity_profile=candidate["selectivity_profile"]))
+    supplementary_fields = list(dict.fromkeys(fields + [k for r in supplementary_results for k in r]))
+    benchmark.write_csv(output / "supplementary_results.csv", supplementary_results, supplementary_fields)
     lists = []
     for index, corpus in enumerate(corpora):
         name = "qualified_query_paths.txt" if len(corpora) == 1 else f"qualified_query_paths_batch{index}.txt"
@@ -221,6 +238,9 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
                           "correct measured pairs only, both runtimes >1s and <1800s, speedup >=0.8; "
                           "latest supplied observations win, including failures; no fallback imputation",
                    target_host=host, target_per_family=target, candidates=len(detail), selected=len(selected),
+                   balanced_candidates=sum(not benchmark.is_historical_case(r) for r in detail),
+                   historical_supplementary_candidates=sum(benchmark.is_historical_case(r) for r in detail),
+                   historical_supplementary_observations=len(supplementary_results),
                    reasons=dict(Counter(r["qualification_reason"] for r in detail)), coverage=counts, sources=sources,
                    statistics={f:speed_statistics([r for r in selected if r["family"]==f]) for f in benchmark.FAMILIES},
                    outeryan_selected_statistics={f:speed_statistics([r for r in qualified_results

@@ -1,8 +1,11 @@
 # Outer-join benchmark: balanced, historically screened candidates
 
-Revision: `balanced-screened-20261002`. The active `benchmark/` contains **720
-distinct candidate SQL queries**, **180 per execution family**. These are not
-720 verified successful measurements. Final membership requires tests on cpu9.
+Revision: `balanced-screened-20261002`. The active `benchmark/` contains **723
+distinct candidate SQL queries**: **720 balanced candidates**, 180 per execution
+family, plus **three historical TPC-DS case studies**. Thus default runs contain
+183 TPC-DS queries and 180 each for Graph, TPC-H and JOB. These are not verified
+successful measurements. The following quotas apply only to the balanced 720;
+final membership requires tests on cpu9.
 
 | Family | Low `(0,5%)` | Medium `[5,40%)` | High `[40,60%]` | Total |
 |---|---:|---:|---:|---:|
@@ -17,14 +20,55 @@ not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
 approximately balanced, not claimed exactly equal.
 
-Types: 384 `join`, 162 `graph` (including 27 industry-inspired controls), and
+Balanced types: 384 `join`, 162 `graph` (including 27 industry-inspired controls), and
 174 `aggregate`. Aggregates comprise 66 COUNT, 36 MIN, 36 MAX and 36 SUM queries.
 Type and family differ: `--only graph` runs 180 Graph-family candidates, whereas
 `--query-type graph` selects 162 graph/control queries across families.
+The three historical cases add three `join` queries (387 in the full run).
+
+## Historical supplementary cases
+
+Default `--all` also runs the following exact archived SQL definitions. Regeneration
+preserves their SQL bytes and verifies pinned hashes; reserve batches do not repeat them.
+
+| Case | Active query ID | Historical DuckDB / OuterYan time (s) |
+|---|---|---:|
+| Q80-alt | `join__tpcds__historical__q80_alt` | 1137.5 / 9.3 |
+| Q80-left-deep | `join__tpcds__historical__q80_left_deep` | 712.5 / 9.2 |
+| Q93-left-deep | `join__tpcds__historical__q93_left_deep` | 665.1 / 4.6 |
+
+These timings are from the **20260926 SF100 run**, not predictions or measurements
+for SF50. The cases were requested based on historical performance; they are
+**not** additional balanced samples. They retain `ss_ticket_number % 1000 = 0`
+and the historical item-only sales/returns equality, not a complete transaction
+composite key. The modulo filter is nominally about 0.1%, but is not a measured
+or audited semantic band. Do not describe these definitions as unchanged original
+TPC-DS queries, or as complying with the balanced component's source-key/filter rules.
+
+The manifest marks `evaluation_role=historical_slow_baseline_case` and
+`semantic_tier=historical_unbanded`. Raw experiment CSVs include all three;
+qualification excludes them from the 720-target quotas and writes their raw
+observations, **including failures**, to `supplementary_results.csv`. This file
+is unqualified case-study evidence, not another screened subset. Selectivity
+audits explicitly list these cases as outside the three-band audit.
+
+To test only these cases using an already compiled binary:
+
+```bash
+bash auto_test/experiment_onoff.sh --all --timeout 1800 \
+  --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
+```
+
+A uniform 15-minute exploratory run is supported by `run_all.sh --all --timeout 900`,
+but Q80-alt historically needed about 19 minutes on the DuckDB side. SF50 may be
+faster; it is not guaranteed to fit within 900 seconds. The default and balanced
+qualification policy remain 1800 seconds. A 900-second result is not silently
+qualified under the 1800-second policy. OFF correctness runs first: an OFF timeout
+stops that query before ON, so it does not establish that OuterYan itself timed out.
 
 ## Sources and screening
 
-Business-schema derived queries retain relations and **all equality keys per
+Balanced business-schema derived queries retain relations and **all equality keys per
 edge** from pinned TPC-H, TPC-DS, JOB and SQLStorm seeds. Synthetic graph shapes
 are independently enumerated chains, stars and branches (4–6 relations, forward
 and converging edges). Industry controls are separately identified as synthetic,
@@ -106,7 +150,8 @@ Outputs under `qualified_TIMESTAMP/`:
 - `qualification.csv`: every candidate and its inclusion/exclusion reason.
 - `coverage.csv`: eligible count and shortage per family/tier (target 60).
 - `qualification_summary.json`: status and per-family geomean/min/max/median/std.
-- `qualified_results.csv`: retained result rows, separate from raw results.
+- `qualified_results.csv`: retained balanced result rows, separate from raw results.
+- `supplementary_results.csv`: all supplied historical-case observations, unqualified.
 - `qualified_manifest.csv`, `qualified_query_paths*.txt`: retained definitions/lists.
 
 `gen_experiment_result.py --date YYYYMMDD` still reports the **full run**.

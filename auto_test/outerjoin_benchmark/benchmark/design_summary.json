@@ -6,55 +6,64 @@
   "counts": {
     "graph": 180,
     "job": 180,
-    "tpcds": 180,
+    "tpcds": 183,
     "tpch": 180
+  },
+  "balanced_counts": {
+    "graph": 180,
+    "tpch": 180,
+    "tpcds": 180,
+    "job": 180
+  },
+  "supplementary_counts": {
+    "tpcds": 3
   },
   "family_tiers": {
     "graph": {
-      "high": 60,
       "low": 60,
-      "medium": 60
+      "medium": 60,
+      "high": 60
     },
     "tpch": {
-      "high": 60,
       "low": 60,
-      "medium": 60
+      "medium": 60,
+      "high": 60
     },
     "tpcds": {
-      "high": 60,
       "low": 60,
-      "medium": 60
+      "medium": 60,
+      "high": 60
     },
     "job": {
-      "high": 60,
       "low": 60,
-      "medium": 60
+      "medium": 60,
+      "high": 60
     }
   },
   "family_shapes": {
     "graph": {
       "left_deep": 60,
-      "bushy": 60,
-      "right_deep": 60
+      "right_deep": 60,
+      "bushy": 60
     },
     "tpch": {
-      "bushy": 60,
       "left_deep": 60,
-      "right_deep": 60
+      "right_deep": 60,
+      "bushy": 60
     },
     "tpcds": {
-      "bushy": 60,
       "left_deep": 60,
-      "right_deep": 60
+      "right_deep": 60,
+      "bushy": 60
     },
     "job": {
+      "left_deep": 60,
       "right_deep": 60,
-      "bushy": 60,
-      "left_deep": 60
+      "bushy": 60
     }
   },
   "historical_exclusion_observations": 138,
   "design_sha256": "a6319af6124cd0273e332a3e205295ec87a9334701a65e0cff8fce5cdaa60414",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
-  "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements."
+  "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. Historical supplementary cases are outside balanced quotas; their old timings are not reused."
 }

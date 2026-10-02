@@ -1,0 +1,3 @@
+tpcds/join__tpcds__historical__q80_alt.sql
+tpcds/join__tpcds__historical__q80_left_deep.sql
+tpcds/join__tpcds__historical__q93_left_deep.sql

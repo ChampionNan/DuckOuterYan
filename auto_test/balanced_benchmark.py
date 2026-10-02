@@ -33,6 +33,50 @@ FAMILIES = ("graph", "tpch", "tpcds", "job")
 TIERS = ("low", "medium", "high")
 SHAPES = ("left_deep", "right_deep", "bushy")
 TARGET = 180
+HISTORICAL_ROLE = "historical_slow_baseline_case"
+HISTORICAL_CASES = {
+    "q80_alt": ("derived__ojb_tpcds_q80_store_channel_alt",
+                "38e9b903da4302ed10c47b29b587fc2f472104a2a90541113df5934b4cc3ca00"),
+    "q80_left_deep": ("derived__ojb_tpcds_q80_store_channel_ldmx",
+                      "c0f055403e607df8bd2dbb21a5f8aeaea0e078d57d4e53277f3632dc4dab7cfe"),
+    "q93_left_deep": ("derived__ojb_tpcds_q93_return_reason_ldmx",
+                      "5461ee1745d99733ce99fe7766fbfbbba037117bb621555d20c70da011faf4ee"),
+}
+
+
+def is_historical_case(row):
+    return row.get("evaluation_role") == HISTORICAL_ROLE
+
+
+def historical_cases():
+    """Restore exact archived SQL; never transfer its old timings to a new scale."""
+    archive = ROOT / "revisions/pre_semantic_20260925/benchmark"
+    manifest = {r["query_id"]: r for r in read_manifest(archive / "manifest.csv")}
+    for name, (original_id, expected_hash) in HISTORICAL_CASES.items():
+        old = manifest[original_id]
+        source = archive / old["path"]
+        if digest(source) != expected_hash:
+            raise ValueError(f"Historical case definition changed: {source}")
+        sql = source.read_text(encoding="utf-8")
+        query = f"join__tpcds__historical__{name}"
+        row = dict(family="tpcds", query_id=query, path=f"tpcds/{query}.sql",
+                   query_class="join", workload_category="join", corpus_revision=REVISION,
+                   source_seed=original_id, source_benchmark="TPC-DS", source_query=old["source_query"],
+                   source_location=str(source.relative_to(legacy.REPO_ROOT)), source_sha256=expected_hash,
+                   source_filter_adaptation="Historical SQL preserved verbatim, including item-only sales/returns edge",
+                   topology=old["topology"], tree_shape=old["tree_shape"], join_vector=old["join_vector"],
+                   relation_count=old["relation_count"], provenance_class="historical_case_study",
+                   source_component="evaluation", evaluation_role=HISTORICAL_ROLE,
+                   filter_design_revision="historical-modulo-20260925", semantic_tier="historical_unbanded",
+                   selectivity_tier="legacy_modulo_unverified", selectivity_profile="legacy_tpcds_ticket_mod1000",
+                   selectivity_anchor="ss.ss_ticket_number", selectivity_predicate="ss.ss_ticket_number % 1000 = 0",
+                   calibration_in_range="not_applicable", selectivity_scope="historical modulo filter; not audited into balanced bands",
+                   parameter_policy="User-requested historical case, selected using prior performance; report separately",
+                   sql_fingerprint=sql_fingerprint(sql, "tpcds"), expression_fingerprint=expression_key(sql, "tpcds"),
+                   content_sha256=expected_hash, candidate_batch=0, selectivity_stress="false", regression_guard="false",
+                   qualification_status="PENDING_CPU9_MEASUREMENT", qualification_timeout_seconds=1800,
+                   qualification_min_runtime_s=1, qualification_min_speedup=.8)
+        yield row, sql
 
 
 def write_json(path, value):
@@ -443,19 +487,32 @@ def generate(root=ROOT, per_family=180, batch=0):
                 path.parent.mkdir(exist_ok=True)
                 path.write_text(content, encoding="utf-8")
                 records.append(row)
+        balanced_records = list(records)
+        # Supplementary cases do not consume balanced quotas or repeat in reserves.
+        if batch == 0:
+            for row, sql in historical_cases():
+                path = output / row["path"]
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(sql, encoding="utf-8")
+                records.append(row)
         records.sort(key=lambda r:r["path"])
         write_csv(output/"manifest.csv", records)
         write_csv(output/"aliases.csv", [], ["canonical_query_id", "sql_fingerprint"])
+        (output / "historical_cases.txt").write_text(
+            "".join(r["path"] + "\n" for r in records if is_historical_case(r)), encoding="utf-8")
         for filename in ("selectivity_stress.txt", "job_regressions.txt"):
             (output/filename).write_text("")
         write_json(output/"design_summary.json", {
             "revision": REVISION, "status": "CANDIDATES_ONLY_NOT_MEASURED", "batch": batch,
             "target_host": "cpu9:/home/data/bchenba/DuckYanOuter", "counts": dict(Counter(r["family"] for r in records)),
-            "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in records if r["family"]==f)) for f in FAMILIES},
-            "family_shapes": {f:dict(Counter(r["tree_shape"] for r in records if r["family"]==f)) for f in FAMILIES},
+            "balanced_counts": dict(Counter(r["family"] for r in balanced_records)),
+            "supplementary_counts": dict(Counter(r["family"] for r in records if is_historical_case(r))),
+            "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
+            "family_shapes": {f:dict(Counter(r["tree_shape"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
             "historical_exclusion_observations": len(evidence["excluded"]),
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
-            "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements."})
+            "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
+                         "Historical supplementary cases are outside balanced quotas; their old timings are not reused."})
         validate(output)
         archive_current(root)
         destination = root/"benchmark"
@@ -480,7 +537,9 @@ def generate(root=ROOT, per_family=180, batch=0):
                 target=destination/source.relative_to(output)
                 target.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copyfile(source,target)
-    print(f"Generated {len(records)} pending candidates: {per_family} per family, {per_family//3} per tier")
+    print(f"Generated {len(records)} pending candidates: {len(balanced_records)} balanced "
+          f"({per_family} per family, {per_family//3} per tier), "
+          f"{len(records)-len(balanced_records)} historical supplementary cases")
     return len(records)
 
 
@@ -489,6 +548,8 @@ def validate(benchmark):
     if not rows or {r["path"] for r in rows} != {str(p.relative_to(benchmark)) for p in benchmark.glob("*/*.sql")}:
         raise ValueError("Manifest does not match the active SQL file set")
     identities=set()
+    expected_cases = {r["query_id"]: r for r, _ in historical_cases()}
+    restored = []
     for r in rows:
         if r["corpus_revision"] != REVISION or r["family"] not in FAMILIES:
             raise ValueError("Not a balanced candidate corpus")
@@ -503,13 +564,22 @@ def validate(benchmark):
         kinds=legacy.sql_join_kind_counts(sql)
         if len([k for k,n in kinds.items() if n])<2:
             raise ValueError(f"Non-mixed query: {path}")
-        if float(r["target_max_fraction"])>.6 or r["calibration_in_range"]!="true":
-            raise ValueError(f"Out-of-band cohort: {path}")
         if r["qualification_status"]!="PENDING_CPU9_MEASUREMENT":
             raise ValueError("Generator cannot certify runtime performance")
-    if {r["family"] for r in rows} != set(FAMILIES) or len(set(Counter(r["family"] for r in rows).values()))!=1:
+        if is_historical_case(r):
+            expected = expected_cases.get(r["query_id"])
+            if expected is None or any(str(r.get(k, "")) != str(v) for k, v in expected.items()):
+                raise ValueError(f"Invalid historical supplementary case: {path}")
+            restored.append(r["query_id"])
+        elif float(r["target_max_fraction"])>.6 or r["calibration_in_range"]!="true":
+            raise ValueError(f"Out-of-band cohort: {path}")
+    balanced = [r for r in rows if not is_historical_case(r)]
+    batches = {int(r["candidate_batch"]) for r in balanced}
+    if len(batches) != 1 or set(restored) != (set(expected_cases) if batches == {0} else set()):
+        raise ValueError("Historical cases must occur exactly once in the primary batch only")
+    if {r["family"] for r in balanced} != set(FAMILIES) or len(set(Counter(r["family"] for r in balanced).values()))!=1:
         raise ValueError("Unequal family counts")
-    if len(set(Counter((r["family"],r["semantic_tier"]) for r in rows).values()))!=1:
+    if len(set(Counter((r["family"],r["semantic_tier"]) for r in balanced).values()))!=1:
         raise ValueError("Unequal family/tier counts")
     return rows
 

@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 720 条配平候选 SQL、manifest、固定筛选证据与历史档案；有效数待 cpu9 实测 |
+| `outerjoin_benchmark/` | 720 条配平候选 + 3 条历史补充案例、manifest、固定筛选证据与历史档案；有效数待 cpu9 实测 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -193,16 +193,34 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 现在为 **720 条唯一候选 SQL**：
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **723 条唯一候选 SQL**。
+其中 **720 条配平候选**：
 Graph/TPC-H/TPC-DS/JOB **各 180 条**。每 family 的三档 selectivity 各 60，
 left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mixed。
 类型为 `join` 384、`graph` 162（含 industry controls）、`aggregate` 174。
 `--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。
 
+另外原样恢复了 Q80-alt、Q80-left-deep、Q93-left-deep 三条历史 TPC-DS SQL，
+名字为 `join__tpcds__historical__*`，因此 TPC-DS 共 183 条，其他 family 各 180 条。
+这三条保留旧 ticket 取模过滤和 item-only 连接，明确标记为历史补充案例，
+不计入三档配平配额，不把 SF100 的旧时间当作 SF50 实测。
+原始 CSV 包含三条；资格报告另写 `supplementary_results.csv`，保留失败，不筛选案例结果。
+只测这三条可用：
+
+```bash
+bash auto_test/experiment_onoff.sh --all --timeout 1800 \
+  --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
+```
+
+15 分钟探索测试可用 `bash auto_test/run_all.sh --all --timeout 900`，但 Q80-alt
+旧 DuckDB 时间为 1137.5 秒（约 19 分钟），SF50 下能否完成需重测。
+默认及配平资格政策仍为 1800 秒；900 秒实验不能冒充 1800 秒资格测量。
+当前 OFF 正确性执行超时会停止该 query，不代表 OuterYan 侧也超时。
+
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
 `join__tpch__q05_region_sales_ldmx__ilrf__sel_low`（新名称还带 expression hash）。
-过滤档位为 `(0,5%)`、`[5,40%)`、`[40,60%]`，使用业务语义谓词，不使用 mod/hash 采样。
+720 条配平候选的过滤档位为 `(0,5%)`、`[5,40%)`、`[40,60%]`，使用业务语义谓词，不使用 mod/hash 采样。
 完整复合连接键保留；Graph 和 industry controls 明确记录 synthetic 来源。
 历史 speed-up <0.8 或确认 30 分钟超时的未改变连接表达式已排除。
 这是 **historically/performance-screened** 集合，论文不能描述成无性能筛选的随机样本。
@@ -887,8 +905,10 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 720 unique candidates under `outerjoin_benchmark/benchmark`:
-180 each for Graph, TPC-H, TPC-DS and JOB. Qualification is a separate measured filter.
+The comparison runs 723 unique candidates under `outerjoin_benchmark/benchmark`:
+180 balanced candidates each for Graph, TPC-H, TPC-DS and JOB, plus three historical
+TPC-DS case studies. Qualification is a separate measured filter; historical cases
+are reported separately and do not consume balanced quotas.
 The harness compares complete bare-query results with OuterYan disabled and
 enabled, records the selected plan, and times eligible correct queries.
 The default is 32 threads; `--threads "16 32"` produces separate result files.

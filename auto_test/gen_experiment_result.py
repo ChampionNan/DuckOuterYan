@@ -1214,13 +1214,16 @@ def benchmark_provenance() -> pd.DataFrame:
     fraction = pd.to_numeric(provenance.get("target_fraction", pd.Series(dtype=float)), errors="coerce")
     provenance["selectivity_level"] = fraction.map(lambda value: f"{100 * value:g}%" if pd.notna(value) else "unspecified")
     if "filter_design_revision" in provenance:
-        semantic = provenance["filter_design_revision"].notna()
+        semantic = (provenance["filter_design_revision"].notna()
+                    & provenance["target_min_fraction"].notna() & provenance["target_max_fraction"].notna())
         for index in provenance.index[semantic]:
             row = provenance.loc[index]
             left = "[" if row["target_min_inclusive"] in (True, "true") else "("
             right = "]" if row["target_max_inclusive"] in (True, "true") else ")"
             provenance.at[index, "selectivity_level"] = (
                 f"{left}{100 * row['target_min_fraction']:g}%, {100 * row['target_max_fraction']:g}%{right}")
+    historical = provenance["evaluation_role"].eq("historical_slow_baseline_case")
+    provenance.loc[historical, "selectivity_level"] = "Legacy modulo (unverified)"
     return provenance
 
 
@@ -1481,7 +1484,9 @@ def deduplicate_sql_results(frame: pd.DataFrame) -> pd.DataFrame:
             row["tree_shape"] = metadata["tree_shape"].replace("_", "-")
             row["topology"] = row["tree_shape"]
             row["join_graph_topology"] = metadata["topology"]
-            row["workload_component"] = "evaluation" if metadata["query_class"] == "graph" else "structural"
+            row["workload_component"] = (
+                "evaluation" if metadata["query_class"] == "graph"
+                or metadata.get("evaluation_role") == "historical_slow_baseline_case" else "structural")
             row["query_class"] = class_from_query(metadata["query_id"])
         else:
             category = "graph" if category == "control" else category
