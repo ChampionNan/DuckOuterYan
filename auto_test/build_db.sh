@@ -16,7 +16,7 @@
 #   DUCKDB_BIN       Path to duckdb binary (default build/release/duckdb)
 #   GRAPH_DATASET    SNAP graph to use for graph R1..R10 (default epinions)
 #                    Options: bitcoin | epinions | google | wiki | dblp
-#   TPCH_SF          TPC-H scale factor (default 100)
+#   TPCH_SF          TPC-H scale factor (default 50)
 #   TPCDS_SF         TPC-DS scale factor (default 50)
 #   GRAPH_DATA_DIR   SNAP graph download dir (default $REPO/graph_data)
 #   FORCE=1          Rebuild even if DB already exists
@@ -29,7 +29,7 @@ REPO_ROOT="$OY_REPO_ROOT"
 
 # --- defaults ---------------------------------------------------------------
 GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
-TPCH_SF="${TPCH_SF:-100}"
+TPCH_SF="${TPCH_SF:-50}"
 TPCDS_SF="${TPCDS_SF:-50}"
 GRAPH_DATA_DIR="${GRAPH_DATA_DIR:-$REPO_ROOT/graph_data}"
 
@@ -174,7 +174,7 @@ _need_rebuild
 if want tpch; then
     TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}"
     if [ -f "$TPCH_DB" ] && [ "${FORCE:-0}" != "1" ]; then
-        echo "[tpch_db] already exists ($TPCH_DB, sf=$(echo "SELECT count(*) FROM lineitem;" | "$DUCKDB_BIN" "$TPCH_DB" -csv -noheader 2>/dev/null || echo '?') rows lineitem). Set FORCE=1 to rebuild."
+        echo "[tpch_db] already exists ($TPCH_DB, $(echo "SELECT count(*) FROM lineitem;" | "$DUCKDB_BIN" "$TPCH_DB" -csv -noheader 2>/dev/null || echo '?') rows lineitem). Requested SF=$TPCH_SF does not change existing data. Set FORCE=1 to rebuild."
     else
         echo "[tpch_db] Building TPC-H SF=$TPCH_SF ..."
         rm -f "$TPCH_DB" "$TPCH_DB.wal"
@@ -201,7 +201,7 @@ fi
 if want tpcds; then
     TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"
     if [ -f "$TPCDS_DB" ] && [ "${FORCE:-0}" != "1" ]; then
-        echo "[tpcds_db] already exists ($TPCDS_DB). Set FORCE=1 to rebuild."
+        echo "[tpcds_db] already exists ($TPCDS_DB). Requested SF=$TPCDS_SF does not change existing data. Set FORCE=1 to rebuild."
     else
         echo "[tpcds_db] Building TPC-DS SF=$TPCDS_SF ..."
         rm -f "$TPCDS_DB" "$TPCDS_DB.wal"

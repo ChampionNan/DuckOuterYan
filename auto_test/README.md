@@ -115,7 +115,7 @@ corresponding environment values.
 | `PYTHON_BIN` | `python3` | Python 3.7+ interpreter; statistics require NumPy/pandas; may be an absolute repo-local path |
 | `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
-| `TPCH_SF` | `100` | TPC-H scale used when `tpch_db` is built |
+| `TPCH_SF` | `50` | TPC-H scale used when `tpch_db` is built |
 | `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
@@ -157,6 +157,23 @@ bash auto_test/build_db.sh [graph|tpch|tpcds|job|all ...]
 
 Existing database files are reused. Merely changing `GRAPH_DATASET`, `TPCH_SF`,
 or `TPCDS_SF` does not change an existing database. Use `FORCE=1` deliberately:
+
+当前主实验统一使用 **TPC-H SF50 / TPC-DS SF50**。这是生成配置，不是已有数据库规模的证明。
+从旧库迁移时，先停止正在使用数据库的实验，并备份 `tpch_db`、`tpcds_db` 及存在的 `.wal` 文件。
+以下命令会**替换这两个 TPC 数据库**，不重建 Graph/JOB：
+
+```bash
+# cpu9: after git pull and after stopping tests / backing up the old TPC databases
+export TPCH_SF=50 TPCDS_SF=50
+FORCE=1 bash auto_test/build_db.sh tpch tpcds
+bash auto_test/run_all.sh --all
+```
+
+不要使用 `FORCE=1 bash auto_test/run_all.sh` 代替上述定向重建，它会强制重建其它 family。
+若已确认两库实际都是 SF50，则不必重建。环境中的 `TPCH_SF/TPCDS_SF` 会覆盖默认值，
+切换后应清除旧覆盖值或都设为 50。原始 SF100 结果保留，不能和 SF50 结果当成同一次实验混合。
+换库后重新执行 selectivity audit 和计划选择审计；此前本地计划选择数不代表 cpu9 的 SF50 结果。
+本次只改数据规模，超时默认仍为 1800 秒，代价模型和 query 集不变。
 
 ```bash
 # Small TPC databases

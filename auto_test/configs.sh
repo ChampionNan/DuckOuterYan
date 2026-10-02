@@ -63,7 +63,8 @@ export OY_CORPUS="${OY_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_benchmark/bench
 export GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
 
 # TPC scale factors. Used by both correctness and performance scripts.
-export TPCH_SF="${TPCH_SF:-100}"
+# Existing files are reused; changing these values alone does not resize data.
+export TPCH_SF="${TPCH_SF:-50}"
 export TPCDS_SF="${TPCDS_SF:-50}"
 
 # ===========================================================================

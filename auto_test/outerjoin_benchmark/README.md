@@ -53,9 +53,20 @@ machine-local `results/`. Optimizer parameters and estimates are unchanged.
 Make and validate changes locally, then commit and push the reviewed task changes
 to origin. On cpu9, pull them into `/home/data/bchenba/DuckYanOuter` and run:
 
+Both TPC-H and TPC-DS now default to **SF50**. Existing database files are reused,
+not resized or scale-verified. On the first migration, stop all tests using the
+databases and back up `tpch_db`, `tpcds_db` and any WAL files. Then explicitly run
+`FORCE=1 TPCH_SF=50 TPCDS_SF=50 bash auto_test/build_db.sh tpch tpcds` after pulling.
+This replaces only the two TPC databases. Skip rebuilding if both existing files
+are already known to be SF50. Remove stale scale environment overrides before
+running the main workflow. Graph/JOB, SQL definitions, cost model and the
+1,800-second timeout are unchanged. Re-audit selectivity/plan choices on the new
+databases; do not pool measurements across SF100 and SF50.
+
 ```bash
 cd /home/data/bchenba/DuckYanOuter
 git pull --ff-only
+export TPCH_SF=50 TPCDS_SF=50
 bash auto_test/run_all.sh --all --timeout 1800
 ```
 

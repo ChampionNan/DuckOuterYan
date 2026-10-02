@@ -13,7 +13,7 @@
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
-#   TPCH_SF          TPC-H scale factor (default 100)
+#   TPCH_SF          TPC-H scale factor (default 50)
 #   TPCDS_SF         TPC-DS scale factor (default 50)
 #   OY_THREAD_COUNTS Sequential timing counts (default "32")
 #   OY_THREADS       Override with one multi-thread timing count

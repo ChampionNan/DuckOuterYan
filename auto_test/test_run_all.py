@@ -59,6 +59,8 @@ class RunAllSelectionTest(unittest.TestCase):
                         "kind": "experiment",
                         "args": args,
                         "corpus_present": "OY_CORPUS" in os.environ,
+                        "tpch_sf": os.environ.get("TPCH_SF"),
+                        "tpcds_sf": os.environ.get("TPCDS_SF"),
                     }) + "\\n")
                 for option in ("-o", "--out"):
                     if option in args:
@@ -85,7 +87,7 @@ class RunAllSelectionTest(unittest.TestCase):
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("OY_", "PGPLAN_", "PG_REPLAY_", "DUCKDB_"))
+            if not key.startswith(("OY_", "PGPLAN_", "PG_REPLAY_", "DUCKDB_", "TPCH_", "TPCDS_"))
         }
         env.update(
             {
@@ -118,6 +120,14 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"] for call in self.calls() if call["kind"] == "generate"], [[]])
         self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
+        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
+        self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
+
+    def test_explicit_scale_overrides_are_preserved(self):
+        result = self.run_driver(TPCH_SF="1", TPCDS_SF="10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
+        self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("1", "10"))
 
     def test_query_type_is_forwarded_without_duplicate_generation(self):
         result = self.run_driver("--query-type", "aggregate", "--timeout", "600")
