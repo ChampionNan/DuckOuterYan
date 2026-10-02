@@ -61,6 +61,7 @@ class RunAllSelectionTest(unittest.TestCase):
                         "corpus_present": "OY_CORPUS" in os.environ,
                         "tpch_sf": os.environ.get("TPCH_SF"),
                         "tpcds_sf": os.environ.get("TPCDS_SF"),
+                        "timeout_seconds": os.environ.get("OY_TIMEOUT_SECS"),
                     }) + "\\n")
                 for option in ("-o", "--out"):
                     if option in args:
@@ -122,6 +123,13 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
+        self.assertEqual(experiment["timeout_seconds"], "900")
+
+    def test_explicit_timeout_environment_override_is_preserved(self):
+        result = self.run_driver(OY_TIMEOUT_SECS="1200")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
+        self.assertEqual(experiment["timeout_seconds"], "1200")
 
     def test_explicit_scale_overrides_are_preserved(self):
         result = self.run_driver(TPCH_SF="1", TPCDS_SF="10")

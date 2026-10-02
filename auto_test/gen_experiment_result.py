@@ -266,7 +266,7 @@ def build_timeout_statistics(detail: pd.DataFrame) -> dict:
     selected_counts = timeout_rows["selected_plan"].value_counts().sort_index().to_dict()
     limits = sorted(pd.to_numeric(detail.get("timeout_seconds", pd.Series(dtype=float)),
                                   errors="coerce").dropna().unique().tolist())
-    # Older CSVs lack this field; do not relabel their 10-minute runs as 30 minutes.
+    # Older CSVs lack this field; do not relabel them using today's timeout default.
     limit = limits[0] if len(limits) == 1 else TIMEOUT_SECONDS if not limits else None
     return {
         "limit_seconds": limit,
@@ -674,7 +674,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         )},
         "method": {
             "speedup": "Measured rows use OFF / ON from original unrounded timing pairs; values > 1 mean faster",
-            "population": ("Performance-screened subset: historical exclusions plus both runtimes >1s, <1800s and speed-up >=0.8; not an unbiased overall sample"
+            "population": ("Performance-screened subset: historical exclusions plus both runtimes >1s and below the recorded timeout, and speed-up >=0.8; not an unbiased overall sample"
                            if "qualification_policy" in frame and frame["qualification_policy"].eq("performance_screened").all()
                            else "Historically screened candidates, before post-measurement qualification; report failures and exclusions"
                            if "corpus_revision" in frame and frame["corpus_revision"].eq("balanced-screened-20261002").all()

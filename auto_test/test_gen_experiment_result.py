@@ -21,9 +21,10 @@ STATS = PLOT = PAPER = RESULT
 class BenchmarkStatisticsTest(unittest.TestCase):
     def test_timeout_uses_recorded_limit_without_relabeling_legacy_data(self):
         frame = self.frame()
-        frame["timeout_seconds"] = 1800
-        detail = RESULT.prepare_queries(frame, "tm")
-        self.assertEqual(RESULT.build_timeout_statistics(detail)["limit_seconds"], 1800)
+        for timeout in (900, 1800):
+            frame["timeout_seconds"] = timeout
+            detail = RESULT.prepare_queries(frame, "tm")
+            self.assertEqual(RESULT.build_timeout_statistics(detail)["limit_seconds"], timeout)
         self.assertEqual(RESULT.build_timeout_statistics(detail.drop(columns="timeout_seconds"))["limit_seconds"], 600)
 
     def test_curated_population_is_explicitly_disclosed(self):
@@ -31,6 +32,8 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         frame["qualification_policy"] = "performance_screened"
         report = RESULT.build_statistics(frame)
         self.assertIn("not an unbiased", report["method"]["population"])
+        self.assertIn("recorded timeout", report["method"]["population"])
+        self.assertNotIn("1800s", report["method"]["population"])
 
     def test_generated_file_cleanup_supports_python37_and_preserves_errors(self):
         original_unlink = Path.unlink

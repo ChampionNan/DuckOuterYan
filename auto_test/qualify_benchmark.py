@@ -103,10 +103,11 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
         return "selectivity_unverified_or_out_of_band"
     if result.get("database_signature") != profiles[0]["database_signature"]:
         return "database_mismatch"
-    if result.get("timeout_seconds") != "1800":
-        return "requires_1800s_run"
+    timeout = benchmark.QUALIFICATION_TIMEOUT_SECONDS
+    if result.get("timeout_seconds") != str(timeout):
+        return f"requires_{timeout}s_run"
     if "TIMEOUT" in result.get("note", "").upper() or "timeout" in result.get("timing_status", "").lower():
-        return "timeout_at_1800s"
+        return f"timeout_at_{timeout}s"
     if result.get("timing_status", "").lower() == "fallback-skip":
         return "fallback_not_measured"
     if result.get("correct", "").upper() != "TRUE":
@@ -119,7 +120,7 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
         return "invalid_timing"
     if not all(math.isfinite(t) and t > 0 for t in (off, on)):
         return "invalid_timing"
-    if max(off, on) >= 1800:
+    if max(off, on) >= timeout:
         return "runtime_at_or_above_timeout"
     if min(off, on) <= 1:
         return "runtime_not_above_1s"
@@ -235,9 +236,10 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     benchmark.write_json(output / "qualification_inputs.json", lists)
     summary = dict(status="COMPLETE" if all(c["shortage"]==0 for c in counts) else "INCOMPLETE",
                    policy="Historically/performance-screened subset, not unbiased overall performance; "
-                          "correct measured pairs only, both runtimes >1s and <1800s, speedup >=0.8; "
+                          f"correct measured pairs only, both runtimes >1s and <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s, speedup >=0.8; "
                           "latest supplied observations win, including failures; no fallback imputation",
                    target_host=host, target_per_family=target, candidates=len(detail), selected=len(selected),
+                   qualification_timeout_seconds=benchmark.QUALIFICATION_TIMEOUT_SECONDS,
                    balanced_candidates=sum(not benchmark.is_historical_case(r) for r in detail),
                    historical_supplementary_candidates=sum(benchmark.is_historical_case(r) for r in detail),
                    historical_supplementary_observations=len(supplementary_results),

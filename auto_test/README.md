@@ -31,7 +31,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 | [`run_all.sh`](run_all.sh) | 编译、建库、生成 query 并运行完整工作流 | 一键入口；`--query-type join/graph/aggregate` 选择类型 |
 | [`build_db.sh`](build_db.sh) | 构建或复用 Graph、TPC-H、TPC-DS、JOB 数据库 | 被 `run_all.sh` 调用，也可单独指定 family；已有数据库默认复用 |
 | [`gen_outerjoin_benchmark.py`](gen_outerjoin_benchmark.py) | 生成去重 SQL、manifest、历史名称映射及三档语义过滤；`--audit-selectivity` 核验实际过滤比例 | 修改或重建 corpus 时；不运行性能查询 |
-| [`qualify_benchmark.py`](qualify_benchmark.py) | 按 cpu9 实测、30 分钟超时、双侧 >1s、speed-up >=0.8 和实际 selectivity 筛选 | 输出排除原因、每 family/tier 的有效数量/缺口和统计，不修改原始结果 |
+| [`qualify_benchmark.py`](qualify_benchmark.py) | 按 cpu9 实测、15 分钟超时、双侧 >1s、speed-up >=0.8 和实际 selectivity 筛选 | 输出排除原因、每 family/tier 的有效数量/缺口和统计，不修改原始结果 |
 | [`gen_queries.py`](gen_queries.py) | 重建固定的 legacy SQL 来源，供当前 corpus 的 graph 查询和来源追溯使用 | `gen_outerjoin_benchmark.py` 的 `regenerate_legacy_sources()` 仍直接调用；文件名旧但并非废弃依赖 |
 | [`experiment_onoff.sh`](experiment_onoff.sh) | 正常/OuterYan 的计划选择、裸查询正确性、计时和 profiling | 主实验入口；输出逐 query TXT/CSV，调用共享统计与 profiling 模块 |
 | [`check_outeryan_dp.py`](check_outeryan_dp.py) | 只用只读 `EXPLAIN` 检查各生成用例是否进入 DP，并记录选择的 plan 与原因 | 优化器覆盖与选择检查；需已有数据库和编译好的 CLI；不是性能测试 |
@@ -119,7 +119,7 @@ corresponding environment values.
 | `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
-| `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout (30 minutes), no retry; `0` disables it |
+| `OY_TIMEOUT_SECS` | `900` | Per-statement timeout (15 minutes), no retry; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
@@ -164,16 +164,22 @@ or `TPCDS_SF` does not change an existing database. Use `FORCE=1` deliberately:
 
 ```bash
 # cpu9: after git pull and after stopping tests / backing up the old TPC databases
+export TPCH_DB=/home/data/bchenba/DuckYanOuter/tpch_db
+export TPCDS_DB=/home/data/bchenba/DuckYanOuter/tpcds_db
 export TPCH_SF=50 TPCDS_SF=50
 FORCE=1 bash auto_test/build_db.sh tpch tpcds
 bash auto_test/run_all.sh --all
 ```
 
+不必另外手动删除：上述 `FORCE=1` 会删除指定的 `tpch_db`、`tpcds_db` 以及各自的 `.wal`，
+再生成 SF50。没有备份则旧文件不能通过脚本恢复；不会删除 Graph/JOB 或已有实验结果。
 不要使用 `FORCE=1 bash auto_test/run_all.sh` 代替上述定向重建，它会强制重建其它 family。
 若已确认两库实际都是 SF50，则不必重建。环境中的 `TPCH_SF/TPCDS_SF` 会覆盖默认值，
 切换后应清除旧覆盖值或都设为 50。原始 SF100 结果保留，不能和 SF50 结果当成同一次实验混合。
 换库后重新执行 selectivity audit 和计划选择审计；此前本地计划选择数不代表 cpu9 的 SF50 结果。
-本次只改数据规模，超时默认仍为 1800 秒，代价模型和 query 集不变。
+当前默认超时为 900 秒（15 分钟）/statement；不自动延长或重试。
+旧 `OY_TIMEOUT_SECS` 环境值或显式 `--timeout` 仍会覆盖默认值；需要时 `unset OY_TIMEOUT_SECS`。
+本次超时调整不修改代价模型或 723 条 query 的 SQL。
 
 ```bash
 # Small TPC databases
@@ -209,13 +215,13 @@ left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mi
 只测这三条可用：
 
 ```bash
-bash auto_test/experiment_onoff.sh --all --timeout 1800 \
+bash auto_test/experiment_onoff.sh --all --timeout 900 \
   --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
 ```
 
-15 分钟探索测试可用 `bash auto_test/run_all.sh --all --timeout 900`，但 Q80-alt
+默认 15 分钟测试可用 `bash auto_test/run_all.sh --all`，但 Q80-alt
 旧 DuckDB 时间为 1137.5 秒（约 19 分钟），SF50 下能否完成需重测。
-默认及配平资格政策仍为 1800 秒；900 秒实验不能冒充 1800 秒资格测量。
+默认及配平资格政策均为 900 秒；旧 1800 秒结果保留原记录，不混作新的 900 秒资格测量。
 当前 OFF 正确性执行超时会停止该 query，不代表 OuterYan 侧也超时。
 
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
@@ -248,7 +254,7 @@ python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout
 ```bash
 cd /home/data/bchenba/DuckYanOuter
 git pull --ff-only
-bash auto_test/run_all.sh --all --timeout 1800
+bash auto_test/run_all.sh --all --timeout 900
 python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout 600 \
   --audit-output auto_test/results/cpu9_selectivity_audit.json
 python3 auto_test/qualify_benchmark.py \
@@ -262,7 +268,7 @@ python3 auto_test/qualify_benchmark.py \
 CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
 `qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
 `qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
-最终要求双侧运行时间 >1s、<1800s、正确且 speed-up >=0.8，fallback-skip 不算有效测量。
+最终要求双侧运行时间 >1s、<900s、正确且 speed-up >=0.8，fallback-skip 不算有效测量。
 缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
 
 ## Experiment pipeline
@@ -546,7 +552,7 @@ the original `BIGINT` type and empty-input value.
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration
-  -t, --timeout S     per-statement timeout seconds (default 1800; 30 minutes)
+  -t, --timeout S     per-statement timeout seconds (default 900; 15 minutes)
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
       --query-type T  all|join|graph|aggregate (default all)
       --all           run each unique SQL once (default)

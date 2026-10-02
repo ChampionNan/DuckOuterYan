@@ -63,7 +63,7 @@
     }
   },
   "historical_exclusion_observations": 138,
-  "design_sha256": "a6319af6124cd0273e332a3e205295ec87a9334701a65e0cff8fce5cdaa60414",
+  "design_sha256": "08899c4ceba41ad815318f17b160698fbb8625a575b04eada0ab36290987432e",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
   "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. Historical supplementary cases are outside balanced quotas; their old timings are not reused."
 }

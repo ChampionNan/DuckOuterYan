@@ -33,6 +33,7 @@ FAMILIES = ("graph", "tpch", "tpcds", "job")
 TIERS = ("low", "medium", "high")
 SHAPES = ("left_deep", "right_deep", "bushy")
 TARGET = 180
+QUALIFICATION_TIMEOUT_SECONDS = 900
 HISTORICAL_ROLE = "historical_slow_baseline_case"
 HISTORICAL_CASES = {
     "q80_alt": ("derived__ojb_tpcds_q80_store_channel_alt",
@@ -74,7 +75,8 @@ def historical_cases():
                    parameter_policy="User-requested historical case, selected using prior performance; report separately",
                    sql_fingerprint=sql_fingerprint(sql, "tpcds"), expression_fingerprint=expression_key(sql, "tpcds"),
                    content_sha256=expected_hash, candidate_batch=0, selectivity_stress="false", regression_guard="false",
-                   qualification_status="PENDING_CPU9_MEASUREMENT", qualification_timeout_seconds=1800,
+                   qualification_status="PENDING_CPU9_MEASUREMENT",
+                   qualification_timeout_seconds=QUALIFICATION_TIMEOUT_SECONDS,
                    qualification_min_runtime_s=1, qualification_min_speedup=.8)
         yield row, sql
 
@@ -226,7 +228,7 @@ def bootstrap_design(binary, root=ROOT):
         print(name, calibration["observed_fractions"], flush=True)
     design["curation"] = {
         "target_per_family": TARGET, "target_per_family_tier": TARGET // 3,
-        "timeout_seconds": 1800, "minimum_runtime_each_engine_exclusive": 1,
+        "timeout_seconds": QUALIFICATION_TIMEOUT_SECONDS, "minimum_runtime_each_engine_exclusive": 1,
         "minimum_speedup": .8, "target_host": "cpu9",
         "target_repository": "/home/data/bchenba/DuckYanOuter",
         "eligibility": "Only correct measured pairs passing target-database selectivity audit. "
@@ -446,6 +448,8 @@ def select_groups(groups, per_family=180, batch=0):
 
 def generate(root=ROOT, per_family=180, batch=0):
     design = json.loads(DESIGN.read_text())
+    if design["curation"]["timeout_seconds"] != QUALIFICATION_TIMEOUT_SECONDS:
+        raise ValueError("Pinned design and qualification timeout disagree")
     evidence = json.loads(EVIDENCE.read_text())
     groups = select_groups(candidate_rows(design, evidence), per_family, batch)
     records = []
@@ -476,7 +480,8 @@ def generate(root=ROOT, per_family=180, batch=0):
                            workload_category=category, corpus_revision=REVISION, sql_fingerprint=fingerprint,
                            aggregate_variant=aggregate, aggregate_anchor=anchor,
                            selectivity_stress="false", regression_guard="false", candidate_batch=batch,
-                           qualification_status="PENDING_CPU9_MEASUREMENT", qualification_timeout_seconds=1800,
+                           qualification_status="PENDING_CPU9_MEASUREMENT",
+                           qualification_timeout_seconds=QUALIFICATION_TIMEOUT_SECONDS,
                            qualification_min_runtime_s=1, qualification_min_speedup=.8)
                 content = (f"-- corpus_revision: {REVISION}; pending cpu9 measurement\n"
                            f"-- source: {row['source_benchmark']} {row['source_query']}\n"
@@ -566,6 +571,8 @@ def validate(benchmark):
             raise ValueError(f"Non-mixed query: {path}")
         if r["qualification_status"]!="PENDING_CPU9_MEASUREMENT":
             raise ValueError("Generator cannot certify runtime performance")
+        if r["qualification_timeout_seconds"] != str(QUALIFICATION_TIMEOUT_SECONDS):
+            raise ValueError("Candidate has an obsolete qualification timeout; regenerate the corpus")
         if is_historical_case(r):
             expected = expected_cases.get(r["query_id"])
             if expected is None or any(str(r.get(k, "")) != str(v) for k, v in expected.items()):

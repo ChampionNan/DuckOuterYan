@@ -1295,7 +1295,7 @@
   "curation": {
     "target_per_family": 180,
     "target_per_family_tier": 60,
-    "timeout_seconds": 1800,
+    "timeout_seconds": 900,
     "minimum_runtime_each_engine_exclusive": 1,
     "minimum_speedup": 0.8,
     "target_host": "cpu9",

@@ -205,6 +205,15 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertNotIn("T1:", report)
         return report
 
+    def test_default_timeout_is_fifteen_minutes_and_is_recorded(self):
+        result = self.run_harness(OY_TIMEOUT_SECS="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read_row()["timeout_seconds"], "900")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertTrue(calls)
+        self.assertTrue(all("SET max_execution_time=900000;" in call["sql"] for call in calls))
+        self.assertIn("hard 900s/statement", (self.root / "result.txt").read_text())
+
     def test_default_profiles_only_on_separately_at_32_threads(self):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

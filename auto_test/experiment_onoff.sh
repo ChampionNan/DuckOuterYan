@@ -22,7 +22,7 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       positive odd timed iterations per config (default 3)
-#   -t,--timeout S    per-statement timeout sec (default 1800). DuckDB enforces S
+#   -t,--timeout S    per-statement timeout sec (default 900). DuckDB enforces S
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1)×S for 1 warm-up + N timed executions.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
@@ -185,7 +185,7 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=1800}"
+: "${OY_TIMEOUT_SECS:=900}"
 : "${OY_BATCH_GRACE_SECS:=30}"
 case "$OY_TIMEOUT_SECS" in
     ''|*[!0-9]*) echo "--timeout must be a non-negative integer (got: $OY_TIMEOUT_SECS)" >&2; exit 2;;

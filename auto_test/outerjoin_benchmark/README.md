@@ -55,15 +55,16 @@ audits explicitly list these cases as outside the three-band audit.
 To test only these cases using an already compiled binary:
 
 ```bash
-bash auto_test/experiment_onoff.sh --all --timeout 1800 \
+bash auto_test/experiment_onoff.sh --all --timeout 900 \
   --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
 ```
 
-A uniform 15-minute exploratory run is supported by `run_all.sh --all --timeout 900`,
+A uniform 15-minute run is now the default (`run_all.sh --all`),
 but Q80-alt historically needed about 19 minutes on the DuckDB side. SF50 may be
 faster; it is not guaranteed to fit within 900 seconds. The default and balanced
-qualification policy remain 1800 seconds. A 900-second result is not silently
-qualified under the 1800-second policy. OFF correctness runs first: an OFF timeout
+qualification policy are both 900 seconds. Old 1800-second results retain their
+recorded limits and are not qualified under the new 900-second policy.
+OFF correctness runs first: an OFF timeout
 stops that query before ON, so it does not establish that OuterYan itself timed out.
 
 ## Sources and screening
@@ -103,23 +104,25 @@ databases and back up `tpch_db`, `tpcds_db` and any WAL files. Then explicitly r
 `FORCE=1 TPCH_SF=50 TPCDS_SF=50 bash auto_test/build_db.sh tpch tpcds` after pulling.
 This replaces only the two TPC databases. Skip rebuilding if both existing files
 are already known to be SF50. Remove stale scale environment overrides before
-running the main workflow. Graph/JOB, SQL definitions, cost model and the
-1,800-second timeout are unchanged. Re-audit selectivity/plan choices on the new
+running the main workflow. Graph/JOB, SQL definitions and cost model are unchanged;
+the default timeout is now 900 seconds. Re-audit selectivity/plan choices on the new
 databases; do not pool measurements across SF100 and SF50.
 
 ```bash
 cd /home/data/bchenba/DuckYanOuter
 git pull --ff-only
 export TPCH_SF=50 TPCDS_SF=50
-bash auto_test/run_all.sh --all --timeout 1800
+bash auto_test/run_all.sh --all --timeout 900
 ```
 
 `run_all.sh` builds, reuses/builds databases, regenerates and runs the candidates.
-`experiment_onoff.sh` alone **does not compile**. Default timeout is 30 minutes
+`experiment_onoff.sh` alone **does not compile**. Default timeout is 15 minutes
 per statement; a timeout ends that query's test without doubling or retrying.
 Successful timing keeps one warm-up plus three timed executions per side (median).
-Optimization profiling uses one post-warm-up sample. Thus 30 minutes is not a
+Optimization profiling uses one post-warm-up sample. Thus 15 minutes is not a
 total budget for all stages of a successful query.
+An existing `OY_TIMEOUT_SECS` environment variable or explicit `--timeout` still
+overrides the default; unset stale overrides when using the default workflow.
 
 After the run, audit the actual cpu9 databases and qualify the exact result CSV:
 
@@ -136,11 +139,11 @@ Replace `TIMESTAMP` with the actual run timestamp. The audit's 600-second limit
 is for read-only base counts, not workload timing. Database overrides are
 `GRAPH_DB`, `TPCH_DB`, `TPCDS_DB`, `JOB_DB`; run and audit must use the same files.
 Qualification checks SQL/manifest hashes, host, database path/size/mtime signature,
-30-minute configuration and audited bands. Database changes require re-audit and
+15-minute configuration and audited bands. Database changes require re-audit and
 remeasurement. The signature is a guard, not a full database checksum.
 
 Final eligibility: correctness verified, both measured runtimes **>1 s and
-<1,800 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
+<900 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
 Unexecuted `fallback-skip` rows are excluded, never interpreted as measured 1×.
 Latest supplied observations win, including failures; no fastest-run selection.
 Missing/failed rows yield shortages, never fabricated success or rescaled timings.
@@ -169,7 +172,7 @@ using its achieved speed-up.
 python3 auto_test/gen_outerjoin_benchmark.py --batch 1 \
   --root auto_test/outerjoin_benchmark/reserve_1
 OY_CORPUS=auto_test/outerjoin_benchmark/reserve_1/benchmark \
-  bash auto_test/experiment_onoff.sh --all --timeout 1800
+  bash auto_test/experiment_onoff.sh --all --timeout 900
 python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity \
   --root auto_test/outerjoin_benchmark/reserve_1 \
   --audit-timeout 600 --audit-output auto_test/results/cpu9_reserve_1_audit.json

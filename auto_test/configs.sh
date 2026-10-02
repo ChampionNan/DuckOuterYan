@@ -81,9 +81,9 @@ unset _oy_thread_defaults
 # ===========================================================================
 # 5) Timeouts
 # ===========================================================================
-# Per-statement timeout (seconds; default 30 minutes), enforced by DuckDB's max_execution_time.
+# Per-statement timeout (seconds; default 15 minutes), enforced by DuckDB's max_execution_time.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
-export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-1800}"
+export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-900}"
 # Extra seconds for CLI startup and teardown around a timing batch.
 export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 
