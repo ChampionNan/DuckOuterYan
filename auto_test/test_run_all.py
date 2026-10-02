@@ -127,15 +127,15 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
         self.assertEqual(experiment["timeout_seconds"], "900")
         self.assertEqual(experiment["timing_runs"], "1")
-        self.assertEqual(experiment["check_correctness"], "0")
+        self.assertEqual(experiment["check_correctness"], "1")
 
     def test_measurement_options_are_forwarded(self):
-        result = self.run_driver("--runs", "1", "--no-check-correctness")
+        result = self.run_driver("--runs", "1", "--check-correctness")
         self.assertEqual(result.returncode, 0, result.stderr)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         runs_index = experiment["args"].index("--runs")
         self.assertEqual(experiment["args"][runs_index:runs_index + 3],
-                         ["--runs", "1", "--no-check-correctness"])
+                         ["--runs", "1", "--check-correctness"])
 
     def test_explicit_timeout_environment_override_is_preserved(self):
         result = self.run_driver(OY_TIMEOUT_SECS="1200")

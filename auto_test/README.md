@@ -122,7 +122,7 @@ corresponding environment values.
 | `OY_TIMEOUT_SECS` | `900` | Per-statement timeout (15 minutes), no retry; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `1` | First unprofiled execution after warm-up/profile; explicit odd N uses a median |
-| `OY_CHECK_CORRECTNESS` | `0` | Result comparison disabled; `--check-correctness` opts in |
+| `OY_CHECK_CORRECTNESS` | `1` | Compare one bare OFF/ON result pair for every query, including fallbacks |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Deduplicated corpus root |
@@ -282,16 +282,19 @@ configuration. Thread counts must be greater than one; CLI settings take
 precedence. Database setup and query generation in `run_all.sh` happen only
 once before any requested sweep.
 
-For every selected query at each thread count, `experiment_onoff.sh` performs:
+For every corpus query included in the run at each thread count, `experiment_onoff.sh` performs:
 
 1. Read a traced `EXPLAIN` decision. A DuckDB fallback, or an aggregate query
-   without realized aggregate pushdown, remains `FALLBACK-SKIP`: no execution,
-   no measured runtimes, policy-default speed-up 1.0 excluded from statistics.
-2. **Correctness comparison is off by default.** Executed rows record
-   `correct=NOT-CHECKED`, `correctness_check=disabled`; this is not verified
-   correctness. Opt in with `--check-correctness` for bare-query OFF/ON result
-   multiset comparison. A mismatch/error/timeout in that optional check stops
-   the query.
+   without realized aggregate pushdown, will skip performance measurements,
+   but still undergoes the default correctness check.
+2. **Correctness comparison is on by default for every query.** Run the bare
+   query once OFF and once ON and compare their complete result multisets.
+   A mismatch/error/timeout stops that query before profiling or timing.
+   A verified fallback records `correct=TRUE`, `timing_status=fallback-skip`,
+   no measured runtimes, and policy-default speed-up 1.0 excluded from statistics.
+   A failed fallback records the actual failure, never a default 1.0 speed-up.
+   Explicit `--no-check-correctness` remains available for diagnostics; unchecked
+   measured rows are `NOT-CHECKED`, not verified correct.
 3. Keep the existing one-shot ON kernel diagnostic (bitmap/hash classification);
    it does not supply a runtime sample or warm the later connection's buffer pool.
 4. Start a fresh CLI for **each** of OFF and ON. In that same process execute:
@@ -306,8 +309,9 @@ For every selected query at each thread count, `experiment_onoff.sh` performs:
    includes the otherwise-untracked cost-model phase. Generic optimizer-pass
    timings are not substituted for the named OuterYan workflow phases.
 
-With profiling enabled, a fully completed selected query therefore executes
-**seven** times: one kernel diagnostic plus three executions per configuration.
+With default correctness and profiling enabled, a fully completed selected query
+executes **nine** times: two correctness checks, one kernel diagnostic, and three
+executions per configuration. A verified fallback executes only the two checks.
 Only two executions (one OFF and one ON) contribute to runtime/speed-up.
 `--no-profile` keeps one warm-up + one timed execution per configuration.
 The compact profiling trace is emitted only while the native profiler is enabled;
@@ -323,13 +327,18 @@ valid unprofiled timing pair and report the missing diagnostic as an error.
 
 All executions use the selected multi-thread count. Timing uses `.mode trash`
 to fully drain the **bare query**, without wrappers or result-file formatting.
-There is no CSV result export or external sort unless correctness is explicitly
-enabled. Logs/CSV carry `correctness_check`, `timing_protocol`, `timing_samples`,
+Only the correctness checks export/sort results; these checks are not runtime
+samples. Logs/CSV carry `correctness_check`, `timing_protocol`, `timing_samples`,
 `timing_estimator`, and `warmup_runs_per_side` (including the profiling warm-up).
 Statistics accept explicit unchecked measured rows, preserve their status, and
 report their count; generated paper text must not call them correctness-verified.
 Do not pool old three-run medians and the new single-sample protocol as one
 measurement configuration; qualification rejects mixed protocols.
+
+The read-only diagnostic [`graph_count_annotation_check.sql`](diagnostics/graph_count_annotation_check.sql)
+reproduces the count-weight arithmetic behind the known `graph_branch5_forward`
+`bushy/rlfi/global_count` mismatch without materializing its large join result.
+It is not a substitute for bare-query equivalence and does not fix the optimizer.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -564,8 +573,8 @@ bash auto_test/experiment_onoff.sh [options]
       --capture-plans save OFF/ON EXPLAIN, trace, and detailed cost files
       --profile       enable phase and optimizer profiling (default)
       --no-profile    skip phase and optimizer profiling
-      --check-correctness     compare bare-query result multisets
-      --no-check-correctness  skip result comparison (default)
+      --check-correctness     compare all bare-query result multisets (default)
+      --no-check-correctness  explicitly opt out of result comparison
   -o, --out FILE      exact text output path
 ```
 
@@ -696,8 +705,8 @@ Live stderr and the TXT report use one clearly separated block per query:
 ```text
 ====================================================================================================
 [ 63/185] query=derived__example
-  result: correct=NOT-CHECKED timing_status=measured reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 runtime_s=[DuckDB=12.000000000 OuterYan=6.000000000] speedup=2.000 optimization_s=[status=OK DuckDB=... OuterYan=...] measurement=[check=disabled protocol=warm-profile-then-timing-v1 samples=1 estimator=single_post_warmup warmups=2]
-  context: family=tpch category=join nrel=5 pass=main note=OK;CORRECTNESS-NOT-CHECKED ... breakdown_s=[status=OK CPU=... R1=... R2=... R3=... Other=...]
+  result: correct=TRUE timing=measured reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 runtime_s=[DuckDB=12.000000000 OuterYan=6.000000000] speedup=2.000 optimization_s=[status=OK DuckDB=... OuterYan=...] measurement=[check=enabled protocol=warm-profile-then-timing-v1 samples=1 estimator=single_post_warmup warmups=2]
+  context: family=tpch category=join nrel=5 pass=main note=OK ... breakdown_s=[status=OK CPU=... R1=... R2=... R3=... Other=...]
   decision: plan=[mode=GATED reason=COST_OUTERYAN_BETTER ... formula=...] optimizer_phases=[...] cost=[...] SJ=[...]
 ```
 
@@ -916,9 +925,10 @@ The comparison runs 723 unique candidates under `outerjoin_benchmark/benchmark`:
 180 balanced candidates each for Graph, TPC-H, TPC-DS and JOB, plus three historical
 TPC-DS case studies. Qualification is a separate measured filter; historical cases
 are reported separately and do not consume balanced quotas.
-The harness records the selected plan and measures one post-warm-up execution
-per side by default. Result comparison is opt-in; unchecked rows are labeled
-NOT-CHECKED and are never represented as verified-correct.
+The harness checks one bare-query OFF/ON result pair for every query by default,
+including fallbacks. After equivalence passes, it measures one post-warm-up
+execution per side for performance-eligible queries. Explicitly unchecked rows
+remain NOT-CHECKED and are never represented as verified-correct.
 The default is 32 threads; `--threads "16 32"` produces separate result files.
 The PostgreSQL replay workflow and its public wrappers have been removed.
 

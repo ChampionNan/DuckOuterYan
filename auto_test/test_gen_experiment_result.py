@@ -196,9 +196,16 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertEqual(summary["totals"]["on_s"], measured["tm_on"])
         fallback_row = next(row for row in report["queries"] if row["query"] == "fallback")
         self.assertIsNone(fallback_row["speedup"])
-        self.assertEqual(fallback_row["speedup_source"], "not-executed")
+        self.assertEqual(fallback_row["speedup_source"], "not-measured")
         self.assertFalse(fallback_row["valid_timing"])
         self.assertFalse(fallback_row["valid_speedup"])
+
+        # Passing equivalence does not turn a fallback's placeholder into a measurement.
+        verified = dict(fallback, correct="TRUE", correctness_check="enabled")
+        verified_rows = STATS.prepare_queries(pd.DataFrame([measured, verified]), "tm")
+        checked_fallback = verified_rows.loc[verified_rows["query"].eq("fallback")].iloc[0]
+        self.assertFalse(checked_fallback["valid_timing"])
+        self.assertEqual(checked_fallback["speedup_source"], "not-measured")
 
     def test_correctness_timeout_status_is_excluded_as_timeout(self):
         good = self.frame().iloc[0].to_dict()

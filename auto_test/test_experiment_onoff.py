@@ -162,6 +162,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
             elif "EXPLAIN" not in sql and not profiling:
                 timeout_mode = os.environ.get("TIMEOUT_CORRECTNESS")
                 if timeout_mode == "1" or timeout_mode == ("off" if off else "on"):
+                    if os.environ.get("NATIVE_TIMEOUT"):
+                        sys.exit("Error: INTERRUPT Error: Maximum execution time exceeded")
                     sys.exit(124)
                 mismatch = os.environ.get("FAIL_CORRECTNESS_THREADS") == str(threads)
                 print("43" if mismatch and not off else "42")
@@ -194,7 +196,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         with (self.root / "result.csv").open(newline="") as handle:
             return next(csv.DictReader(handle))
 
-    def assert_result(self, path, threads, expected_correct="NOT-CHECKED", expected_speedup="2.000"):
+    def assert_result(self, path, threads, expected_correct="TRUE", expected_speedup="2.000"):
         with path.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 1)
@@ -226,7 +228,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 32)
         self.assertIn("# corpus : revision=custom", report)
-        for label in ("query=sample", "result: correct=NOT-CHECKED", "context: family=tpch", "decision: plan="):
+        for label in ("query=sample", "result: correct=TRUE", "context: family=tpch", "decision: plan="):
             self.assertIn(label, report)
         self.assertFalse((self.root / "result_t16.csv").exists())
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
@@ -248,11 +250,14 @@ class MultiThreadExperimentTest(unittest.TestCase):
             self.assertEqual(sql.split(".timer on\n")[1].count("SELECT * FROM example;"), 1)
         row = self.read_row()
         self.assertEqual(row["timeout_seconds"], "0")
-        self.assertEqual(row["correctness_check"], "disabled")
+        self.assertEqual(row["correctness_check"], "enabled")
         self.assertEqual(row["timing_samples"], "1")
         self.assertEqual(row["timing_estimator"], "single_post_warmup")
         self.assertEqual(row["warmup_runs_per_side"], "2")
-        self.assertIn("correct=0  not-checked=1", report)
+        self.assertIn("correct=1  not-checked=0", report)
+        checked = [call for call in calls if "EXPLAIN" not in call["sql"] and ".mode trash" not in call["sql"]]
+        self.assertEqual([call["off"] for call in checked], [True, False])
+        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 1 for call in checked))
         self.assertEqual(len(row["sql_content_sha256"]), 64)
         self.assertEqual(len(row["database_signature"]), 64)
         self.assertTrue(row["execution_host"])
@@ -379,6 +384,27 @@ class MultiThreadExperimentTest(unittest.TestCase):
     def test_correctness_on_timeout_is_recorded_once_without_retry(self):
         self.assert_correctness_timeout("on", 2)
 
+    def test_native_correctness_timeout_is_not_misclassified_as_error(self):
+        result = self.run_harness(TIMEOUT_CORRECTNESS="off", NATIVE_TIMEOUT="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read_row()["correct"], "TIMEOUT")
+        self.assertEqual(self.read_row()["note"], "TIMEOUT")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
+        self.assertEqual(len([call for call in calls if "EXPLAIN" not in call["sql"]]), 1)
+
+    def test_explicit_correctness_opt_out_remains_unchecked(self):
+        result = self.run_harness("--no-check-correctness")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_result(self.root / "result.csv", 32, expected_correct="NOT-CHECKED")
+        self.assertEqual(self.read_row()["correctness_check"], "disabled")
+
+    def test_check_flag_overrides_stale_disabled_environment(self):
+        result = self.run_harness("--check-correctness", OY_CHECK_CORRECTNESS="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read_row()["correct"], "TRUE")
+        self.assertEqual(self.read_row()["correctness_check"], "enabled")
+
     def test_timing_timeout_stops_query_without_retry_or_profile(self):
         result = self.run_harness(TIMEOUT_TIMING="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -416,7 +442,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["timing_status"], "timeout")
         self.assertEqual(row["tm_off"], "NA")
         self.assertEqual(row["tm_on"], "NA")
-        self.assertEqual(row["correct"], "NOT-CHECKED")
+        self.assertEqual(row["correct"], "TRUE")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertEqual(len([c for c in calls if c["profiling"]]), 1)
         self.assertTrue(Path(row["profile_directory"]).is_dir())
@@ -468,15 +494,15 @@ class MultiThreadExperimentTest(unittest.TestCase):
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
         execution = [call for call in calls if "EXPLAIN" not in call["sql"]]
-        self.assertEqual(len(execution), 1)
-        self.assertIn(".mode trash", execution[0]["sql"])
+        self.assertEqual(len(execution), 3)
+        self.assertIn(".mode trash", execution[-1]["sql"])
 
-    def test_nonaggregate_duckdb_fallback_skips_execution_with_default_speedup(self):
+    def test_nonaggregate_duckdb_fallback_checks_equivalence_but_skips_timing(self):
         result = self.run_harness(SELECTED_PLAN="DUCKDB")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "0")
-        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["correct"], "TRUE")
         self.assertEqual(row["note"], "FALLBACK-SKIP")
         self.assertEqual(row["timing_status"], "fallback-skip")
         self.assertEqual(row["profile_status"], "fallback-skip")
@@ -487,6 +513,29 @@ class MultiThreadExperimentTest(unittest.TestCase):
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call["timing"] for call in calls))
         self.assertFalse(any(call["profiling"] for call in calls))
+        checked = [call for call in calls if "EXPLAIN" not in call["sql"]]
+        self.assertEqual([call["off"] for call in checked], [True, False])
+        self.assertTrue(all(".mode trash" not in call["sql"] for call in checked))
+        report = (self.root / "result.txt").read_text()
+        self.assertIn("correct=1  not-checked=0  fallback-skip=1  incorrect/not-run=0  timed=0", report)
+
+    def test_fallback_mismatch_is_not_hidden_by_default_speedup(self):
+        result = self.run_harness(SELECTED_PLAN="DUCKDB", FAIL_CORRECTNESS_THREADS="32")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["correct"], "FALSE")
+        self.assertEqual(row["note"], "NOT-EQUIV")
+        self.assertEqual(row["timing_status"], "not-run")
+        self.assertNotEqual(row["tm_speedup"], "1.000")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
+
+    def test_fallback_opt_out_skips_all_execution(self):
+        result = self.run_harness("--no-check-correctness", SELECTED_PLAN="DUCKDB")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read_row()["correct"], "SKIPPED")
+        self.assertEqual(self.read_row()["timing_status"], "fallback-skip")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertTrue(all("EXPLAIN" in call["sql"] for call in calls))
 
     def test_aggregate_duckdb_fallback_without_pushdown_is_skipped(self):
@@ -495,7 +544,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "1")
         self.assertEqual(row["aggregate_pushdown_applied"], "0")
-        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["correct"], "TRUE")
         self.assertEqual(row["note"], "FALLBACK-SKIP")
         self.assertEqual(row["timing_status"], "fallback-skip")
         self.assertEqual(row["tm_speedup"], "1.000")
@@ -508,7 +557,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "1")
         self.assertEqual(row["aggregate_pushdown_applied"], "0")
-        self.assertEqual(row["correct"], "SKIPPED")
+        self.assertEqual(row["correct"], "TRUE")
         self.assertEqual(row["timing_status"], "fallback-skip")
         self.assertEqual(row["tm_speedup"], "1.000")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
@@ -520,8 +569,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "1")
         self.assertEqual(row["aggregate_pushdown_applied"], "1")
-        self.assertEqual(row["correct"], "NOT-CHECKED")
-        self.assertEqual(row["note"], "OK;CORRECTNESS-NOT-CHECKED")
+        self.assertEqual(row["correct"], "TRUE")
+        self.assertEqual(row["note"], "OK")
         self.assertEqual(row["timing_status"], "measured")
         self.assertEqual(row["tm_speedup"], "2.000")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]

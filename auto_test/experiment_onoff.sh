@@ -7,10 +7,9 @@
 #      whether its candidate grouping differs from DuckDB, whether the cost gate
 #      ran, and which candidate was selected.
 #      A DuckDB fallback, or an aggregate query without an actual aggregate
-#      pushdown, is recorded as FALLBACK-SKIP with the selection-policy default
-#      speed-up 1.0 and is not executed.
-#   2. OPTIONAL CORRECTNESS — disabled by default; --check-correctness compares
-#      the bare-query result multisets. Unchecked results are NOT-CHECKED, not TRUE.
+#      pushdown, skips performance measurements after the correctness check.
+#   2. CORRECTNESS — enabled by default for every query, including fallbacks.
+#      Compare one OFF/ON bare-query result pair. A failure is never timed.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
@@ -40,8 +39,8 @@
 #      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
 #      --profile         collect ON phase plus OFF/ON optimizer metrics (default)
 #      --no-profile      skip phase/optimizer profiles; timing stays unprofiled
-#      --check-correctness     opt in to bare-query result comparison
-#      --no-check-correctness  skip result comparison (default)
+#      --check-correctness     compare all bare-query result multisets (default)
+#      --no-check-correctness  explicitly opt out of result comparison
 #   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
 set -uo pipefail
@@ -65,7 +64,7 @@ QUERY_TYPE="all"
 RUNS="${OY_RUNS:-1}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 PROFILE="${OY_PROFILE:-1}"
-CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-0}"
+CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-1}"
 THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do case "$1" in
@@ -303,7 +302,7 @@ oy_duck() {
 # result sets as order-independent multisets. Both optimizer configurations
 # execute the bare query; sorting happens on the emitted CSV files so the
 # correctness check cannot change the optimized plan.
-# When explicitly enabled, this is a precondition for timing: a query that fails
+# Enabled by default, this is a precondition for timing: a query that fails
 # this check (mismatch / error / timeout) is NOT timed. Each OFF/ON bare-query
 # process has the same fixed per-statement and external timeout.
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
@@ -315,6 +314,7 @@ oy_equiv_check() {
 
     printf '%s\n%s\n%s;\n' "$prag" "$OY_OFF" "${query%;}" > "$sql"
     if oy_duck "$db" -csv -noheader < "$sql" > "$off" 2>"$eoff"; then roff=0; else roff=$?; fi
+    if grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$eoff"; then roff=124; fi
     if [ "$roff" -eq 124 ]; then
         echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, off): $label"; rc=3
     elif [ "$roff" -ne 0 ] || grep -qE 'Error:' "$eoff"; then
@@ -333,6 +333,7 @@ oy_equiv_check() {
     if [ "$rc" -eq 0 ]; then
         printf '%s\n%s\n%s;\n' "$prag" "$OY_ON" "${query%;}" > "$sql"
         if oy_duck "$db" -csv -noheader < "$sql" > "$on" 2>"$eon"; then ron=0; else ron=$?; fi
+        if grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$eon"; then ron=124; fi
         if [ "$ron" -eq 124 ]; then
             echo "  TIMEOUT (${OY_TIMEOUT_SECS}s, on): $label"; rc=3
         elif [ "$ron" -ne 0 ] || grep -qE 'Error:' "$eon"; then
@@ -980,7 +981,7 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1 + PROFILE) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
     echo "# correct: check=$CORRECTNESS_MODE; NOT-CHECKED means result equivalence was not verified"
-    echo "# fallback: DuckDB selections and aggregate queries without realized pushdown skip execution, use timing_status=fallback-skip and default speed-up=1.0"
+    echo "# fallback: correctness is still checked when enabled; verified fallbacks skip profiling/timing, use timing_status=fallback-skip and policy-default speed-up=1.0"
     echo "# formula : candidate_total = candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost"
     echo "# gate    : candidate_total <= cost_ratio_limit * baseline_cost"
     echo "# compare : raw_cost_winner compares candidate_total directly with baseline_cost"
@@ -1166,18 +1167,10 @@ PY
             fi
             ;;
     esac
-    if [ "$fallback_skip" = 1 ]; then
-        correct="SKIPPED"
-        note="FALLBACK-SKIP"
-        timing_status="fallback-skip"
-        offm="NA"
-        onm="NA"
-        ratiom="1.000"
-        profile_status="fallback-skip"
-        optimizer_status="fallback-skip"
-    elif [ "$CHECK_CORRECTNESS" = 0 ]; then
+    if [ "$CHECK_CORRECTNESS" = 0 ]; then
         correct="NOT-CHECKED"
         note="OK;CORRECTNESS-NOT-CHECKED"
+        [ "$fallback_skip" = 0 ] || correct="SKIPPED"
     else
         gate="$(oy_equiv_check "$db" "$id" "$sql")"
         case "$gate" in
@@ -1187,10 +1180,19 @@ PY
             *)             correct="FALSE"; note="ERROR";     rows="-";;
         esac
     fi
+    if [ "$fallback_skip" = 1 ] && { [ "$correct" = TRUE ] || [ "$correct" = SKIPPED ]; }; then
+        note="FALLBACK-SKIP"
+        timing_status="fallback-skip"
+        offm="NA"
+        onm="NA"
+        ratiom="1.000"
+        profile_status="fallback-skip"
+        optimizer_status="fallback-skip"
+    fi
     [ -z "$decision_issue" ] || note="${note};$decision_issue"
     [ -z "$plan_issue" ] || note="${note};$plan_issue"
 
-    if [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ]; then
+    if [ "$fallback_skip" = 0 ] && { [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ]; }; then
         if [ "$selected_plan" = "OUTERYAN" ]; then
             local kraw
             kraw="$(oy_kernel "$db" "$sql")"
@@ -1503,7 +1505,7 @@ done
 
 # ==== Final summary computed from the Q* arrays =============================
 QN="${#LABELS[@]}"
-NCORRECT=0; NUNCHECKED=0; NTIMED=0; NFALLBACK=0; NKBM=0; NKHASH=0; NKMIX=0
+NCORRECT=0; NUNCHECKED=0; NTIMED=0; NFALLBACK=0; NSKIP=0; NKBM=0; NKHASH=0; NKMIX=0
 NNO=0; NYES=0; SUMNO=0; SUMYES=0
 NBASELINE=0; NOUTERYAN=0; SUMBASELINE=0; SUMOUTERYAN=0
 NSAME=0; NREJECT=0; NSELECTED=0; NDECISION_UNKNOWN=0; NGATE_APPLIED=0
@@ -1515,14 +1517,17 @@ for ((i=0; i<QN; i++)); do
         0:1|1:1) NSELECTED=$((NSELECTED+1));;
         *)   NDECISION_UNKNOWN=$((NDECISION_UNKNOWN+1));;
     esac
+    case "${QCORRECT[i]}" in
+        TRUE) NCORRECT=$((NCORRECT+1));;
+        NOT-CHECKED) NUNCHECKED=$((NUNCHECKED+1));;
+    esac
     if [ "${QTIMING_STATUS[i]}" = "fallback-skip" ]; then
         NFALLBACK=$((NFALLBACK+1))
         continue
     fi
     case "${QCORRECT[i]}" in
-        TRUE) NCORRECT=$((NCORRECT+1));;
-        NOT-CHECKED) NUNCHECKED=$((NUNCHECKED+1));;
-        *) continue;;
+        TRUE|NOT-CHECKED) ;;
+        *) NSKIP=$((NSKIP+1)); continue;;
     esac
     [ "${QTIMING_STATUS[i]}" = "measured" ] && NTIMED=$((NTIMED+1))
     case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
@@ -1536,7 +1541,6 @@ for ((i=0; i<QN; i++)); do
         1) NOUTERYAN=$((NOUTERYAN+1)); SUMOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
     esac
 done
-NSKIP=$((QN-NCORRECT-NUNCHECKED-NFALLBACK))
 MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 MBASELINE="$(awk -v s="$SUMBASELINE" -v n="$NBASELINE" 'BEGIN{print (n? s/n : "-")}')"
@@ -1555,11 +1559,11 @@ MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-
         for ((i=0; i<QN; i++)); do
             [ "${QNREL[i]}" = "$nrel" ] || continue
             nrel_queries=$((nrel_queries+1))
+            [ "${QCORRECT[i]}" != "TRUE" ] || nrel_correct=$((nrel_correct+1))
             if [ "${QTIMING_STATUS[i]}" = "fallback-skip" ]; then
                 nrel_fallback=$((nrel_fallback+1))
                 continue
             fi
-            [ "${QCORRECT[i]}" != "TRUE" ] || nrel_correct=$((nrel_correct+1))
             [ "${QTIMING_STATUS[i]}" = "measured" ] && nrel_timed=$((nrel_timed+1))
         done
         echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  fallback-skip=$nrel_fallback  timed=$nrel_timed"

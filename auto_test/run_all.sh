@@ -20,7 +20,7 @@
 #   OY_PROFILE       One pre-timing profile per side (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
 #   OY_RUNS          Timed iterations after warm-up/profiling (default 1)
-#   OY_CHECK_CORRECTNESS  Compare result multisets before timing (default 0)
+#   OY_CHECK_CORRECTNESS  Compare every query's result multisets (default 1)
 #   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 900; 15 minutes)
 #   --timeout S      CLI timeout override; 0 disables the timeout
 #   JOBS             Make parallelism (default: nproc)

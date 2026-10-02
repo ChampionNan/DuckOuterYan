@@ -173,7 +173,7 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
     detail["speedup"] = speedup.where(measured)
     detail["valid_timing"] = measured
     detail["valid_speedup"] = valid
-    detail["speedup_source"] = np.where(fallback, "not-executed", np.where(measured, "measured", ""))
+    detail["speedup_source"] = np.where(fallback, "not-measured", np.where(measured, "measured", ""))
     # Exclusive reasons make coverage totals reconcile without double-counting.
     detail["exclusion_reason"] = np.select(
         [valid, timeout, too_fast, fallback, ~correct, ~pair],
@@ -689,11 +689,11 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                            else "Historically screened candidates, before post-measurement qualification; report failures and exclusions"
                            if "corpus_revision" in frame and frame["corpus_revision"].eq("balanced-screened-20261002").all()
                            else "Original supplied experiment population"),
-            "eligibility": "Only verified or explicitly NOT-CHECKED/disabled measured pairs with finite positive non-timeout OFF/ON times and at least one runtime >=1s; failures and unexecuted fallback rows are excluded",
+            "eligibility": "Only verified or explicitly NOT-CHECKED/disabled measured pairs with finite positive non-timeout OFF/ON times and at least one runtime >=1s; failures and untimed fallback rows are excluded",
             "correctness": "NOT-CHECKED with correctness_check=disabled is performance-only evidence, not a correctness claim; failed or unspecified checks are excluded",
             "timing_protocols": frame[[c for c in ("timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side") if c in frame]].drop_duplicates().fillna("").to_dict("records"),
             "minimum_runtime": "Exclude a measured query only when both OFF < 1.0 s and ON < 1.0 s; retain equality at 1.0 s and all pairs with either side above it. Apply the same query filter to phase and optimizer summaries; retain raw rows for coverage",
-            "fallback": "timing_status=fallback-skip means no query execution occurred; the original placeholder 1.0 is not used in statistics",
+            "fallback": "timing_status=fallback-skip means no performance measurement occurred; correctness may still be verified; the original placeholder 1.0 is not used in statistics",
             "deduplication": "Unique execution-family/SQL identities across names and historical suites; latest observations win including failures; unresolved definitions remain separate",
             "strata": "Manifest tree_shape and join_graph_topology are distinct; topology is the legacy name-inferred display shape. Join-type composition counts I/L/R/F edges. Selectivity levels are nominal manifest targets, not measured cardinalities; unspecified metadata is not inferred from runtime",
             "geomean": "exp(mean(log(OFF / ON))), each eligible query weighted equally",
@@ -764,7 +764,7 @@ def markdown_report(report: dict) -> str:
             lines.append(f"| {row['family']} | " + " | ".join(number(row["speedup"][key]) for key in
                          ("p05", "p10", "p25", "p75", "p90", "p95", "p99", "variance", "cv")) + " |")
         lines.extend(["", "### Coverage and faster/slower counts", "",
-                      "Measured faster/slower use exact OFF/ON; unexecuted fallback skips are excluded. "
+                      "Measured faster/slower use exact OFF/ON; untimed fallback skips are excluded. "
                       "The ±5% band below applies to the speed-up ratio; "
                       "it is a descriptive band, not a statistical significance test.", "",
                       "| Benchmark | Timeout | Other excluded | Faster | Equal | Slower | >1.05 | [0.95,1.05] | <0.95 | >=2 | >=10 |",
@@ -2933,7 +2933,7 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
 
 def composition_tex(report: dict) -> str:
     corpus = report["corpus"]
-    text = (f"After excluding invalid, unexecuted, and sub-second pairs, the evaluated benchmark contains {number(corpus['structural'], 0)} "
+    text = (f"After excluding invalid, unmeasured, and sub-second pairs, the evaluated benchmark contains {number(corpus['structural'], 0)} "
             f"structural queries and {number(corpus['supplementary'], 0)} supplementary queries, "
             f"for a total of {number(corpus['total'], 0)} query instances")
     if corpus["unclassified"]:
@@ -3004,7 +3004,7 @@ def overall_tex(report: dict) -> str:
     other = (coverage["excluded"] - coverage["both_runtimes_below_1s"]
              - coverage["fallback_skips"] - timeout["total"])
     text += (f"We additionally exclude {number(coverage['both_runtimes_below_1s'], 0)} pairs for which both runtimes "
-             rf"are strictly below $1$\,s and {number(coverage['fallback_skips'], 0)} unexecuted fallback cases")
+             rf"are strictly below $1$\,s and {number(coverage['fallback_skips'], 0)} untimed fallback cases")
     if other:
         text += f", plus {number(other, 0)} other incomplete or failed cases"
     text += (". Reported corpus counts include valid measured queries only; the performance overview further "
@@ -3026,7 +3026,7 @@ def runtime_tex(report: dict) -> str:
             lines.append(latex_escape(group["family"]) + " & " + " & ".join(values) + r" \\")
     caption = (r"Statistics across benchmark workloads after excluding recorded timeouts and measured pairs with both runtimes below $1$\,s. "
                "Total is the ratio of measured runtime sums. ")
-    caption += "Both panels include only eligible complete measured pairs; unexecuted fallback placeholders are excluded."
+    caption += "Both panels include only eligible complete measured pairs; untimed fallback placeholders are excluded."
     lines.extend([r"\bottomrule", r"\end{tabular}", r"\caption{" + caption + "}",
                   r"\label{tab:runtime-by-benchmark}", r"\end{table}"])
     return "\n".join(lines) + "\n"
@@ -3248,7 +3248,7 @@ def write_result_bundle(output_dir: Path, population: pd.DataFrame, *, group_by:
         if column in population]))
     (output_dir / "plot_selection.json").write_text(json.dumps({
         "group_by": group_by, "group": run,
-        "runtime_filter": "require eligible measured pairs with at least one runtime >= 1 s; exclude unexecuted fallbacks; speed-up summaries use OuterYan-selected plans",
+        "runtime_filter": "require eligible measured pairs with at least one runtime >= 1 s; exclude untimed fallbacks; speed-up summaries use OuterYan-selected plans",
         "both_runtimes_below_1s": int(below_runtime_threshold(population).sum()),
         "deduplication": "latest observation per execution family and normalized SQL; includes failures; preserves literals, join kinds and grouping; unresolved SQL stays separate",
         "workloads": population["workload_category"].value_counts().to_dict(),

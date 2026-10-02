@@ -98,7 +98,7 @@ export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 # Higher OY_RUNS therefore increases total experiment time and can expose more
 # timing-phase timeouts on slow (e.g. large-graph) queries.
 export OY_RUNS="${OY_RUNS:-1}"
-export OY_CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-0}"
+export OY_CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-1}"
 
 # Each side runs one warm-up, one optional profile, then unprofiled timing in the
 # same process. The optimizer and execution phases share that profile sample.
