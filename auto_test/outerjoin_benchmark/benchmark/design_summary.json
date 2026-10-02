@@ -63,17 +63,17 @@
     }
   },
   "graph_relation_counts": {
-    "5": 90,
-    "6": 18,
-    "4": 72
+    "5": 54,
+    "4": 126
   },
   "graph_relation_weights": {
-    "4": 4,
-    "5": 5,
-    "6": 1
+    "4": 7,
+    "5": 3
   },
+  "graph_filter_revision": "inputcap1",
+  "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",
   "historical_exclusion_observations": 138,
-  "design_sha256": "2af1b9473f5568f78fe2feb3e17d20a18242193e8a59dbcef719cf4df1d7c4c1",
+  "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
   "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. Historical supplementary cases are outside balanced quotas; their old timings are not reused."
 }

@@ -144,6 +144,7 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         "sql_identity", "original_query", "original_workload_category", "original_sql_path",
         "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
         "relation_count", "tree_shape", "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
+        "graph_filter_revision", "input_filter_placement", "input_filter_profiles_json",
         "aggregate_query", "aggregate_pushdown_applied", "selected_plan", "correct", "note", "timing_status",
         "timing_threads", "sql_path", "timeout_seconds", "correctness_check",
         "timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side",
@@ -1224,6 +1225,7 @@ def benchmark_provenance() -> pd.DataFrame:
             "filter_design_revision", "target_min_fraction", "target_max_fraction",
             "target_min_inclusive", "target_max_inclusive",
             "calibration_fraction", "selectivity_profile", "selectivity_scope",
+            "graph_filter_revision", "input_filter_placement", "input_filter_profiles_json",
         ) if column in manifest]
         part = manifest[columns].copy().rename(columns={"topology": "join_graph_topology"})
         if category == "v3_selectivity_stress":
@@ -1472,7 +1474,8 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
         lookup = frame["query"]
     for column in ("source_component", "evaluation_role", "workload_component", "tree_shape",
                    "join_graph_topology", "join_vector", "join_type_composition", "selectivity_tier",
-                   "target_fraction", "selectivity_level"):
+                   "target_fraction", "selectivity_level", "graph_filter_revision",
+                   "input_filter_placement", "input_filter_profiles_json"):
         if column not in frame and column in provenance:
             frame[column] = provenance[column].reindex(lookup).to_numpy()
     return frame

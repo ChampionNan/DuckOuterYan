@@ -39,19 +39,24 @@ def audit_selectivity(root, binary, output, timeout):
     for row in rows:
         if benchmark.is_historical_case(row):
             continue
-        used[row["selectivity_profile"]].add(row["semantic_tier"])
+        used[(row["selectivity_profile"], "")].add(row["semantic_tier"])
+        for extra in json.loads(row.get("input_filter_profiles_json") or "[]"):
+            used[(extra["profile"], extra["relation"])].add(row["semantic_tier"])
     measurements = []
-    for name, tiers in sorted(used.items()):
+    for (name, relation), tiers in sorted(used.items()):
         profile = design["profiles"][name]
+        if relation and (name != "graph_aux_source_range" or relation not in ("R2", "R3", "R4", "R5")):
+            raise ValueError(f"Invalid input-filter audit target: {name}/{relation}")
         family = profile["family"]
         database = Path(os.environ.get(f"{family.upper()}_DB", benchmark.legacy.REPO_ROOT / f"{family}_db"))
         signature = database_signature(database)
         ordered = [tier for tier in benchmark.TIERS if tier in tiers]
-        predicates = [benchmark.profile_metadata(design, name, profile["column"], tier)["selectivity_predicate"]
+        column = f"{relation}.src" if relation else profile["column"]
+        predicates = [benchmark.profile_metadata(design, name, column, tier)["selectivity_predicate"]
                       for tier in ordered]
         aggregates = ["COUNT(*) AS n"] + [f"COUNT(*) FILTER (WHERE {p}) AS c{i}" for i, p in enumerate(predicates)]
         sql = ("SET disabled_optimizers='outer_yan'; SET threads=4; SELECT " + ", ".join(aggregates)
-               + " FROM " + profile["calibration_from"] + ";")
+               + " FROM " + (relation or profile["calibration_from"]) + ";")
         result = subprocess.run([str(binary), "-readonly", "-no-init", "-bail", "-json", str(database), "-c", sql],
                                 capture_output=True, text=True, check=True, timeout=timeout)
         if database_signature(database) != signature:
@@ -59,13 +64,13 @@ def audit_selectivity(root, binary, output, timeout):
         counts = json.loads(result.stdout)[0]
         for i, tier in enumerate(ordered):
             fraction = counts[f"c{i}"] / counts["n"] if counts["n"] else 0
-            band = design["tiers"][benchmark.TIERS.index(tier)]
-            measurements.append(dict(profile=name, family=family, tier=tier, database=str(database.resolve()),
+            band = profile.get("tiers", design["tiers"])[benchmark.TIERS.index(tier)]
+            measurements.append(dict(profile=name, relation=relation, family=family, tier=tier, database=str(database.resolve()),
                                      database_signature=signature, predicate=predicates[i], total_rows=counts["n"],
                                      qualified_rows=counts[f"c{i}"], observed_fraction=fraction,
                                      in_range=benchmark.legacy.fraction_in_band(fraction, band)))
-        print(f"Audited {name}: " + ", ".join(f"{m['tier']}={m['observed_fraction']:.4%}"
-              for m in measurements if m["profile"] == name), flush=True)
+        print(f"Audited {name}{'/' + relation if relation else ''}: " + ", ".join(f"{m['tier']}={m['observed_fraction']:.4%}"
+              for m in measurements if m["profile"] == name and m["relation"] == relation), flush=True)
     success = all(m["in_range"] for m in measurements)
     benchmark.write_json(output, dict(revision=benchmark.REVISION, execution_host=socket.gethostname(),
                          manifest_sha256=benchmark.digest(corpus / "manifest.csv"),
@@ -73,7 +78,7 @@ def audit_selectivity(root, binary, output, timeout):
                          all_used_bands_in_range=success,
                          historical_cases_outside_band_audit=[r["query_id"] for r in rows
                                                              if benchmark.is_historical_case(r)],
-                         scope="Base-entity cohorts including NULL rows in denominator, not join-output selectivity"))
+                         scope="Primary base-entity cohorts plus per-relation graph input caps, including NULLs in each denominator; not join-output selectivity or a product of marginal fractions"))
     print(f"Selectivity audit: {'PASS' if success else 'OUT OF BAND'}; {output}")
     return success
 
@@ -103,6 +108,15 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
         return "selectivity_unverified_or_out_of_band"
     if result.get("database_signature") != profiles[0]["database_signature"]:
         return "database_mismatch"
+    for extra in json.loads(candidate.get("input_filter_profiles_json") or "[]"):
+        matching = [p for p in audit.get("profiles", []) if p["profile"] == extra["profile"]
+                    and p["tier"] == candidate["semantic_tier"] and p.get("relation") == extra["relation"]]
+        if len(matching) != 1 or not matching[0]["in_range"]:
+            return "input_selectivity_unverified_or_out_of_band"
+        if matching[0].get("predicate") != extra["predicate"]:
+            return "input_selectivity_predicate_mismatch"
+        if result.get("database_signature") != matching[0]["database_signature"]:
+            return "database_mismatch"
     timeout = benchmark.QUALIFICATION_TIMEOUT_SECONDS
     limits = [result.get(f"{side}_timeout_seconds", result.get("timeout_seconds"))
               for side in ("duckdb", "outeryan")]

@@ -34,7 +34,8 @@ TIERS = ("low", "medium", "high")
 SHAPES = ("left_deep", "right_deep", "bushy")
 TARGET = 180
 QUALIFICATION_TIMEOUT_SECONDS = 600
-GRAPH_RELATION_WEIGHTS = {4: 4, 5: 5, 6: 1}
+GRAPH_RELATION_WEIGHTS = {4: 7, 5: 3}
+GRAPH_FILTER_REVISION = "inputcap1"
 HISTORICAL_ROLE = "historical_slow_baseline_case"
 HISTORICAL_CASES = {
     "q80_alt": ("derived__ojb_tpcds_q80_store_channel_alt",
@@ -105,7 +106,9 @@ def body(sql):
 
 def expression_key(sql, family):
     """Ignore projection and filter, but retain grouping, operands and every ON key."""
-    expression = re.search(r"\bFROM\s+(.*?)\s+WHERE\b", body(sql), re.I | re.S)
+    unfiltered = re.sub(r"\(SELECT src, dst FROM (R\d+) WHERE src <= \d+\) (R\d+)",
+                        r"\1 \2", body(sql), flags=re.I)
+    expression = re.search(r"\bFROM\s+(.*?)\s+WHERE\b", unfiltered, re.I | re.S)
     if not expression:
         raise ValueError("Expected flat FROM/WHERE query")
     return sql_fingerprint(expression.group(1), family)
@@ -187,6 +190,10 @@ def freeze_history(root=ROOT):
 def bootstrap_design(binary, root=ROOT):
     """Retune high-band literals and recount base entities; no workload execution."""
     design = json.loads((root / "sources/semantic_filter_design.json").read_text())
+    # Keep the explicit graph input-cap design when refreshing business cohorts.
+    current = json.loads(DESIGN.read_text())
+    design["profiles"]["graph_aux_source_range"] = current["profiles"]["graph_aux_source_range"]
+    design["source_adaptations"]["graph"] = current["source_adaptations"]["graph"]
     design["revision"] = REVISION
     design["calibration_policy"] = "Three base-entity bands (0,5%), [5,40%), [40,60%]; " \
         "frozen local counts, mandatory target-server audit. This is a historically screened candidate corpus."
@@ -245,7 +252,7 @@ def profile_metadata(design, profile_id, column, tier):
     """Reuse formatting without changing the legacy generator's frozen design."""
     profile = design["profiles"][profile_id]
     i = TIERS.index(tier)
-    band = design["tiers"][i]
+    band = profile.get("tiers", design["tiers"])[i]
     if profile["kind"] == "predicates":
         predicate = profile["predicates"][i].format(column=column)
     elif profile["kind"] == "date_window":
@@ -284,9 +291,15 @@ def full_equality(predicate):
     return " AND ".join(m.group() for m in matches)
 
 
-def expression(seed, shape, kinds, traversal=0):
+def expression(seed, shape, kinds, traversal=0, input_predicates=None):
     aliases = [legacy.relation_alias(r) for r in seed.relations]
     tables = dict(zip(aliases, seed.relations))
+    for alias, predicate in (input_predicates or {}).items():
+        if seed.family != "graph" or not re.fullmatch(r"R[2-5]", alias) or alias not in tables:
+            raise ValueError(f"Unsupported graph filter alias: {alias}")
+        # Filter the input, not the NULL-padded join output. Moving these to the
+        # root WHERE would change outer-join preservation and simplification.
+        tables[alias] = f"(SELECT src, dst FROM {alias} WHERE {predicate}) {alias}"
     edges = [(*legacy.predicate_aliases(p), i) for i, p in enumerate(seed.predicates)]
 
     def deep(nodes, right=False):
@@ -317,7 +330,7 @@ def expression(seed, shape, kinds, traversal=0):
 
 def graph_seeds():
     seeds = []
-    for n in (4, 5, 6):
+    for n in GRAPH_RELATION_WEIGHTS:
         for topology in ("chain", "star", "branch"):
             if topology == "branch" and n == 4:
                 continue
@@ -331,6 +344,19 @@ def graph_seeds():
                     topology, "Synthetic acyclic graph control; independently enumerated structure.",
                     tuple(f"R{i} R{i}" for i in range(1,n+1)), predicates, "*", tuple("ILRF"[i%4] for i in range(n-1))))
     return seeds
+
+
+def graph_input_filters(design, seed, tier):
+    """Tier-paired input caps, chosen without candidate runtime/speed-up data."""
+    profile_id = "graph_aux_source_range"
+    filters = []
+    for relation in seed.relations[1:]:
+        alias = legacy.relation_alias(relation)
+        metadata = profile_metadata(design, profile_id, f"{alias}.src", tier)
+        filters.append(dict(relation=alias, profile=profile_id,
+                            predicate=metadata["selectivity_predicate"],
+                            calibration_fraction=metadata["calibration_fraction"]))
+    return filters
 
 
 def seed_projection(seed):
@@ -366,7 +392,17 @@ def candidate_rows(design, evidence, root=ROOT):
             rows = []
             for tier in TIERS:
                 metadata = profile_metadata(design, spec["profile"], spec["column"], tier)
-                sql = f"SELECT {seed_projection(seed)}\nFROM {expr}\nWHERE {metadata['selectivity_predicate']};\n"
+                filtered_expr = expr
+                if seed.family == "graph":
+                    filters = graph_input_filters(design, seed, tier)
+                    predicates = {f["relation"]: f["predicate"].replace(f["relation"] + ".", "") for f in filters}
+                    filtered_expr = expression(seed, shape, vector, traversal, predicates)
+                    metadata.update(graph_filter_revision=GRAPH_FILTER_REVISION,
+                                    input_filter_profiles_json=json.dumps(filters, separators=(",", ":")),
+                                    input_filter_placement="base_relation_subquery",
+                                    filter_design_revision=REVISION + "/" + GRAPH_FILTER_REVISION,
+                                    selectivity_scope="R1 base-entity cohort; R2..Rn have separately audited input caps; not joined-output selectivity")
+                sql = f"SELECT {seed_projection(seed)}\nFROM {filtered_expr}\nWHERE {metadata['selectivity_predicate']};\n"
                 if sql_fingerprint(sql, seed.family) in exact:
                     break
                 row = dict(metadata, family=seed.family, source_seed=seed.seed_id,
@@ -413,7 +449,7 @@ def candidate_rows(design, evidence, root=ROOT):
 
 
 def graph_relation_quotas(group_count):
-    """Largest-remainder 40/50/10 allocation; each structure pairs three tiers."""
+    """Largest-remainder 70/30 allocation; each structure pairs three tiers."""
     denominator = sum(GRAPH_RELATION_WEIGHTS.values())
     quotas = {n: group_count * weight // denominator for n, weight in GRAPH_RELATION_WEIGHTS.items()}
     order = sorted(quotas, key=lambda n: (-(group_count * GRAPH_RELATION_WEIGHTS[n] % denominator), n))
@@ -495,6 +531,8 @@ def generate(root=ROOT, per_family=180, batch=0):
                     sql = body(sql) + "\n"
                 fingerprint = sql_fingerprint(sql, family)
                 query = f"{category}__{family}__{row['source_seed']}__{row['tree_shape']}__{row['join_vector'].lower()}__{row['expression_fingerprint'][:8]}__sel_{row['semantic_tier']}"
+                if family == "graph":
+                    query = query.replace("__sel_", f"__{GRAPH_FILTER_REVISION}__sel_")
                 if aggregate:
                     query += "__"+aggregate
                 row.update(query_id=query, path=f"{family}/{query}.sql", query_class=category,
@@ -537,6 +575,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             "family_shapes": {f:dict(Counter(r["tree_shape"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
             "graph_relation_counts": dict(Counter(r["relation_count"] for r in balanced_records if r["family"] == "graph")),
             "graph_relation_weights": GRAPH_RELATION_WEIGHTS,
+            "graph_filter_revision": GRAPH_FILTER_REVISION,
+            "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",
             "historical_exclusion_observations": len(evidence["excluded"]),
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
@@ -576,6 +616,8 @@ def validate(benchmark):
     if not rows or {r["path"] for r in rows} != {str(p.relative_to(benchmark)) for p in benchmark.glob("*/*.sql")}:
         raise ValueError("Manifest does not match the active SQL file set")
     identities=set()
+    design = json.loads(DESIGN.read_text())
+    graph_sources = {s.seed_id: s for s in graph_seeds()}
     expected_cases = {r["query_id"]: r for r, _ in historical_cases()}
     restored = []
     for r in rows:
@@ -603,6 +645,20 @@ def validate(benchmark):
             restored.append(r["query_id"])
         elif float(r["target_max_fraction"])>.6 or r["calibration_in_range"]!="true":
             raise ValueError(f"Out-of-band cohort: {path}")
+        if r["family"] == "graph":
+            seed = graph_sources.get(r["source_seed"])
+            if seed is None or r.get("graph_filter_revision") != GRAPH_FILTER_REVISION:
+                raise ValueError(f"Obsolete graph design: {path}; regenerate the corpus")
+            expected = graph_input_filters(design, seed, r["semantic_tier"])
+            if json.loads(r.get("input_filter_profiles_json") or "[]") != expected:
+                raise ValueError(f"Missing/changed graph input filters: {path}")
+            for extra in expected:
+                alias = extra["relation"]
+                predicate = extra["predicate"].replace(alias + ".", "")
+                if f"(SELECT src, dst FROM {alias} WHERE {predicate}) {alias}" not in sql:
+                    raise ValueError(f"Graph input filter is not below the join: {path}/{alias}")
+            if expression_key(sql, "graph") != r["expression_fingerprint"]:
+                raise ValueError(f"Graph input caps changed join structure: {path}")
     balanced = [r for r in rows if not is_historical_case(r)]
     batches = {int(r["candidate_batch"]) for r in balanced}
     if len(batches) != 1 or set(restored) != (set(expected_cases) if batches == {0} else set()):

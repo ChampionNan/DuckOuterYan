@@ -20,10 +20,24 @@ not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
 approximately balanced, not claimed exactly equal.
 
-Graph now has **72 four-relation, 90 five-relation, and 18 six-relation queries**
-(previously 36/78/66). Each selectivity-by-shape cell uses the same 8/10/2 split.
+Graph now has **126 four-relation and 54 five-relation queries; no six-relation queries**
+(previously 72/90/18). Each selectivity-by-shape cell uses the same 14/6 split.
 This changes query selection, not the graph database or dataset. Both active
 and reserve batches follow this relation-count quota.
+
+Graph names include `__inputcap1__` to distinguish the new filtered inputs from
+old measurements. R1 retains `src <= 2/83/306` (local Bitcoin fractions
+2.83%/30.00%/54.99%). Every other participating relation uses a pre-join source
+cap `src <= 10/20/40`, with local marginal fractions 9.33%/14.35%/21.19%.
+These predicates are inside each relation's scan subquery, not added to the
+root WHERE: filtering NULL-padded output there could erase preserved rows.
+The three balanced tiers refer to **R1's primary cohort**, not every input.
+Do not multiply these correlated marginal fractions to estimate join selectivity.
+`input_filter_profiles_json` in the manifest records each input/predicate;
+the harness saves a per-run manifest snapshot. Server audits count R2..Rn
+independently and qualification requires every input cap to pass its own band.
+The caps were not selected using ON/OFF speed-ups. They reduce the input scale
+but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of all 180 candidates.
 
 Balanced types: 384 `join`, 162 `graph` (including 27 industry-inspired controls), and
 174 `aggregate`. Aggregates comprise 66 COUNT, 36 MIN, 36 MAX and 36 SUM queries.

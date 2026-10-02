@@ -815,21 +815,11 @@ fi
 # ============================================================================
 LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=(); QUERY_TYPES=()
 
-# Corpus queries are deliberately flat: one FROM relation followed by explicit
-# JOIN relations (no CTEs or subqueries). Count those SQL tokens instead of
-# inferring depth from the label, whose convention differs across families.
+# Count base relations, not SELECT wrappers used for graph input predicates.
+# Counting every FROM/JOIN token would mislabel a four-table query as seven.
 oy_relation_count() {
-    printf '%s\n' "$1" | awk '
-        {
-            sub(/--.*/, "")
-            gsub(/[^[:alnum:]_]+/, " ")
-            for (i = 1; i <= NF; i++) {
-                token = tolower($i)
-                if (token == "from" || token == "join") count++
-            }
-        }
-        END { if (count > 0) print count; else print "-" }
-    '
+    printf '%s\n' "$1" | PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON_BIN:-python3}" -c \
+        'import sys; from benchmark_corpus import count_base_relations; print(count_base_relations(sys.stdin.read()) or "-")'
 }
 
 db_for_family() {

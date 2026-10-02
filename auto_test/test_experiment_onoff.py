@@ -226,6 +226,16 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertTrue(all("SET max_execution_time=600000;" in call["sql"] for call in calls))
         self.assertIn("DuckDB=600s", (self.root / "result.txt").read_text())
 
+    def test_input_filter_subqueries_do_not_inflate_relation_count(self):
+        sql = ("SELECT R1.src FROM ((R1 R1 LEFT JOIN (SELECT src,dst FROM R2 WHERE src<=10) R2 "
+               "ON R1.dst=R2.src) FULL JOIN (SELECT src,dst FROM R3 WHERE src<=10) R3 "
+               "ON R2.dst=R3.src) WHERE R1.src<=2;\n")
+        (self.root / "corpus/tpch/sample.sql").write_text(sql)
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read_row()["relation_count"], "3")
+        self.assertEqual(self.read_row()["correct"], "TRUE")
+
     def test_default_warms_and_profiles_before_single_timing_in_each_process(self):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

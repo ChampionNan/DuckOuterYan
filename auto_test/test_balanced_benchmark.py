@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import balanced_benchmark as b
+from benchmark_corpus import count_base_relations
 import qualify_benchmark as q
 from test_gen_outerjoin_benchmark import forbid_result_access
 
@@ -33,12 +34,12 @@ class BalancedBenchmarkTest(unittest.TestCase):
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
         self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
         graph = [r for r in rows if r["family"] == "graph"]
-        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 72, 5: 90, 6: 18})
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 126, 5: 54})
         for tier in b.TIERS:
             for shape in b.SHAPES:
                 self.assertEqual(Counter(int(r["relation_count"]) for r in graph
                                          if r["semantic_tier"] == tier and r["tree_shape"] == shape),
-                                 {4: 8, 5: 10, 6: 2})
+                                 {4: 14, 5: 6})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
         self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows))
@@ -57,6 +58,27 @@ class BalancedBenchmarkTest(unittest.TestCase):
             self.assertEqual(row["target_max_fraction"], "")
             self.assertEqual(row["calibration_in_range"], "not_applicable")
             self.assertEqual(row["qualification_status"], "PENDING_CPU9_MEASUREMENT")
+
+    def test_graph_caps_filter_each_non_anchor_input_without_changing_join_structure(self):
+        corpus = b.ROOT / "benchmark"
+        for row in b.read_manifest(corpus / "manifest.csv"):
+            if row["family"] != "graph":
+                continue
+            sql = (corpus / row["path"]).read_text()
+            inputs = json.loads(row["input_filter_profiles_json"])
+            self.assertEqual(len(inputs), int(row["relation_count"]) - 1)
+            self.assertEqual(count_base_relations(sql), int(row["relation_count"]))
+            self.assertIn("__inputcap1__", row["query_id"])
+            self.assertEqual(b.expression_key(sql, "graph"), row["expression_fingerprint"])
+            outer_where = sql.split("\nWHERE ")[-1].split("\nGROUP BY")[0].rstrip(";\n")
+            self.assertEqual(outer_where, row["selectivity_predicate"])
+            cap = (10, 20, 40)[b.TIERS.index(row["semantic_tier"])]
+            for extra in inputs:
+                alias = extra["relation"]
+                self.assertNotEqual(alias, "R1")
+                self.assertIn(f"(SELECT src, dst FROM {alias} WHERE src <= {cap}) {alias}", sql)
+                self.assertEqual(extra["predicate"], f"{alias}.src <= {cap}")
+                self.assertLess(extra["calibration_fraction"], .3)
 
     def test_reserve_generation_does_not_repeat_historical_cases(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), forbid_result_access():
@@ -146,6 +168,38 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(self.status(correct="NOT-CHECKED", correctness_check="disabled"), "eligible")
         self.assertEqual(self.status(correct="FALSE", correctness_check="disabled"), "correctness_not_verified")
 
+    def test_graph_qualification_requires_every_input_cap_audit(self):
+        extra = dict(profile="graph_aux_source_range", relation="R2", predicate="R2.src <= 10")
+        self.candidate["input_filter_profiles_json"] = json.dumps([extra])
+        self.assertEqual(self.status(), "input_selectivity_unverified_or_out_of_band")
+        self.audit["profiles"].append(dict(extra, tier="low", in_range=True, database_signature="db"))
+        self.assertEqual(self.status(), "eligible")
+        self.audit["profiles"][-1]["predicate"] = "R2.src <= 40"
+        self.assertEqual(self.status(), "input_selectivity_predicate_mismatch")
+        self.audit["profiles"][-1]["predicate"] = extra["predicate"]
+        self.audit["profiles"][-1]["database_signature"] = "changed"
+        self.assertEqual(self.status(), "database_mismatch")
+
+    def test_graph_input_audit_counts_each_relation_against_its_own_band(self):
+        rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
+        candidate = next(r for r in rows if r["family"] == "graph" and r["relation_count"] == "4"
+                         and r["semantic_tier"] == "high")
+        def run_count(command, **kwargs):
+            sql = command[-1]
+            is_anchor = " FROM R1;" in sql
+            self.assertIn("R1.src <= 306" if is_anchor else "src <= 40", sql)
+            return mock.Mock(stdout=json.dumps([dict(n=24186, c0=13299 if is_anchor else 5126)]))
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(b, "validate", return_value=[candidate]), \
+                mock.patch.object(q, "database_signature", return_value="db"), \
+                mock.patch.object(q.subprocess, "run", side_effect=run_count) as run:
+            output = Path(tmp) / "audit.json"
+            self.assertTrue(q.audit_selectivity(b.ROOT, Path("duckdb"), output, 10))
+            profiles = json.loads(output.read_text())["profiles"]
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual({p["relation"] for p in profiles}, {"", "R2", "R3", "R4"})
+            self.assertTrue(all(p["in_range"] for p in profiles))
+
     def test_pending_report_has_no_invented_speedup(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             report = q.qualify([b.ROOT / "benchmark"], [], [], Path(tmp))
@@ -180,7 +234,7 @@ class QualificationTest(unittest.TestCase):
 
     def test_band_audit_explicitly_excludes_historical_cases(self):
         rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
-        candidate = next(r for r in rows if not b.is_historical_case(r))
+        candidate = next(r for r in rows if not b.is_historical_case(r) and r["family"] != "graph")
         historical = [r for r in rows if b.is_historical_case(r)]
         design = json.loads(b.DESIGN.read_text())
         calibration = design["profiles"][candidate["selectivity_profile"]]["calibration"]
@@ -199,7 +253,7 @@ class QualificationTest(unittest.TestCase):
 
     def test_latest_failure_replaces_prior_success_in_report(self):
         corpus = b.ROOT / "benchmark"
-        candidate = b.read_manifest(corpus / "manifest.csv")[0]
+        candidate = next(r for r in b.read_manifest(corpus / "manifest.csv") if r["family"] != "graph")
         manifest_hash = b.digest(corpus / "manifest.csv")
         audit = dict(self.audit, manifest_sha256=manifest_hash, profiles=[dict(
             profile=candidate["selectivity_profile"], tier=candidate["semantic_tier"],

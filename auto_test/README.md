@@ -208,8 +208,18 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 其中 **720 条配平候选**：
 Graph/TPC-H/TPC-DS/JOB **各 180 条**。每 family 的三档 selectivity 各 60，
 left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mixed。
-Graph 的 4/5/6 relation 数量分别为 **72/90/18**（原为 36/78/66），
-每个 selectivity×shape 单元为 8/10/2；数据库及图数据集不变。
+Graph 的 4/5 relation 数量分别为 **126/54**，不再生成 6 relation 查询
+（上一版为 72/90/18）。每个 selectivity×shape 单元为 14/6；数据库及数据集不变。
+Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
+R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
+放在 `(SELECT src,dst FROM Ri WHERE ...) Ri` 中，避免在根 WHERE 误删 NULL-padded 行。
+本地 Bitcoin 的 R1 保留率为 2.83%/30.00%/54.99%；其余每个输入约为
+9.33%/14.35%/21.19%。三档配平指 **R1 主过滤**，不能宣称所有输入过滤率均匀分布，
+也不能将各输入的边际比例相乘当作 join selectivity。
+`manifest.csv` 的 `input_filter_profiles_json` 记录逐关系谓词及本地校准比例；
+每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
+资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
+也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
 类型为 `join` 384、`graph` 162（含 industry controls）、`aggregate` 174。
 `--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。

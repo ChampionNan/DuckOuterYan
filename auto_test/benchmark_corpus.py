@@ -29,6 +29,25 @@ def sql_fingerprint(sql, family):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def count_base_relations(sql):
+    """Count generated join leaves, excluding input-filter SELECT wrappers.
+
+    Supports the corpus's explicit join trees and scan subqueries, not arbitrary
+    SQL (e.g. CTE expansion or comma-separated FROM lists).
+    """
+    tokens = [t.lower() for t in SQL_TOKEN.findall(sql) if not t.startswith(("--", "/*"))]
+    count = 0
+    for i, token in enumerate(tokens):
+        if token not in ("from", "join"):
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j] == "(":
+            j += 1
+        if j < len(tokens) and tokens[j] not in ("select", "with"):
+            count += 1
+    return count
+
+
 def read_manifest(path):
     with Path(path).open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))

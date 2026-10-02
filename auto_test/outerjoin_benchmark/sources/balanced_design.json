@@ -3,7 +3,7 @@
   "calibration_policy": "Three base-entity bands (0,5%), [5,40%), [40,60%]; frozen local counts, mandatory target-server audit. This is a historically screened candidate corpus.",
   "source_adaptations": {
     "sqlstorm_tpcds": "The source examples use year 2023, outside this TPC-DS sales population. Calendar windows are anchored in the generated sales period (2000), rather than preserving an empty out-of-domain year.",
-    "graph": "Vertex intervals are synthetic graph cohorts; they are not claimed as business filters.",
+    "graph": "Vertex intervals are synthetic graph cohorts, not business filters. R1 retains the three primary bands; all other graph inputs have stricter tier-paired source-vertex caps applied before the join. Audit marginal fractions per input, not an independence-based product or joined-output fraction.",
     "job_10a": "Use the source title/cast_info/role_type/movie_companies/company_name connected subgraph. Never replace char_name.id = cast_info.person_role_id with the unrelated role_id; the local inferred DOUBLE person_role_id would otherwise require a join-key cast outside the current DP envelope."
   },
   "tiers": [
@@ -643,6 +643,25 @@
           0.3000082692466716,
           0.5498635574299181
         ]
+      }
+    },
+    "graph_aux_source_range": {
+      "family": "graph",
+      "calibration_from": "R2",
+      "column": "R2.src",
+      "kind": "upper",
+      "meaning": "additional pre-join source-vertex cap on every non-anchor graph relation",
+      "bounds": [10, 20, 40],
+      "tiers": [
+        {"name": "low", "lower_bound": 0.05, "upper_bound": 0.1, "include_lower": true, "include_upper": false, "target_fraction": 0.09},
+        {"name": "medium", "lower_bound": 0.1, "upper_bound": 0.2, "include_lower": true, "include_upper": false, "target_fraction": 0.15},
+        {"name": "high", "lower_bound": 0.2, "upper_bound": 0.3, "include_lower": true, "include_upper": false, "target_fraction": 0.21}
+      ],
+      "calibration": {
+        "dataset": "Bitcoin Alpha; independently verify every R2..R5 copy on cpu9",
+        "n": 24186,
+        "qualified_rows": [2256, 3471, 5126],
+        "observed_fractions": [0.09327710245596627, 0.14351277598610768, 0.21194079219383113]
       }
     },
     "tpch_part_color": {
