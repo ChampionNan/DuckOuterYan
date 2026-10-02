@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared profiling helpers sourced by experiment_onoff.sh, not a standalone CLI.
-# oy_optimizer_profile_pair executes one post-warm-up OFF/ON profile pair.
+# oy_warm_profile_time runs warm-up -> optional profile -> unprofiled timing per side.
 # oy_phase_profile_from_json reads CPU components from that same ON profile;
 # it does not rerun the query. CPU work and wall latency remain separate.
 
@@ -124,77 +124,87 @@ except Exception as exc:
 PY
 }
 
-# Profile optimization as part of one real query execution after one unprofiled
-# warm-up. DuckDB supplies the named optimizer totals; the ON total additionally
-# includes the otherwise-untracked OuterYan cost-model phase. The ON-side
-# decision trace supplies non-overlapping OuterYan workflow phases
-# (simplification, desimplification, join reorder, and so on). Generic DuckDB
-# per-pass timings are intentionally not exported.
-#
+# One CLI per configuration preserves its own warmed buffer pool. Only statements
+# after .timer on contribute to runtime. Profiler trace output is enabled only
+# while the native profiler is enabled (requires the matching rebuilt binary).
+# Echoes the timed sample (or median for explicit runs > 1) and sample count.
+oy_warm_profile_time() {
+    local db="$1" setting="$2" query="$3" threads="$4" runs="$5"
+    local profiledir="$6" mode="$7" profile="$8"
+    local sqlf rawf profilef tracef rc=0 saved_to="$OY_TIMEOUT_SECS" i
+    sqlf=$(mktemp) || return 1
+    rawf="$profiledir/optimizer_${mode}.log"
+    profilef="$profiledir/optimizer_${mode}_1.json"
+    tracef="$profiledir/optimizer_${mode}.trace"
+    : > "$tracef"
+    {
+        printf ".timer off\n.mode trash\nCALL disable_profiling();\nPRAGMA threads=%s;\n%s\n%s\n" \
+            "$threads" "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" "$setting"
+        printf '.print OY_STAGE:warmup\n%s;\n' "${query%;}"
+        if [ "$profile" = 1 ]; then
+            printf ".print OY_STAGE:profile\nCALL enable_profiling(format='json', save_location='%s', coverage='select', mode='detailed');\n%s;\n" \
+                "${profilef//"'"/"''"}" "${query%;}"
+            # Unlike CALL, this pragma disables profiling before optimization
+            # and cannot append an unrelated CALL decision to the profile trace.
+            printf 'PRAGMA disable_profiling;\n'
+        fi
+        printf '.print OY_STAGE:timing\n.timer on\n'
+        for ((i=0; i<runs; i++)); do printf '%s;\n' "${query%;}"; done
+        printf '.timer off\n'
+    } > "$sqlf"
+    [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != 0 ] \
+        && OY_TIMEOUT_SECS=$(( saved_to * (1 + profile + runs) + OY_BATCH_GRACE_SECS ))
+    # This helper is called in a command substitution; do not inherit verbose
+    # traces or kernel diagnostics into the measured execution.
+    unset DUCKDB_OYTRACE DUCKDB_SJ_KERNEL_TRACE
+    DUCKDB_OY_PROFILE_TRACE="$tracef" oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1 || rc=$?
+    OY_TIMEOUT_SECS="$saved_to"
+    rm -f "$sqlf"
+    if [ "$rc" -eq 124 ] || grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$rawf"; then
+        echo "NA 0"; return 124
+    fi
+    if [ "$rc" -ne 0 ] || grep -q 'Error:' "$rawf"; then
+        echo "NA 0"; return 1
+    fi
+    if [ "$mode" = outeryan ]; then
+        local records
+        records="$(awk '/^\[OY_DECISION\]/ {n++} END {print n+0}' "$tracef")"
+        if [ "$records" != "$profile" ]; then
+            printf 'Error: expected %s profile-only decisions, found %s; rebuild DuckDB before timing\n' \
+                "$profile" "$records" >> "$rawf"
+            echo "NA 0"; return 1
+        fi
+    fi
+    "${PYTHON_BIN:-python3}" - "$rawf" "$runs" <<'PY'
+import math
+import re
+import statistics
+import sys
+with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+    raw = handle.read()
+values = [float(v) for v in re.findall(r"Run Time[^\n]*?\breal\s+([0-9.eE+-]+)", raw)]
+if len(values) != int(sys.argv[2]) or not all(math.isfinite(v) and v > 0 for v in values):
+    print("NA 0")
+    sys.exit(1)
+print(f"{statistics.median(values):.9f} {len(values)}")
+PY
+}
+
+# Parse the already-collected profiles; never execute another query.
+# DuckDB supplies optimizer totals; the ON total also includes the otherwise
+# untracked OuterYan cost-model phase. The decision trace supplies non-overlapping
+# workflow phases (simplification, desimplification, join reorder, and so on).
+# Generic DuckDB per-pass timings are intentionally not exported.
 # Echoes a pipe-delimited record:
 #   off_total|on_total|delta|on_over_off|off_phase_sum|on_phase_sum|
 #   off_other|on_other|samples|off_phases_json|on_phases_json|
 #   comparable_delta_json|outeryan_focus
-oy_optimizer_profile_pair() {
-    local db="$1" query="$2" threads="$3" runs="$4" profile_dest="${5:-}"
-    local sqlf rawf profiledir profilef profile_sql tracef mode setting profile_rc=0
-    sqlf=$(mktemp) || { oy_optimizer_profile_failure; return 1; }
-    rawf=$(mktemp) || { rm -f "$sqlf"; oy_optimizer_profile_failure; return 1; }
-    if [ -n "$profile_dest" ]; then
-        profiledir="$profile_dest"
-        [ -d "$profiledir" ] || {
-            rm -f "$sqlf" "$rawf"
-            oy_optimizer_profile_failure
-            return 1
-        }
-    else
-        profiledir=$(mktemp -d "$OY_RUN_TMPDIR/oy_optimizer_profile.XXXXXX") || {
-            rm -f "$sqlf" "$rawf"
-            oy_optimizer_profile_failure
-            return 1
-        }
-    fi
-
-    printf ".timer off\n.mode trash\nCALL disable_profiling();\nPRAGMA threads=%s;\n%s\n" \
-        "$threads" "$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" > "$sqlf"
-    tracef="$profiledir/optimizer_outeryan.trace"
-    : > "$tracef"
-    for mode in duckdb outeryan; do
-        if [ "$mode" = "duckdb" ]; then
-            setting="$OY_OFF"
-        else
-            setting="$OY_ON"
-        fi
-        printf '%s\n' "$setting" >> "$sqlf"
-        # One ordinary execution warms the database and compiled runtime. The
-        # following execution is the only optimizer/profile sample.
-        printf '%s;\n' "${query%;}" >> "$sqlf"
-        profilef="$profiledir/optimizer_${mode}_1.json"
-        profile_sql="${profilef//"'"/"''"}"
-        printf "CALL enable_profiling(format='json', save_location='%s', coverage='select', mode='detailed');\n%s;\n" \
-            "$profile_sql" "${query%;}" >> "$sqlf"
-        if [ "$mode" = "duckdb" ]; then
-            # OFF is followed by the ON warm-up, so disable its profiler before
-            # changing optimizer settings. ON is the final statement in this
-            # process: exiting flushes the JSON and, importantly, avoids a
-            # trailing CALL decision that would mask the target query's compact
-            # OuterYan workflow trace.
-            printf 'CALL disable_profiling();\n' >> "$sqlf"
-        fi
-    done
-
-    local saved_to="$OY_TIMEOUT_SECS" duck_rc=0
-    [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ] \
-        && OY_TIMEOUT_SECS=$(( OY_TIMEOUT_SECS * 4 + OY_BATCH_GRACE_SECS ))
-    if DUCKDB_OY_PROFILE_TRACE="$tracef" oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1; then
-        duck_rc=0
-    else
-        duck_rc=$?
-    fi
-    OY_TIMEOUT_SECS="$saved_to"
-
+oy_optimizer_profile_from_files() {
+    local profiledir="$1" query="$2"
+    local rawf="$profiledir/optimizer_duckdb.log" duck_rc=0
+    local tracef="$profiledir/optimizer_outeryan.trace"
     "${PYTHON_BIN:-python3}" - "$rawf" "$profiledir" "${query%;}" "$duck_rc" "$tracef" <<'PY' \
-        || profile_rc=$?
+        || return $?
 import json
 import math
 import os
@@ -333,17 +343,6 @@ except Exception as exc:
     print(failure)
     sys.exit(1)
 PY
-    if [ -n "$profile_dest" ]; then
-        cp "$rawf" "$profiledir/optimizer_duckdb.log"
-    else
-        rm -f "$profiledir/optimizer_duckdb_1.json" "$profiledir/optimizer_outeryan_1.json" "$tracef"
-        rmdir "$profiledir" 2>/dev/null || true
-    fi
-    rm -f "$sqlf" "$rawf"
-    if [ "$duck_rc" -eq 124 ]; then
-        return 124
-    fi
-    return "$profile_rc"
 }
 
 oy_optimizer_profile_failure() {

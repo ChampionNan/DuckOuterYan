@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/optimizer/join_order/join_order_optimizer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
@@ -406,7 +407,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		decision.reason = "INAPPLICABLE";
 		candidate_tree.phase_timings.available = true;
 		decision.phase_timings = candidate_tree.phase_timings;
-		OuterYanTrace::Decision(decision);
+		OuterYanTrace::Decision(decision, QueryProfiler::Get(context).IsEnabled());
 		result.plan = std::move(input);
 		return result;
 	}
@@ -851,7 +852,7 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 	}
 	candidate_tree.phase_timings.available = true;
 	decision.phase_timings = candidate_tree.phase_timings;
-	OuterYanTrace::Decision(decision);
+	OuterYanTrace::Decision(decision, QueryProfiler::Get(context).IsEnabled());
 	// The selected plan lives locally while the facade is running, so the
 	// normal RunOptimizer post-callback check cannot see it through
 	// Optimizer::plan. Preserve the same verification boundary explicitly.

@@ -64,8 +64,8 @@ but Q80-alt historically needed about 19 minutes on the DuckDB side. SF50 may be
 faster; it is not guaranteed to fit within 900 seconds. The default and balanced
 qualification policy are both 900 seconds. Old 1800-second results retain their
 recorded limits and are not qualified under the new 900-second policy.
-OFF correctness runs first: an OFF timeout
-stops that query before ON, so it does not establish that OuterYan itself timed out.
+Correctness comparison is now disabled by default. An OFF warm-up/profile/timing
+timeout still stops the query before ON; it does not establish an OuterYan timeout.
 
 ## Sources and screening
 
@@ -118,9 +118,17 @@ bash auto_test/run_all.sh --all --timeout 900
 `run_all.sh` builds, reuses/builds databases, regenerates and runs the candidates.
 `experiment_onoff.sh` alone **does not compile**. Default timeout is 15 minutes
 per statement; a timeout ends that query's test without doubling or retrying.
-Successful timing keeps one warm-up plus three timed executions per side (median).
-Optimization profiling uses one post-warm-up sample. Thus 15 minutes is not a
-total budget for all stages of a successful query.
+Each side uses a fresh process with one ordinary warm-up, one detailed profile,
+then one unprofiled timed execution in that same process. Preparatory executions
+do not contribute to runtime; optimizer and execution phases share the profile.
+There is also one separate ON kernel diagnostic. Thus a completed selected query
+uses seven executions, but only the final OFF/ON pair supplies running times.
+Result comparison is off by default: CSVs explicitly record `NOT-CHECKED` and
+`correctness_check=disabled`, not verified correctness. `--check-correctness`
+restores the optional result comparison. `--no-profile` retains one ordinary
+warm-up before timing. Explicit `--runs N` can request multiple timed samples;
+the default is one. Rebuild via `run_all.sh` for profile-only trace emission.
+Thus 15 minutes is not a total budget for all stages of a successful query.
 An existing `OY_TIMEOUT_SECS` environment variable or explicit `--timeout` still
 overrides the default; unset stale overrides when using the default workflow.
 
@@ -142,8 +150,11 @@ Qualification checks SQL/manifest hashes, host, database path/size/mtime signatu
 15-minute configuration and audited bands. Database changes require re-audit and
 remeasurement. The signature is a guard, not a full database checksum.
 
-Final eligibility: correctness verified, both measured runtimes **>1 s and
+Final eligibility: correctness verified **or explicitly unchecked**, both measured runtimes **>1 s and
 <900 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
+Unchecked rows remain performance-only evidence, not a correctness claim.
+Qualification rejects mixed timing protocols/sample counts/correctness modes;
+do not combine old three-run medians and new single-run timings as one experiment.
 Unexecuted `fallback-skip` rows are excluded, never interpreted as measured 1×.
 Latest supplied observations win, including failures; no fastest-run selection.
 Missing/failed rows yield shortages, never fabricated success or rescaled timings.

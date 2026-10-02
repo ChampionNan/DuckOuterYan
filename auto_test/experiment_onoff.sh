@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# experiment_onoff.sh  —  OuterYan ON-vs-OFF correctness + performance test.
+# experiment_onoff.sh  —  OuterYan ON-vs-OFF single-sample performance test.
 #
 # Per corpus query, IN THIS ORDER:
 #   1. PLAN DECISION — oy_decision reads OuterYan's machine-readable trace:
@@ -9,22 +9,23 @@
 #      A DuckDB fallback, or an aggregate query without an actual aggregate
 #      pushdown, is recorded as FALLBACK-SKIP with the selection-policy default
 #      speed-up 1.0 and is not executed.
-#   2. CORRECTNESS GATE — for every remaining query, oy_equiv_check compares
-#      ON==OFF on the bare query. A mismatch, crash, or timeout is NOT timed.
+#   2. OPTIONAL CORRECTNESS — disabled by default; --check-correctness compares
+#      the bare-query result multisets. Unchecked results are NOT-CHECKED, not TRUE.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. TIMING — unprofiled OFF/ON medians at the selected multi-thread count.
-#   5. PROFILE — separate native ON phase samples for OuterYan-selected queries.
+#   4. EACH SIDE — one warm-up, one optional native profile, then one unprofiled
+#      timed execution in the same CLI process. OFF/ON use separate processes.
+#      The same ON profile supplies optimizer and R1/R2/R3 phase times.
 # The default run uses 32 threads; explicit sweeps use separate result files.
 # Profiling defaults to on; no single-thread executions are performed.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
-#   -n,--runs N       positive odd timed iterations per config (default 3)
+#   -n,--runs N       positive odd timed iterations per config (default 1)
 #   -t,--timeout S    per-statement timeout sec (default 900). DuckDB enforces S
 #                     on every query; the external timing-batch watchdog is
-#                     (N+1)×S for 1 warm-up + N timed executions.
+#                     (N+1+profile)×S plus startup grace per side.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
 #                     (default all); bench = tpch+tpcds+job
 #      --pattern GLOB  only queries whose label matches (default *)
@@ -39,6 +40,8 @@
 #      --threads LIST    thread counts, e.g. "16 32" or 16,32 (default 32)
 #      --profile         collect ON phase plus OFF/ON optimizer metrics (default)
 #      --no-profile      skip phase/optimizer profiles; timing stays unprofiled
+#      --check-correctness     opt in to bare-query result comparison
+#      --no-check-correctness  skip result comparison (default)
 #   -o,--out FILE     results base (default experiment_onoff_<timestamp>_t<N>.txt)
 # ============================================================================
 set -uo pipefail
@@ -59,9 +62,10 @@ QUERY_TYPE="all"
     echo "OY_CORPUS_VERSION is retired; unset it and select --query-type instead" >&2; exit 2;
 }
 
-RUNS="${OY_RUNS:-3}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
+RUNS="${OY_RUNS:-1}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 PROFILE="${OY_PROFILE:-1}"
+CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-0}"
 THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
 ORIGINAL_ARGS=("$@")
 while [ $# -gt 0 ]; do case "$1" in
@@ -80,6 +84,8 @@ while [ $# -gt 0 ]; do case "$1" in
     --capture-plans) CAPTURE_PLANS=1; shift;;
     --profile) PROFILE=1; shift;;
     --no-profile) PROFILE=0; shift;;
+    --check-correctness) CHECK_CORRECTNESS=1; shift;;
+    --no-check-correctness) CHECK_CORRECTNESS=0; shift;;
     --threads)
         [ $# -ge 2 ] || { echo "--threads requires a value" >&2; exit 2; }
         THREAD_COUNTS="$2"; shift 2;;
@@ -122,6 +128,12 @@ case "$RUNS" in
 esac
 [ $((RUNS % 2)) -eq 1 ] || { echo "--runs must be odd so one real median execution is selected" >&2; exit 2; }
 case "$PROFILE" in 0|1) ;; *) echo "OY_PROFILE must be 0 or 1" >&2; exit 2;; esac
+case "$CHECK_CORRECTNESS" in 0|1) ;; *) echo "OY_CHECK_CORRECTNESS must be 0 or 1" >&2; exit 2;; esac
+CORRECTNESS_MODE="disabled"
+[ "$CHECK_CORRECTNESS" = 0 ] || CORRECTNESS_MODE="enabled"
+TIMING_PROTOCOL="warm-profile-then-timing-v1"
+TIMING_ESTIMATOR="single_post_warmup"
+[ "$RUNS" = 1 ] || TIMING_ESTIMATOR="median_post_warmup"
 oy_parse_thread_counts "$THREAD_COUNTS" || exit $?
 # One experiment start timestamp, captured the moment this script begins (before
 # the DB-build phase). Used for BOTH the .txt/.csv filenames AND the in-file
@@ -291,8 +303,8 @@ oy_duck() {
 # result sets as order-independent multisets. Both optimizer configurations
 # execute the bare query; sorting happens on the emitted CSV files so the
 # correctness check cannot change the optimized plan.
-# This is the hard PRE-CONDITION run before any timing: a query that is not
-# verified here (mismatch / error / timeout) is NOT timed. Each OFF/ON bare-query
+# When explicitly enabled, this is a precondition for timing: a query that fails
+# this check (mismatch / error / timeout) is NOT timed. Each OFF/ON bare-query
 # process has the same fixed per-statement and external timeout.
 # RETURNS: 0 PASS | 1 FAIL (rows differ) | 2 ERROR | 3 TIMEOUT.
 oy_equiv_check() {
@@ -349,70 +361,6 @@ oy_equiv_check() {
     return $rc
 }
 
-# --- timing -----------------------------------------------------------------
-# oy_time_median: run ONE warm-up followed by $runs timed executions, all with the
-# timer on, and return the median over the TIMED runs (the warm-up is NOT counted,
-# so total executions = $runs + 1). A partial/error batch is rejected instead of
-# mixing a different number of samples into the benchmark.
-# Output: "median_time runs_used"  (runs_used = how many TIMED runs the median spans)
-: "${OY_RUNS:=3}"
-
-oy_time_median() {
-    local db="$1" set_sql="$2" query="$3" runs="$4" threads="$5"
-    local script i
-    # Trash mode still executes the bare query and fully drains its result, but
-    # avoids charging terminal/result formatting and output I/O to the CLI timer.
-    # Each configuration uses a fresh CLI process with DuckDB profiling off.
-    # This setup runs before `.timer on`, so it is not part of the measurement.
-    script=".timer off"$'\n'".mode trash"$'\n'"CALL disable_profiling();"$'\n'"PRAGMA threads=${threads};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")"$'\n'"${set_sql}"$'\n'
-    # 1 warm-up run + $runs timed runs (timer on for all). The warm-up primes the
-    # buffer pool and is excluded from the median.
-    script+=".timer on"$'\n'
-    script+="${query%;};"$'\n'                                   # warm-up (not counted)
-    for ((i=0; i<runs; i++)); do script+="${query%;};"$'\n'; done
-    local times sqlf rawf
-    sqlf=$(mktemp) || { echo "NA 0"; return; }
-    rawf=$(mktemp) || { rm -f "$sqlf"; echo "NA 0"; return; }
-    printf '%s' "$script" > "$sqlf"
-    # OY_TIMEOUT_SECS is the PER-QUERY limit. The batch runs $runs+1 executions
-    # (1 warm-up + $runs timed) in one process under a single `timeout`, so scale
-    # the budget to (runs+1) * per-query so every run gets its full limit. When
-    # the global timeout is disabled (OY_TIMEOUT_BIN empty / secs=0) this is moot.
-    local saved_to="$OY_TIMEOUT_SECS" duck_rc=0
-    [ -n "$OY_TIMEOUT_BIN" ] && [ "$OY_TIMEOUT_SECS" != "0" ] \
-        && OY_TIMEOUT_SECS=$(( OY_TIMEOUT_SECS * (runs + 1) + OY_BATCH_GRACE_SECS ))
-    if oy_duck "$db" -noheader < "$sqlf" > "$rawf" 2>&1; then
-        duck_rc=0
-    else
-        duck_rc=$?
-    fi
-    OY_TIMEOUT_SECS="$saved_to"
-    # Run Times in EXECUTION order; the first entry is the warm-up.
-    times="$(awk '/Run Time/{for(i=1;i<=NF;i++) if($i=="real") print $(i+1)}' "$rawf")"
-    local completed
-    completed="$(printf '%s\n' "$times" | awk 'NF {n++} END {print n+0}')"
-    if [ "$duck_rc" -ne 0 ] || grep -qE 'Error:' "$rawf" || [ "$completed" -ne $((runs + 1)) ]; then
-        rm -f "$sqlf" "$rawf"
-        if [ "$duck_rc" -eq 124 ]; then
-            echo "TIMEOUT 0"
-            return 124
-        fi
-        echo "NA 0"
-        return 1
-    fi
-    rm -f "$sqlf" "$rawf"
-    # Median over the timed runs after dropping the warm-up.
-    echo "$times" | awk '
-        { t[NR]=$1 }
-        END {
-            n=NR
-            lo=2                                  # skip the warm-up
-            m=0; for(k=lo;k<=n;k++) a[++m]=t[k]   # timed set, still in run order
-            for(i=1;i<=m;i++) for(j=i+1;j<=m;j++) if(a[j]<a[i]){x=a[i];a[i]=a[j];a[j]=x}
-            if(m%2==1) med=a[(m+1)/2]; else med=(a[m/2]+a[m/2+1])/2
-            printf "%.9f %d", med, m
-        }'
-}
 
 # --- OuterYan candidate decision --------------------------------------------
 # OuterYan emits exactly one machine-readable record while optimizing EXPLAIN:
@@ -734,7 +682,7 @@ oy_kernel() {
     local db="$1" query="$2" sqlf errf nbm nhash label rc
     local nforce nbudget nineligible noverflow reasons="" separator=""
     sqlf=$(mktemp); errf=$(mktemp)
-    printf '%s\n%s\n%s\n' "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
+    printf '.mode trash\n%s\n%s\n%s\n' "CALL disable_profiling();PRAGMA threads=${OY_THREADS};$(oy_statement_timeout_sql "$OY_TIMEOUT_SECS")" \
         "$OY_ON" "${query%;};" > "$sqlf"
     # Scope the trace to this single run: export before, unset after, so the
     # timing/equivalence oy_duck calls never see the extra stderr.
@@ -742,6 +690,9 @@ oy_kernel() {
     oy_duck "$db" -noheader < "$sqlf" >/dev/null 2>"$errf"
     rc=$?
     unset DUCKDB_SJ_KERNEL_TRACE
+    if grep -qiE 'Error:.*(maximum execution time|timeout|interrupt)' "$errf"; then
+        rc=124
+    fi
     nbm="$(grep -c '\[SJ_KERNEL\] BITMAP' "$errf")"
     nhash="$(grep -c '\[SJ_KERNEL\] HASH' "$errf")"
     nforce="$(grep -c '\[SJ_KERNEL\] HASH reason=force_hash' "$errf")"
@@ -1001,6 +952,7 @@ CSV_HEADER=(
     profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
     profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
     timeout_seconds sql_content_sha256 execution_host database_signature corpus_manifest_sha256
+    correctness_check timing_protocol timing_samples timing_estimator warmup_runs_per_side
 )
 EXECUTION_HOST="$(hostname)"
 CORPUS_MANIFEST_SHA256="-"
@@ -1019,15 +971,15 @@ csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
     echo "# class  : workload_category=$WORKLOAD_CATEGORY query_class=$QUERY_CLASS"
     echo "# relations: counted from FROM/JOIN tokens in each flat bare query"
     echo "# tables : $SIZES"
-    echo "# timing : threads=${OY_THREADS}, median of ${RUNS} runs per config (1 warm-up + ${RUNS} timed)"
+    echo "# timing : threads=${OY_THREADS}, estimator=$TIMING_ESTIMATOR samples=$RUNS; each side: 1 warm-up + $PROFILE profile + $RUNS unprofiled timed; same process"
     echo "# overhead: correctness, diagnostics and TM timing disable profiling; phase/optimizer profiling enabled=$PROFILE"
     echo "# optimize: OFF/ON query execution profiles; 1 unprofiled warm-up + 1 measured sample per side"
     echo "# phases : workflow optimizer phases and execution R1/R2/R3 share the same measured ON execution"
     echo "#          Round 1/2/3 + OtherCPU = aggregate CPU-Time, not wall-clock Total-Time"
     echo "#          successful raw profiles are deleted; failure artifacts, if any: $PROFILE_DIR"
-    echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1) + OY_BATCH_GRACE_SECS ))s; no retry"
+    echo "# timeout: hard ${OY_TIMEOUT_SECS}s/statement (DuckDB max_execution_time); external single-query watchdog=${OY_TIMEOUT_SECS}s, timing-batch watchdog=$(( OY_TIMEOUT_SECS * (RUNS + 1 + PROFILE) + OY_BATCH_GRACE_SECS ))s; no retry"
     echo "# temp    : base=$OY_TMPDIR run=$OY_RUN_TMPDIR ($OY_TMP_FREE available on $OY_TMP_MOUNT)"
-    echo "# correct: ON result multiset == OFF result; only correct queries are timed"
+    echo "# correct: check=$CORRECTNESS_MODE; NOT-CHECKED means result equivalence was not verified"
     echo "# fallback: DuckDB selections and aggregate queries without realized pushdown skip execution, use timing_status=fallback-skip and default speed-up=1.0"
     echo "# formula : candidate_total = candidate_join_cost + semijoin_cost_ratio * semijoin_raw_cost"
     echo "# gate    : candidate_total <= cost_ratio_limit * baseline_cost"
@@ -1066,8 +1018,8 @@ QEFFECTIVE_PASS=(); QDUCKDB_PLAN=(); QENABLED_PLAN=(); QTRACE_FILE=(); QCOST_FIL
 
 PASS="main"            # Retained in CSV/artifact names for output compatibility.
 
-# process_one <i> — run the full pipeline for query i (decision -> gate -> kernel
-# -> timing -> optional profile) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
+# process_one <i> — run the pipeline for query i (decision -> optional check -> kernel
+# -> each side's warm-up/profile/timing) under the fixed $OY_TIMEOUT_SECS, store the result in the Q*
 # arrays at index i, and append one row to TXT and CSV.
 process_one() {
     local i="$1"
@@ -1223,6 +1175,9 @@ PY
         ratiom="1.000"
         profile_status="fallback-skip"
         optimizer_status="fallback-skip"
+    elif [ "$CHECK_CORRECTNESS" = 0 ]; then
+        correct="NOT-CHECKED"
+        note="OK;CORRECTNESS-NOT-CHECKED"
     else
         gate="$(oy_equiv_check "$db" "$id" "$sql")"
         case "$gate" in
@@ -1235,7 +1190,7 @@ PY
     [ -z "$decision_issue" ] || note="${note};$decision_issue"
     [ -z "$plan_issue" ] || note="${note};$plan_issue"
 
-    if [ "$correct" = "TRUE" ]; then
+    if [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ]; then
         if [ "$selected_plan" = "OUTERYAN" ]; then
             local kraw
             kraw="$(oy_kernel "$db" "$sql")"
@@ -1243,6 +1198,7 @@ PY
             if [ "$kernel_status" = "timeout" ]; then
                 note="TIMEOUT-KERNEL"
                 timing_status="timeout"
+                offm="NA"; onm="NA"; ratiom="NA"
                 profile_status="timeout"
                 optimizer_status="timeout"
                 stop_after_timeout=1
@@ -1253,12 +1209,21 @@ PY
             ker="not-run"; kdetail="b0h0"; kreasons="-"; kernel_status="not-run"
         fi
         kernel_display="$(oy_kernel_display "$ker" "$kdetail")"
+        if [ "$stop_after_timeout" = 0 ]; then
+            local measurement_root="$OY_RUN_TMPDIR"
+            [ "$PROFILE" = 0 ] || measurement_root="$PROFILE_DIR"
+            optimizer_profile_directory="$(mktemp -d "$measurement_root/${family}__${id}.optimizer.XXXXXX")" || {
+                note="${note};MEASUREMENT-DIRECTORY-ERROR"
+                timing_status="error"
+                stop_after_timeout=1
+            }
+        fi
         local local_rom local_rnm off_timing_rc=0 on_timing_rc=0
         if [ "$stop_after_timeout" = 0 ]; then
-            local_rom="$(oy_time_median "$db" "$OY_OFF" "$sql" "$RUNS" "${OY_THREADS}")"
+            local_rom="$(oy_warm_profile_time "$db" "$OY_OFF" "$sql" "$OY_THREADS" "$RUNS" "$optimizer_profile_directory" duckdb "$PROFILE")"
             off_timing_rc=$?
             if [ "$off_timing_rc" -eq 124 ]; then
-                note="TIMEOUT-OFF-TIMING"
+                note="TIMEOUT-OFF-$(awk -F: '/^OY_STAGE:/ {stage=$2} END {print toupper(stage ? stage : "batch")}' "$optimizer_profile_directory/optimizer_duckdb.log")"
                 timing_status="timeout"
                 offm="NA"; onm="NA"; ratiom="NA"
                 profile_status="timeout"
@@ -1276,10 +1241,10 @@ PY
             fi
         fi
         if [ "$stop_after_timeout" = 0 ]; then
-            local_rnm="$(oy_time_median "$db" "$OY_ON" "$sql" "$RUNS" "${OY_THREADS}")"
+            local_rnm="$(oy_warm_profile_time "$db" "$OY_ON" "$sql" "$OY_THREADS" "$RUNS" "$optimizer_profile_directory" outeryan "$PROFILE")"
             on_timing_rc=$?
             if [ "$on_timing_rc" -eq 124 ]; then
-                note="TIMEOUT-ON-TIMING"
+                note="TIMEOUT-ON-$(awk -F: '/^OY_STAGE:/ {stage=$2} END {print toupper(stage ? stage : "batch")}' "$optimizer_profile_directory/optimizer_outeryan.log")"
                 timing_status="timeout"
                 onm="NA"; ratiom="NA"
                 profile_status="timeout"
@@ -1304,11 +1269,10 @@ PY
             local optimizer_result optimizer_rc=0 optimizer_raw
             local -a optimizer_fields=()
             optimizer_status="ERROR"
-            optimizer_profile_directory="$(mktemp -d "$PROFILE_DIR/${family}__${id}.optimizer.XXXXXX")" || optimizer_rc=1
             optimizer_result="$(mktemp)" || optimizer_rc=1
             if [ "$optimizer_rc" = 0 ]; then
-                oy_optimizer_profile_pair "$db" "$sql" "$OY_THREADS" "$RUNS" \
-                    "$optimizer_profile_directory" > "$optimizer_result" || optimizer_rc=$?
+                oy_optimizer_profile_from_files "$optimizer_profile_directory" "$sql" \
+                    > "$optimizer_result" || optimizer_rc=$?
                 optimizer_raw="$(< "$optimizer_result")"
                 IFS='|' read -r -a optimizer_fields <<< "$optimizer_raw"
                 rm -f "$optimizer_result"
@@ -1373,6 +1337,8 @@ PY
                 rm -f "$optimizer_profile_directory/optimizer_duckdb_1.json" \
                     "$optimizer_profile_directory/optimizer_outeryan_1.json" \
                     "$optimizer_profile_directory/optimizer_outeryan.trace" \
+                    "$optimizer_profile_directory/optimizer_duckdb.trace" \
+                    "$optimizer_profile_directory/optimizer_outeryan.log" \
                     "$optimizer_profile_directory/optimizer_duckdb.log"
                 if rmdir "$optimizer_profile_directory" 2>/dev/null; then
                     optimizer_profile_directory="-"
@@ -1382,6 +1348,9 @@ PY
                 fi
             fi
         fi
+    fi
+    if [ "$stop_after_timeout" = 1 ] && [ "$optimizer_profile_directory" != "-" ]; then
+        profile_directory="$optimizer_profile_directory"
     fi
     # Store final state for the summary.
     QLBL[$i]="$id"; QNREL[$i]="$nrel"; QCORRECT[$i]="$correct"; QNOTE[$i]="$note"; QROWS[$i]="$rows"
@@ -1422,12 +1391,13 @@ PY
         "$correct" "$timing_status" "$aggregate_query" "$aggregate_pushdown_applied" "$outer_reordered" "$selected_plan" "$kernel_display" "$OY_THREADS" \
         "$offm" "$onm" "$ratiom" "$optimizer_status" "$optimizer_duckdb_total" \
         "$optimizer_outeryan_total" "$optimizer_overhead" "$optimizer_ratio" "$optimizer_samples"
+    result_line+=" measurement=[check=$CORRECTNESS_MODE protocol=$TIMING_PROTOCOL samples=$RUNS estimator=$TIMING_ESTIMATOR warmups=$((1 + PROFILE))]"
     printf -v context_line \
         '  context: family=%s category=%s nrel=%s pass=%s note=%s rows=%s sql=%s breakdown_s=[status=%s CPU=%s R1=%s R2=%s R3=%s Other=%s wall=%s samples=%s]' \
         "$family" "$WORKLOAD_CATEGORY" "$nrel" "$PASS" "$note" "$rows" "$sql_path" \
         "$profile_status" "$profile_cpu" "$r1sj" "$r2sj" "$realjoin" "$other" "$profile_wall" "$profile_samples"
     decision_line='  decision:'
-    if [ "$correct" = "TRUE" ] || [ "$timing_status" = "fallback-skip" ]; then
+    if [ "$correct" = "TRUE" ] || [ "$correct" = "NOT-CHECKED" ] || [ "$timing_status" = "fallback-skip" ]; then
         printf -v detail_suffix \
             ' plan=[mode=%s reason=%s raw_winner=%s gate=%s gate_applied=%s proven_empty=%s outer_yan_selected=%s formula=%s]' \
             "$selection_mode" \
@@ -1519,20 +1489,21 @@ PY
         "$r1_operators" "$r2_operators" "$realjoin_operators" \
         "$profile_wall" "$profile_cpu" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
         "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory" \
-        "$OY_TIMEOUT_SECS" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256"
+        "$OY_TIMEOUT_SECS" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256" \
+        "$CORRECTNESS_MODE" "$TIMING_PROTOCOL" "$RUNS" "$TIMING_ESTIMATOR" "$((1 + PROFILE))"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============
 echo "Temporary result storage: $OY_RUN_TMPDIR" >&2
 echo "Temporary filesystem: $OY_TMP_FREE available on $OY_TMP_MOUNT (base=$OY_TMPDIR)" >&2
-echo "--- Per-query: decision + selected/aggregate correctness and timing (TM=${OY_THREADS}) ---" >&2
+echo "--- Per-query: decision + warm-up/profile/timing; correctness=$CORRECTNESS_MODE (TM=${OY_THREADS}) ---" >&2
 for ((i=0; i<${#LABELS[@]}; i++)); do
     process_one "$i"
 done
 
 # ==== Final summary computed from the Q* arrays =============================
 QN="${#LABELS[@]}"
-NCORRECT=0; NTIMED=0; NFALLBACK=0; NKBM=0; NKHASH=0; NKMIX=0
+NCORRECT=0; NUNCHECKED=0; NTIMED=0; NFALLBACK=0; NKBM=0; NKHASH=0; NKMIX=0
 NNO=0; NYES=0; SUMNO=0; SUMYES=0
 NBASELINE=0; NOUTERYAN=0; SUMBASELINE=0; SUMOUTERYAN=0
 NSAME=0; NREJECT=0; NSELECTED=0; NDECISION_UNKNOWN=0; NGATE_APPLIED=0
@@ -1548,8 +1519,11 @@ for ((i=0; i<QN; i++)); do
         NFALLBACK=$((NFALLBACK+1))
         continue
     fi
-    [ "${QCORRECT[i]}" = "TRUE" ] || continue
-    NCORRECT=$((NCORRECT+1))
+    case "${QCORRECT[i]}" in
+        TRUE) NCORRECT=$((NCORRECT+1));;
+        NOT-CHECKED) NUNCHECKED=$((NUNCHECKED+1));;
+        *) continue;;
+    esac
     [ "${QTIMING_STATUS[i]}" = "measured" ] && NTIMED=$((NTIMED+1))
     case "${QKER[i]}" in bitmap) NKBM=$((NKBM+1));; hash) NKHASH=$((NKHASH+1));; mixed) NKMIX=$((NKMIX+1));; esac
     case "${QRATIOM[i]}" in ''|NA|-) continue;; esac
@@ -1562,7 +1536,7 @@ for ((i=0; i<QN; i++)); do
         1) NOUTERYAN=$((NOUTERYAN+1)); SUMOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v r="${QRATIOM[i]}" 'BEGIN{print s+r}')";;
     esac
 done
-NSKIP=$((QN-NCORRECT-NFALLBACK))
+NSKIP=$((QN-NCORRECT-NUNCHECKED-NFALLBACK))
 MNO="$(awk -v s="$SUMNO" -v n="$NNO" 'BEGIN{print (n? s/n : "-")}')"
 MYES="$(awk -v s="$SUMYES" -v n="$NYES" 'BEGIN{print (n? s/n : "-")}')"
 MBASELINE="$(awk -v s="$SUMBASELINE" -v n="$NBASELINE" 'BEGIN{print (n? s/n : "-")}')"
@@ -1570,8 +1544,8 @@ MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-
 {
     echo
     echo "============================== SUMMARY ================================"
-    echo "queries=$QN  correct=$NCORRECT  fallback-skip=$NFALLBACK  incorrect/not-run=$NSKIP  timed=$NTIMED"
-    echo "kernel (correct queries): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
+    echo "queries=$QN  correct=$NCORRECT  not-checked=$NUNCHECKED  fallback-skip=$NFALLBACK  incorrect/not-run=$NSKIP  timed=$NTIMED"
+    echo "kernel (executed diagnostics): bitmap=$NKBM  hash=$NKHASH  mixed=$NKMIX"
     echo "threads: multi=${OY_THREADS}"
     echo "OuterYan decisions: same-grouping=$NSAME  changed-rejected=$NREJECT  selected=$NSELECTED  unknown=$NDECISION_UNKNOWN  cost-gate-applied=$NGATE_APPLIED"
     echo "coverage by relation count:"
@@ -1585,8 +1559,7 @@ MOUTERYAN="$(awk -v s="$SUMOUTERYAN" -v n="$NOUTERYAN" 'BEGIN{print (n? s/n : "-
                 nrel_fallback=$((nrel_fallback+1))
                 continue
             fi
-            [ "${QCORRECT[i]}" = "TRUE" ] || continue
-            nrel_correct=$((nrel_correct+1))
+            [ "${QCORRECT[i]}" != "TRUE" ] || nrel_correct=$((nrel_correct+1))
             [ "${QTIMING_STATUS[i]}" = "measured" ] && nrel_timed=$((nrel_timed+1))
         done
         echo "  relations=$nrel  queries=$nrel_queries  correct=$nrel_correct  fallback-skip=$nrel_fallback  timed=$nrel_timed"

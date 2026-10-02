@@ -133,6 +133,11 @@ class QualificationTest(unittest.TestCase):
         self.audit["profiles"][0]["in_range"] = False
         self.assertEqual(self.status(), "selectivity_unverified_or_out_of_band")
 
+    def test_unchecked_performance_requires_explicit_opt_out(self):
+        self.assertEqual(self.status(correct="NOT-CHECKED"), "correctness_not_verified")
+        self.assertEqual(self.status(correct="NOT-CHECKED", correctness_check="disabled"), "eligible")
+        self.assertEqual(self.status(correct="FALSE", correctness_check="disabled"), "correctness_not_verified")
+
     def test_pending_report_has_no_invented_speedup(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             report = q.qualify([b.ROOT / "benchmark"], [], [], Path(tmp))

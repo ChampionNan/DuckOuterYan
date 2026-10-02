@@ -231,7 +231,8 @@ def bootstrap_design(binary, root=ROOT):
         "timeout_seconds": QUALIFICATION_TIMEOUT_SECONDS, "minimum_runtime_each_engine_exclusive": 1,
         "minimum_speedup": .8, "target_host": "cpu9",
         "target_repository": "/home/data/bchenba/DuckYanOuter",
-        "eligibility": "Only correct measured pairs passing target-database selectivity audit. "
+        "eligibility": "Only measured pairs passing target-database selectivity audit; "
+                       "correctness is verified or explicitly NOT-CHECKED with checks disabled. "
                        "New SQL is pending measurement, never assumed eligible.",
         "excluded_seeds": {"tpcds_q72_fulfillment":
             "Reduced source subgraph omits sales/inventory week constraint; historical 1800s timeouts."},

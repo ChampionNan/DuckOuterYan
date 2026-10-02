@@ -131,8 +131,8 @@ void OuterYanTrace::Stage(const string &label, const string &body) {
 	Append(block);
 }
 
-void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
-	if (!Enabled() && ProfileTracePath().empty()) {
+void OuterYanTrace::Decision(const OuterYanDecisionRecord &record, bool profiling_enabled) {
+	if (!Enabled() && (!profiling_enabled || ProfileTracePath().empty())) {
 		return;
 	}
 	const auto &costs = record.costs;
@@ -248,7 +248,7 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record) {
 	line << "\n";
 	const auto text = line.str();
 	Append(text);
-	if (ProfileTracePath() != TracePath()) {
+	if (profiling_enabled && ProfileTracePath() != TracePath()) {
 		AppendTo(ProfileTracePath(), text);
 	}
 }

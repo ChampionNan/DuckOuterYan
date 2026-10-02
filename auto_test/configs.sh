@@ -90,17 +90,18 @@ export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 # ===========================================================================
 # 6) Iteration counts
 # ===========================================================================
-# Positive odd number of timed runs per query (after 1 warm-up run).
-# NOTE: the timing phase runs (OY_RUNS + 1) executions inside ONE duckdb process
+# Positive odd number of timed runs per query; default is the first post-warm-up run.
+# NOTE: each side runs (OY_RUNS + 1 + OY_PROFILE) executions in ONE duckdb process
 # under ONE external timeout window. The harness keeps max_execution_time at
-# OY_TIMEOUT_SECS per statement, scales the process watchdog by (OY_RUNS + 1),
+# OY_TIMEOUT_SECS per statement, scales the watchdog by that execution count,
 # and adds a small process/serialization grace period.
 # Higher OY_RUNS therefore increases total experiment time and can expose more
 # timing-phase timeouts on slow (e.g. large-graph) queries.
-export OY_RUNS="${OY_RUNS:-3}"
+export OY_RUNS="${OY_RUNS:-1}"
+export OY_CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-0}"
 
-# Separate ON phase profiles at the same thread count, only for correct queries
-# that select OuterYan. Timing medians remain unprofiled. CLI --no-profile opts out.
+# Each side runs one warm-up, one optional profile, then unprofiled timing in the
+# same process. The optimizer and execution phases share that profile sample.
 export OY_PROFILE="${OY_PROFILE:-1}"
 
 # Save OFF/ON EXPLAIN plans plus OuterYan trace/cost artifacts. The
@@ -127,7 +128,8 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  OY_THREAD_COUNTS = $OY_THREAD_COUNTS (sequential)"
         echo "  TIMEOUT          = ${OY_TIMEOUT_SECS}s per statement"
         echo "  BATCH GRACE      = ${OY_BATCH_GRACE_SECS}s"
-        echo "  OY_RUNS          = $OY_RUNS (median of N timed iterations)"
+        echo "  OY_RUNS          = $OY_RUNS (1 = first post-warm-up sample; odd N >1 = median)"
+        echo "  CHECK_CORRECTNESS = $OY_CHECK_CORRECTNESS (0 = NOT-CHECKED)"
         echo "  CAPTURE_PLANS     = $OY_CAPTURE_PLANS"
         echo "  OY_TMPDIR         = $OY_TMPDIR"
         echo "========================="

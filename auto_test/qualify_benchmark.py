@@ -110,7 +110,9 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
         return f"timeout_at_{timeout}s"
     if result.get("timing_status", "").lower() == "fallback-skip":
         return "fallback_not_measured"
-    if result.get("correct", "").upper() != "TRUE":
+    unchecked = (result.get("correct", "").upper() == "NOT-CHECKED"
+                 and result.get("correctness_check") == "disabled")
+    if result.get("correct", "").upper() != "TRUE" and not unchecked:
         return "correctness_not_verified"
     if result.get("timing_status", "").lower() != "measured":
         return "timing_not_measured"
@@ -168,6 +170,11 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     formulas = {f for _, _, f in configurations if f not in (None, "-", "NA", "")}
     if len(formulas) > 1:
         raise ValueError("Mixed cost-model revisions; qualify separately")
+    protocols = {(r.get("timing_protocol", "legacy"), r.get("timing_samples", "legacy"),
+                  r.get("timing_estimator", "legacy"), r.get("correctness_check", "legacy"))
+                 for r in observed.values()}
+    if len(protocols) > 1:
+        raise ValueError("Mixed timing/correctness protocols; qualify each protocol separately")
     for family in benchmark.FAMILIES:
         signatures = {r.get("database_signature") for r in observed.values() if r.get("family") == family}
         if len(signatures) > 1:
@@ -236,10 +243,12 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     benchmark.write_json(output / "qualification_inputs.json", lists)
     summary = dict(status="COMPLETE" if all(c["shortage"]==0 for c in counts) else "INCOMPLETE",
                    policy="Historically/performance-screened subset, not unbiased overall performance; "
-                          f"correct measured pairs only, both runtimes >1s and <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s, speedup >=0.8; "
+                          f"eligible measured pairs only, both runtimes >1s and <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s, speedup >=0.8; "
+                          "explicit NOT-CHECKED/disabled rows are performance-only, not correctness-verified; "
                           "latest supplied observations win, including failures; no fallback imputation",
                    target_host=host, target_per_family=target, candidates=len(detail), selected=len(selected),
                    qualification_timeout_seconds=benchmark.QUALIFICATION_TIMEOUT_SECONDS,
+                   unchecked_selected=sum(r.get("correct") == "NOT-CHECKED" for r in qualified_results),
                    balanced_candidates=sum(not benchmark.is_historical_case(r) for r in detail),
                    historical_supplementary_candidates=sum(benchmark.is_historical_case(r) for r in detail),
                    historical_supplementary_observations=len(supplementary_results),

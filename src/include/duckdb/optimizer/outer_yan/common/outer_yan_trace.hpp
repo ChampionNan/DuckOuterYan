@@ -164,7 +164,7 @@ struct OuterYanDecisionRecord {
 //! Output is appended — one file can accumulate several queries; `BeginQuery`
 //! writes a separator banner so blocks stay readable.
 //! `DUCKDB_OY_PROFILE_TRACE` is a separate machine-readable decision sink used
-//! by the benchmark profiler. It writes only `[OY_DECISION]` records, avoiding
+//! by the benchmark profiler. It writes only profiled `[OY_DECISION]` records, avoiding
 //! the I/O cost of full stage snapshots in measured optimization phases.
 class OuterYanTrace {
 public:
@@ -184,7 +184,7 @@ public:
 	//! harness consumes this record instead of inferring the decision from the
 	//! presence of SJ operators (which cannot represent a changed-but-rejected
 	//! candidate).
-	static void Decision(const OuterYanDecisionRecord &record);
+	static void Decision(const OuterYanDecisionRecord &record, bool profiling_enabled);
 
 private:
 	OuterYanTrace() = delete;

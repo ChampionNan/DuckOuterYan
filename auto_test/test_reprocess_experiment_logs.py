@@ -57,6 +57,16 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(rows[1]["tm_off"], "-")
         self.assertEqual(rows[1]["candidate_total"], "NA")
 
+    def test_unchecked_measurement_metadata_survives_txt_recovery(self):
+        text = LOG.replace("correct=TRUE", "correct=NOT-CHECKED").replace(
+            "speedup=2.123 ", "speedup=2.123 measurement=[check=disabled protocol=warm-profile-then-timing-v1 samples=1 estimator=single_post_warmup warmups=2] ")
+        self.log.write_text(text)
+        rows, _ = self.recover()
+        self.assertEqual(rows[0]["correct"], "NOT-CHECKED")
+        self.assertEqual(rows[0]["correctness_check"], "disabled")
+        self.assertEqual(rows[0]["timing_samples"], "1")
+        self.assertEqual(rows[0]["timing_estimator"], "single_post_warmup")
+
     def test_sibling_precision_and_phase_maps_survive_recovery(self):
         original = {
             "query": "measured", "family": "tpch", "correct": "TRUE", "selected_plan": "OUTERYAN",

@@ -17,9 +17,10 @@
 #   TPCDS_SF         TPC-DS scale factor (default 50)
 #   OY_THREAD_COUNTS Sequential timing counts (default "32")
 #   OY_THREADS       Override with one multi-thread timing count
-#   OY_PROFILE       Separate ON phase-profile batch (default 1; set 0 to skip)
+#   OY_PROFILE       One pre-timing profile per side (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
-#   OY_RUNS          Timed iterations after one warm-up (default 3)
+#   OY_RUNS          Timed iterations after warm-up/profiling (default 1)
+#   OY_CHECK_CORRECTNESS  Compare result multisets before timing (default 0)
 #   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 900; 15 minutes)
 #   --timeout S      CLI timeout override; 0 disables the timeout
 #   JOBS             Make parallelism (default: nproc)

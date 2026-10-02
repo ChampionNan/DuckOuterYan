@@ -50,18 +50,19 @@ class MultiThreadExperimentTest(unittest.TestCase):
             timing = ".timer on" in sql
             profiling = "CALL enable_profiling(" in sql
             off = "disabled_optimizers TO 'outer_yan'" in sql
-            if profiling and timing:
-                sys.exit("Error: profile mixed with performance timing")
+            if profiling and timing and not (sql.index("CALL enable_profiling(") < sql.index("PRAGMA disable_profiling;") < sql.index(".timer on")):
+                sys.exit("Error: profile was not disabled before timing")
             with open(os.environ["HARNESS_CALLS"], "a") as log:
                 log.write(json.dumps({"threads": threads, "timing": timing, "profiling": profiling,
                                       "off": off, "sql": sql}) + "\n")
             if profiling:
                 if os.environ.get("FAIL_PROFILE"):
+                    print("OY_STAGE:profile")
                     print("Error: profile timeout", file=sys.stderr)
                     sys.exit(124)
                 measured = re.findall(
                     r"save_location='([^']+)'[^\n]*\);\n(.*?);\n"
-                    r"(?:CALL disable_profiling\(\);\n?|\Z)",
+                    r"(?:PRAGMA disable_profiling;\n?|\Z)",
                     sql,
                     re.DOTALL,
                 )
@@ -109,6 +110,9 @@ class MultiThreadExperimentTest(unittest.TestCase):
                         )
                     )
                     Path(profile_trace).write_text(f"[OY_DECISION] {phase_fields}\n")
+                    if os.environ.get("STALE_PROFILE_BINARY"):
+                        with open(profile_trace, "a") as handle:
+                            handle.write(f"[OY_DECISION] {phase_fields}\n")
             elif "EXPLAIN" in sql:
                 trace = os.environ.get("DUCKDB_OYTRACE")
                 if trace:
@@ -141,18 +145,21 @@ class MultiThreadExperimentTest(unittest.TestCase):
                         "round1_pairs=1 round2_pairs=0\n"
                     )
                 print("plan")
-            elif timing:
+            if timing:
+                print("OY_STAGE:timing")
                 if os.environ.get("TIMEOUT_TIMING") and off:
                     sys.exit(124)
                 if os.environ.get("FAIL_TIMING_THREADS") == str(threads):
                     sys.exit("Error: timing failed")
-                count = len(re.findall(r"(?m)^SELECT ", sql))
+                count = len(re.findall(r"(?m)^SELECT ", sql.split(".timer on\n", 1)[1]))
                 for index in range(count):
-                    seconds = 99 if index == 0 else (160 if off else 80) / threads
+                    seconds = (160 if off else 80) / threads
                     print(f"Run Time (s): real {seconds:.9f} user 0 sys 0")
             elif os.environ.get("DUCKDB_SJ_KERNEL_TRACE"):
+                if os.environ.get("TIMEOUT_KERNEL"):
+                    sys.exit("Error: INTERRUPT Error: Maximum execution time exceeded")
                 print("[SJ_KERNEL] BITMAP", file=sys.stderr)
-            else:
+            elif "EXPLAIN" not in sql and not profiling:
                 timeout_mode = os.environ.get("TIMEOUT_CORRECTNESS")
                 if timeout_mode == "1" or timeout_mode == ("off" if off else "on"):
                     sys.exit(124)
@@ -187,7 +194,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         with (self.root / "result.csv").open(newline="") as handle:
             return next(csv.DictReader(handle))
 
-    def assert_result(self, path, threads, expected_correct="TRUE", expected_speedup="2.000"):
+    def assert_result(self, path, threads, expected_correct="NOT-CHECKED", expected_speedup="2.000"):
         with path.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual(len(rows), 1)
@@ -214,28 +221,38 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertTrue(all("SET max_execution_time=900000;" in call["sql"] for call in calls))
         self.assertIn("hard 900s/statement", (self.root / "result.txt").read_text())
 
-    def test_default_profiles_only_on_separately_at_32_threads(self):
+    def test_default_warms_and_profiles_before_single_timing_in_each_process(self):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 32)
         self.assertIn("# corpus : revision=custom", report)
-        for label in ("query=sample", "result: correct=TRUE", "context: family=tpch", "decision: plan="):
+        for label in ("query=sample", "result: correct=NOT-CHECKED", "context: family=tpch", "decision: plan="):
             self.assertIn(label, report)
         self.assertFalse((self.root / "result_t16.csv").exists())
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertEqual({call["threads"] for call in calls}, {32})
         timed = [call for call in calls if call["timing"]]
         self.assertEqual(len(timed), 2)
-        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 4 for call in timed))
+        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 3 for call in timed))
         self.assertTrue(all("CALL disable_profiling();" in call["sql"] for call in calls))
         profiles = [call for call in calls if call["profiling"]]
-        self.assertEqual(len(profiles), 1)
+        self.assertEqual(len(profiles), 2)
         self.assertNotIn("EXPLAIN", profiles[0]["sql"])
         self.assertTrue(profiles[0]["off"])
-        self.assertEqual(profiles[0]["sql"].count("SELECT * FROM example;"), 4)
-        self.assertFalse(any(call["profiling"] for call in timed))
+        self.assertEqual(profiles[0]["sql"].count("SELECT * FROM example;"), 3)
+        self.assertEqual([call["off"] for call in profiles], [True, False])
+        for call in timed:
+            sql = call["sql"]
+            self.assertLess(sql.index("CALL enable_profiling("), sql.index("PRAGMA disable_profiling;"))
+            self.assertLess(sql.index("PRAGMA disable_profiling;"), sql.index(".timer on"))
+            self.assertEqual(sql.split(".timer on\n")[1].count("SELECT * FROM example;"), 1)
         row = self.read_row()
         self.assertEqual(row["timeout_seconds"], "0")
+        self.assertEqual(row["correctness_check"], "disabled")
+        self.assertEqual(row["timing_samples"], "1")
+        self.assertEqual(row["timing_estimator"], "single_post_warmup")
+        self.assertEqual(row["warmup_runs_per_side"], "2")
+        self.assertIn("correct=0  not-checked=1", report)
         self.assertEqual(len(row["sql_content_sha256"]), 64)
         self.assertEqual(len(row["database_signature"]), 64)
         self.assertTrue(row["execution_host"])
@@ -304,9 +321,9 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual([call["threads"] for call in calls], sorted(call["threads"] for call in calls))
         timed = [call for call in calls if call["timing"]]
         self.assertEqual(len(timed), 4)
-        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 4 for call in timed))
+        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 3 for call in timed))
         self.assertTrue(all("CALL disable_profiling();" in call["sql"] for call in calls))
-        self.assertEqual([call["threads"] for call in calls if call["profiling"]], [16, 32])
+        self.assertEqual([call["threads"] for call in calls if call["profiling"]], [16, 16, 32, 32])
 
     def test_cli_single_override_takes_precedence_and_preserves_explicit_out(self):
         result = self.run_harness("--threads", "8", OY_THREAD_COUNTS="16 32")
@@ -327,16 +344,16 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
 
     def test_failed_correctness_is_not_timed_but_other_thread_config_runs(self):
-        result = self.run_harness("--threads", "16,32", FAIL_CORRECTNESS_THREADS="16")
+        result = self.run_harness("--check-correctness", "--threads", "16,32", FAIL_CORRECTNESS_THREADS="16")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_result(self.root / "result_t16.csv", 16, "FALSE", "-")
-        self.assert_result(self.root / "result_t32.csv", 32)
+        self.assert_result(self.root / "result_t32.csv", 32, "TRUE")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call["timing"] and call["threads"] == 16 for call in calls))
         self.assertFalse(any(call["profiling"] and call["threads"] == 16 for call in calls))
 
     def assert_correctness_timeout(self, mode, execution_count):
-        result = self.run_harness(TIMEOUT_CORRECTNESS=mode)
+        result = self.run_harness("--check-correctness", TIMEOUT_CORRECTNESS=mode)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(
             self.root / "result.csv", 32, expected_correct="TIMEOUT", expected_speedup="-"
@@ -374,7 +391,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         timed = [call for call in calls if call["timing"]]
         self.assertEqual(len(timed), 1)
         self.assertTrue(timed[0]["off"])
-        self.assertFalse(any(call["profiling"] for call in calls))
+        self.assertTrue(timed[0]["profiling"])
         self.assertIn("timed=0", report)
 
     def test_failed_timing_is_not_counted_as_measured(self):
@@ -382,6 +399,39 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 16, expected_speedup="NA")
         self.assertIn("timed=0", report)
+
+    def test_stale_binary_cannot_publish_trace_contaminated_timings(self):
+        result = self.run_harness(STALE_PROFILE_BINARY="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["timing_status"], "error")
+        self.assertEqual(row["tm_on"], "NA")
+        self.assertEqual(row["tm_speedup"], "NA")
+
+    def test_profile_timeout_stops_before_formal_measurement_without_retry(self):
+        result = self.run_harness(FAIL_PROFILE="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["note"], "TIMEOUT-OFF-PROFILE")
+        self.assertEqual(row["timing_status"], "timeout")
+        self.assertEqual(row["tm_off"], "NA")
+        self.assertEqual(row["tm_on"], "NA")
+        self.assertEqual(row["correct"], "NOT-CHECKED")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertEqual(len([c for c in calls if c["profiling"]]), 1)
+        self.assertTrue(Path(row["profile_directory"]).is_dir())
+
+    def test_explicit_three_samples_still_exclude_all_warmup_work(self):
+        result = self.run_harness("--runs", "3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_result(self.root / "result.csv", 32)
+        row = self.read_row()
+        self.assertEqual(row["timing_samples"], "3")
+        self.assertEqual(row["timing_estimator"], "median_post_warmup")
+        for call in [json.loads(line) for line in self.calls.read_text().splitlines()]:
+            if call["timing"]:
+                self.assertEqual(call["sql"].count("SELECT * FROM example;"), 5)
+                self.assertEqual(call["sql"].split(".timer on\n")[1].count("SELECT * FROM example;"), 3)
 
     def test_no_profile_flag_preserves_unprofiled_performance(self):
         result = self.run_harness("--no-profile")
@@ -394,6 +444,10 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["profile_wall_time_s"], "NA")
         self.assertEqual(row["profile_total_time_s"], "NA")
         self.assertEqual(row["optimizer_profile_status"], "disabled")
+        self.assertEqual(row["warmup_runs_per_side"], "1")
+        for call in calls:
+            if call["timing"]:
+                self.assertEqual(call["sql"].count("SELECT * FROM example;"), 2)
         self.assertFalse((self.root / "result.profiles").exists())
 
     def test_profile_flag_overrides_environment(self):
@@ -402,6 +456,20 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assert_result(self.root / "result.csv", 32)
         row = self.read_row()
         self.assertEqual(row["profile_status"], "OK")
+
+    def test_native_kernel_timeout_stops_before_warmup_profile_or_timing(self):
+        result = self.run_harness(TIMEOUT_KERNEL="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["timing_status"], "timeout")
+        self.assertEqual(row["note"], "TIMEOUT-KERNEL")
+        self.assertEqual(row["tm_off"], "NA")
+        self.assertEqual(row["tm_on"], "NA")
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertFalse(any(call["timing"] or call["profiling"] for call in calls))
+        execution = [call for call in calls if "EXPLAIN" not in call["sql"]]
+        self.assertEqual(len(execution), 1)
+        self.assertIn(".mode trash", execution[0]["sql"])
 
     def test_nonaggregate_duckdb_fallback_skips_execution_with_default_speedup(self):
         result = self.run_harness(SELECTED_PLAN="DUCKDB")
@@ -452,15 +520,15 @@ class MultiThreadExperimentTest(unittest.TestCase):
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "1")
         self.assertEqual(row["aggregate_pushdown_applied"], "1")
-        self.assertEqual(row["correct"], "TRUE")
-        self.assertEqual(row["note"], "OK")
+        self.assertEqual(row["correct"], "NOT-CHECKED")
+        self.assertEqual(row["note"], "OK;CORRECTNESS-NOT-CHECKED")
         self.assertEqual(row["timing_status"], "measured")
         self.assertEqual(row["tm_speedup"], "2.000")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertEqual(len([call for call in calls if call["timing"]]), 2)
 
     def test_profile_failures_keep_timing_and_do_not_fabricate_phases(self):
-        for failure in ("FAIL_PROFILE", "BAD_PROFILE_JSON", "BAD_PROFILE_ROUND"):
+        for failure in ("BAD_PROFILE_JSON", "BAD_PROFILE_ROUND"):
             with self.subTest(failure=failure):
                 result = self.run_harness(**{failure: "1"})
                 self.assertEqual(result.returncode, 0, result.stderr)

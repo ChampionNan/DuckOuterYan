@@ -39,6 +39,7 @@ profile_status profile_threads profile_round1_operator_s profile_round2_operator
 profile_round1_operator_count profile_round2_operator_count profile_round3_operator_count profile_wall_time_s
 profile_total_time_s profile_cpu_time_s profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
 profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
+correctness_check timing_protocol timing_samples timing_estimator warmup_runs_per_side
 """.split()
 
 
@@ -74,6 +75,10 @@ def parse_record(query, result, context, decision):
     row["kernel"] = row.get("kernel_detail", "").split("(", 1)[0]
     mapped(row, section(result, "runtime_s"), {"DuckDB": "tm_off", "OuterYan": "tm_on"})
     mapped(row, result, {"speedup": "tm_speedup"})
+    mapped(row, section(result, "measurement"), {
+        "check": "correctness_check", "protocol": "timing_protocol", "samples": "timing_samples",
+        "estimator": "timing_estimator", "warmups": "warmup_runs_per_side",
+    })
     mapped(row, section(result, "optimization_s"), {
         "status": "optimizer_profile_status", "DuckDB": "optimizer_duckdb_total_s",
         "OuterYan": "optimizer_outeryan_total_s", "overhead": "optimizer_overhead_s",

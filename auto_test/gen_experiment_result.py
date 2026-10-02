@@ -120,6 +120,14 @@ def distribution(values: pd.Series) -> dict:
     return result
 
 
+def correctness_eligible(frame: pd.DataFrame) -> pd.Series:
+    """Unchecked performance is explicit opt-out, never fabricated verification."""
+    status = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper()
+    mode = frame.get("correctness_check", pd.Series("", index=frame.index)).astype(str).str.lower()
+    measured = frame.get("timing_status", pd.Series("", index=frame.index)).astype(str).str.lower().eq("measured")
+    return status.eq("TRUE") | (status.eq("NOT-CHECKED") & mode.eq("disabled") & measured)
+
+
 def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
     """Normalize reported outcomes without requiring the rounded speedup field."""
     if metric not in ("tm", "t1"):
@@ -137,13 +145,14 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
         "relation_count", "tree_shape", "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
         "aggregate_query", "aggregate_pushdown_applied", "selected_plan", "correct", "note", "timing_status",
-        "timing_threads", "sql_path", "timeout_seconds",
+        "timing_threads", "sql_path", "timeout_seconds", "correctness_check",
+        "timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side",
     ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
     detail["family"] = detail["family"].map(normalize_family)
     detail["selected_plan"] = detail.get("selected_plan", pd.Series("UNKNOWN", index=detail.index)).fillna(
         "UNKNOWN").astype(str).str.upper()
-    correct = detail.get("correct", pd.Series("TRUE", index=detail.index)).astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(detail)
     notes = detail.get("note", pd.Series("", index=detail.index)).fillna("").astype(str)
     timing_status = detail.get(
         "timing_status", pd.Series("", index=detail.index)
@@ -181,6 +190,7 @@ def summarize(rows: pd.DataFrame) -> dict:
     counts = {
         "total": len(rows), "valid": len(valid), "excluded": len(rows) - len(valid),
         "measured": len(measured),
+        "unchecked_measured": int(measured.get("correct", pd.Series(dtype=str)).eq("NOT-CHECKED").sum()),
         "fallback_skips": int(rows["exclusion_reason"].eq("fallback_not_executed").sum()),
         "both_runtimes_below_1s": int(rows["exclusion_reason"].eq("both_runtimes_below_1s").sum()),
         "timeouts": int(rows["exclusion_reason"].eq("timeout").sum()),
@@ -299,7 +309,7 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
 
     detail = frame[[column for column in (
         "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
-        "query", "family", "topology", "selected_plan", "correct", "note",
+        "query", "family", "topology", "selected_plan", "correct", "correctness_check", "timing_status", "note",
         "profile_status", "profile_threads",
         "profile_wall_time_s", "profile_cpu_time_s", *(column for _, column in PHASE_COMPONENTS),
         f"{metric}_off", f"{metric}_on",
@@ -314,7 +324,7 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
             detail[column] = pd.to_numeric(detail[column], errors="coerce")
     selected = detail["selected_plan"].fillna("").astype(str).str.upper().eq("OUTERYAN")
     complete = detail["profile_status"].fillna("").astype(str).str.upper().eq("OK")
-    correct = detail.get("correct", pd.Series("TRUE", index=detail.index)).astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(detail)
     notes = detail.get("note", pd.Series("", index=detail.index)).fillna("").astype(str)
     not_timeout = ~notes.str.contains("TIMEOUT", case=False, regex=False)
     finite = np.isfinite(detail["profile_wall_time_s"]) & detail["profile_wall_time_s"].gt(0)
@@ -466,7 +476,7 @@ def build_optimizer_statistics(frame: pd.DataFrame, metric: str = "tm") -> dict:
     frame = frame.loc[~below_runtime_threshold(frame, metric)]
     columns = [column for column in (
         "experiment_group", "corpus_version", "corpus_scope", "workload_category", "query_class",
-        "query", "family", "selected_plan", "correct", "note", "optimizer_profile_status",
+        "query", "family", "selected_plan", "correct", "correctness_check", "timing_status", "note", "optimizer_profile_status",
         "optimizer_timed_samples", "optimizer_duckdb_total_s", "optimizer_outeryan_total_s",
         "optimizer_overhead_s", "optimizer_outeryan_to_duckdb_ratio",
         "optimizer_duckdb_measured_phase_s", "optimizer_outeryan_measured_phase_s",
@@ -483,7 +493,7 @@ def build_optimizer_statistics(frame: pd.DataFrame, metric: str = "tm") -> dict:
     ) if column in detail]
     for column in numeric:
         detail[column] = pd.to_numeric(detail[column], errors="coerce")
-    correct = detail["correct"].astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(detail)
     not_timeout = ~detail["note"].fillna("").astype(str).str.contains("TIMEOUT", case=False, regex=False)
     complete = detail["optimizer_profile_status"].fillna("").astype(str).str.upper().eq("OK")
     finite = (
@@ -679,7 +689,9 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                            else "Historically screened candidates, before post-measurement qualification; report failures and exclusions"
                            if "corpus_revision" in frame and frame["corpus_revision"].eq("balanced-screened-20261002").all()
                            else "Original supplied experiment population"),
-            "eligibility": "Only correct, non-timeout, executed rows with finite positive OFF/ON pairs and at least one runtime >= 1 s are valid; unexecuted fallback rows are excluded",
+            "eligibility": "Only verified or explicitly NOT-CHECKED/disabled measured pairs with finite positive non-timeout OFF/ON times and at least one runtime >=1s; failures and unexecuted fallback rows are excluded",
+            "correctness": "NOT-CHECKED with correctness_check=disabled is performance-only evidence, not a correctness claim; failed or unspecified checks are excluded",
+            "timing_protocols": frame[[c for c in ("timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side") if c in frame]].drop_duplicates().fillna("").to_dict("records"),
             "minimum_runtime": "Exclude a measured query only when both OFF < 1.0 s and ON < 1.0 s; retain equality at 1.0 s and all pairs with either side above it. Apply the same query filter to phase and optimizer summaries; retain raw rows for coverage",
             "fallback": "timing_status=fallback-skip means no query execution occurred; the original placeholder 1.0 is not used in statistics",
             "deduplication": "Unique execution-family/SQL identities across names and historical suites; latest observations win including failures; unresolved definitions remain separate",
@@ -1888,7 +1900,7 @@ def runtime_series(frame: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 def complete_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep correct, non-timeout queries with complete timings for their schema."""
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).fillna("TRUE").astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(frame)
     timeout = frame.get("note", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains(
         "TIMEOUT", case=False, regex=False
     )
@@ -1917,7 +1929,7 @@ def representative_runtime_rows(
 ) -> pd.DataFrame:
     """Per-family caps, round-robin shape quotas, then OFF-runtime quantiles.
 
-    Eligibility requires correct, complete timings and the requested plan scope.
+    Eligibility requires complete timings, an eligible check status, and the requested plan scope.
     Neither speed-up nor ON time ranks eligible candidates. Keep label IDs from
     the full in-scope population so filtering and sampling do not renumber them.
     """
@@ -2116,7 +2128,7 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
 def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: str) -> None:
     """All measured runtimes and the OuterYan-selected speed-up distribution."""
     _load_plotting()
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(frame)
     sub = positive_runtime_rows(frame.loc[correct], metric)
     if sub.empty:
         print(f"  speed-up figure omitted for {run}: no complete timings")
@@ -2208,7 +2220,7 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     if not set(required).issubset(frame.columns):
         return frame.iloc[0:0].copy(), 0
     plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(frame)
     selected = frame.loc[plans.eq("OUTERYAN") & correct & ~below_runtime_threshold(frame)].copy()
     if selected.empty:
         return selected, 0
@@ -2590,7 +2602,7 @@ def write_standalone_runtime_figures(
     ):
         remove_generated_file(output_directory / filename)
     outputs = []
-    correct = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper().eq("TRUE")
+    correct = correctness_eligible(frame)
     if not positive_runtime_rows(frame.loc[correct], metric).empty:
         outputs.append(("speedup_all_queries", lambda pdf: page_speedup_scatter(pdf, frame, run, metric)))
     else:
@@ -2908,7 +2920,7 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
                    for value, rows in selected.groupby(dimension, dropna=False, sort=True)],
         "method": {
             **report["method"],
-            "corpus": "Main corpus counts use only correct, complete measured pairs with at least one runtime >= 1 s; raw deduplicated input counts are retained separately as input_corpus",
+            "corpus": "Main corpus counts use only eligible complete measured pairs with at least one runtime >= 1 s; raw deduplicated input counts are retained separately as input_corpus",
             "phase_percent": "100 * sum(phase operator CPU seconds) / sum(profile CPU seconds) over every eligible complete selected profile, not a representative sample or wall-time share",
             "optimization_percent": "100 * optimizer_ENGINE_total_s / tm_ENGINE, calculated separately for DuckDB/OFF and OuterYan/ON; optimizer times come from separate profiles",
             "representatives": f"Up to {limit} per family, measured OuterYan-selected queries with complete paired optimizer totals; shape quotas then evenly spaced OFF-runtime ranks; no ranking by speed-up",
@@ -2926,15 +2938,18 @@ def composition_tex(report: dict) -> str:
             f"for a total of {number(corpus['total'], 0)} query instances")
     if corpus["unclassified"]:
         text += f", including {number(corpus['unclassified'], 0)} additional unclassified instances"
-    text += (". Each retained instance is correct, completes within its recorded per-statement timeout, and has complete measured runtimes with at least one runtime "
+    text += (". Each retained instance completes within its recorded per-statement timeout and has complete measured runtimes with at least one runtime "
              r"at or above $1$\,s. We report results by workload family, join-tree shape, join-graph topology, join-type composition, and selectivity level." + "\n")
     population = report.get("method", {}).get("population", "")
     if population.startswith("Performance-screened"):
-        text += (r"This is a performance-screened subset: both runtimes exceed $1$\,s and remain below $1{,}800$\,s, "
+        text += (r"This is a performance-screened subset: both runtimes exceed $1$\,s and remain below the recorded timeout, "
                  r"and DuckDB/OuterYan speed-up is at least $0.8\times$. Historical exclusions and this outcome-based filter "
                  "must not be interpreted as an unbiased overall-workload comparison.\n")
     elif population.startswith("Historically screened"):
         text += "The candidate corpus was historically screened; complete failures and exclusion counts are reported separately.\n"
+    unchecked = report.get("coverage", {}).get("unchecked_measured", 0)
+    if unchecked:
+        text += f"Result equivalence was not checked for {unchecked} retained instances; these timings are performance-only evidence.\n"
     if corpus["selectivity_ablation"]:
         text += (f"The supplementary component comprises {number(corpus['supplementary_controls'], 0)} graph queries "
                  f"and {number(corpus['selectivity_ablation'], 0)} selectivity-ablation instances; "
@@ -3011,7 +3026,7 @@ def runtime_tex(report: dict) -> str:
             lines.append(latex_escape(group["family"]) + " & " + " & ".join(values) + r" \\")
     caption = (r"Statistics across benchmark workloads after excluding recorded timeouts and measured pairs with both runtimes below $1$\,s. "
                "Total is the ratio of measured runtime sums. ")
-    caption += "Both panels include only correct, complete measured pairs; unexecuted fallback placeholders are excluded."
+    caption += "Both panels include only eligible complete measured pairs; unexecuted fallback placeholders are excluded."
     lines.extend([r"\bottomrule", r"\end{tabular}", r"\caption{" + caption + "}",
                   r"\label{tab:runtime-by-benchmark}", r"\end{table}"])
     return "\n".join(lines) + "\n"
@@ -3091,7 +3106,7 @@ def optimization_tex(report: dict) -> str:
     if not rows:
         return "No retained measured queries have complete paired optimizer profiles; the representative optimization table is unavailable.\n"
     lines = [r"\begin{table*}[t]", r"\centering\scriptsize\setlength{\tabcolsep}{3.2pt}",
-             r"\caption{Running time, query statistics, and optimization overhead for representative queries. Optimization ratio is $100\,T_{\rm opt}/T_{\rm runtime}$ for each configuration, using separate optimizer profiles and unprofiled runtime medians. Attributes count distinct referenced columns per relation alias, including expanded SELECT stars, join predicates and filters. Queries are selected by family, shape and DuckDB runtime ranks, without ranking speed-up.}",
+             r"\caption{Running time, query statistics, and optimization overhead for representative queries. Optimization ratio is $100\,T_{\rm opt}/T_{\rm runtime}$ for each configuration, using separate optimizer profiles and unprofiled runtime samples. Attributes count distinct referenced columns per relation alias, including expanded SELECT stars, join predicates and filters. Queries are selected by family, shape and DuckDB runtime ranks, without ranking speed-up.}",
              r"\label{tab:optimization-time}", r"\resizebox{\textwidth}{!}{%",
              r"\begin{tabular}{ll" + "r" * len(rows) + "}", r"\toprule",
              "Category & Metric & " + " & ".join(latex_escape(row["short_query"]) for row in rows) + r" \\"]
@@ -3233,7 +3248,7 @@ def write_result_bundle(output_dir: Path, population: pd.DataFrame, *, group_by:
         if column in population]))
     (output_dir / "plot_selection.json").write_text(json.dumps({
         "group_by": group_by, "group": run,
-        "runtime_filter": "require correct measured pairs with at least one runtime >= 1 s; exclude unexecuted fallbacks; speed-up summaries use OuterYan-selected plans",
+        "runtime_filter": "require eligible measured pairs with at least one runtime >= 1 s; exclude unexecuted fallbacks; speed-up summaries use OuterYan-selected plans",
         "both_runtimes_below_1s": int(below_runtime_threshold(population).sum()),
         "deduplication": "latest observation per execution family and normalized SQL; includes failures; preserves literals, join kinds and grouping; unresolved SQL stays separate",
         "workloads": population["workload_category"].value_counts().to_dict(),

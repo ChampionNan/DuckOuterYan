@@ -49,7 +49,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 | [`benchmark_corpus.py`](benchmark_corpus.py) | 生成器、统计与复现共享的 SQL 身份、命名及历史路径解析 | 内部模块，无独立 CLI |
 | [`balanced_benchmark.py`](balanced_benchmark.py) | 配平候选、完整复合连接键、固定历史排除证据、独立 reserve batch | 当前主生成入口委托该模块；不读取本机 results/ |
 | [`thread_sweep.sh`](thread_sweep.sh) | 解析线程列表、拒绝非法/重复线程数 | `run_all.sh`、`experiment_onoff.sh` 通过 `source` 使用 |
-| [`phase_profile.sh`](phase_profile.sh) | 单独采集 OFF/ON optimizer profile，并从同一 ON 样本解析 R1/R2/R3/Other CPU | `experiment_onoff.sh` 调用 `oy_optimizer_profile_pair` / `oy_phase_profile_from_json` |
+| [`phase_profile.sh`](phase_profile.sh) | 每侧依次预热、profiling、正式计时；同一 ON profile 提供 optimizer 和 R1/R2/R3/Other CPU | `oy_warm_profile_time` 执行；`oy_optimizer_profile_from_files` / `oy_phase_profile_from_json` 解析 |
 | [`legacy_corpus.py`](legacy_corpus.py) | 固定 legacy 成员、历史超时排除、来源与对照集合 | 两个 corpus 生成器；不依赖本机历史结果文件 |
 
 ### 回归测试（不是临时实验脚本）
@@ -121,7 +121,8 @@ corresponding environment values.
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
 | `OY_TIMEOUT_SECS` | `900` | Per-statement timeout (15 minutes), no retry; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
-| `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
+| `OY_RUNS` | `1` | First unprofiled execution after warm-up/profile; explicit odd N uses a median |
+| `OY_CHECK_CORRECTNESS` | `0` | Result comparison disabled; `--check-correctness` opts in |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
 | `OY_CORPUS` | `auto_test/outerjoin_benchmark/benchmark` | Deduplicated corpus root |
@@ -222,7 +223,7 @@ bash auto_test/experiment_onoff.sh --all --timeout 900 \
 默认 15 分钟测试可用 `bash auto_test/run_all.sh --all`，但 Q80-alt
 旧 DuckDB 时间为 1137.5 秒（约 19 分钟），SF50 下能否完成需重测。
 默认及配平资格政策均为 900 秒；旧 1800 秒结果保留原记录，不混作新的 900 秒资格测量。
-当前 OFF 正确性执行超时会停止该 query，不代表 OuterYan 侧也超时。
+当前默认不做正确性比较；OFF 预热/profiling/计时超时仍会停止该 query，不代表 OuterYan 侧也超时。
 
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
 `join__tpch__q05_region_sales_ldmx__ilrf__sel_low`（新名称还带 expression hash）。
@@ -268,7 +269,7 @@ python3 auto_test/qualify_benchmark.py \
 CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
 `qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
 `qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
-最终要求双侧运行时间 >1s、<900s、正确且 speed-up >=0.8，fallback-skip 不算有效测量。
+最终要求双侧运行时间 >1s、<900s、speed-up >=0.8；正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
 缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
 
 ## Experiment pipeline
@@ -283,54 +284,52 @@ once before any requested sweep.
 
 For every selected query at each thread count, `experiment_onoff.sh` performs:
 
-1. Run a traced `EXPLAIN` in a fresh process and read one `[OY_DECISION]` record,
-   including `aggregate_query`, `aggregate_pushdown_applied`, and `selected_plan`.
-2. Execute a query only when it selects OuterYan and, for an aggregate query,
-   the selected plan actually contains at least one aggregate pushdown. A DuckDB
-   fallback or an aggregate query without a realized pushdown is retained as
-   `note=FALLBACK-SKIP`, `timing_status=fallback-skip`, with unavailable OFF/ON
-   runtimes and the selection-policy speed-up default `1.0`. For remaining
-   queries, execute the bare query with OuterYan OFF and ON, sort the emitted CSV
-   files outside DuckDB, and compare the result multisets. A mismatch, error, or
-   timeout is not timed. No SQL wrapper changes the optimized plan.
-3. If OuterYan was selected, run one kernel-classification execution and record
-   bitmap/hash filter counts.
-4. Time OuterYan OFF and ON at `threads=$OY_THREADS`. Each batch
-   has one warm-up followed by `--runs N` timed executions; the median excludes
-   the warm-up.
-5. For every executed correct query, execute OFF and ON once after one unprofiled warm-up
-   while collecting a detailed JSON profile. DuckDB's `all_optimizers` value is
-   the OFF total. The ON total adds OuterYan's cost-model phase because that
-   phase sits between named DuckDB optimizer timers and is therefore absent
-   from `all_optimizers`. The ON record also exports the algorithmic
-   OuterYan workflow phases: applicability, OT construction, simplification,
-   semi-join-pair planning, desimplification, OuterYan join reorder, DuckDB
-   baseline simplification/reorder, cost model, resimplification, aggregate
-   marking, plan lowering, semi-join insertion, and aggregate pushdown. Generic
-   DuckDB optimizer-pass timings are not reported.
-6. For correct queries whose ON plan selects OuterYan, read R1/R2/R3 operator
-   work from that same post-warm-up ON execution profile. This is enabled by
-   default (`OY_PROFILE=1`); `--no-profile` or `OY_PROFILE=0` skips both optimizer
-   and phase profiling. The performance medians in step 4 remain unprofiled and
-   independent of this single diagnostic sample.
+1. Read a traced `EXPLAIN` decision. A DuckDB fallback, or an aggregate query
+   without realized aggregate pushdown, remains `FALLBACK-SKIP`: no execution,
+   no measured runtimes, policy-default speed-up 1.0 excluded from statistics.
+2. **Correctness comparison is off by default.** Executed rows record
+   `correct=NOT-CHECKED`, `correctness_check=disabled`; this is not verified
+   correctness. Opt in with `--check-correctness` for bare-query OFF/ON result
+   multiset comparison. A mismatch/error/timeout in that optional check stops
+   the query.
+3. Keep the existing one-shot ON kernel diagnostic (bitmap/hash classification);
+   it does not supply a runtime sample or warm the later connection's buffer pool.
+4. Start a fresh CLI for **each** of OFF and ON. In that same process execute:
+   **one unprofiled warm-up → one detailed profile → disable profiling → one
+   unprofiled timed execution**. Both preparatory executions are excluded from
+   runtime. The first execution after these preparations is the reported query
+   time; default `OY_RUNS=1`, not a median of three. Explicit `--runs N` still
+   accepts a positive odd N and selects the median of only those N timed samples.
+5. Read optimizer totals and workflow phases from the already-produced profiles;
+   read R1/R2/R3 and Other CPU work from that same ON profile. No further query
+   execution is needed. OFF uses DuckDB's `all_optimizers`; ON additionally
+   includes the otherwise-untracked cost-model phase. Generic optimizer-pass
+   timings are not substituted for the named OuterYan workflow phases.
 
-Every statement uses the same fixed `OY_TIMEOUT_SECS` limit. The larger external
-watchdog on a timing/profile process only accounts for the four fixed-limit
-statements in that process; it does not increase any statement's timeout. At the
-first timeout in correctness, kernel classification, timing, or profiling, the
-query is marked `TIMEOUT-*`, the remaining phases for that query are skipped,
-and the query is never retried with a longer limit.
+With profiling enabled, a fully completed selected query therefore executes
+**seven** times: one kernel diagnostic plus three executions per configuration.
+Only two executions (one OFF and one ON) contribute to runtime/speed-up.
+`--no-profile` keeps one warm-up + one timed execution per configuration.
+The compact profiling trace is emitted only while the native profiler is enabled;
+it does not write during formal timing. **Rebuild the binary** for this behavior:
+use `run_all.sh`, not a stale CLI with `experiment_onoff.sh`.
 
-All executions explicitly set the selected multi-thread count. Correctness,
-diagnostics, and OFF/ON performance timing disable profiling. There is no
-single-thread batch. Timing runs in fresh `-no-init` CLI processes using `.mode
-trash`, which fully drains the bare query without measuring CSV formatting or
-file output. Correctness and optional plan/cost diagnostics remain enabled.
-Profile work adds one paired OFF/ON execution batch and never contributes
-to OFF/ON timing medians or speed-up. A profile failure leaves valid timing pairs
-intact. Optimizer and phase failures are recorded independently as
-`OPTIMIZER-PROFILE-ERROR` and `PROFILE-ERROR`; partial JSON files and CLI logs
-remain available for diagnosis.
+Each statement retains the same 900-second default limit. The process watchdog
+covers `(1 + profile + runs) * limit + grace`, not a larger per-query allowance.
+The first timeout in any stage stops that query with no retry. A profiling
+execution timeout now occurs *before* timing, so it cannot yield a measured pair.
+If executions finish but profile JSON validation fails, retain the independently
+valid unprofiled timing pair and report the missing diagnostic as an error.
+
+All executions use the selected multi-thread count. Timing uses `.mode trash`
+to fully drain the **bare query**, without wrappers or result-file formatting.
+There is no CSV result export or external sort unless correctness is explicitly
+enabled. Logs/CSV carry `correctness_check`, `timing_protocol`, `timing_samples`,
+`timing_estimator`, and `warmup_runs_per_side` (including the profiling warm-up).
+Statistics accept explicit unchecked measured rows, preserve their status, and
+report their count; generated paper text must not call them correctness-verified.
+Do not pool old three-run medians and the new single-sample protocol as one
+measurement configuration; qualification rejects mixed protocols.
 
 Bare-query equivalence can require temporary space comparable to several query
 result sets. Temporary result and external-sort files default to
@@ -489,7 +488,7 @@ DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
   --only tpcds \
   --query-type join --limit 1 \
-  --runs 3 \
+  --check-correctness --runs 1 \
   --capture-plans
 ```
 
@@ -551,7 +550,7 @@ the original `BIGINT` type and empty-input value.
 ```text
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
-  -n, --runs N        positive odd timed executions per configuration
+  -n, --runs N        positive odd timed executions per configuration (default 1)
   -t, --timeout S     per-statement timeout seconds (default 900; 15 minutes)
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
       --query-type T  all|join|graph|aggregate (default all)
@@ -565,6 +564,8 @@ bash auto_test/experiment_onoff.sh [options]
       --capture-plans save OFF/ON EXPLAIN, trace, and detailed cost files
       --profile       enable phase and optimizer profiling (default)
       --no-profile    skip phase and optimizer profiling
+      --check-correctness     compare bare-query result multisets
+      --no-check-correctness  skip result comparison (default)
   -o, --out FILE      exact text output path
 ```
 
@@ -609,13 +610,13 @@ bash auto_test/experiment_onoff.sh --only tpch
 # Force one valid OuterYan candidate for a bare-query correctness comparison
 DUCKDB_OY_FORCE_CANDIDATE=1 \
 bash auto_test/experiment_onoff.sh \
-  --only tpcds --query-type join --limit 1 --capture-plans
+  --only tpcds --query-type join --limit 1 --check-correctness --capture-plans
 
 # Skip JOB bushy-7 labels
 bash auto_test/experiment_onoff.sh --only bench --exclude '*bushy7*'
 
 # Small unique-corpus run using existing databases
-SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=3 bash auto_test/run_all.sh \
+SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=1 bash auto_test/run_all.sh \
   --only graph --limit 10 --capture-plans
 ```
 
@@ -695,8 +696,8 @@ Live stderr and the TXT report use one clearly separated block per query:
 ```text
 ====================================================================================================
 [ 63/185] query=derived__example
-  result: correct=TRUE reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 runtime_s=[DuckDB=12.000000000 OuterYan=6.000000000] speedup=2.000 optimization_s=[status=OK DuckDB=... OuterYan=...]
-  context: family=tpch category=v2 nrel=5 pass=main note=OK ... breakdown_s=[status=OK CPU=... R1=... R2=... R3=... Other=...]
+  result: correct=NOT-CHECKED timing_status=measured reorder=1 selected=OUTERYAN kernel=bitmap(b=3,h=0) threads=16 runtime_s=[DuckDB=12.000000000 OuterYan=6.000000000] speedup=2.000 optimization_s=[status=OK DuckDB=... OuterYan=...] measurement=[check=disabled protocol=warm-profile-then-timing-v1 samples=1 estimator=single_post_warmup warmups=2]
+  context: family=tpch category=join nrel=5 pass=main note=OK;CORRECTNESS-NOT-CHECKED ... breakdown_s=[status=OK CPU=... R1=... R2=... R3=... Other=...]
   decision: plan=[mode=GATED reason=COST_OUTERYAN_BETTER ... formula=...] optimizer_phases=[...] cost=[...] SJ=[...]
 ```
 
@@ -915,8 +916,9 @@ The comparison runs 723 unique candidates under `outerjoin_benchmark/benchmark`:
 180 balanced candidates each for Graph, TPC-H, TPC-DS and JOB, plus three historical
 TPC-DS case studies. Qualification is a separate measured filter; historical cases
 are reported separately and do not consume balanced quotas.
-The harness compares complete bare-query results with OuterYan disabled and
-enabled, records the selected plan, and times eligible correct queries.
+The harness records the selected plan and measures one post-warm-up execution
+per side by default. Result comparison is opt-in; unchecked rows are labeled
+NOT-CHECKED and are never represented as verified-correct.
 The default is 32 threads; `--threads "16 32"` produces separate result files.
 The PostgreSQL replay workflow and its public wrappers have been removed.
 

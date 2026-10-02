@@ -1300,7 +1300,7 @@
     "minimum_speedup": 0.8,
     "target_host": "cpu9",
     "target_repository": "/home/data/bchenba/DuckYanOuter",
-    "eligibility": "Only correct measured pairs passing target-database selectivity audit. New SQL is pending measurement, never assumed eligible.",
+    "eligibility": "Only measured pairs passing target-database selectivity audit; correctness is verified or explicitly NOT-CHECKED with checks disabled. New SQL is pending measurement, never assumed eligible.",
     "excluded_seeds": {
       "tpcds_q72_fulfillment": "Reduced source subgraph omits sales/inventory week constraint; historical 1800s timeouts."
     }

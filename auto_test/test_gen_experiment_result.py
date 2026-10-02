@@ -84,6 +84,23 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertEqual([summary["counts"][key] for key in ("faster", "equal", "slower")], [1, 1, 1])
         self.assertEqual(summary["off_s"]["max"], 4)
 
+    def test_unchecked_requires_explicit_opt_out_and_executed_timing(self):
+        frame = self.frame()
+        frame["correct"] = "NOT-CHECKED"
+        frame["correctness_check"] = "disabled"
+        frame["timing_status"] = "measured"
+        frame["timing_samples"] = 1
+        frame["timing_estimator"] = "single_post_warmup"
+        report = STATS.build_statistics(frame)
+        self.assertEqual(report["groups"][0]["counts"]["measured"], 3)
+        self.assertEqual(report["groups"][0]["counts"]["unchecked_measured"], 3)
+        self.assertEqual(report["method"]["timing_protocols"][0]["timing_samples"], 1)
+        self.assertTrue(all(r["correct"] == "NOT-CHECKED" for r in report["queries"]))
+        for column in ("correctness_check", "timing_status"):
+            self.assertEqual(STATS.build_statistics(frame.drop(columns=column))["valid_queries"], 0)
+        frame["correct"] = "FALSE"
+        self.assertEqual(STATS.build_statistics(frame)["valid_queries"], 0)
+
     def test_minimum_runtime_filter_is_symmetric_strict_and_keeps_coverage(self):
         base = self.frame().iloc[0].to_dict()
         frame = pd.DataFrame([
@@ -1314,6 +1331,19 @@ class PaperStatisticsTest(unittest.TestCase):
             self.assertEqual(row["outeryan_optimizer_percent"], 2)
             self.assertEqual(row["attribute_count"], 5)
         self.assertEqual(report["runtime"]["all"][-1]["counts"]["fallback_skips"], 0)
+
+    def test_unchecked_runtime_profiles_and_paper_are_not_called_verified(self):
+        frame = self.frame().iloc[:16].copy()
+        frame["correct"] = "NOT-CHECKED"
+        frame["correctness_check"] = "disabled"
+        frame["timing_status"] = "measured"
+        report = self.report(frame)
+        self.assertEqual(report["coverage"]["unchecked_measured"], 12)
+        self.assertEqual(report["phase"][-1]["profiles"], 8)
+        self.assertEqual(len(report["representatives"]), 8)
+        text = PAPER.composition_tex(report)
+        self.assertIn("Result equivalence was not checked for 12", text)
+        self.assertNotIn("instance is correct", text)
 
     def test_cpu_weighting_is_not_mean_of_query_percentages(self):
         frame = self.frame().iloc[:2].copy()
