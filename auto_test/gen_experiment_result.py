@@ -67,6 +67,7 @@ pd = import_pandas()
 # ---- Shared statistics and eligibility --------------------------------------
 
 MIN_RUNTIME_SECONDS = 1.0
+TIMEOUT_SECONDS = 10 * 60
 
 
 def below_runtime_threshold(frame: pd.DataFrame, metric: str = "tm") -> pd.Series:
@@ -134,9 +135,9 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
         "experiment_group", "source_run", "source_csv", "corpus_version", "corpus_revision", "corpus_scope", "workload_category", "query_class",
         "sql_identity", "original_query", "original_workload_category", "original_sql_path",
         "query", "family", "topology", "workload_component", "source_component", "evaluation_role",
-        "tree_shape", "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
+        "relation_count", "tree_shape", "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
         "aggregate_query", "aggregate_pushdown_applied", "selected_plan", "correct", "note", "timing_status",
-        "timing_threads", "sql_path",
+        "timing_threads", "sql_path", "timeout_seconds",
     ) if column in frame]
     detail = frame[columns].copy().reset_index(drop=True)
     detail["family"] = detail["family"].map(normalize_family)
@@ -204,6 +205,80 @@ def summarize(rows: pd.DataFrame) -> dict:
                    "speedup": total_off / total_on if total_on is not None else None,
                    "saved_s": total_off - total_on if total_on is not None else None,
                    "time_reduction_fraction": 1 - total_on / total_off if total_off is not None else None},
+    }
+
+
+TIMEOUT_DIMENSIONS = (
+    "family",
+    "workload_category",
+    "relation_count",
+    "tree_shape",
+    "join_graph_topology",
+    "join_type_composition",
+    "selectivity_level",
+    "aggregate_query",
+)
+
+
+def build_timeout_statistics(detail: pd.DataFrame) -> dict:
+    """Describe observed harness timeouts without inventing censored runtimes."""
+    timeout_rows = detail.loc[detail["exclusion_reason"].eq("timeout")].copy()
+    distributions = []
+    for dimension in TIMEOUT_DIMENSIONS:
+        if dimension not in detail:
+            continue
+        all_values = detail[dimension].copy()
+        timeout_values = timeout_rows[dimension].copy()
+        if dimension == "relation_count":
+            all_values = pd.to_numeric(all_values, errors="coerce").map(
+                lambda value: "Unspecified" if pd.isna(value) else (
+                    str(int(value)) if float(value).is_integer() else str(value)
+                )
+            )
+            timeout_values = pd.to_numeric(timeout_values, errors="coerce").map(
+                lambda value: "Unspecified" if pd.isna(value) else (
+                    str(int(value)) if float(value).is_integer() else str(value)
+                )
+            )
+        else:
+            all_values = all_values.map(lambda value: "Unspecified" if pd.isna(value) or str(value).strip() == "" else str(value))
+            timeout_values = timeout_values.map(
+                lambda value: "Unspecified" if pd.isna(value) or str(value).strip() == "" else str(value)
+            )
+        totals = all_values.value_counts(dropna=False)
+        timed_out = timeout_values.value_counts(dropna=False)
+        for value in sorted(totals.index, key=lambda item: str(item)):
+            total = int(totals[value])
+            count = int(timed_out.get(value, 0))
+            distributions.append({
+                "dimension": dimension,
+                "value": str(value),
+                "total_queries": total,
+                "timeout_queries": count,
+                "timeout_rate": count / total if total else None,
+                "share_of_timeouts": count / len(timeout_rows) if len(timeout_rows) else None,
+            })
+    query_columns = [column for column in (
+        "query", "family", "workload_category", "relation_count", "tree_shape",
+        "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
+        "aggregate_query", "selected_plan", "timing_status", "note", "sql_path",
+    ) if column in timeout_rows]
+    selected_counts = timeout_rows["selected_plan"].value_counts().sort_index().to_dict()
+    limits = sorted(pd.to_numeric(detail.get("timeout_seconds", pd.Series(dtype=float)),
+                                  errors="coerce").dropna().unique().tolist())
+    # Older CSVs lack this field; do not relabel their 10-minute runs as 30 minutes.
+    limit = limits[0] if len(limits) == 1 else TIMEOUT_SECONDS if not limits else None
+    return {
+        "limit_seconds": limit,
+        "limit_minutes": limit / 60 if limit is not None else None,
+        "recorded_limits_seconds": limits,
+        "limit_source": "recorded_csv" if limits else "legacy_default",
+        "total": len(timeout_rows),
+        "input_total": len(detail),
+        "rate": len(timeout_rows) / len(detail) if len(detail) else None,
+        "selected_plan_counts": {str(key): int(value) for key, value in selected_counts.items()},
+        "distribution": distributions,
+        "queries": json.loads(timeout_rows[query_columns].to_json(orient="records", double_precision=15)),
     }
 
 
@@ -583,7 +658,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                             "rows": len(pd.read_csv(path)),
                             "kind": "attempts" if path.name.endswith(".attempts.csv") else "final"})
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "run": (
             str(frame["run"].iloc[0]) if "run" in frame and len(frame)
             else str(frame["experiment_group"].iloc[0]) if "experiment_group" in frame and len(frame)
@@ -599,6 +674,11 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         )},
         "method": {
             "speedup": "Measured rows use OFF / ON from original unrounded timing pairs; values > 1 mean faster",
+            "population": ("Performance-screened subset: historical exclusions plus both runtimes >1s, <1800s and speed-up >=0.8; not an unbiased overall sample"
+                           if "qualification_policy" in frame and frame["qualification_policy"].eq("performance_screened").all()
+                           else "Historically screened candidates, before post-measurement qualification; report failures and exclusions"
+                           if "corpus_revision" in frame and frame["corpus_revision"].eq("balanced-screened-20261002").all()
+                           else "Original supplied experiment population"),
             "eligibility": "Only correct, non-timeout, executed rows with finite positive OFF/ON pairs and at least one runtime >= 1 s are valid; unexecuted fallback rows are excluded",
             "minimum_runtime": "Exclude a measured query only when both OFF < 1.0 s and ON < 1.0 s; retain equality at 1.0 s and all pairs with either side above it. Apply the same query filter to phase and optimizer summaries; retain raw rows for coverage",
             "fallback": "timing_status=fallback-skip means no query execution occurred; the original placeholder 1.0 is not used in statistics",
@@ -610,9 +690,11 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
             "stddev_variance": "Sample statistics (ddof=1); unavailable for n < 2",
             "percentiles": "Linear interpolation; p50 is median",
             "excluded": "No timeout substitution, runtime imputation, speed-up trimming, or use of the representative display sample",
+            "timeout": "A query is a timeout only when the harness recorded TIMEOUT; use each CSV's timeout_seconds (legacy CSVs default to 600 s). Timeout runtimes are censored and excluded rather than replaced with the limit",
             "uncertainty": "Descriptive query-level statistics, not confidence intervals over repeated runs",
         },
         "groups": groups,
+        "timeouts": build_timeout_statistics(detail),
         "phase_profiles": build_phase_statistics(frame, metric),
         "optimizer_profiles": build_optimizer_statistics(frame, metric),
         "queries": json.loads(detail.to_json(orient="records", double_precision=15)),
@@ -632,6 +714,24 @@ def markdown_report(report: dict) -> str:
                   f"OuterYan-selected: {headline['counts']['valid']}; "
                   f"geometric-mean speed-up: {number(headline['speedup']['geomean'])}×.",
                   f"Input records after reconciliation (before exclusions): {report['unique_queries']}.", ""])
+    timeouts = report["timeouts"]
+    lines.extend([
+        f"## Timeout distribution ({timeouts['limit_minutes']}-minute limit)", "",
+        f"Observed timeouts: {timeouts['total']} / {timeouts['input_total']} "
+        f"({number(100 * timeouts['rate'])}%). Timeout runtimes are censored and are not replaced with the limit.",
+        f"Selected-plan counts among timeouts: {timeouts['selected_plan_counts']}.", "",
+        "| Dimension | Stratum | Timeout / total | Timeout rate (%) | Share of all timeouts (%) |",
+        "|---|---|---:|---:|---:|",
+    ])
+    displayed_dimensions = {"family", "workload_category", "relation_count", "tree_shape", "selectivity_level", "aggregate_query"}
+    for row in timeouts["distribution"]:
+        if row["dimension"] not in displayed_dimensions or not row["timeout_queries"]:
+            continue
+        lines.append(
+            f"| {row['dimension']} | {row['value']} | {row['timeout_queries']} / {row['total_queries']} | "
+            f"{number(100 * row['timeout_rate'])} | {number(100 * row['share_of_timeouts'])} |"
+        )
+    lines.extend(["", "Complete timeout strata are in `timeout_summary.csv`; exact query names and metadata are in `timeout_queries.csv`.", ""])
     family_order = {name: index for index, name in enumerate(("all", "Graph", "TPC-H", "TPC-DS", "JOB"))}
     for subset in ("outeryan_selected", "all", "duckdb_selected"):
         rows = [row for row in report["groups"] if row["subset"] == subset and row["scope"] in ("overall", "benchmark")]
@@ -815,6 +915,34 @@ def write_statistics(output_directory: Path, frame: pd.DataFrame, metric: str = 
         })
     pd.DataFrame(benchmark_rows).to_csv(output_directory / "benchmark_statistics.csv", index=False)
 
+    strata_rows = []
+    for row in report["groups"]:
+        if row["subset"] not in ("all", "outeryan_selected") or row["scope"] not in TIMEOUT_DIMENSIONS:
+            continue
+        value = row.get(row["scope"], "Unspecified")
+        if pd.isna(value) or str(value).strip() == "":
+            value = "Unspecified"
+        strata_rows.append({
+            "subset": row["subset"],
+            "dimension": row["scope"],
+            "value": value,
+            "valid": row["counts"]["valid"],
+            "total": row["counts"]["total"],
+            "faster": row["counts"]["faster"],
+            "slower": row["counts"]["slower"],
+            "geomean": row["speedup"]["geomean"],
+            "median": row["speedup"]["median"],
+            "max": row["speedup"]["max"],
+            "total_time_speedup": row["totals"]["speedup"],
+        })
+    strata_columns = [
+        "subset", "dimension", "value", "valid", "total", "faster", "slower",
+        "geomean", "median", "max", "total_time_speedup",
+    ]
+    pd.DataFrame(strata_rows, columns=strata_columns).to_csv(
+        output_directory / "strata_statistics.csv", index=False
+    )
+
     phase_rows = []
     phase = report["phase_profiles"]
     if phase["available"]:
@@ -931,6 +1059,20 @@ def write_statistics(output_directory: Path, frame: pd.DataFrame, metric: str = 
     ]
     pd.DataFrame(phase_summary_rows, columns=phase_summary_columns).to_csv(
         output_directory / "optimizer_phase_summary.csv", index=False
+    )
+    timeout_columns = [
+        "dimension", "value", "total_queries", "timeout_queries", "timeout_rate", "share_of_timeouts",
+    ]
+    pd.DataFrame(report["timeouts"]["distribution"], columns=timeout_columns).to_csv(
+        output_directory / "timeout_summary.csv", index=False
+    )
+    timeout_query_columns = [
+        "query", "family", "workload_category", "relation_count", "tree_shape",
+        "join_graph_topology", "join_vector", "join_type_composition", "selectivity_level",
+        "aggregate_query", "selected_plan", "timing_status", "note", "sql_path",
+    ]
+    pd.DataFrame(report["timeouts"]["queries"]).reindex(columns=timeout_query_columns).to_csv(
+        output_directory / "timeout_queries.csv", index=False
     )
     return report
 
@@ -2746,10 +2888,11 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
     phase_groups = {normalize_family(row["family"]): row for row in phases["groups"]
                     if row["scope"] in ("overall", "benchmark")}
     return {
-        "schema_version": 2, "run": report["run"], "timing_threads": report["timing_threads"],
+        "schema_version": 3, "run": report["run"], "timing_threads": report["timing_threads"],
         "sources": report["sources"], "runtime_population": "measured", "headline_population": "measured_outeryan_selected",
         "corpus": composition(frame.loc[detail["valid_timing"].to_numpy()]),
         "input_corpus": composition(frame), "coverage": summarize(detail)["counts"],
+        "timeouts": report["timeouts"],
         "runtime": {"all": family_summaries(measured), "outeryan_selected": family_summaries(selected)},
         "measured_runtime": family_summaries(measured),
         "phase": [{"family": family, **phase_groups.get("all" if family == "All" else family, {})}
@@ -2778,8 +2921,15 @@ def composition_tex(report: dict) -> str:
             f"for a total of {number(corpus['total'], 0)} query instances")
     if corpus["unclassified"]:
         text += f", including {number(corpus['unclassified'], 0)} additional unclassified instances"
-    text += (". Each retained instance is correct and has complete measured runtimes with at least one runtime "
+    text += (". Each retained instance is correct, completes within its recorded per-statement timeout, and has complete measured runtimes with at least one runtime "
              r"at or above $1$\,s. We report results by workload family, join-tree shape, join-graph topology, join-type composition, and selectivity level." + "\n")
+    population = report.get("method", {}).get("population", "")
+    if population.startswith("Performance-screened"):
+        text += (r"This is a performance-screened subset: both runtimes exceed $1$\,s and remain below $1{,}800$\,s, "
+                 r"and DuckDB/OuterYan speed-up is at least $0.8\times$. Historical exclusions and this outcome-based filter "
+                 "must not be interpreted as an unbiased overall-workload comparison.\n")
+    elif population.startswith("Historically screened"):
+        text += "The candidate corpus was historically screened; complete failures and exclusion counts are reported separately.\n"
     if corpus["selectivity_ablation"]:
         text += (f"The supplementary component comprises {number(corpus['supplementary_controls'], 0)} graph queries "
                  f"and {number(corpus['selectivity_ablation'], 0)} selectivity-ablation instances; "
@@ -2798,13 +2948,47 @@ def overall_tex(report: dict) -> str:
     text += "The maximum per-query speed-ups for these workloads are "
     text += ", ".join(factor(group["speedup"]["max"]) for group in groups[:-1])
     text += f", respectively, with a maximum of {factor(total['speedup']['max'])} across these OuterYan-selected instances.\n"
+    text += (f"The query-weighted median is {factor(total['speedup']['median'])}: "
+             f"{number(total['counts']['faster'], 0)} queries are faster and "
+             f"{number(total['counts']['slower'], 0)} are slower. ")
+    family_by_name = {group["family"]: group for group in groups[:-1]}
+    tpcds = family_by_name.get("TPC-DS")
+    if tpcds and tpcds["speedup"]["geomean"] is not None and tpcds["speedup"]["geomean"] < 1:
+        text += (f"TPC-DS is the main regression group: only {number(tpcds['counts']['faster'], 0)} of "
+                 f"{number(tpcds['counts']['valid'], 0)} queries are faster, and its geometric mean is "
+                 f"{factor(tpcds['speedup']['geomean'])}. ")
     text += f"Their total-time ratio is {factor(total['totals']['speedup'])}. "
+    if total["totals"]["speedup"] > total["speedup"]["geomean"]:
+        text += ("The larger total-time ratio indicates that a small number of expensive queries with large gains "
+                 "contribute disproportionately to aggregate time saved; it should not be read as uniform per-query improvement. ")
     coverage = report["coverage"]
-    text += (f"We exclude {number(coverage['both_runtimes_below_1s'], 0)} pairs for which both runtimes "
-             rf"are strictly below $1$\,s, {number(coverage['fallback_skips'], 0)} unexecuted fallback cases, and "
-             f"{number(coverage['excluded'] - coverage['both_runtimes_below_1s'] - coverage['fallback_skips'], 0)} "
-             "other incomplete, failed, or timed-out cases. Reported corpus counts include valid measured queries only; "
-             "the performance overview further restricts them to OuterYan-selected plans.\n")
+    timeout = report["timeouts"]
+    family_counts = {
+        row["value"]: row["timeout_queries"] for row in timeout["distribution"]
+        if row["dimension"] == "family" and row["timeout_queries"]
+    }
+    ordered_families = [family for family in ("Graph", "TPC-H", "TPC-DS", "JOB") if family in family_counts]
+    family_text = ", ".join(f"{family_counts[family]} {family}" for family in ordered_families)
+    text += (f"With a {number(timeout['limit_minutes'], 0)}-minute per-statement limit, "
+             f"{number(timeout['total'], 0)} of {number(timeout['input_total'], 0)} queries time out")
+    if family_text:
+        text += f" ({family_text})"
+    text += ". Timeout runtimes are treated as censored and are not replaced with the cutoff. "
+    selected_counts = timeout["selected_plan_counts"]
+    if selected_counts == {"OUTERYAN": timeout["total"]} and timeout["total"]:
+        text += "All timeout rows selected the OuterYan plan. "
+    elif selected_counts:
+        text += "The selected-plan counts among timeouts are " + ", ".join(
+            f"{plan}: {count}" for plan, count in selected_counts.items()
+        ) + ". "
+    other = (coverage["excluded"] - coverage["both_runtimes_below_1s"]
+             - coverage["fallback_skips"] - timeout["total"])
+    text += (f"We additionally exclude {number(coverage['both_runtimes_below_1s'], 0)} pairs for which both runtimes "
+             rf"are strictly below $1$\,s and {number(coverage['fallback_skips'], 0)} unexecuted fallback cases")
+    if other:
+        text += f", plus {number(other, 0)} other incomplete or failed cases"
+    text += (". Reported corpus counts include valid measured queries only; the performance overview further "
+             "restricts them to OuterYan-selected plans.\n")
     return text
 
 
@@ -2820,7 +3004,7 @@ def runtime_tex(report: dict) -> str:
             values.extend(number(group["speedup"][key]) for key in ("geomean", "mean", "median", "max"))
             values.append(number(group["totals"]["speedup"]))
             lines.append(latex_escape(group["family"]) + " & " + " & ".join(values) + r" \\")
-    caption = (r"Statistics across benchmark workloads after excluding measured pairs with both runtimes below $1$\,s. "
+    caption = (r"Statistics across benchmark workloads after excluding recorded timeouts and measured pairs with both runtimes below $1$\,s. "
                "Total is the ratio of measured runtime sums. ")
     caption += "Both panels include only correct, complete measured pairs; unexecuted fallback placeholders are excluded."
     lines.extend([r"\bottomrule", r"\end{tabular}", r"\caption{" + caption + "}",
@@ -2843,6 +3027,57 @@ def phase_tex(report: dict) -> str:
         label = "All" if group["family"] == "all" else group["family"]
         lines.append(latex_escape(label) + " & " + " & ".join(values) + r" \\")
     lines.extend([r"\bottomrule", r"\end{tabular}", r"\end{table}"])
+    all_group = next((group for group in report["phase"] if group["family"] == "all"), None)
+    if all_group and "cpu_weighted_fraction" in all_group:
+        shares = all_group["cpu_weighted_fraction"]
+        lines.append(
+            "Across all retained profiles, R1, R2, R3, and other operators account for "
+            + ", ".join(number(100 * shares[name], 2, r"\%") for name in ("round1", "round2", "round3", "other"))
+            + ", respectively. These CPU-work shares describe where operator work is spent and are not wall-time critical-path fractions."
+        )
+    tpcds = next((group for group in report["phase"] if group["family"] == "TPC-DS"), None)
+    if tpcds and "cpu_weighted_fraction" in tpcds:
+        semijoin_share = tpcds["cpu_weighted_fraction"]["round1"] + tpcds["cpu_weighted_fraction"]["round2"]
+        semijoin_share_text = number(100 * semijoin_share, 2, r"\%")
+        lines.append(
+            f"For TPC-DS, R1 and R2 together account for {semijoin_share_text} of profiled CPU work, "
+            "consistent with semi-join processing being the dominant cost in this workload."
+        )
+    return "\n".join(lines) + "\n"
+
+
+def shape_tex(report: dict) -> str:
+    rows = [row for row in report["strata"] if row["dimension"] == "tree_shape"]
+    if not rows:
+        return "No retained measured queries have join-tree-shape metadata; the shape-effect table is unavailable.\n"
+    order = {"left-deep": 0, "right-deep": 1, "bushy": 2, "": 3, "Unspecified": 3}
+    rows.sort(key=lambda row: order.get(row["value"], 99))
+    lines = [r"\begin{table}[t]", r"\centering\small\setlength{\tabcolsep}{5pt}",
+             r"\begin{tabular}{lrrrrrr}", r"\toprule",
+             r"Input shape & $n$ & Geomean & Median & Faster & Slower & Total \\", r"\midrule"]
+    labels = {"": "Unspecified/control", "Unspecified": "Unspecified/control"}
+    for row in rows:
+        lines.append(
+            latex_escape(labels.get(row["value"], row["value"])) + " & "
+            + " & ".join([
+                number(row["counts"]["valid"], 0), number(row["speedup"]["geomean"]),
+                number(row["speedup"]["median"]), number(row["counts"]["faster"], 0),
+                number(row["counts"]["slower"], 0), number(row["totals"]["speedup"]),
+            ]) + r" \\"
+        )
+    lines.extend([
+        r"\bottomrule", r"\end{tabular}",
+        r"\caption{Speed-up by input join-tree shape for valid measured OuterYan-selected queries. Total is the ratio of measured runtime sums within each stratum.}",
+        r"\label{tab:shape-effect}", r"\end{table}",
+    ])
+    best = max(rows, key=lambda row: row["speedup"]["geomean"])
+    worst = min(rows, key=lambda row: row["speedup"]["geomean"])
+    lines.append(
+        f"The strongest query-weighted result is observed for {latex_escape(labels.get(best['value'], best['value']))} inputs "
+        f"({factor(best['speedup']['geomean'])}), while {latex_escape(labels.get(worst['value'], worst['value']))} inputs "
+        f"have the lowest geometric mean ({factor(worst['speedup']['geomean'])}). "
+        "These are descriptive workload strata rather than a causal isolation of shape, because the queries and workload families differ across strata."
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -2885,6 +3120,7 @@ def write_paper_statistics(output_directory: Path, frame: pd.DataFrame, sources:
          r"\subsubsection{Overall Performance Analysis}" + "\n" + overall_tex(paper)),
         ("runtime_by_benchmark", "Runtime statistics by benchmark", runtime_tex(paper)),
         ("phase_by_benchmark", "Phase CPU summary", phase_tex(paper)),
+        ("shape_effect", "Join-tree shape effect", shape_tex(paper)),
         ("optimization_time", "Representative queries and optimization overhead", optimization_tex(paper)),
     ]
     separator = "% " + "=" * 76

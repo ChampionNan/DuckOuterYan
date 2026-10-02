@@ -19,6 +19,19 @@ STATS = PLOT = PAPER = RESULT
 
 
 class BenchmarkStatisticsTest(unittest.TestCase):
+    def test_timeout_uses_recorded_limit_without_relabeling_legacy_data(self):
+        frame = self.frame()
+        frame["timeout_seconds"] = 1800
+        detail = RESULT.prepare_queries(frame, "tm")
+        self.assertEqual(RESULT.build_timeout_statistics(detail)["limit_seconds"], 1800)
+        self.assertEqual(RESULT.build_timeout_statistics(detail.drop(columns="timeout_seconds"))["limit_seconds"], 600)
+
+    def test_curated_population_is_explicitly_disclosed(self):
+        frame = self.frame()
+        frame["qualification_policy"] = "performance_screened"
+        report = RESULT.build_statistics(frame)
+        self.assertIn("not an unbiased", report["method"]["population"])
+
     def test_generated_file_cleanup_supports_python37_and_preserves_errors(self):
         original_unlink = Path.unlink
 
@@ -171,7 +184,8 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         good = self.frame().iloc[0].to_dict()
         frame = pd.DataFrame([
             good,
-            dict(good, query="timeout", correct="TIMEOUT", note="TIMEOUT", tm_on=None),
+            dict(good, query="timeout", correct="TIMEOUT", note="TIMEOUT", tm_on=None,
+                 relation_count=5, workload_category="v2", tree_shape="bushy"),
             dict(good, query="wrong", correct="FALSE", note="NOT-EQUIV"),
         ])
         report = STATS.build_statistics(frame)
@@ -183,6 +197,12 @@ class BenchmarkStatisticsTest(unittest.TestCase):
         self.assertEqual(timeout["correct"], "TIMEOUT")
         self.assertEqual(timeout["exclusion_reason"], "timeout")
         self.assertIsNone(timeout["speedup"])
+        self.assertEqual(report["timeouts"]["limit_seconds"], 600)
+        self.assertEqual(report["timeouts"]["total"], 1)
+        self.assertEqual(report["timeouts"]["selected_plan_counts"], {"OUTERYAN": 1})
+        relation = next(row for row in report["timeouts"]["distribution"]
+                        if row["dimension"] == "relation_count" and row["value"] == "5")
+        self.assertEqual((relation["timeout_queries"], relation["total_queries"]), (1, 1))
 
     def test_empty_statistics_and_timeout_only_shape_are_unavailable(self):
         frame = self.frame().iloc[:1].assign(correct=False, note="TIMEOUT", tm_on=None)
@@ -330,6 +350,9 @@ class BenchmarkStatisticsTest(unittest.TestCase):
             )
             optimizer_phase_summary = pd.read_csv(root / "optimizer_phase_summary.csv")
             self.assertIn("delta_median", optimizer_phase_summary.columns)
+            self.assertTrue((root / "timeout_summary.csv").exists())
+            self.assertTrue((root / "timeout_queries.csv").exists())
+            self.assertTrue((root / "strata_statistics.csv").exists())
 
 
 def empty_benchmark_provenance():
@@ -1336,26 +1359,30 @@ class PaperStatisticsTest(unittest.TestCase):
             out = root / "out"
             out.mkdir()
             for name in ("benchmark_composition", "overall_performance", "runtime_by_benchmark",
-                         "phase_by_benchmark", "optimization_time"):
+                         "phase_by_benchmark", "shape_effect", "optimization_time"):
                 (out / f"{name}.tex").write_text("obsolete generated fragment")
             result = PAPER.write_paper_statistics(root / "out", frame, [str(source)])
             output = (root / "out" / "paper_statistics.tex").read_text()
             self.assertEqual([path.name for path in out.glob("*.tex")], ["paper_statistics.tex"])
             self.assertEqual([line for line in output.splitlines()
-                              if line.startswith(tuple(f"% {index}. " for index in range(1, 6)))], [
+                              if line.startswith(tuple(f"% {index}. " for index in range(1, 7)))], [
                 "% 1. Benchmark composition",
                 "% 2. Overall performance analysis",
                 "% 3. Runtime statistics by benchmark",
                 "% 4. Phase CPU summary",
-                "% 5. Representative queries and optimization overhead",
+                "% 5. Join-tree shape effect",
+                "% 6. Representative queries and optimization overhead",
             ])
             self.assertNotIn("\t", output)
             self.assertNotIn("assigned the policy default", output)
+            self.assertIn("-minute per-statement limit", output)
+            self.assertIn(r"\fix{1} of \fix{18}", output)
             self.assertIn(r"\# Attributes", output)
+            self.assertIn(r"\label{tab:shape-effect}", output)
             self.assertNotIn(r"\fix{--}", output)
-            self.assertEqual(output.count(r"\begin{table}"), 2)
+            self.assertEqual(output.count(r"\begin{table}"), 3)
             self.assertEqual(output.count(r"\begin{table*}"), 1)
-            self.assertEqual(output.count(r"\end{table}"), 2)
+            self.assertEqual(output.count(r"\end{table}"), 3)
             self.assertEqual(result["sources"][0]["sha256"], digest)
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
             saved = json.loads((root / "out" / "paper_statistics.json").read_text())
@@ -1367,9 +1394,9 @@ class PaperStatisticsTest(unittest.TestCase):
         provenance = PLOT.benchmark_provenance()
         historical = provenance[provenance["filter_design_revision"].isna()]
         self.assertEqual(len(historical), 932)
-        provenance = provenance[provenance["workload_category"].isin(["join", "graph", "aggregate"])]
+        provenance = provenance[provenance["filter_design_revision"].eq("balanced-screened-20261002")]
         counts = provenance["workload_component"].value_counts().to_dict()
-        self.assertEqual(counts, {"structural": 582, "evaluation": 68})
+        self.assertEqual(counts, {"structural": 513, "evaluation": 207})
         stress = PLOT.benchmark_provenance().loc[lambda frame: frame["workload_category"].eq("v3_selectivity_stress") & frame["filter_design_revision"].notna()]
         self.assertEqual(len(stress), 18)
         self.assertEqual(stress["selectivity_level"].nunique(), 3)

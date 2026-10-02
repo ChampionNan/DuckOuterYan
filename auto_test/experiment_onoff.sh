@@ -22,7 +22,7 @@
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
 #   -n,--runs N       positive odd timed iterations per config (default 3)
-#   -t,--timeout S    per-statement timeout sec (default 600). DuckDB enforces S
+#   -t,--timeout S    per-statement timeout sec (default 1800). DuckDB enforces S
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1)×S for 1 warm-up + N timed executions.
 #      --only select|agg|pred|tpch|tpcds|job|graph|bench|all  query families
@@ -52,7 +52,7 @@ CALLER_OY_CORPUS_SET="${OY_CORPUS+x}"
 . "$SCRIPT_DIR/phase_profile.sh"
 [ -x "$DUCKDB_BIN" ] || export DUCKDB_BIN="$REPO_ROOT/build/debug/duckdb"
 CORPUS="${OY_CORPUS:-}"
-CORPUS_REVISION="unique-semantic-20260929"
+CORPUS_REVISION="custom"
 CORPUS_SCOPE="${OY_CORPUS_SCOPE:-benchmark}"
 QUERY_TYPE="all"
 [ -z "${OY_CORPUS_VERSION:-}" ] || {
@@ -106,6 +106,17 @@ QUERY_CLASS="$QUERY_TYPE"
     echo "Corpus directory not found: $CORPUS (generate with: python3 auto_test/gen_outerjoin_benchmark.py)" >&2
     exit 2
 }
+if [ -f "$CORPUS/manifest.csv" ]; then
+    CORPUS_REVISION="$(python3 - "$CORPUS/manifest.csv" <<'PY'
+import csv, sys
+with open(sys.argv[1], newline='') as handle:
+    revisions = {r.get('corpus_revision') or 'custom' for r in csv.DictReader(handle)}
+if len(revisions) != 1:
+    sys.exit('Corpus manifest must have one revision')
+print(revisions.pop())
+PY
+    )" || exit 2
+fi
 case "$RUNS" in
     ''|*[!0-9]*|0) echo "--runs must be a positive integer (got: $RUNS)" >&2; exit 2;;
 esac
@@ -174,7 +185,7 @@ case "$DUCKDB_BIN" in *debug*) echo "WARNING: timing a DEBUG build — direction
 # ============================================================================
 OY_OFF="SET disabled_optimizers TO 'outer_yan';"
 OY_ON="SET disabled_optimizers TO '';"
-: "${OY_TIMEOUT_SECS:=600}"
+: "${OY_TIMEOUT_SECS:=1800}"
 : "${OY_BATCH_GRACE_SECS:=30}"
 case "$OY_TIMEOUT_SECS" in
     ''|*[!0-9]*) echo "--timeout must be a non-negative integer (got: $OY_TIMEOUT_SECS)" >&2; exit 2;;
@@ -989,7 +1000,14 @@ CSV_HEADER=(
     profile_wall_time_s profile_total_time_s profile_cpu_time_s
     profile_round1_ratio profile_round2_ratio profile_total_sj_ratio
     profile_round3_ratio profile_other_elapsed_s profile_other_ratio profile_timed_samples profile_directory
+    timeout_seconds sql_content_sha256 execution_host database_signature corpus_manifest_sha256
 )
+EXECUTION_HOST="$(hostname)"
+CORPUS_MANIFEST_SHA256="-"
+if [ -f "$CORPUS/manifest.csv" ]; then
+    CORPUS_MANIFEST_SHA256="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CORPUS/manifest.csv")"
+    cp "$CORPUS/manifest.csv" "${OUT%.txt}.manifest.csv"
+fi
 : > "$CSV_FINAL"
 csv_row "$CSV_FINAL" "${CSV_HEADER[@]}"
 
@@ -1056,6 +1074,16 @@ process_one() {
     local id="${LABELS[i]}" sql="${SQLS[i]}" db="${DBS[i]}"
     local family="${QUERY_FAMILIES[i]}" sql_path="${SQL_PATHS[i]}"
     local nrel="${RELATION_COUNTS[i]}"
+    local identity sql_content_sha256 database_signature
+    identity="$(python3 - "$CORPUS/$sql_path" "$db" <<'PY'
+import hashlib, json, pathlib, sys
+sql, db = map(pathlib.Path, sys.argv[1:])
+stat = db.stat()
+signature = json.dumps([str(db.resolve()), stat.st_size, stat.st_mtime_ns], separators=(',', ':'))
+print(hashlib.sha256(sql.read_bytes()).hexdigest(), hashlib.sha256(signature.encode()).hexdigest())
+PY
+    )" || return 1
+    read -r sql_content_sha256 database_signature <<< "$identity"
     local WORKLOAD_CATEGORY="${QUERY_TYPES[i]}" QUERY_CLASS="${QUERY_TYPES[i]}"
     local gate="" correct="FALSE" note="ERROR" rows="-"
     local reg="-" outer_reordered="-" gate_applied="-" selected="-" decision="-"
@@ -1490,7 +1518,8 @@ process_one() {
         "$profile_status" "$profile_threads" "$r1sj" "$r2sj" "$realjoin" \
         "$r1_operators" "$r2_operators" "$realjoin_operators" \
         "$profile_wall" "$profile_cpu" "$profile_cpu" "$r1ratio" "$r2ratio" "$sjratio" \
-        "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory"
+        "$realjoin_ratio" "$other" "$other_ratio" "$profile_samples" "$profile_directory" \
+        "$OY_TIMEOUT_SECS" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============

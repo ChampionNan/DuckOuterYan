@@ -10,7 +10,7 @@ synopsis.
 
 ## 脚本总览
 
-`auto_test/` 顶层共有 **18 个脚本：13 个入口/依赖、5 个回归测试**。
+`auto_test/` 的入口、内部依赖和回归测试按下表区分。
 `results/` 只存实验产物，不再放一次性执行脚本。
 
 日常主流程：`run_all.sh` → 数据准备与 corpus 生成 → `experiment_onoff.sh` →
@@ -31,6 +31,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 | [`run_all.sh`](run_all.sh) | 编译、建库、生成 query 并运行完整工作流 | 一键入口；`--query-type join/graph/aggregate` 选择类型 |
 | [`build_db.sh`](build_db.sh) | 构建或复用 Graph、TPC-H、TPC-DS、JOB 数据库 | 被 `run_all.sh` 调用，也可单独指定 family；已有数据库默认复用 |
 | [`gen_outerjoin_benchmark.py`](gen_outerjoin_benchmark.py) | 生成去重 SQL、manifest、历史名称映射及三档语义过滤；`--audit-selectivity` 核验实际过滤比例 | 修改或重建 corpus 时；不运行性能查询 |
+| [`qualify_benchmark.py`](qualify_benchmark.py) | 按 cpu9 实测、30 分钟超时、双侧 >1s、speed-up >=0.8 和实际 selectivity 筛选 | 输出排除原因、每 family/tier 的有效数量/缺口和统计，不修改原始结果 |
 | [`gen_queries.py`](gen_queries.py) | 重建固定的 legacy SQL 来源，供当前 corpus 的 graph 查询和来源追溯使用 | `gen_outerjoin_benchmark.py` 的 `regenerate_legacy_sources()` 仍直接调用；文件名旧但并非废弃依赖 |
 | [`experiment_onoff.sh`](experiment_onoff.sh) | 正常/OuterYan 的计划选择、裸查询正确性、计时和 profiling | 主实验入口；输出逐 query TXT/CSV，调用共享统计与 profiling 模块 |
 | [`check_outeryan_dp.py`](check_outeryan_dp.py) | 只用只读 `EXPLAIN` 检查各生成用例是否进入 DP，并记录选择的 plan 与原因 | 优化器覆盖与选择检查；需已有数据库和编译好的 CLI；不是性能测试 |
@@ -46,6 +47,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 |---|---|---|
 | [`configs.sh`](configs.sh) | DuckDB/数据库路径、scale、线程、超时和 corpus 的统一默认配置 | `run_all.sh`、`build_db.sh`、`experiment_onoff.sh` |
 | [`benchmark_corpus.py`](benchmark_corpus.py) | 生成器、统计与复现共享的 SQL 身份、命名及历史路径解析 | 内部模块，无独立 CLI |
+| [`balanced_benchmark.py`](balanced_benchmark.py) | 配平候选、完整复合连接键、固定历史排除证据、独立 reserve batch | 当前主生成入口委托该模块；不读取本机 results/ |
 | [`thread_sweep.sh`](thread_sweep.sh) | 解析线程列表、拒绝非法/重复线程数 | `run_all.sh`、`experiment_onoff.sh` 通过 `source` 使用 |
 | [`phase_profile.sh`](phase_profile.sh) | 单独采集 OFF/ON optimizer profile，并从同一 ON 样本解析 R1/R2/R3/Other CPU | `experiment_onoff.sh` 调用 `oy_optimizer_profile_pair` / `oy_phase_profile_from_json` |
 | [`legacy_corpus.py`](legacy_corpus.py) | 固定 legacy 成员、历史超时排除、来源与对照集合 | 两个 corpus 生成器；不依赖本机历史结果文件 |
@@ -57,6 +59,7 @@ python3 auto_test/gen_experiment_result.py --date 20260926
 | [`test_run_all.py`](test_run_all.py) | 主入口的默认版本、CLI 选择和 query 生成/运行衔接 |
 | [`test_experiment_onoff.py`](test_experiment_onoff.py) | 使用模拟 DuckDB 验证 shell harness、超时、正确性、计划与 profiling 行为 |
 | [`test_gen_outerjoin_benchmark.py`](test_gen_outerjoin_benchmark.py) | corpus 可重建性、成员、SQL/manifest 与不依赖历史结果文件的约束 |
+| [`test_balanced_benchmark.py`](test_balanced_benchmark.py) | 720 候选配平、mixed join、复合键、reserve 去重与实测资格边界 |
 | [`test_gen_experiment_result.py`](test_gen_experiment_result.py) | 统计、图形、论文表格与统一 CLI；覆盖日期默认目录、多线程隔离、1 秒边界、profile 配对和无需 Matplotlib 的 harness 汇总 |
 | [`test_reprocess_experiment_logs.py`](test_reprocess_experiment_logs.py) | 日志恢复、CSV 精度、超时识别与不完整批次处理 |
 
@@ -95,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 650 条唯一 SQL、stress/regression 子集清单、manifest 与历史档案 |
+| `outerjoin_benchmark/` | 720 条配平候选 SQL、manifest、固定筛选证据与历史档案；有效数待 cpu9 实测 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -116,7 +119,7 @@ corresponding environment values.
 | `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
-| `OY_TIMEOUT_SECS` | `600` | Per-statement timeout (10 minutes); `0` disables it |
+| `OY_TIMEOUT_SECS` | `1800` | Per-statement timeout (30 minutes), no retry; `0` disables it |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
 | `OY_RUNS` | `3` | Positive odd number of timed executions after one warm-up |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
@@ -173,33 +176,59 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-主查询集只有 `outerjoin_benchmark/benchmark/`，共 **650 条唯一 SQL**：
-480 条来源结构查询（`join`）、68 条图结构查询（`graph`）、102 条聚合查询（`aggregate`）。
-Graph/TPC-H/TPC-DS/JOB 分别为 **31/175/209/235** 条。
-`--query-type graph` 选择上述 68 条图结构查询；`--only graph` 选择 Graph 数据集的 31 条查询。
-旧结果中的 `control__` 名称仍可解析到改名后的 SQL。
-原 v1/v2 已合并，不再按版本运行或命名；相同 SQL 只执行一次。
+主查询集 `outerjoin_benchmark/benchmark/` 现在为 **720 条唯一候选 SQL**：
+Graph/TPC-H/TPC-DS/JOB **各 180 条**。每 family 的三档 selectivity 各 60，
+left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mixed。
+类型为 `join` 384、`graph` 162（含 industry controls）、`aggregate` 174。
+`--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
+原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。
 
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
-`join__tpch__q05_region_sales_ldmx__ilrf__sel_low`。
-过滤档位为 `(0,5%)`、`[5,40%)`、`[40,80%]`，使用业务语义谓词，不使用 mod/hash 采样。
-18 条 selectivity stress 和两条 JOB regression 是现有查询的子集标签及路径清单，不增加总数。
+`join__tpch__q05_region_sales_ldmx__ilrf__sel_low`（新名称还带 expression hash）。
+过滤档位为 `(0,5%)`、`[5,40%)`、`[40,60%]`，使用业务语义谓词，不使用 mod/hash 采样。
+完整复合连接键保留；Graph 和 industry controls 明确记录 synthetic 来源。
+历史 speed-up <0.8 或确认 30 分钟超时的未改变连接表达式已排除。
+这是 **historically/performance-screened** 集合，论文不能描述成无性能筛选的随机样本。
 
 ```bash
 python3 auto_test/gen_outerjoin_benchmark.py
 bash auto_test/experiment_onoff.sh
 bash auto_test/experiment_onoff.sh --query-type join --only tpch
 bash auto_test/experiment_onoff.sh --query-type aggregate
-bash auto_test/experiment_onoff.sh --corpus-scope selectivity-stress
 python3 auto_test/check_outeryan_dp.py --out auto_test/results/unique_optimizer_audit_sj020.json
 python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout 600
 ```
 
 `--version` 已移除；`--all` 等同默认唯一查询集。
 去重身份保留 execution family、字符串常量、join 类型与括号结构，忽略注释和格式。
-所有 910 个历史名称（含两个 regression 副本）映射至 `benchmark/aliases.csv` 的 canonical ID。
-旧 SQL 已归档至 `revisions/`，旧结果 CSV 不修改。详细规则见
+旧 650 条 SQL 和名称映射保存在 `revisions/unique_semantic_20260929/benchmark/`，
+旧结果 CSV 不修改。候选三档成组配对；旧 stress/regression scope 不用于新集合。详细规则见
 [benchmark README](outerjoin_benchmark/README.md)。
+
+### 本地修改与 cpu9 重测
+
+流程：本地修改/验证 → commit & push origin → cpu9 `git pull --ff-only`。
+不直接修改 cpu9，也不以本地 SF1 时间代替服务器结果。cpu9 上：
+
+```bash
+cd /home/data/bchenba/DuckYanOuter
+git pull --ff-only
+bash auto_test/run_all.sh --all --timeout 1800
+python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity --audit-timeout 600 \
+  --audit-output auto_test/results/cpu9_selectivity_audit.json
+python3 auto_test/qualify_benchmark.py \
+  --selectivity-audit auto_test/results/cpu9_selectivity_audit.json \
+  --results auto_test/results/experiment_onoff_benchmark_TIMESTAMP_t32.csv \
+  --output-dir auto_test/results/qualified_TIMESTAMP
+```
+
+`TIMESTAMP` 换成实际文件时间。`run_all.sh` 包含编译；`experiment_onoff.sh` 不编译。
+实际数据库路径不同可设置 `GRAPH_DB/TPCH_DB/TPCDS_DB/JOB_DB`，audit 和实验必须一致。
+CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
+`qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
+`qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
+最终要求双侧运行时间 >1s、<1800s、正确且 speed-up >=0.8，fallback-skip 不算有效测量。
+缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
 
 ## Experiment pipeline
 
@@ -482,7 +511,7 @@ the original `BIGINT` type and empty-input value.
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
   -n, --runs N        positive odd timed executions per configuration
-  -t, --timeout S     per-statement timeout seconds (default 600; 10 minutes)
+  -t, --timeout S     per-statement timeout seconds (default 1800; 30 minutes)
       --threads LIST  multi-thread counts (default "32"; also accepts 16,32)
       --query-type T  all|join|graph|aggregate (default all)
       --all           run each unique SQL once (default)
@@ -841,8 +870,8 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs the 650 unique SQL files under `outerjoin_benchmark/benchmark`:
-31 Graph, 175 TPC-H, 209 TPC-DS and 235 JOB queries.
+The comparison runs 720 unique candidates under `outerjoin_benchmark/benchmark`:
+180 each for Graph, TPC-H, TPC-DS and JOB. Qualification is a separate measured filter.
 The harness compares complete bare-query results with OuterYan disabled and
 enabled, records the selected plan, and times eligible correct queries.
 The default is 32 threads; `--threads "16 32"` produces separate result files.

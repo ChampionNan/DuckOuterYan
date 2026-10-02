@@ -20,7 +20,7 @@
 #   OY_PROFILE       Separate ON phase-profile batch (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
 #   OY_RUNS          Timed iterations after one warm-up (default 3)
-#   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 600; 10 minutes)
+#   OY_TIMEOUT_SECS  Per-statement timeout seconds (default 1800; 30 minutes)
 #   --timeout S      CLI timeout override; 0 disables the timeout
 #   JOBS             Make parallelism (default: nproc)
 #   PYTHON_BIN       Python 3.7+ interpreter (default: python3; may be repo-local)

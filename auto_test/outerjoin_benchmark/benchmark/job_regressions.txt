@@ -1,2 +1,0 @@
-job/graph__job__bushy4a__rfi__sel_low.sql
-job/join__job__sqlstorm_job_11914_bdmx__ilrfi__sel_medium.sql

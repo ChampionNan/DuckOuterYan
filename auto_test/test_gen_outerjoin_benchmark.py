@@ -201,7 +201,8 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
                 self.assertEqual(len(aliases), 910)
                 self.assertEqual({row["canonical_query_id"] for row in aliases},
                                  {row["query_id"] for row in active})
-                self.assertEqual(active, csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / "benchmark" / "manifest.csv"))
+                self.assertEqual(active, csv_rows(SCRIPT_DIR / "outerjoin_benchmark" / "revisions" /
+                                                 "unique_semantic_20260929" / "benchmark" / "manifest.csv"))
                 before = (root / "benchmark" / "manifest.csv").read_bytes()
                 with contextlib.redirect_stdout(io.StringIO()):
                     BENCHMARK.generate_unified(root)

@@ -41,6 +41,9 @@ def historical_manifests(root=ROOT):
             path = root / "revisions" / revision / scope / "manifest.csv"
             if path.is_file():
                 yield category, path
+    path = root / "revisions/unique_semantic_20260929/benchmark/manifest.csv"
+    if path.is_file():
+        yield None, path
 
 
 def resolve_sql_path(category, relative, root=ROOT):
@@ -58,6 +61,7 @@ def resolve_sql_path(category, relative, root=ROOT):
         candidates.append(root / scope / path)
     else:
         candidates = [root / "benchmark" / path]
+        candidates.append(root / "revisions/unique_semantic_20260929/benchmark" / path)
         # The former query-type prefix is a naming alias; SQL identity is unchanged.
         if path.name.startswith("control__"):
             candidates.append(root / "benchmark" / path.with_name(

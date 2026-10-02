@@ -3645,6 +3645,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", help=argparse.SUPPRESS)
     parser.add_argument("--root", type=Path)
+    parser.add_argument("--batch", type=int, default=0, help="Disjoint candidate batch (default: 0)")
+    parser.add_argument("--per-family", type=int, default=180)
     parser.add_argument("--core-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--audit-selectivity", action="store_true",
                         help="count base-entity cohorts on existing databases; do not regenerate or run workload SQL")
@@ -3659,14 +3661,16 @@ def main() -> None:
     if args.audit_selectivity:
         if args.audit_timeout <= 0:
             parser.error("--audit-timeout must be positive")
-        if not audit_selectivity(args.root or DEFAULT_ROOT, args.duckdb.resolve(),
+        from qualify_benchmark import audit_selectivity as audit_balanced
+        if not audit_balanced(args.root or DEFAULT_ROOT, args.duckdb.resolve(),
                                  args.audit_output, args.audit_timeout):
             raise SystemExit(1)
         return
 
     if args.version or args.core_only:
         parser.error("Versioned generation is retired; run without --version/--core-only for the unique corpus")
-    generate_unified(args.root or DEFAULT_ROOT)
+    from balanced_benchmark import generate
+    generate(args.root or DEFAULT_ROOT, args.per_family, args.batch)
 
 
 if __name__ == "__main__":
