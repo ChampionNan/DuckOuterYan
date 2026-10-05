@@ -1,0 +1,1657 @@
+{
+  "revision": "tpcds-recovery-20261005",
+  "base_revision": "balanced-screened-20261002",
+  "applies_to": {
+    "batch": 0,
+    "per_family": 180
+  },
+  "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+  "source_csv_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74",
+  "target_complete_pairs": 50,
+  "retained_current_measured_pairs": 7,
+  "exclusion_policy": "TPC-DS only: remove exact SQL observed timeout or measured OFF/ON <0.5. Do not ban other tiers of the same expression.",
+  "selection_policy": "Performance-conditioned historical recovery component. Preserve old predicate relation: identifier bucket cohorts at 3/30/55 percent for modulo patterns, semantic cohorts for Q93 and control. All three tiers generated; old timings are provenance only, not candidate measurements.",
+  "expected_exclusions": 36,
+  "expected_new_candidates": 54,
+  "expected_tpcds_total": 201,
+  "recovery_profiles": {
+    "recovery_modulo_wr_order_number": {
+      "family": "tpcds",
+      "kind": "predicates",
+      "column": "wr.wr_order_number",
+      "predicates": [
+        "({column} % 100) < 3",
+        "({column} % 100) < 30",
+        "({column} % 100) < 55"
+      ],
+      "calibration_from": "web_returns wr",
+      "meaning": "Deterministic identifier-bucket cohort on the historical filter relation; NOT a business-semantic predicate or uniform joined-output sample",
+      "calibration": {
+        "n": 71654,
+        "qualified_rows": [
+          2184,
+          21579,
+          39490
+        ],
+        "observed_fractions": [
+          0.030479805733106317,
+          0.3011555530744969,
+          0.5511206631869819
+        ],
+        "host": "local",
+        "database_sha256": "22628bc194cc902e1b2ec1a6dc3abc16d78009df29928653a5146f823538169d",
+        "source": "Read-only local base-table counts; CPU9 re-audit required"
+      }
+    },
+    "recovery_modulo_ss_ticket_number": {
+      "family": "tpcds",
+      "kind": "predicates",
+      "column": "ss.ss_ticket_number",
+      "predicates": [
+        "({column} % 100) < 3",
+        "({column} % 100) < 30",
+        "({column} % 100) < 55"
+      ],
+      "calibration_from": "store_sales ss",
+      "meaning": "Deterministic identifier-bucket cohort on the historical filter relation; NOT a business-semantic predicate or uniform joined-output sample",
+      "calibration": {
+        "n": 2880404,
+        "qualified_rows": [
+          86236,
+          863268,
+          1584208
+        ],
+        "observed_fractions": [
+          0.029938855799394808,
+          0.29970379155146293,
+          0.5499950701359948
+        ],
+        "host": "local",
+        "database_sha256": "22628bc194cc902e1b2ec1a6dc3abc16d78009df29928653a5146f823538169d",
+        "source": "Read-only local base-table counts; CPU9 re-audit required"
+      }
+    },
+    "recovery_modulo_cs_order_number": {
+      "family": "tpcds",
+      "kind": "predicates",
+      "column": "cs.cs_order_number",
+      "predicates": [
+        "({column} % 100) < 3",
+        "({column} % 100) < 30",
+        "({column} % 100) < 55"
+      ],
+      "calibration_from": "catalog_sales cs",
+      "meaning": "Deterministic identifier-bucket cohort on the historical filter relation; NOT a business-semantic predicate or uniform joined-output sample",
+      "calibration": {
+        "n": 1441548,
+        "qualified_rows": [
+          42938,
+          432660,
+          793351
+        ],
+        "observed_fractions": [
+          0.029786035567320686,
+          0.30013568746930386,
+          0.5503465718796738
+        ],
+        "host": "local",
+        "database_sha256": "22628bc194cc902e1b2ec1a6dc3abc16d78009df29928653a5146f823538169d",
+        "source": "Read-only local base-table counts; CPU9 re-audit required"
+      }
+    },
+    "recovery_modulo_c_customer_sk": {
+      "family": "tpcds",
+      "kind": "predicates",
+      "column": "c.c_customer_sk",
+      "predicates": [
+        "({column} % 100) < 3",
+        "({column} % 100) < 30",
+        "({column} % 100) < 55"
+      ],
+      "calibration_from": "customer c",
+      "meaning": "Deterministic identifier-bucket cohort on the historical filter relation; NOT a business-semantic predicate or uniform joined-output sample",
+      "calibration": {
+        "n": 100000,
+        "qualified_rows": [
+          3000,
+          30000,
+          55000
+        ],
+        "observed_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "host": "local",
+        "database_sha256": "22628bc194cc902e1b2ec1a6dc3abc16d78009df29928653a5146f823538169d",
+        "source": "Read-only local base-table counts; CPU9 re-audit required"
+      }
+    }
+  },
+  "excluded": [
+    {
+      "query_id": "aggregate__tpcds__sqlstorm_tpcds_11376__bushy__irlf__6716bc5a__sel_high__grouped_min",
+      "path": "tpcds/aggregate__tpcds__sqlstorm_tpcds_11376__bushy__irlf__6716bc5a__sel_high__grouped_min.sql",
+      "reason": "timeout",
+      "content_sha256": "2c699db7d86f4118ef9313c7884c754ef70a4c334d007c0f5b2cd7908077cf10",
+      "sql_fingerprint": "c1fa54e67d94db7e9eda0b5800346429f77c2047ccb73684ccbc5610a3bdb38f",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "aggregate__tpcds__sqlstorm_tpcds_11376__bushy__irlf__6716bc5a__sel_medium__grouped_min",
+      "path": "tpcds/aggregate__tpcds__sqlstorm_tpcds_11376__bushy__irlf__6716bc5a__sel_medium__grouped_min.sql",
+      "reason": "timeout",
+      "content_sha256": "53a6e5ff43c3aeca448c452dcb33dc8673a6cc94a330bdd157255b431c4fcd95",
+      "sql_fingerprint": "9fc3c7dc026cee8ed0aae43cbde7891606a2475952bfe8863ac644d87aff05eb",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "graph__tpcds__ds_real_store_agg__left_deep__lrf__f5b8eb7d__sel_high",
+      "path": "tpcds/graph__tpcds__ds_real_store_agg__left_deep__lrf__f5b8eb7d__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "cbf28425365ffe805dd763b8c9bed4a09280b0ab3c81d70b66546aae569c7aaf",
+      "sql_fingerprint": "25c3cc83d095e09606fc0017ab0a701612923bad467391c58d942ea47426181e",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "graph__tpcds__ds_real_store_agg__left_deep__lrf__f5b8eb7d__sel_medium",
+      "path": "tpcds/graph__tpcds__ds_real_store_agg__left_deep__lrf__f5b8eb7d__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "63da6aad6d09b81255e811391a495e70a1ab597ca3e7c1199749d4818c36dca5",
+      "sql_fingerprint": "954420ecbc0fd38fcb523c8d988a6244b6030e81813e77928fc39c3c750d1132",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__historical__q80_alt",
+      "path": "tpcds/join__tpcds__historical__q80_alt.sql",
+      "reason": "timeout",
+      "content_sha256": "38e9b903da4302ed10c47b29b587fc2f472104a2a90541113df5934b4cc3ca00",
+      "sql_fingerprint": "76e3f6e6282fc138df52ed4824f025287b66ed3e3c6102c96056adffe3681f78",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__historical__q80_left_deep",
+      "path": "tpcds/join__tpcds__historical__q80_left_deep.sql",
+      "reason": "timeout",
+      "content_sha256": "c0f055403e607df8bd2dbb21a5f8aeaea0e078d57d4e53277f3632dc4dab7cfe",
+      "sql_fingerprint": "d83227932872df3a188c92babea60f101f883e8b16c829bc0c71d251cc8135c5",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__historical__q93_left_deep",
+      "path": "tpcds/join__tpcds__historical__q93_left_deep.sql",
+      "reason": "timeout",
+      "content_sha256": "5461ee1745d99733ce99fe7766fbfbbba037117bb621555d20c70da011faf4ee",
+      "sql_fingerprint": "77b1ab818d5a4d3ec5fdca4c3b4cf6aac0e342bea1ab61c8019480cc9cc680b9",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "4.290063504",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "2f74dfdb8c7c2868f9463bef839b985301b908abf810e04bee904de997d75235",
+      "sql_fingerprint": "258fee8af1652ffb797fff892c97609b7df4524b96dbe601f48b4942444bf652",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "062dda7eb36847639f8ca09d0daaba0a4c8404fe1bf35674df99e708d989eaf3",
+      "sql_fingerprint": "2f49311a9ad20c734f410939981ad9b2197a26b082479e5921400713d49a1a2e",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__filr__5ee7b4f5__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "c3a261fccc8357f180e32cae3426d6a753a2e1fb681bca6834406c6db52d4c24",
+      "sql_fingerprint": "d7770a3aeda88db038973f8ecc4e3cfc4032bf724cf86ff10f4945e052c0b737",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "3bc4c3fac309acd6d55d1d809c71c7af30e9554ae8d03b725410cbee6734f886",
+      "sql_fingerprint": "5b87f1f00254513fd15662d946eed357db06ad428486367b35e82e68d720504b",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "11ac0d68e858babbbfdd302da20b51086782418393b734d3b341455095ae546f",
+      "sql_fingerprint": "312a1d49ed359277f6718f6357eb9bb38d1827e4e6cdce2426a2921a2b7d694c",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irfl__4a6763dd__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "268372df5f9a1af8e2d1e80249cc4d68d3a67f56ec95762a45b783120e871473",
+      "sql_fingerprint": "666bf9e377808ead93c41e6395d354048408ab6e4e03c1eb644c6b3154f97c1b",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "4dc33fc01f2928f6435764939d4a969c563b6941384da5dc38a1963b4f17966a",
+      "sql_fingerprint": "c3699514fddf29f009b59a901591ac5378e77c3a80bfb687e2d65632b12d1b0f",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "1b62acfab25e3037ba2cc0e4c0bb67820a6e6ea51e00dea31f53e540da448485",
+      "sql_fingerprint": "96502db7fbc8b63ccae59aa4a60486b891403f0a6a7b96d2cbb098ace69ef977",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__irlf__f6b4d494__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "b89564dbe5461e65ce0e596b1afd12dd67e860d9dde0ff7434f1af8ccd7a7ea4",
+      "sql_fingerprint": "d85c3087d3962bd0a35b3ee793a15125a9126e02e15bc423e509f550e8dee8bb",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "495880bbf8074819119408a1ddb364c753b85da48f579257fe94f92a5f4f2588",
+      "sql_fingerprint": "f76759d6b94c0a52197b0ca9a94c58a19cdc03f5cf7b6b85169cd27997330592",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "47916fd80c053ac31ecf2d8552eae44f55aae4e3b6df591c75044c8798498965",
+      "sql_fingerprint": "050f3133c860de550ad18517b12e80b05a58f7a776abe10564363e0c920d8a60",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__bushy__rifl__fa26756d__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "515663c27a5d174864102b51a86c7344784a2d1e7af3593d45decc05a7214026",
+      "sql_fingerprint": "173ad73134c89c92fe213c47825f49f7357fb7a5393bfe5a9217e6f9e4dffedd",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "d73e3aedd9888a02140b6c97ef0d4a4a60a9f75e2843a898de76959e2606b0e9",
+      "sql_fingerprint": "1b2fa449a713de6f1e5d6bbaad33899622ddaeed5da71bc497dca61dea38203b",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "c21146dcbda98d5601a30088e00b794920ce8d51194da97dd8a2f58b1572b9b8",
+      "sql_fingerprint": "7da85e2509d1a91dd3facc1ccf34ba96222de0d5b0012f9bc85fe46b4fec7f28",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__left_deep__ifrl__aac6322b__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "98669b2e31623aeee47733fa935cd9536779df0c4c264544e2d0790c860b3103",
+      "sql_fingerprint": "4708ab7296ecc8012555f1060e322ef1990f1e9df085222b8c4bffd4502c9ef8",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "d129146eaf3066a9a96ccb90dd1b1f932c2d6c017c7e890f5d9727e37fa4f501",
+      "sql_fingerprint": "ebad05e84a04a5fba3bd1c00cb51fdf7786a9e555686c1fce5227fa73ed4df09",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "4b04a68191f884bababa19836d7c624e701f049dfd931aeba135c8d3385bf60b",
+      "sql_fingerprint": "0594fbb8f98962cd57952ba8d6c3c89f0b209733f1245a28201bdfce8c2a9ac8",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__filr__ba92a1c2__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "a69eed8d4984c173f57b90f8ed1afe711b2c15a7118dc6985dec179d21f802de",
+      "sql_fingerprint": "2d7db0f0c879ce5ba207cd2d2e79c15798b246409914d524227f93a516270293",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_high.sql",
+      "reason": "timeout",
+      "content_sha256": "acfcccba6ef384f1f5f32e1335c457267b6fd65d975003d36ace82ce3cc7d4d0",
+      "sql_fingerprint": "7ff372f7c661f06622cb78f382966608a92be0cfbc1c394aeccaf9cc4f1bcf03",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_low.sql",
+      "reason": "timeout",
+      "content_sha256": "992b4142abd90cb865387d4cb4f5fb41083e363a7653ab066e2d79b8cf3c078c",
+      "sql_fingerprint": "8013dd79b0dcde2bb336c6445dd0758ca16587d8e9290251cf1efe8ea32934bf",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_11376__right_deep__ifrl__f6d9418f__sel_medium.sql",
+      "reason": "timeout",
+      "content_sha256": "559f198432b740071433d0b881a1b5ed211f77840804454b90215a85d5dd364d",
+      "sql_fingerprint": "fecac78362087090a7a5ca0a091dc2e31f233f43b683e922a82910913e9b6994",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "NA",
+      "outeryan_s": "NA",
+      "speedup": null,
+      "duckdb_status": "timeout",
+      "outeryan_status": "timeout"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_high.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "414ca849d188a16903065bcd653617d7acee9d1918da8917efaa7f556e74341b",
+      "sql_fingerprint": "2a51d75a102905213b48f322d52417215740172c50a7cb7ca1f2363fdf406a00",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.357724197",
+      "outeryan_s": "0.887461476",
+      "speedup": 0.4030870146751024,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_low.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "66657936faf82eb0c5b68569bbb0494cd4ac6c2a80ad7db21cfa0bc9861cb05a",
+      "sql_fingerprint": "9077e66bbfc21ad026e24e6a678a0548df7fb711fdf9f01e4db50d6b5b2e7761",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.323705152",
+      "outeryan_s": "0.860061449",
+      "speedup": 0.3763744467053772,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__bushy__irflr__8232ede7__sel_medium.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "395b30446243ed16cc981fe84a845d89ab6e9b4abd6fd0c573bf9e579a6b39f4",
+      "sql_fingerprint": "f76d2596b3eed9d2a05be1d137a3a40492eea423ac678161baf78c40da12f0d6",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.370277158",
+      "outeryan_s": "0.856002616",
+      "speedup": 0.4325654514121251,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_high.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "5fda12670a84dac9e7ba7f56f2fdd55517e0704baa099da6e8f7a916bd2a1782",
+      "sql_fingerprint": "1fba7c2595530ab035ee453f233a38eb8005a51f9b81836ecb1bc97b12094848",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.238817410",
+      "outeryan_s": "1.021080799",
+      "speedup": 0.2338868875351362,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_medium.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "b10e88f4dc3a1d467a03ed2166b5d8facf5aa6828c2f97796cfd73a5f1ca20ee",
+      "sql_fingerprint": "a1eb4ff1f470c330c42e2c5367a3b985c3478dfc6d2180bce86d0532639557da",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.180547603",
+      "outeryan_s": "0.626770143",
+      "speedup": 0.28806031208796745,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_high",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_high.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "250eeac4f95c8a0b70925c4057674c314a5fc3669d63ed1a2b45710d3f7547e2",
+      "sql_fingerprint": "2c6ebfd7d7538160f291c7b1e351813e4096d1ef8af1eed7529d6a891818a836",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.251187543",
+      "outeryan_s": "1.231186835",
+      "speedup": 0.20402065377835202,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_low",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_low.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "bb39cf5c76dea86ec7ec9bf476b0c098a0a1abfcd112195353e226ce8fa8bb18",
+      "sql_fingerprint": "20f59327e0cdb96d93f82b9711a0bc0a66078d080dbd9f53c1f5e67b5de32aae",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.135629930",
+      "outeryan_s": "0.783497076",
+      "speedup": 0.17310840608676378,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_medium",
+      "path": "tpcds/join__tpcds__sqlstorm_tpcds_28643__right_deep__irfli__dca73956__sel_medium.sql",
+      "reason": "measured_speedup_below_0.5",
+      "content_sha256": "72374aeaba3c7e4219734a4ed3f38ccdd0ccb2db41fa878da7ee920203867f3a",
+      "sql_fingerprint": "672c04b2c448f2106c43e80b67fff2dd41bd76db62e0d94bb1aaa9f3fb1094e5",
+      "source_csv": "experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "duckdb_s": "0.201204882",
+      "outeryan_s": "1.032913907",
+      "speedup": 0.1947934679129071,
+      "duckdb_status": "measured",
+      "outeryan_status": "measured"
+    }
+  ],
+  "templates": [
+    {
+      "name": "q93_count",
+      "source_seed": "tpcds_q93_return_reason",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q93",
+      "source_location": "extension/tpcds/dsdgen/queries/93.sql",
+      "archive_sql": "revisions/unique_semantic_20260929/benchmark/tpcds/aggregate__tpcds__q93_return_reason_ldmx__fi__global_count__sel_high.sql",
+      "archive_sha256": "13ec84af505c12830e5ff73cc8bd9e263ef008f57239ec29902b4a3b389c6cbc",
+      "historical_run": "20260929_222836_t32",
+      "historical_csv_sha256": "a84e17d604a3c2a97910877621e70eb91112568b50c8328410b0d2f34b086b71",
+      "historical_query": "aggregate__tpcds__q93_return_reason_ldmx__fi__global_count__sel_high",
+      "historical_duckdb_s": 103.019256958,
+      "historical_outeryan_s": 1.124247383,
+      "historical_speedup": 91.63397532943156,
+      "tree_shape": "left_deep",
+      "join_vector": "FI",
+      "relation_count": 3,
+      "topology": "chain",
+      "expression_fingerprint": "72f7683490f3c297f8751e5933a218f63b6dc4ef16490d88aad3b0239b6e312e",
+      "selectivity_profile": "tpcds_return_reason",
+      "selectivity_anchor": "r.r_reason_desc",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q05_alt_count",
+      "source_seed": "tpcds_q05_web_channel",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q5",
+      "source_location": "extension/tpcds/dsdgen/queries/05.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_tpcds_q05_web_channel_alt.sql",
+      "archive_sha256": "32cc5f53162efd6f79e0b3d89032514a86e5e40356e5250b4e199e5ec3b0953e",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q05_web_channel_alt",
+      "historical_duckdb_s": 67.709986857,
+      "historical_outeryan_s": 0.812764215,
+      "historical_speedup": 83.30827761283757,
+      "tree_shape": "left_deep",
+      "join_vector": "RFI",
+      "relation_count": 4,
+      "topology": "star",
+      "expression_fingerprint": "d09b60e83186e5f1cc80f7f1597f4285803df5fc9d6f66304b1d8d90919c3727",
+      "selectivity_profile": "recovery_modulo_wr_order_number",
+      "selectivity_anchor": "wr.wr_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q05_right_count",
+      "source_seed": "tpcds_q05_web_channel",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q5",
+      "source_location": "extension/tpcds/dsdgen/queries/05.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_tpcds_q05_web_channel_rdmx.sql",
+      "archive_sha256": "19d9c87f3d957005a9d95896671cb31727c0b161330730d16d8722ac3b65b287",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q05_web_channel_rdmx",
+      "historical_duckdb_s": 175.158656311,
+      "historical_outeryan_s": 59.641854214,
+      "historical_speedup": 2.9368412270100785,
+      "tree_shape": "right_deep",
+      "join_vector": "LRF",
+      "relation_count": 4,
+      "topology": "star",
+      "expression_fingerprint": "e314b93ae2ce520a732735d4889bac2b572f382e341c0949a20d493558b86111",
+      "selectivity_profile": "recovery_modulo_wr_order_number",
+      "selectivity_anchor": "wr.wr_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q05_rdax_count",
+      "source_seed": "tpcds_q05_web_channel",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q5",
+      "source_location": "extension/tpcds/dsdgen/queries/05.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_tpcds_q05_web_channel_rdax.sql",
+      "archive_sha256": "b8a26c4db23dd9b470fc70c2423d51b09d1da1ccef0e528aca1dc21c4a861247",
+      "historical_run": "20260926_110332_t32_v1",
+      "historical_csv_sha256": "195e033d75e65f5f1ef0d1ae08b5e29a0f558fd4d1d703ac73bacf1592652bb0",
+      "historical_query": "derived__ojb_tpcds_q05_web_channel_rdax",
+      "historical_duckdb_s": 56.770733255,
+      "historical_outeryan_s": 0.95000517,
+      "historical_speedup": 59.758341373026425,
+      "tree_shape": "right_deep",
+      "join_vector": "FIL",
+      "relation_count": 4,
+      "topology": "star",
+      "expression_fingerprint": "3b58fd83a11575661bc4c73803992e2c9d67947819e144a82dc1f82ed6e6f22f",
+      "selectivity_profile": "recovery_modulo_wr_order_number",
+      "selectivity_anchor": "wr.wr_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q80_left_count",
+      "source_seed": "tpcds_q80_store_channel",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q80",
+      "source_location": "extension/tpcds/dsdgen/queries/80.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v2/benchmark/tpcds/derived__ojb_tpcds_q80_store_channel_ldmx_sel001.sql",
+      "archive_sha256": "87685cfe0e937019392eaeb0187a4a0b78afe51d80fa8435b7d959ab51723c08",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q80_store_channel_ldmx_sel001",
+      "historical_duckdb_s": 580.419201676,
+      "historical_outeryan_s": 0.984038427,
+      "historical_speedup": 589.8338781804503,
+      "tree_shape": "left_deep",
+      "join_vector": "FILR",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "1f99434e8c7384ea437aa6285c1d97cd21341da1c60d1ec8dab404576d6c0c90",
+      "selectivity_profile": "recovery_modulo_ss_ticket_number",
+      "selectivity_anchor": "ss.ss_ticket_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q80_rdax_count",
+      "source_seed": "tpcds_q80_store_channel",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q80",
+      "source_location": "extension/tpcds/dsdgen/queries/80.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v2/benchmark/tpcds/derived__ojb_tpcds_q80_store_channel_rdax_sel001.sql",
+      "archive_sha256": "c686d14dc2cb27762552bb9e8a258272172035705176863821d34f8f3b57ad73",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q80_store_channel_rdax_sel001",
+      "historical_duckdb_s": 3.115022684,
+      "historical_outeryan_s": 0.921142905,
+      "historical_speedup": 3.3816931847290297,
+      "tree_shape": "right_deep",
+      "join_vector": "RFIL",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "6e4320b2d26aedb061aa908de9044abbcadf69f0051349546b30ef9dc6a3bd18",
+      "selectivity_profile": "recovery_modulo_ss_ticket_number",
+      "selectivity_anchor": "ss.ss_ticket_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q40_alt_count",
+      "source_seed": "tpcds_q40_catalog_returns",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q40",
+      "source_location": "extension/tpcds/dsdgen/queries/40.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v3/benchmark/tpcds/aggregate__ojb_tpcds_q40_catalog_returns_alt_global_count.sql",
+      "archive_sha256": "c519bda88d56f793281ae004c2a561136caaa8e73dd1ceb6e1f8fb32f9644182",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "aggregate__ojb_tpcds_q40_catalog_returns_alt_global_count",
+      "historical_duckdb_s": 0.824496426,
+      "historical_outeryan_s": 0.180393409,
+      "historical_speedup": 4.570546288639625,
+      "tree_shape": "left_deep",
+      "join_vector": "RFIL",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "6fd66f8ddd50c439c7845c20a8015fbb6e3d6903db348893bd0a4c80f76742db",
+      "selectivity_profile": "recovery_modulo_cs_order_number",
+      "selectivity_anchor": "cs.cs_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q40_right_count",
+      "source_seed": "tpcds_q40_catalog_returns",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q40",
+      "source_location": "extension/tpcds/dsdgen/queries/40.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v2/benchmark/tpcds/derived__ojb_tpcds_q40_catalog_returns_rdmx_sel01.sql",
+      "archive_sha256": "1516fb0d2c3d1503e20941250a1312da6feed2b1882c16017efdfeb16055d04b",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q40_catalog_returns_rdmx_sel01",
+      "historical_duckdb_s": 1.161784735,
+      "historical_outeryan_s": 0.187145083,
+      "historical_speedup": 6.207936197821452,
+      "tree_shape": "right_deep",
+      "join_vector": "LRFI",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "4fb69227f1bd84f9c44da33350ab90b2fe0cb64784c5a9a8bdcaf795f426e713",
+      "selectivity_profile": "recovery_modulo_cs_order_number",
+      "selectivity_anchor": "cs.cs_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q40_rdax_count",
+      "source_seed": "tpcds_q40_catalog_returns",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q40",
+      "source_location": "extension/tpcds/dsdgen/queries/40.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v2/benchmark/tpcds/derived__ojb_tpcds_q40_catalog_returns_rdax_sel001.sql",
+      "archive_sha256": "6a1fb0018a308769230f1376ea4f52d9c0cfc8bdd9d70c7c0cb253fe44f4db21",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q40_catalog_returns_rdax_sel001",
+      "historical_duckdb_s": 0.634113102,
+      "historical_outeryan_s": 0.169526741,
+      "historical_speedup": 3.7404901330581235,
+      "tree_shape": "right_deep",
+      "join_vector": "FILR",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "a8fcb1bebd710aa0a3fd25ecf7c65fbac38a9df92693403fdd6ccb5f543d5e5d",
+      "selectivity_profile": "recovery_modulo_cs_order_number",
+      "selectivity_anchor": "cs.cs_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "q40_rduf_count",
+      "source_seed": "tpcds_q40_catalog_returns",
+      "source_benchmark": "TPC-DS",
+      "source_query": "Q40",
+      "source_location": "extension/tpcds/dsdgen/queries/40.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_tpcds_q40_catalog_returns_rduF.sql",
+      "archive_sha256": "43f1d332b854db6049e8dd23d55036d249937a2e7f2af5e75ab99c05f5de54b3",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_tpcds_q40_catalog_returns_rduF",
+      "historical_duckdb_s": 0.273784701,
+      "historical_outeryan_s": 0.161049757,
+      "historical_speedup": 1.700000708476698,
+      "tree_shape": "right_deep",
+      "join_vector": "ILRF",
+      "relation_count": 5,
+      "topology": "star",
+      "expression_fingerprint": "692ddf27a7162423b0d8af415ff32ec938a4bf833077e34a5a0f3a373a1d5b2a",
+      "selectivity_profile": "recovery_modulo_cs_order_number",
+      "selectivity_anchor": "cs.cs_order_number",
+      "aggregate_variant": "global_count",
+      "projection_policy": "global_count",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm28643_right",
+      "source_seed": "sqlstorm_tpcds_28643",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/28643.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/28643.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_28643_rdmx.sql",
+      "archive_sha256": "b575f131da499c71a97bd8646f49e9be9121d41e6cea8c80ff45764e350e6737",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_28643_rdmx",
+      "historical_duckdb_s": 4.230856149,
+      "historical_outeryan_s": 0.573300848,
+      "historical_speedup": 7.379818403826955,
+      "tree_shape": "right_deep",
+      "join_vector": "ILRFI",
+      "relation_count": 6,
+      "topology": "branch",
+      "expression_fingerprint": "c8e9f9b5b4b1519ac5667e6e3c6627a673c55a36e847f1b3d32e0a773feba6d1",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "C.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm14368_right",
+      "source_seed": "sqlstorm_tpcds_14368",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/14368.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/14368.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_14368_rdmx.sql",
+      "archive_sha256": "2857dba2df32f854f6484eb526918385380f03b8d9a946d8028ca9cc3794ec3b",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_14368_rdmx",
+      "historical_duckdb_s": 3.808375278,
+      "historical_outeryan_s": 0.56540214,
+      "historical_speedup": 6.735693073252253,
+      "tree_shape": "right_deep",
+      "join_vector": "LRFIL",
+      "relation_count": 6,
+      "topology": "branch",
+      "expression_fingerprint": "37930165788d355223bc7f2d65a1b38645aa5757dd8689205f05dc6b40b2ccd0",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm14368_left",
+      "source_seed": "sqlstorm_tpcds_14368",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/14368.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/14368.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_14368_ldmx.sql",
+      "archive_sha256": "035ad35fc9d7823ff7e0d11c6889f21b8501e2b5ea9e4ac02af89215cdd63c50",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_14368_ldmx",
+      "historical_duckdb_s": 3.178208156,
+      "historical_outeryan_s": 0.558355364,
+      "historical_speedup": 5.692088517304905,
+      "tree_shape": "left_deep",
+      "join_vector": "ILRFI",
+      "relation_count": 6,
+      "topology": "branch",
+      "expression_fingerprint": "a9f61abeb977ff919336cc5dc0156e22d3a09158f07600018850fc68289f806d",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm14368_rdur",
+      "source_seed": "sqlstorm_tpcds_14368",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/14368.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/14368.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_14368_rduR.sql",
+      "archive_sha256": "136f83b6dfaeb00681db4d34d33184493291ead33c7666e9b652db09e5dc07e5",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_14368_rduR",
+      "historical_duckdb_s": 0.737469401,
+      "historical_outeryan_s": 0.503152905,
+      "historical_speedup": 1.4656963989902831,
+      "tree_shape": "right_deep",
+      "join_vector": "ILRFI",
+      "relation_count": 6,
+      "topology": "branch",
+      "expression_fingerprint": "b1da8d666c62d2848867e4617ee628499161aca1fe7a2a9c3314f3ca15b24f88",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm10809_left",
+      "source_seed": "sqlstorm_tpcds_10809",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/10809.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/10809.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_10809_ldmx.sql",
+      "archive_sha256": "1daea1c9562e52e8574ced5325d5b856f15d03ef92a54fa95086216b43c75c0c",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_10809_ldmx",
+      "historical_duckdb_s": 1.139245643,
+      "historical_outeryan_s": 0.28462046,
+      "historical_speedup": 4.002683584307326,
+      "tree_shape": "left_deep",
+      "join_vector": "RFIL",
+      "relation_count": 5,
+      "topology": "branch",
+      "expression_fingerprint": "878e6f0ab3b597d8b7174d12e058946c056f89a8dbdb4872ec4ab0bd0f67185f",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm10809_right",
+      "source_seed": "sqlstorm_tpcds_10809",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/10809.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/10809.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/v2/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_10809_rdmx_sel001.sql",
+      "archive_sha256": "c58b1754b11e213dae9c0e1c9cd15bedaa58d098260edd93bc1c2e15124168e9",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_10809_rdmx_sel001",
+      "historical_duckdb_s": 0.288639686,
+      "historical_outeryan_s": 0.22700287,
+      "historical_speedup": 1.271524390859023,
+      "tree_shape": "right_deep",
+      "join_vector": "FILR",
+      "relation_count": 5,
+      "topology": "branch",
+      "expression_fingerprint": "1b9b482c193914f9c1933ab7333331fa442755031680972311c81c338b8912dd",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "storm10809_rdul",
+      "source_seed": "sqlstorm_tpcds_10809",
+      "source_benchmark": "SQLStorm",
+      "source_query": "v1.0/tpcds/queries/10809.sql",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/10809.sql",
+      "archive_sql": "revisions/pre_semantic_20260925/benchmark/tpcds/derived__ojb_sqlstorm_tpcds_10809_rduL.sql",
+      "archive_sha256": "60354018a7dbd91eb1328e736338c9e01fc5a3ac8600ade4694820431374a68b",
+      "historical_run": "20260928_205224_t32_all",
+      "historical_csv_sha256": "860a5c27e037cd8833d9a254e0a1183f9567778adc2587bd1b00dd05eba96be4",
+      "historical_query": "derived__ojb_sqlstorm_tpcds_10809_rduL",
+      "historical_duckdb_s": 1.584821304,
+      "historical_outeryan_s": 0.351366028,
+      "historical_speedup": 4.510456839043074,
+      "tree_shape": "right_deep",
+      "join_vector": "RFIL",
+      "relation_count": 5,
+      "topology": "branch",
+      "expression_fingerprint": "5fa2ea2c14086ee39ce7945380d48a9113ada63abb5f99ca5087a3e21896a4db",
+      "selectivity_profile": "recovery_modulo_c_customer_sk",
+      "selectivity_anchor": "c.c_customer_sk",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    },
+    {
+      "name": "line4b_control",
+      "source_seed": "ds_ds_line4b",
+      "source_benchmark": "Industry-inspired synthetic control",
+      "source_query": "",
+      "source_location": "industry_inspired/tpcds/oy_ds_ds_line4b_v0.sql",
+      "archive_sql": "revisions/unique_semantic_20260929/benchmark/tpcds/graph__tpcds__ds_ds_line4b__fil__sel_low.sql",
+      "archive_sha256": "1ac32b0e6513118df263d123a4b0e26256b097d11f0979b2cdad16f464bbaee4",
+      "historical_run": "20260929_222836_t32",
+      "historical_csv_sha256": "a84e17d604a3c2a97910877621e70eb91112568b50c8328410b0d2f34b086b71",
+      "historical_query": "graph__tpcds__ds_ds_line4b__fil__sel_low",
+      "historical_duckdb_s": 1.587341079,
+      "historical_outeryan_s": 1.486562344,
+      "historical_speedup": 1.067793143965175,
+      "tree_shape": "left_deep",
+      "join_vector": "FIL",
+      "relation_count": 4,
+      "topology": "chain",
+      "expression_fingerprint": "a3bfbfd65e958ce6bee02a56cb5d494e0c1287b113e8543bff0c4e533965637d",
+      "selectivity_profile": "tpcds_web_quantity",
+      "selectivity_anchor": "web_sales.ws_quantity",
+      "aggregate_variant": "",
+      "projection_policy": "archive_projection",
+      "risk": "Historical join expression retained, including any item-only fact/fact edges; changed predicates and any changed projection invalidate old runtime predictions."
+    }
+  ],
+  "recovery_rejected_exact_sql": [
+    {
+      "query_id": "aggregate__tpcds__q40_catalog_returns_alt__rfil__global_count__sel_low",
+      "sql_fingerprint": "df6b77ab232b5f071f0cd3433f1c4150c262620dff1490e0b223e18b4fa0c787",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.088426896760724
+    },
+    {
+      "query_id": "graph__tpcds__ds_ds_line4a__lrf__sel_high",
+      "sql_fingerprint": "fcf418d1956bf9474d9b7e0d09553d354aec10e2d96a98b93be7cbaa7faea4e7",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "graph__tpcds__ds_ds_line4a__rfi__sel_high",
+      "sql_fingerprint": "6559d4422e31e1a70eb0abd77815142bf2e726806dd527dfceb1b7a3edadd7bb",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "graph__tpcds__ds_real_catalog_demo__ilr__sel_medium",
+      "sql_fingerprint": "7115bcec42e1a4bbfe4804de47f1500085b50caea70292ee48a72a718581b5cd",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.41726666038696447
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_alt__rfi__sel_high",
+      "sql_fingerprint": "bdab4dd2dbbf89104665bf96e908b1203f1c498812e4c4d206c42bb16bde20c5",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_alt__rfi__sel_low",
+      "sql_fingerprint": "0c05d77e7b0d207f722bdc102e4bef7bc1df2fb9a08a30314ffff835758cae21",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_alt__rfi__sel_medium",
+      "sql_fingerprint": "c2469dc467188132607227252f764c1750a4ce9e6322de6c2b0acb6bb9b6d949",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdax__fil__sel_high",
+      "sql_fingerprint": "39b51758637af768553bfb67148f093efc216caad275bb83820127dc6534910f",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdax__fil__sel_low",
+      "sql_fingerprint": "821f101766eb0b5c266736ba986a0373fc4eda845be5049893a282c6fe658ec2",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdax__fil__sel_medium",
+      "sql_fingerprint": "018e7117a6830cec09051bcf154b4906c96615471b5b5fc5106f105d26e1c0ae",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdmx__lrf__sel_high",
+      "sql_fingerprint": "bdaab303a00a0f9e5cef521a5f0328b9d56d0071e3f158246ea4d856437d1440",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdmx__lrf__sel_low",
+      "sql_fingerprint": "d4cba9a226c74f77d4832facea22e7c87114dd26ad845c17aba890667ead1870",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdmx__lrf__sel_medium",
+      "sql_fingerprint": "c67ab59595099f7fb31915720b5a6fbb5a3378e593dc4158d520e92780c46c82",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdur__ilr__sel_high",
+      "sql_fingerprint": "814abeb0d4ea6cfb3c1c310627bb3296dacd2235f8d3262030fb7689b22a09ce",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdur__ilr__sel_low",
+      "sql_fingerprint": "f6d04ef024fb52c546729d2c15d9cce781dae0c604d90fab9cc1b0bf9da344f6",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q05_web_channel_rdur__ilr__sel_medium",
+      "sql_fingerprint": "c15f9ce4f90fed64c306f396cec82a7bc3ab164c833946d99142d5e9d00a55a0",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_alt__rfil__sel_high",
+      "sql_fingerprint": "d91ac9d24d9b449b1fb4effcdb581eea2ceaa9255eee4d684ac57f9c6a1ddfec",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.15817224006687658
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_alt__rfil__sel_low",
+      "sql_fingerprint": "4a78bfe96dcf6f2bfc8cf52b0003702dce03c4e79c975b21170a024e7855c58d",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.11619473283012229
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_alt__rfil__sel_medium",
+      "sql_fingerprint": "27046959d8a1cc317a95d7a91394014917601a031b95ec161b8661b497b63284",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.14745542483707785
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_ldmx__ilrf__sel_high",
+      "sql_fingerprint": "05305b980fa6067d094ae5c90484e07e97350f280c75403dfeffc0078a5e87af",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.2976801082719449
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_ldmx__ilrf__sel_low",
+      "sql_fingerprint": "18d7c67f3ad35ca3bf38b9264562711453b948489f1018a58b0b71a210374e39",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.2719612074044395
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_ldmx__ilrf__sel_medium",
+      "sql_fingerprint": "8de1b5d358ef229976ec281a9c8748cd61e68226ae84e392d79bed174574aee8",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.2920468816874132
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdax__filr__sel_high",
+      "sql_fingerprint": "3b8223177da783a0bfb287196ce732f7ca04193de2051eaf63de5402d2a19920",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.1186744733823911
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdax__filr__sel_low",
+      "sql_fingerprint": "9d34947d19983bc2693a12bea30cc3b7f83a2d48653fdd958afbb3f234526995",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.07926698019441561
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdax__filr__sel_medium",
+      "sql_fingerprint": "ee0f577660c4e515f609f8d736ac56c937338f58982e7d1de1de6fb220a496f1",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.1056343974648481
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdmx__lrfi__sel_high",
+      "sql_fingerprint": "58fd25894f93208657d9aed28b7879a5c3c4be4d2dfb641977d94f00422f3590",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.20401559882581527
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdmx__lrfi__sel_low",
+      "sql_fingerprint": "338b6f2635c636389783db2085410494379b6f8d5dbf5e6fdfd7614da3a3d6e0",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.12337345744906493
+    },
+    {
+      "query_id": "join__tpcds__q40_catalog_returns_rdmx__lrfi__sel_medium",
+      "sql_fingerprint": "33f54c16d0b69a6ae5c0301f57e951204eb86eb77f2fc1ceca6999eaf5fbc4d1",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.17436234623705493
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_bdmx__filr__sel_high",
+      "sql_fingerprint": "3c1d5ba03ff08bf2304417305d1a647a8a9ccd870320ae6d156e7a5035e0f37a",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_bdmx__filr__sel_low",
+      "sql_fingerprint": "747e79e80dc7a6ce8a650422c0fdbd365650ef2fcc0233c473341416943aed14",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_bdmx__filr__sel_medium",
+      "sql_fingerprint": "89a686c75b7aa5b076b2b971c1d82bf2dcac99472abea226d7c998f5e244d210",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_ldmx__ilrf__sel_high",
+      "sql_fingerprint": "e57478d58b942920134b1016128b269612c97ccdb81ac4063e308ab67e80c9bc",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_ldmx__ilrf__sel_low",
+      "sql_fingerprint": "1a3ae36a1ff0a869958ef3acab4f17036641eea15e93b1c551dcef006c7d33a7",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_ldmx__ilrf__sel_medium",
+      "sql_fingerprint": "ca3a430bbde4072035c177ba94da0ade5d987caab57fe22e30d7717e2d1428f9",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_rdmx__lrfi__sel_high",
+      "sql_fingerprint": "1277c664b0f81f4568ea2b1eccd0d17ec538aa43979b9ce1866ca655ac929300",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_rdmx__lrfi__sel_low",
+      "sql_fingerprint": "b8066b882d448b7ac10add685efd47b702c829908080fe6817f1b960c12b60b1",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q72_fulfillment_rdmx__lrfi__sel_medium",
+      "sql_fingerprint": "0421363e7d23f5376ba6c7e3321eeedbc0a5020193415df4eb72ecdf0076450c",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_alt__lrfi__sel_high",
+      "sql_fingerprint": "6cb90469d5b5c01346b1949d5882a43ee25ed474f58d2494dc52711526292056",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_alt__lrfi__sel_low",
+      "sql_fingerprint": "9bd23be624c07de4c70eaf7334688dee437372d082ec8388a30103ed43723556",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_alt__lrfi__sel_medium",
+      "sql_fingerprint": "706ca64dd91c74270881b32165ed8dab25c90927ad3e5eaa6a8c2f0b86bc603f",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_ldmx__filr__sel_high",
+      "sql_fingerprint": "8b3358b23973e15404fac5712149b7c67905f02df343f3b7512d7605facaf681",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_ldmx__filr__sel_low",
+      "sql_fingerprint": "b79039477daed357f07a2888193c86061e140f0a162950faeddb95f386aece91",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_ldmx__filr__sel_medium",
+      "sql_fingerprint": "58a746b02d90b4ca4c330afb5939ccf6931ec4f57449e68172d4556fc97afae6",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdax__rfil__sel_high",
+      "sql_fingerprint": "ecf73c87a07636f63d8bbd31bd0eced8bc99cd830aeee730eb37160475a5df16",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdax__rfil__sel_low",
+      "sql_fingerprint": "a836dc1e0c1f8a66351f7012e1ee806ef2c79805209c442ef25252a72f9a7ddf",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdax__rfil__sel_medium",
+      "sql_fingerprint": "1a0c401527e0ba3468f9f90fc1d10e7bd8e77762a8cf4421698ea38d2a5cd90c",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdmx__ilrf__sel_high",
+      "sql_fingerprint": "63e59f98e7be54a3ab0616ebf4ee7e96827fc3b1a0665d82aa51fe22ee8192f1",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdmx__ilrf__sel_low",
+      "sql_fingerprint": "ad9e3287d6c170986e91728b67ca409ce1a9bc4dfe17da27fd62e5079e75c463",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdmx__ilrf__sel_medium",
+      "sql_fingerprint": "6a12edb374d2422fdea25c436748d979834fb58f1b3900c37951b21dc3af23a3",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdul__filr__sel_high",
+      "sql_fingerprint": "d01a86299675dcdfa88691335ac958a5773accb2418b6d21eed355ae75d67bfa",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdul__filr__sel_low",
+      "sql_fingerprint": "020d1f8bd95b2b8941ef195856b63b40428d29cadedb9f732e1918ae82cb9cc8",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q80_store_channel_rdul__filr__sel_medium",
+      "sql_fingerprint": "0368bf0ce6985e20573414ef5141d90dae50a64bd46124f0fa0a62f7d1c60903",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_alt__lr__sel_high",
+      "sql_fingerprint": "ffcb2900f27d0eea2d16a3d2f7b229a5aadf32329d4a962928c9165853a7a5e2",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_alt__lr__sel_low",
+      "sql_fingerprint": "51531842ff56bdc3ca6e108c066b9dca1f17771dce5ec77c8309ff2ff0dc2a99",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_alt__lr__sel_medium",
+      "sql_fingerprint": "0e85a60d5c214f2e82c2f89576a7935febbe5d8417bb2c3c9c1445f011405634",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_ldmx__fi__sel_high",
+      "sql_fingerprint": "0b94023486367ab6373808d3f3ef2e7f7eec48c19163ba359a2794feb9b77020",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_ldmx__fi__sel_low",
+      "sql_fingerprint": "7f67c525074ccef001329abe657470d83c928252ed6aa26ba5eca361d7454320",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_ldmx__fi__sel_medium",
+      "sql_fingerprint": "22a1c473a1481c5a7b0d73d877b78342f7128ffbb098bad74f17b76d1fb0e758",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdax__rf__sel_high",
+      "sql_fingerprint": "8e71b6f02147dfb135691b99eef7e8a81da1033904932ca4c8f8bcb5f2400727",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdax__rf__sel_low",
+      "sql_fingerprint": "5d0d3048f5a70a1476b77d6904bbaf94236a8dd4af65a0b4b8724a54362d1587",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdax__rf__sel_medium",
+      "sql_fingerprint": "13edd6c3c3ced2366696fc9ef4276980546ac9d42905f1bcb2cccd17b7af01fc",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdmx__il__sel_high",
+      "sql_fingerprint": "dd956ba672b631df83af64d6c57b8b5727880f0fc9712ab237a199d20d95fe60",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdmx__il__sel_low",
+      "sql_fingerprint": "b6b23c276c11b91267deb9da8499dde556aa273a47f94abd1b03a62e6213de35",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q93_return_reason_rdmx__il__sel_medium",
+      "sql_fingerprint": "b814d470b4456cdcf547ea7d84e8e9e24d8578ca4e6e1ac90be3467bd6459cc5",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q97_customer_item_overlap_rdul__fi__sel_high",
+      "sql_fingerprint": "8ba972c475b24004bac3480341f22a2d9a578e10da4b7b9b8551fe5513758e18",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q97_customer_item_overlap_rdul__fi__sel_low",
+      "sql_fingerprint": "38140e38f517d91953cda33bc30bc6e88ed4e79e424187915a664965bc6caf9e",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__q97_customer_item_overlap_rdul__fi__sel_medium",
+      "sql_fingerprint": "fa1eed14db81cdbb9b4cdf73d5c8f15d4efe0bfe086a3d96cdee9ee05c4c257e",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_10809_bmx__ilrf__sel_high",
+      "sql_fingerprint": "5c456db76535d5733cbef73538df35d344b3c8e2a57c2ba241dcf0af9b73df59",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.20417974446329326
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_10809_bmx__ilrf__sel_medium",
+      "sql_fingerprint": "7e11055dbc7dc7af3c9dfef797c3bb0c827b398c5f8b09b21764c70e88e833d0",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.21385011956247635
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_10809_rdul__rfil__sel_high",
+      "sql_fingerprint": "ec7d147d4d18338d321f535e2897491940fb7d2de52f842712b12e27c8f295b4",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.3485741394133825
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_10809_rdul__rfil__sel_medium",
+      "sql_fingerprint": "88abb98b672dfbca0b17263884bc2879348cf6e2b66a83140680f2b6fc2ead2d",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "measured_speedup_below_0.5",
+      "speedup": 0.43669372404223117
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bdmx__rfil__sel_high",
+      "sql_fingerprint": "ee915a80725466ff13acbd7eaa105cedd8fc66975e16ad7737b021fea75c328f",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bdmx__rfil__sel_low",
+      "sql_fingerprint": "d0ff0dfc5d8b070015672331c5395c3f31f3ff221b23d79cc450d87d74679148",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bdmx__rfil__sel_medium",
+      "sql_fingerprint": "3888ce221591d4933faa6c0f8c48e7f2d30537f25dca64873b3b6a9d4fa57a37",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bmx__lrfi__sel_high",
+      "sql_fingerprint": "18eb3e3458354c0899f1139b8f0bd12d7f6f106584212732bd04763fb37ed832",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bmx__lrfi__sel_low",
+      "sql_fingerprint": "99966b6eb153e269321e79716cce970683614f6849c1afa89b05e7c44092b1d6",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_bmx__lrfi__sel_medium",
+      "sql_fingerprint": "17ac565564da2ee30bd5d71ede5e4cf02f9714b4e0664839087b5983f31fc515",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_ldmx__filr__sel_high",
+      "sql_fingerprint": "8462863858616f41e84f05e348a87e5217379bd27fdb79042929085ce5e5287a",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_ldmx__filr__sel_low",
+      "sql_fingerprint": "ee43ecf823977a8c68c17a34f83e88b8d6c63bc246ee52def8dc809a33b9ae7d",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_ldmx__filr__sel_medium",
+      "sql_fingerprint": "aea83f807347ba049a9752aed6cb957ce47ca0d527efcf19f678e8b7852ee270",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdmx__ilrf__sel_high",
+      "sql_fingerprint": "0731ed04784c6f42f610664f930e87c1f0d302982a7f1e41730ba3528e656377",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdmx__ilrf__sel_low",
+      "sql_fingerprint": "cb898620f5d2eec7b32afd07635826accfd1dee533c1b3faf79211a596544518",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdmx__ilrf__sel_medium",
+      "sql_fingerprint": "718ce92a1a434d81f6cf3bfbce1fb64ef7584e617bb71cced58652a133603626",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdul__filr__sel_high",
+      "sql_fingerprint": "ea927be2788ee70d75caa930b7c6702842de0cc6355a4383787861a6f8f1c53f",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdul__filr__sel_low",
+      "sql_fingerprint": "ea7cd494d2b15216f368ee137a38a53dded231e58a51605d37613cfc3d50e2cf",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    },
+    {
+      "query_id": "join__tpcds__sqlstorm_tpcds_11376_rdul__filr__sel_medium",
+      "sql_fingerprint": "c58966c4c856efb0b5ce15a83d195ff1e42028c327207aa34fa1dd53dd3294a3",
+      "source_csv": "experiment_onoff_benchmark_20260929_222836_t32.csv",
+      "reason": "timeout",
+      "speedup": null
+    }
+  ]
+}

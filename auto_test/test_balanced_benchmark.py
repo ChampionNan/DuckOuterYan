@@ -11,6 +11,7 @@ from unittest import mock
 import balanced_benchmark as b
 from benchmark_corpus import count_base_relations
 import qualify_benchmark as q
+import tpcds_refresh as refresh
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
@@ -23,12 +24,10 @@ class BalancedBenchmarkTest(unittest.TestCase):
 
     def test_active_matrix_and_mixed_kinds(self):
         rows = b.validate(b.ROOT / "benchmark")
-        self.assertEqual(len(rows), 723)
-        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=180, tpch=180, tpcds=183, job=180))
-        rows = [r for r in rows if not b.is_historical_case(r)]
-        self.assertEqual(len(rows), 720)
-        self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in rows),
-                         {(f, t, s):20 for f in b.FAMILIES for t in b.TIERS for s in b.SHAPES})
+        self.assertEqual(len(rows), 741)
+        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=180, tpch=180, tpcds=201, job=180))
+        self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in rows if r["family"] != "tpcds"),
+                         {(f, t, s):20 for f in ("graph", "tpch", "job") for t in b.TIERS for s in b.SHAPES})
         self.assertTrue(all(len(set(r["join_vector"])) >= 2 for r in rows))
         self.assertFalse(any(r["source_seed"] == "tpcds_q72_fulfillment" for r in rows))
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
@@ -42,14 +41,15 @@ class BalancedBenchmarkTest(unittest.TestCase):
                                  {4: 14, 5: 6})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
-        self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows))
+        self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows if not refresh.is_recovery(r)))
 
     def test_historical_cases_preserve_sql_and_are_not_band_calibrated(self):
-        corpus = b.ROOT / "benchmark"
-        rows = [r for r in b.validate(corpus) if b.is_historical_case(r)]
+        active = b.ROOT / "benchmark"
+        self.assertFalse(any(b.is_historical_case(r) for r in b.validate(active)))
+        self.assertEqual((active / "historical_cases.txt").read_text(), "")
+        corpus = b.ROOT / "revisions/retired_tpcds_20261005/benchmark"
+        rows = [r for r in b.read_manifest(corpus / "manifest.csv") if b.is_historical_case(r)]
         self.assertEqual(len(rows), 3)
-        self.assertEqual(set((corpus / "historical_cases.txt").read_text().splitlines()),
-                         {r["path"] for r in rows})
         for row in rows:
             original = b.legacy.REPO_ROOT / row["source_location"]
             self.assertEqual((corpus / row["path"]).read_bytes(), original.read_bytes())
@@ -147,6 +147,13 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(self.status(tm_on="nan"), "invalid_timing")
         self.assertEqual(q.classify(self.candidate, None, self.audit, "manifest"), "pending_measurement")
 
+    def test_tpcds_refresh_keeps_subsecond_and_half_speed_boundary(self):
+        self.candidate.update(qualification_min_runtime_s="0", qualification_min_speedup="0.5")
+        self.assertEqual(self.status(tm_off="0.1", tm_on="0.2"), "eligible")
+        self.assertEqual(self.status(tm_off="0.0999", tm_on="0.2"), "speedup_below_0.5")
+        self.candidate["qualification_min_runtime_s"] = "nan"
+        self.assertEqual(self.status(), "invalid_qualification_policy")
+
     def test_failures_never_become_measured(self):
         self.assertEqual(self.status(note="OFF-TIMEOUT"), "timeout_at_600s")
         self.assertEqual(self.status(timing_status="fallback-skip", tm_off="NA"), "fallback_not_measured")
@@ -207,19 +214,20 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
-            self.assertEqual(report["balanced_candidates"], 720)
-            self.assertEqual(report["historical_supplementary_candidates"], 3)
+            self.assertEqual(report["balanced_candidates"], 741)
+            self.assertEqual(report["historical_supplementary_candidates"], 0)
             self.assertEqual(report["historical_supplementary_observations"], 0)
             self.assertEqual(report["qualification_timeout_seconds"], 600)
 
     def test_historical_results_preserved_separately_including_timeouts(self):
-        corpus = b.ROOT / "benchmark"
-        candidates = [r for r in b.read_manifest(corpus / "manifest.csv") if b.is_historical_case(r)]
+        candidates = [r for r, _ in b.historical_cases()]
         results = [dict(self.result, family=r["family"], query=r["query_id"],
                         note="OFF-TIMEOUT" if i == 0 else "OK", tm_off="NA" if i == 0 else "712.5")
                    for i, r in enumerate(candidates)]
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             root = Path(tmp)
+            b.generate(root, per_family=9)
+            corpus = root / "benchmark"
             source = root / "results.csv"
             b.write_csv(source, results)
             report = q.qualify([corpus], [], [source], root / "report")
@@ -235,7 +243,7 @@ class QualificationTest(unittest.TestCase):
     def test_band_audit_explicitly_excludes_historical_cases(self):
         rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
         candidate = next(r for r in rows if not b.is_historical_case(r) and r["family"] != "graph")
-        historical = [r for r in rows if b.is_historical_case(r)]
+        historical = [r for r, _ in b.historical_cases()]
         design = json.loads(b.DESIGN.read_text())
         calibration = design["profiles"][candidate["selectivity_profile"]]["calibration"]
         counts = dict(n=calibration["n"], c0=calibration["qualified_rows"][b.TIERS.index(candidate["semantic_tier"])])

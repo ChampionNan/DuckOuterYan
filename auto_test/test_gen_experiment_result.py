@@ -1455,6 +1455,14 @@ class PaperStatisticsTest(unittest.TestCase):
 
     def test_real_manifest_roles_and_distinct_dimensions(self):
         provenance = PLOT.benchmark_provenance()
+        recovery = provenance[provenance["evaluation_role"].eq("historical_selectivity_recovery")]
+        self.assertEqual(len(recovery), 54)
+        self.assertEqual(set(recovery["workload_component"]), {"historical_recovery"})
+        self.assertEqual(set(recovery["filter_design_revision"]), {"tpcds-recovery-20261005"})
+        composition = PAPER.composition(recovery)
+        self.assertEqual(composition["historical_recovery"], 54)
+        self.assertEqual(composition["supplementary"], 54)
+        self.assertEqual(composition["unclassified"], 0)
         supplementary = provenance[provenance["evaluation_role"].eq("historical_slow_baseline_case")]
         self.assertEqual(len(supplementary), 3)
         self.assertEqual(set(supplementary["workload_component"]), {"evaluation"})

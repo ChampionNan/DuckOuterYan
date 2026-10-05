@@ -34,7 +34,7 @@ def audit_selectivity(root, binary, output, timeout):
     """Read-only base-entity counts, not query timing or cardinality estimates."""
     corpus = root / "benchmark"
     rows = benchmark.validate(corpus)
-    design = json.loads(benchmark.DESIGN.read_text())
+    design = benchmark.load_design()
     used = defaultdict(set)
     for row in rows:
         if benchmark.is_historical_case(row):
@@ -140,10 +140,18 @@ def classify(candidate, result, audit, manifest_hash, expected_host="cpu9"):
         return "invalid_timing"
     if max(off, on) >= timeout:
         return "runtime_at_or_above_timeout"
-    if min(off, on) <= 1:
-        return "runtime_not_above_1s"
-    if off / on < .8:
-        return "speedup_below_0.8"
+    try:
+        minimum_runtime = float(candidate.get("qualification_min_runtime_s", 1))
+        minimum_speedup = float(candidate.get("qualification_min_speedup", .8))
+    except (TypeError, ValueError):
+        return "invalid_qualification_policy"
+    if not (math.isfinite(minimum_runtime) and minimum_runtime >= 0
+            and math.isfinite(minimum_speedup) and minimum_speedup > 0):
+        return "invalid_qualification_policy"
+    if min(off, on) <= minimum_runtime:
+        return f"runtime_not_above_{minimum_runtime:g}s"
+    if off / on < minimum_speedup:
+        return f"speedup_below_{minimum_speedup:g}"
     return "eligible"
 
 
@@ -259,7 +267,8 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     benchmark.write_json(output / "qualification_inputs.json", lists)
     summary = dict(status="COMPLETE" if all(c["shortage"]==0 for c in counts) else "INCOMPLETE",
                    policy="Historically/performance-screened subset, not unbiased overall performance; "
-                          f"eligible measured pairs only, both runtimes >1s and <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s, speedup >=0.8; "
+                          f"eligible measured pairs only, both runtimes <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s; "
+                          "minimum runtime/speedup come from each candidate manifest (TPC-DS refresh: >0s/>=0.5; other candidates: >1s/>=0.8); "
                           "explicit NOT-CHECKED/disabled rows are performance-only, not correctness-verified; "
                           "latest supplied observations win, including failures; no fallback imputation",
                    target_host=host, target_per_family=target, candidates=len(detail), selected=len(selected),

@@ -6,60 +6,62 @@
   "counts": {
     "graph": 180,
     "job": 180,
-    "tpcds": 183,
+    "tpcds": 201,
     "tpch": 180
   },
   "balanced_counts": {
     "graph": 180,
     "tpch": 180,
-    "tpcds": 180,
+    "tpcds": 147,
     "job": 180
   },
-  "supplementary_counts": {
-    "tpcds": 3
+  "base_matrix_complete": false,
+  "recovery_counts": {
+    "tpcds": 54
   },
+  "supplementary_counts": {},
   "family_tiers": {
     "graph": {
+      "high": 60,
       "low": 60,
-      "medium": 60,
-      "high": 60
+      "medium": 60
     },
     "tpch": {
+      "high": 60,
       "low": 60,
-      "medium": 60,
-      "high": 60
+      "medium": 60
     },
     "tpcds": {
-      "low": 60,
-      "medium": 60,
-      "high": 60
+      "high": 66,
+      "low": 69,
+      "medium": 66
     },
     "job": {
+      "high": 60,
       "low": 60,
-      "medium": 60,
-      "high": 60
+      "medium": 60
     }
   },
   "family_shapes": {
     "graph": {
       "left_deep": 60,
-      "right_deep": 60,
-      "bushy": 60
+      "bushy": 60,
+      "right_deep": 60
     },
     "tpch": {
+      "bushy": 60,
       "left_deep": 60,
-      "right_deep": 60,
-      "bushy": 60
+      "right_deep": 60
     },
     "tpcds": {
-      "left_deep": 60,
-      "right_deep": 60,
-      "bushy": 60
+      "left_deep": 74,
+      "right_deep": 84,
+      "bushy": 43
     },
     "job": {
-      "left_deep": 60,
       "right_deep": 60,
-      "bushy": 60
+      "bushy": 60,
+      "left_deep": 60
     }
   },
   "graph_relation_counts": {
@@ -73,7 +75,23 @@
   "graph_filter_revision": "inputcap1",
   "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",
   "historical_exclusion_observations": 138,
+  "tpcds_refresh": {
+    "revision": "tpcds-recovery-20261005",
+    "policy_sha256": "65a230b07b06a41f91eb953151f7d183c131b31efff8b7077826b154e2d525f0",
+    "target_complete_pairs": 50,
+    "retained_previous_measured_pairs": 7,
+    "new_candidates": 54,
+    "removed_queries": 36,
+    "status": "PENDING_CPU9_MEASUREMENT",
+    "counts": {
+      "graph": 180,
+      "tpch": 180,
+      "tpcds": 201,
+      "job": 180
+    },
+    "note": "Measured-pair target is not guaranteed. Historical selection and exclusions must be disclosed."
+  },
   "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
-  "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. Historical supplementary cases are outside balanced quotas; their old timings are not reused."
+  "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. The primary TPC-DS refresh is performance-conditioned and changes base quotas; historical timings are not reused."
 }

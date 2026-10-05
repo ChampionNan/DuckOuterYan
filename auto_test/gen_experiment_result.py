@@ -1240,7 +1240,8 @@ def benchmark_provenance() -> pd.DataFrame:
     provenance = pd.concat(frames, ignore_index=True).drop_duplicates(["workload_category", "query_id"], keep="last")
     provenance["workload_component"] = provenance["source_component"].map(
         {"core": "structural", "industry_inspired": "evaluation",
-         "v1_active_evaluation": "evaluation", "evaluation": "evaluation", "selectivity_ablation": "selectivity_ablation"}
+         "v1_active_evaluation": "evaluation", "evaluation": "evaluation", "selectivity_ablation": "selectivity_ablation",
+         "historical_recovery": "historical_recovery"}
     ).fillna("unknown")
     for column in ("tree_shape", "join_graph_topology", "join_vector", "selectivity_tier"):
         provenance[column] = provenance.get(column, pd.Series(dtype=str)).fillna("unspecified")
@@ -1525,6 +1526,7 @@ def deduplicate_sql_results(frame: pd.DataFrame) -> pd.DataFrame:
             row["topology"] = row["tree_shape"]
             row["join_graph_topology"] = metadata["topology"]
             row["workload_component"] = (
+                "historical_recovery" if metadata.get("source_component") == "historical_recovery" else
                 "evaluation" if metadata["query_class"] == "graph"
                 or metadata.get("evaluation_role") == "historical_slow_baseline_case" else "structural")
             row["query_class"] = class_from_query(metadata["query_id"])
@@ -2708,11 +2710,13 @@ def composition(frame: pd.DataFrame) -> dict:
     structural = int(counts.get("structural", 0))
     controls = int(counts.get("evaluation", 0))
     stress = int(counts.get("selectivity_ablation", 0))
+    recovery = int(counts.get("historical_recovery", 0))
     return {
         "total": len(frame), "structural": structural,
-        "supplementary": controls + stress, "supplementary_controls": controls,
-        "selectivity_ablation": stress, "unclassified": len(frame) - structural - controls - stress,
-        "rule": "core = structural; graph queries and selectivity ablation = supplementary",
+        "supplementary": controls + stress + recovery, "supplementary_controls": controls,
+        "selectivity_ablation": stress, "historical_recovery": recovery,
+        "unclassified": len(frame) - structural - controls - stress - recovery,
+        "rule": "core = structural; graph queries, selectivity ablation and historical recovery = supplementary",
         "dimensions": {
             dimension: {str(key): int(value) for key, value in frame[dimension].fillna("unspecified").value_counts().sort_index().items()}
             for dimension in DIMENSIONS if dimension in frame

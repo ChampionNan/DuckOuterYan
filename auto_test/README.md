@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 720 条配平候选 + 3 条历史补充案例、manifest、固定筛选证据与历史档案；有效数待 cpu9 实测 |
+| `outerjoin_benchmark/` | 741 条当前查询（TPC-DS 201，其它 family 各 180）、manifest、固定筛选证据与历史档案；新增 54 条 TPC-DS 候选待 cpu9 实测 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -220,33 +220,41 @@ R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的�
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 384、`graph` 162（含 industry controls）、`aggregate` 174。
+类型为 `join` 376、`graph` 163（含 industry controls）、`aggregate` 202。
 `--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。
 
-另外原样恢复了 Q80-alt、Q80-left-deep、Q93-left-deep 三条历史 TPC-DS SQL，
-名字为 `join__tpcds__historical__*`，因此 TPC-DS 共 183 条，其他 family 各 180 条。
-这三条保留旧 ticket 取模过滤和 item-only 连接，明确标记为历史补充案例，
-不计入三档配平配额，不把 SF100 的旧时间当作 SF50 实测。
-原始 CSV 包含三条；资格报告另写 `supplementary_results.csv`，保留失败，不筛选案例结果。
-只测这三条可用：
+20261005 的 TPC-DS 调整按 20261002 实测移出 28 条 timeout、8 条 speed-up <0.5 的 SQL，
+保留 147 条，并加入 18 组历史表达式 × 三档 = 54 条候选，总计 201 条；完整默认运行共 741 条。
+Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移出。
+36 条原 SQL 可在 `outerjoin_benchmark/revisions/retired_tpcds_20261005/benchmark/` 恢复；原始 CSV 不改。
+生成器读取固定 `sources/tpcds_refresh_20261005.json`，不会在下次 `run_all.sh` 恢复已剔除 SQL。
+
+目标约 50 条完整 TPC-DS 实测：保留定义中此前只有 7 条配对，新增 54 条仍需 cpu9 实测，
+不能把旧速度比当成新查询结果。新组保留旧 join expression 与过滤 relation，
+旧取模模式采用约 3%/30%/55% 的 identifier buckets，Q93/control 保留语义谓词。
+它们明确标为性能筛选的历史扩展，不宣称业务语义过滤或无偏采样。
+Q5/Q40/Q80 大输出模式采用明确命名的 COUNT 变体，仍由两侧执行同一裸查询。
+每组包含三档，不因一个档位表现差而默认排除整个表达式。
+
+只重测 TPC-DS（含编译/重新生成），或仅测新增候选（使用现有编译）：
 
 ```bash
-bash auto_test/experiment_onoff.sh --all --timeout 600 \
-  --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
+bash auto_test/run_all.sh --only tpcds --timeout 600 --check-correctness
+bash auto_test/experiment_onoff.sh --all --timeout 600 --check-correctness \
+  --query-list auto_test/outerjoin_benchmark/benchmark/tpcds_recovery.txt
 ```
 
-默认双方各 10 分钟测试可用 `bash auto_test/run_all.sh --all`，但 Q80-alt
-旧 DuckDB 时间为 1137.5 秒（约 19 分钟），SF50 下能否完成需重测。
+默认双方各 10 分钟测试可用 `bash auto_test/run_all.sh --all`。
 默认及配平资格政策均为双方各 600 秒；旧 900/1800 秒结果保留原记录，不混作新的资格测量。
 默认检查所有 query 的等价性。任何一侧超时都不阻止另一侧执行；若等价性阶段超时，
 `correct=TIMEOUT`，仍保留完成侧的时间/profile，精确 speed-up 为 `NA`，不混入有效配对统计。
 
 查询名包含类型、执行 benchmark、来源/结构、join vector 和 selectivity 档位，例如
 `join__tpch__q05_region_sales_ldmx__ilrf__sel_low`（新名称还带 expression hash）。
-720 条配平候选的过滤档位为 `(0,5%)`、`[5,40%)`、`[40,60%]`，使用业务语义谓词，不使用 mod/hash 采样。
-完整复合连接键保留；Graph 和 industry controls 明确记录 synthetic 来源。
-历史 speed-up <0.8 或确认 30 分钟超时的未改变连接表达式已排除。
+主过滤档位为 `(0,5%)`、`[5,40%)`、`[40,60%]`。基础组件使用语义谓词，恢复组件的 identifier buckets 单独标明。
+基础组件保留完整复合连接键；历史恢复组件保留归档键，部分为 item-only；Graph/industry controls 明确记录 synthetic 来源。
+基础组件排除历史 speed-up <0.8 或确认 30 分钟超时的表达式；恢复组件仅根据明确的新 SQL 变体重新评估，且防止已知失败 SQL 仅换名后加入。
 这是 **historically/performance-screened** 集合，论文不能描述成无性能筛选的随机样本。
 
 ```bash
@@ -286,7 +294,9 @@ python3 auto_test/qualify_benchmark.py \
 CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
 `qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
 `qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
-最终要求双侧运行时间 >1s、<600s、speed-up >=0.8；正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
+资格门槛读取 manifest：TPC-DS 当前为时间 >0、<600s，speed-up >=0.5；其它 family 仍为双侧 >1s、<600s、speed-up >=0.8。
+正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
+`qualify_benchmark.py` 的默认 180/family 配平目标是旧资格流程，不等于本次约 50 条 TPC-DS 完整配对的探索目标。
 缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
 
 ## Experiment pipeline

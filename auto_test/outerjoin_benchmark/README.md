@@ -1,24 +1,29 @@
 # Outer-join benchmark: balanced, historically screened candidates
 
-Revision: `balanced-screened-20261002`. The active `benchmark/` contains **723
-distinct candidate SQL queries**: **720 balanced candidates**, 180 per execution
-family, plus **three historical TPC-DS case studies**. Thus default runs contain
-183 TPC-DS queries and 180 each for Graph, TPC-H and JOB. These are not verified
-successful measurements. The following quotas apply only to the balanced 720;
-final membership requires tests on cpu9.
+Base revision: `balanced-screened-20261002`, with the primary-batch
+`tpcds-recovery-20261005` component pinned in `tpcds_refresh.json` and the manifest.
+The active `benchmark/` contains **741 queries**: **201 TPC-DS** and **180 each**
+for Graph, TPC-H and JOB. The other families' SQL is unchanged.
+TPC-DS removes 28 timed-out and 8 measured speed-up <0.5 queries from the
+20261002 run, retains 147 definitions, and adds 54 pending recovery candidates.
+The target of about **50 complete TPC-DS measured pairs is not yet achieved**:
+only 7 of the retained definitions have complete prior measurements; the 54
+new candidates require cpu9 testing, including equivalence checks.
 
 | Family | Low `(0,5%)` | Medium `[5,40%)` | High `[40,60%]` | Total |
 |---|---:|---:|---:|---:|
 | Graph | 60 | 60 | 60 | 180 |
 | TPC-H | 60 | 60 | 60 | 180 |
-| TPC-DS | 60 | 60 | 60 | 180 |
+| TPC-DS | 69 | 66 | 66 | 201 |
 | JOB | 60 | 60 | 60 | 180 |
 
-Each family also has 60 left-deep, 60 right-deep and 60 bushy input expressions:
+The unchanged families have 60 left-deep, 60 right-deep and 60 bushy input expressions:
 20 of each shape in each selectivity band. Shapes describe input expressions,
 not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
-approximately balanced, not claimed exactly equal.
+approximately balanced, not claimed exactly equal. TPC-DS now has 74 left-deep,
+84 right-deep and 43 bushy expressions; do not claim exact shape balance for its
+performance-conditioned recovery component.
 
 Graph now has **126 four-relation and 54 five-relation queries; no six-relation queries**
 (previously 72/90/18). Each selectivity-by-shape cell uses the same 14/6 split.
@@ -39,16 +44,17 @@ independently and qualification requires every input cap to pass its own band.
 The caps were not selected using ON/OFF speed-ups. They reduce the input scale
 but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of all 180 candidates.
 
-Balanced types: 384 `join`, 162 `graph` (including 27 industry-inspired controls), and
-174 `aggregate`. Aggregates comprise 66 COUNT, 36 MIN, 36 MAX and 36 SUM queries.
+Current types: 376 `join`, 163 `graph` (including industry-inspired controls), and
+202 `aggregate`. Aggregates comprise 96 COUNT, 34 MIN, 36 MAX and 36 SUM queries.
 Type and family differ: `--only graph` runs 180 Graph-family candidates, whereas
-`--query-type graph` selects 162 graph/control queries across families.
-The three historical cases add three `join` queries (387 in the full run).
+`--query-type graph` selects 163 graph/control queries across families.
 
-## Historical supplementary cases
+## TPC-DS historical recovery and removed cases
 
-Default `--all` also runs the following exact archived SQL definitions. Regeneration
-preserves their SQL bytes and verifies pinned hashes; reserve batches do not repeat them.
+The three previously restored cases below timed out in the 20261002 correctness
+stage and are **no longer active**. They are preserved, together with all 36 removed
+definitions, under `revisions/retired_tpcds_20261005/benchmark/`. Raw experiment
+results remain unchanged. `benchmark/historical_cases.txt` is now empty.
 
 | Case | Active query ID | Historical DuckDB / OuterYan time (s) |
 |---|---|---:|
@@ -64,18 +70,44 @@ composite key. The modulo filter is nominally about 0.1%, but is not a measured
 or audited semantic band. Do not describe these definitions as unchanged original
 TPC-DS queries, or as complying with the balanced component's source-key/filter rules.
 
-The manifest marks `evaluation_role=historical_slow_baseline_case` and
-`semantic_tier=historical_unbanded`. Raw experiment CSVs include all three;
-qualification excludes them from the 720-target quotas and writes their raw
-observations, **including failures**, to `supplementary_results.csv`. This file
-is unqualified case-study evidence, not another screened subset. Selectivity
-audits explicitly list these cases as outside the three-band audit.
+The replacement component is explicitly marked
+`evaluation_role=historical_selectivity_recovery`: 18 historical expressions ×
+three tiers = 54 candidates (30 global COUNT, 21 join and 3 synthetic-control
+queries). Sources cover Q5, Q40, Q80, Q93, SQLStorm 10809/14368/28643 and one
+industry control. SQLStorm 11376 is not replenished. Archived mixed join types,
+parentheses, relations and join keys are retained. Some historical fact/fact
+patterns intentionally retain item-only edges and must not be described as
+unchanged original TPC-DS queries with complete transaction keys.
 
-To test only these cases using an already compiled binary:
+For historical modulo patterns, filters remain on the same relation and use
+`(identifier % 100) < 3/30/55`, not an unrelated date predicate. These are
+deterministic identifier cohorts, **not business-semantic filters**, random
+samples, or joined-output selectivity estimates. Q93 reason categories and the
+control quantity predicate retain semantic cohorts. Four locally counted
+recovery profiles are pinned in `sources/tpcds_refresh_20261005.json`; cpu9
+must re-audit their actual fractions. All profiles fit `(0,5%)`, `[5,40%)`,
+`[40,60%]` locally. Large-output Q5/Q40/Q80 expressions use explicit COUNT
+variants, not a hidden wrapper around timed SQL. Both engines execute the same
+bare query. Historical times are selection evidence, never assigned to new SQL.
+
+Exclusions match exact SQL, not every tier sharing an expression. The three
+recovery tiers are kept together; changing a query's name cannot restore an
+exact query known to time out or run below 0.5× in the pinned comparison runs.
+The policy is applied automatically during normal regeneration, without reading
+machine-local results. `--batch >0` and custom-size reserve corpora retain the
+base design; they do not repeat this primary-batch recovery component.
+
+Build, regenerate and retest all active TPC-DS queries on cpu9:
+
+```bash
+bash auto_test/run_all.sh --only tpcds --timeout 600 --check-correctness
+```
+
+To test only the 54 new candidates with an already compiled binary:
 
 ```bash
 bash auto_test/experiment_onoff.sh --all --timeout 600 \
-  --query-list auto_test/outerjoin_benchmark/benchmark/historical_cases.txt
+  --query-list auto_test/outerjoin_benchmark/benchmark/tpcds_recovery.txt
 ```
 
 A 10-minute limit for each engine is now the default (`run_all.sh --all`),
@@ -89,21 +121,24 @@ An OFF timeout does not stop ON or establish an OuterYan timeout (and vice versa
 
 ## Sources and screening
 
-Balanced business-schema derived queries retain relations and **all equality keys per
+The base business-schema component retains relations and **all equality keys per
 edge** from pinned TPC-H, TPC-DS, JOB and SQLStorm seeds. Synthetic graph shapes
-are independently enumerated chains, stars and branches (4–6 relations, forward
+are independently enumerated chains, stars and branches (4–5 relations, forward
 and converging edges). Industry controls are separately identified as synthetic,
 not claimed to originate in a source workload.
 
 `sources/balanced_design.json` pins predicates, adaptations and local calibration.
-Filters replace WHERE, without modulo/hash sampling. Graph filters use vertex
+Base-component filters replace WHERE, without modulo/hash sampling. Recovery
+identifier cohorts are the explicitly marked exception above. Graph filters use vertex
 cohorts; business filters use dates, years, categories, names and ranges.
 Selectivity includes NULL base rows in its denominator, not final join output
 or cost-model estimates. Local calibration requires a target-database audit.
 
 `sources/balanced_exclusions.json` pins historical speed-up <0.8 or confirmed
 1,800-second timeout observations. Their unchanged join expressions are excluded
-across tiers. 600-second timeouts are not assumed to be 1,800-second failures.
+across tiers in the base generator. The recovery component explicitly reconsiders
+historical expressions with new predicate cohorts and/or projections; it does
+not silently rename known failed exact SQL. 600-second timeouts are not assumed to be 1,800-second failures.
 TPC-DS Q72's reduced pattern is excluded because its omitted sales/inventory week
 constraint produced unsafe fanout. Corrected composite-key expressions are new
 candidates, not recipients of old timing measurements.
@@ -179,8 +214,10 @@ Qualification checks SQL/manifest hashes, host, database path/size/mtime signatu
 10-minute-per-engine configuration and audited bands. Database changes require re-audit and
 remeasurement. The signature is a guard, not a full database checksum.
 
-Final eligibility: correctness verified **or explicitly unchecked**, both measured runtimes **>1 s and
-<600 s**, DuckDB/OuterYan **>=0.8**, and verified selectivity band.
+Qualification uses each manifest row's thresholds: refreshed TPC-DS keeps
+positive subsecond times and requires DuckDB/OuterYan **>=0.5**; other candidates
+retain **both >1s, speed-up >=0.8**. Both sides must complete below 600s and pass
+the selectivity audit. Correctness is verified unless explicitly disabled.
 Unchecked rows remain performance-only evidence, not a correctness claim.
 Qualification rejects mixed timing protocols/sample counts/correctness modes;
 do not combine old three-run medians and new single-run timings as one experiment.
@@ -191,7 +228,8 @@ Missing/failed rows yield shortages, never fabricated success or rescaled timing
 Outputs under `qualified_TIMESTAMP/`:
 
 - `qualification.csv`: every candidate and its inclusion/exclusion reason.
-- `coverage.csv`: eligible count and shortage per family/tier (target 60).
+- `coverage.csv`: eligible count and shortage per family/tier (legacy balanced target 60,
+  not the new exploratory goal of about 50 complete TPC-DS pairs overall).
 - `qualification_summary.json`: status and per-family geomean/min/max/median/std.
 - `qualified_results.csv`: retained balanced result rows, separate from raw results.
 - `supplementary_results.csv`: all supplied historical-case observations, unqualified.

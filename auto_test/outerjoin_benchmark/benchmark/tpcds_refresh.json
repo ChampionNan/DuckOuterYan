@@ -1,0 +1,16 @@
+{
+  "revision": "tpcds-recovery-20261005",
+  "policy_sha256": "65a230b07b06a41f91eb953151f7d183c131b31efff8b7077826b154e2d525f0",
+  "target_complete_pairs": 50,
+  "retained_previous_measured_pairs": 7,
+  "new_candidates": 54,
+  "removed_queries": 36,
+  "status": "PENDING_CPU9_MEASUREMENT",
+  "counts": {
+    "graph": 180,
+    "tpch": 180,
+    "tpcds": 201,
+    "job": 180
+  },
+  "note": "Measured-pair target is not guaranteed. Historical selection and exclusions must be disclosed."
+}

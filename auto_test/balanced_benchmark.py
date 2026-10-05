@@ -100,6 +100,17 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def load_design():
+    """Base design plus pinned recovery cohorts; no machine-local measurements."""
+    design = json.loads(DESIGN.read_text())
+    import tpcds_refresh
+    additions = tpcds_refresh.policy().get("recovery_profiles", {})
+    if set(additions).intersection(design["profiles"]):
+        raise ValueError("Recovery profile collides with the base design")
+    design["profiles"].update(additions)
+    return design
+
+
 def body(sql):
     return re.sub(r"--[^\n]*", "", sql).strip()
 
@@ -559,6 +570,11 @@ def generate(root=ROOT, per_family=180, batch=0):
                 path.parent.mkdir(exist_ok=True)
                 path.write_text(sql, encoding="utf-8")
                 records.append(row)
+        refreshed = per_family == 180 and batch == 0
+        if refreshed:
+            import tpcds_refresh
+            records = tpcds_refresh.apply(records, output)
+            balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
         write_csv(output/"manifest.csv", records)
         write_csv(output/"aliases.csv", [], ["canonical_query_id", "sql_fingerprint"])
@@ -570,21 +586,27 @@ def generate(root=ROOT, per_family=180, batch=0):
             "revision": REVISION, "status": "CANDIDATES_ONLY_NOT_MEASURED", "batch": batch,
             "target_host": "cpu9:/home/data/bchenba/DuckYanOuter", "counts": dict(Counter(r["family"] for r in records)),
             "balanced_counts": dict(Counter(r["family"] for r in balanced_records)),
+            "base_matrix_complete": not refreshed,
+            "recovery_counts": dict(Counter(r["family"] for r in records
+                                              if r.get("evaluation_role") == "historical_selectivity_recovery")),
             "supplementary_counts": dict(Counter(r["family"] for r in records if is_historical_case(r))),
-            "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
-            "family_shapes": {f:dict(Counter(r["tree_shape"] for r in balanced_records if r["family"]==f)) for f in FAMILIES},
+            "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
+            "family_shapes": {f:dict(Counter(r["tree_shape"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
             "graph_relation_counts": dict(Counter(r["relation_count"] for r in balanced_records if r["family"] == "graph")),
             "graph_relation_weights": GRAPH_RELATION_WEIGHTS,
             "graph_filter_revision": GRAPH_FILTER_REVISION,
             "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",
             "historical_exclusion_observations": len(evidence["excluded"]),
+            "tpcds_refresh": json.loads((output / "tpcds_refresh.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
-                         "Historical supplementary cases are outside balanced quotas; their old timings are not reused."})
+                         "The primary TPC-DS refresh is performance-conditioned and changes base quotas; historical timings are not reused."})
         validate(output)
         archive_current(root)
         destination = root/"benchmark"
         old = read_manifest(destination/"manifest.csv") if (destination/"manifest.csv").exists() else []
+        if (destination / "tpcds_refresh.json").exists() and not refreshed:
+            raise ValueError("Use a new --root for a reserve/custom-size batch; preserve the TPC-DS refresh")
         if old and old[0].get("corpus_revision") == REVISION and any(
                 int(r["candidate_batch"]) != batch for r in old):
             raise ValueError("Use a new --root for a reserve batch; do not overwrite measured candidates")
@@ -596,6 +618,8 @@ def generate(root=ROOT, per_family=180, batch=0):
         present = {str(p.relative_to(destination)) for p in destination.glob("*/*.sql")}
         if present-managed:
             raise ValueError(f"Unmanaged SQL would contaminate corpus: {sorted(present-managed)}")
+        if refreshed:
+            tpcds_refresh.archive_retired(destination, old, root)
         retained = {r["path"] for r in records}
         for row in old:
             if row["path"] not in retained:
@@ -605,9 +629,9 @@ def generate(root=ROOT, per_family=180, batch=0):
                 target=destination/source.relative_to(output)
                 target.parent.mkdir(parents=True,exist_ok=True)
                 shutil.copyfile(source,target)
-    print(f"Generated {len(records)} pending candidates: {len(balanced_records)} balanced "
-          f"({per_family} per family, {per_family//3} per tier), "
-          f"{len(records)-len(balanced_records)} historical supplementary cases")
+    print(f"Generated {len(records)} pending candidates: "
+          f"{dict(Counter(r['family'] for r in records))}; "
+          f"TPC-DS recovery={'enabled' if refreshed else 'not applied to reserve/custom-size batch'}")
     return len(records)
 
 
@@ -619,6 +643,11 @@ def validate(benchmark):
     design = json.loads(DESIGN.read_text())
     graph_sources = {s.seed_id: s for s in graph_seeds()}
     expected_cases = {r["query_id"]: r for r, _ in historical_cases()}
+    refreshed = (benchmark / "tpcds_refresh.json").exists()
+    if refreshed:
+        import tpcds_refresh
+        excluded_ids = {r["query_id"] for r in tpcds_refresh.policy()["excluded"]}
+        expected_cases = {k: v for k, v in expected_cases.items() if k not in excluded_ids}
     restored = []
     for r in rows:
         if r["corpus_revision"] != REVISION or r["family"] not in FAMILIES:
@@ -663,6 +692,9 @@ def validate(benchmark):
     batches = {int(r["candidate_batch"]) for r in balanced}
     if len(batches) != 1 or set(restored) != (set(expected_cases) if batches == {0} else set()):
         raise ValueError("Historical cases must occur exactly once in the primary batch only")
+    if refreshed:
+        tpcds_refresh.validate(benchmark, rows)
+        return rows
     if {r["family"] for r in balanced} != set(FAMILIES) or len(set(Counter(r["family"] for r in balanced).values()))!=1:
         raise ValueError("Unequal family counts")
     if len(set(Counter((r["family"],r["semantic_tier"]) for r in balanced).values()))!=1:
