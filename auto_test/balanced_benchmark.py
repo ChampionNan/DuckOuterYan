@@ -573,7 +573,9 @@ def generate(root=ROOT, per_family=180, batch=0):
         refreshed = per_family == 180 and batch == 0
         if refreshed:
             import tpcds_refresh
+            import benchmark_speedup_screen
             records = tpcds_refresh.apply(records, output)
+            records = benchmark_speedup_screen.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
         write_csv(output/"manifest.csv", records)
@@ -598,9 +600,10 @@ def generate(root=ROOT, per_family=180, batch=0):
             "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",
             "historical_exclusion_observations": len(evidence["excluded"]),
             "tpcds_refresh": json.loads((output / "tpcds_refresh.json").read_text()) if refreshed else None,
+            "speedup_screen": json.loads((output / "speedup_screen.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
-                         "The primary TPC-DS refresh is performance-conditioned and changes base quotas; historical timings are not reused."})
+                         "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
         validate(output)
         archive_current(root)
         destination = root/"benchmark"
@@ -620,6 +623,9 @@ def generate(root=ROOT, per_family=180, batch=0):
             raise ValueError(f"Unmanaged SQL would contaminate corpus: {sorted(present-managed)}")
         if refreshed:
             tpcds_refresh.archive_retired(destination, old, root)
+            screen = benchmark_speedup_screen.policy()
+            tpcds_refresh.archive_retired(destination, old, root,
+                                         exclusions=screen["excluded"], revision=screen["archive_revision"])
         retained = {r["path"] for r in records}
         for row in old:
             if row["path"] not in retained:
@@ -693,7 +699,9 @@ def validate(benchmark):
     if len(batches) != 1 or set(restored) != (set(expected_cases) if batches == {0} else set()):
         raise ValueError("Historical cases must occur exactly once in the primary batch only")
     if refreshed:
-        tpcds_refresh.validate(benchmark, rows)
+        import benchmark_speedup_screen
+        before_screen = benchmark_speedup_screen.validate(benchmark, rows)
+        tpcds_refresh.validate(benchmark, before_screen)
         return rows
     if {r["family"] for r in balanced} != set(FAMILIES) or len(set(Counter(r["family"] for r in balanced).values()))!=1:
         raise ValueError("Unequal family counts")

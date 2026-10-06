@@ -128,14 +128,13 @@ def apply(records, output):
     return retained
 
 
-def archive_retired(destination, old_rows, root):
+def archive_retired(destination, old_rows, root, *, exclusions=None, revision="retired_tpcds_20261005"):
     """Preserve removed SQL and old manifest rows before active-set replacement."""
-    spec = policy()
-    excluded = {r["query_id"]: r for r in spec["excluded"]}
+    excluded = {r["query_id"]: r for r in (policy()["excluded"] if exclusions is None else exclusions)}
     rows = [r for r in old_rows if r["query_id"] in excluded]
     if not rows:
         return
-    archive = root / "revisions/retired_tpcds_20261005/benchmark"
+    archive = root / "revisions" / revision / "benchmark"
     for row in rows:
         source, target = destination / row["path"], archive / row["path"]
         if b.digest(source) != excluded[row["query_id"]]["content_sha256"]:

@@ -268,7 +268,7 @@ def qualify(corpora, audits, results, output, target=180, host="cpu9"):
     summary = dict(status="COMPLETE" if all(c["shortage"]==0 for c in counts) else "INCOMPLETE",
                    policy="Historically/performance-screened subset, not unbiased overall performance; "
                           f"eligible measured pairs only, both runtimes <{benchmark.QUALIFICATION_TIMEOUT_SECONDS}s; "
-                          "minimum runtime/speedup come from each candidate manifest (TPC-DS refresh: >0s/>=0.5; other candidates: >1s/>=0.8); "
+                          "minimum runtime/speedup come from each candidate manifest (screened primary batch: >=0.5; TPC-DS >0s, other families >1s; legacy/reserve policies are preserved); "
                           "explicit NOT-CHECKED/disabled rows are performance-only, not correctness-verified; "
                           "latest supplied observations win, including failures; no fallback imputation",
                    target_host=host, target_per_family=target, candidates=len(detail), selected=len(selected),

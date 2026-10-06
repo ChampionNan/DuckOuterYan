@@ -9,7 +9,8 @@ benchmark SQL is never executed.
 The default cohort deduplicates SQL across all query types for the same date and
 thread count; latest observations win, including failures. Historical versioned
 CSV files are resolved through archived SQL and canonical aliases. Exclude a
-measured pair only when both runtimes are strictly below 1 second. Unexecuted
+measured pair only when both runtimes are strictly below 1 second by default;
+--include-subsecond retains these pairs for review. Unexecuted
 fallback placeholders are excluded from measured performance.
 """
 
@@ -32,9 +33,9 @@ import sys
 import warnings
 
 if __package__:
-    from .benchmark_corpus import historical_manifests, read_manifest, resolve_sql_path, sql_fingerprint
+    from .benchmark_corpus import count_base_relations, historical_manifests, read_manifest, resolve_sql_path, sql_fingerprint
 else:
-    from benchmark_corpus import historical_manifests, read_manifest, resolve_sql_path, sql_fingerprint
+    from benchmark_corpus import count_base_relations, historical_manifests, read_manifest, resolve_sql_path, sql_fingerprint
 
 import numpy as np
 
@@ -71,12 +72,18 @@ TIMEOUT_SECONDS = 10 * 60
 
 
 def below_runtime_threshold(frame: pd.DataFrame, metric: str = "tm") -> pd.Series:
-    """Exclude only known positive pairs with both runtimes strictly below 1s."""
+    """Exclude positive pairs below the active threshold (zero disables it)."""
     missing = pd.Series(np.nan, index=frame.index)
     off = pd.to_numeric(frame.get(f"{metric}_off", missing), errors="coerce")
     on = pd.to_numeric(frame.get(f"{metric}_on", missing), errors="coerce")
     return (np.isfinite(off) & off.gt(0) & off.lt(MIN_RUNTIME_SECONDS)
             & np.isfinite(on) & on.gt(0) & on.lt(MIN_RUNTIME_SECONDS))
+
+
+def runtime_filter_description() -> str:
+    if MIN_RUNTIME_SECONDS == 0:
+        return "No minimum runtime filter; retain all finite positive measured pairs, including both runtimes below 1 s"
+    return "Exclude pairs with both runtimes < 1 s; retain pairs with at least one runtime >= 1 s"
 
 
 PHASE_COMPONENTS = (
@@ -712,10 +719,11 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
                            else "Historically screened candidates, before post-measurement qualification; report failures and exclusions"
                            if "corpus_revision" in frame and frame["corpus_revision"].eq("balanced-screened-20261002").all()
                            else "Original supplied experiment population"),
-            "eligibility": "Only verified or explicitly NOT-CHECKED/disabled measured pairs with finite positive non-timeout OFF/ON times and at least one runtime >=1s; failures and untimed fallback rows are excluded",
+            "eligibility": "Only verified or explicitly NOT-CHECKED/disabled measured pairs with finite positive non-timeout OFF/ON times; failures and untimed fallback rows are excluded. " + runtime_filter_description(),
             "correctness": "NOT-CHECKED with correctness_check=disabled is performance-only evidence, not a correctness claim; failed or unspecified checks are excluded",
             "timing_protocols": frame[[c for c in ("timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side") if c in frame]].drop_duplicates().fillna("").to_dict("records"),
-            "minimum_runtime": "Exclude a measured query only when both OFF < 1.0 s and ON < 1.0 s; retain equality at 1.0 s and all pairs with either side above it. Apply the same query filter to phase and optimizer summaries; retain raw rows for coverage",
+            "minimum_runtime": runtime_filter_description() + ". Apply the same query filter to phase and optimizer summaries; retain raw rows for coverage",
+            "minimum_runtime_seconds": MIN_RUNTIME_SECONDS,
             "fallback": "timing_status=fallback-skip means no performance measurement occurred; correctness may still be verified; the original placeholder 1.0 is not used in statistics",
             "deduplication": "Unique execution-family/SQL identities across names and historical suites; latest observations win including failures; unresolved definitions remain separate",
             "strata": "Manifest tree_shape and join_graph_topology are distinct; topology is the legacy name-inferred display shape. Join-type composition counts I/L/R/F edges. Selectivity levels are nominal manifest targets, not measured cardinalities; unspecified metadata is not inferred from runtime",
@@ -1446,9 +1454,7 @@ def enrich(frame: pd.DataFrame, run: str) -> pd.DataFrame:
                 sql = resolve_sql_path(category, path, corpus_root).read_text(encoding="utf-8")
             except (OSError, ValueError):
                 return np.nan
-            sql = re.sub(r"--[^\n]*", "", sql)
-            sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
-            count = len(re.findall(r"\b(?:FROM|JOIN)\b", sql, flags=re.IGNORECASE))
+            count = count_base_relations(sql)
             return float(count) if count > 0 else np.nan
 
         categories = frame.get("workload_category", pd.Series("v1", index=frame.index))
@@ -2028,6 +2034,8 @@ def format_seconds_label(value: float) -> str:
         return f"{value:.1f}s"
     if value >= 1:
         return f"{value:.2g}s"
+    if 0 < value < 0.01:
+        return f"{value:.2g}s"
     return f"{value:.2f}s"
 
 
@@ -2115,7 +2123,7 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
     visible = (ticks >= lower) & (ticks <= upper)
     ax.set_xlim(lower, upper)
     ax.set_xticks(ticks[visible], [f"{value:g}×" for value in candidates[visible]])
-    ax.set_yticks(positions, families)
+    ax.set_yticks(positions, ["Graph" if family == "graph" else family for family in families])
     ax.invert_yaxis()
     ax.axvline(0.0, color="0.45", linewidth=0.8, zorder=1)
     # Soft warm/cool hues meet at white for 1x. The background and arrow share the
@@ -2212,7 +2220,7 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     ])
         for family in families
     ]
-    legend_labels = families.copy()
+    legend_labels = ["Graph" if family == "graph" else family for family in families]
     legend_handles.extend([
         Line2D([], [], color="0.28", marker="o", linestyle="none", markeredgecolor="white",
                markeredgewidth=0.25, markersize=6),
@@ -2222,7 +2230,8 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     legend_labels.extend(["OuterYan faster/equal", "OuterYan slower"])
     excluded_fast = int((correct & below_runtime_threshold(frame, metric)).sum())
     figure.text(0.5, -0.025,
-                f"Exclude pairs with both runtimes < 1 s ({excluded_fast} queries); "
+                (f"Exclude pairs with both runtimes < 1 s ({excluded_fast} queries); "
+                 if MIN_RUNTIME_SECONDS else "Sub-second measured pairs retained; ") +
                 "right panel: measured OuterYan-selected plans only.", ha="center", va="top", fontsize=7.5)
     figure.legend(
         handles=legend_handles, labels=legend_labels,
@@ -2465,7 +2474,8 @@ def page_phase(
                 )
         left += widths
     for row_y, total in zip(y, totals):
-        axis.text(101.2, row_y, f"{total:.1f} s", ha="left", va="center", fontsize=8)
+        total_label = f"{total:.3g} s" if total < 0.1 else f"{total:.1f} s"
+        axis.text(101.2, row_y, total_label, ha="left", va="center", fontsize=8)
 
     versioned_labels = "workload_category" in sub
     for family in families:
@@ -2557,7 +2567,8 @@ def page_phase(
         )
     figure.text(
         0.52, 0.045,
-        "(1) Exclude pairs with both unprofiled runtimes < 1 s; bars sum to CPU time (operator seconds).",
+        ("(1) Exclude pairs with both unprofiled runtimes < 1 s; " if MIN_RUNTIME_SECONDS
+         else "(1) Sub-second measured pairs retained; ") + "bars sum to CPU time (operator seconds).",
         ha="center", va="bottom", fontsize=8.7,
     )
     figure.text(
@@ -2653,7 +2664,7 @@ def write_standalone_runtime_figures(
         (output_directory / "phase_queries.json").write_text(json.dumps({
             "placeholder": notice is not None,
             "notice": notice,
-            "runtime_filter": "exclude pairs with both unprofiled OFF < 1 s and ON < 1 s",
+            "runtime_filter": runtime_filter_description(),
             "queries": json.loads(phases[columns].to_json(orient="records", double_precision=15)),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     else:
@@ -2788,7 +2799,7 @@ def participating_columns(sql: str, schema: dict[str, list[str]]) -> list[str]:
 
     A lexer separates identifiers from comments/literals. Stars in the SELECT
     list expand through the catalog; COUNT(*) has no column argument. Unsupported
-    scopes are rejected instead of guessing a count for CTEs or nested queries.
+    scopes are rejected except for the generator's Graph input-filter scans.
     """
     tokens = []
     for match in SQL_ATTRIBUTE_TOKENS.finditer(sql):
@@ -2798,6 +2809,30 @@ def participating_columns(sql: str, schema: dict[str, list[str]]) -> list[str]:
         if kind == "quoted":
             value = value[1:-1].replace('""', '"')
         tokens.append((kind, value.casefold() if kind in ("word", "quoted") else value))
+    # Graph inputcap1 scans project both graph columns without renaming. Collapse
+    # only that exact leaf form for analysis, retaining its column dependencies.
+    # This does not rewrite the executed SQL or accept arbitrary nested scopes.
+    scan_columns, flattened, index = set(), [], 0
+    while index < len(tokens):
+        scan = tokens[index:index + 14]
+        if (len(scan) == 14 and scan[:6] == [
+                ("symbol", "("), ("word", "select"), ("word", "src"),
+                ("symbol", ","), ("word", "dst"), ("word", "from")]
+                and scan[6][0] == "word" and re.fullmatch(r"r[0-9]+", scan[6][1])
+                and scan[7:11] == [("word", "where"), ("word", "src"),
+                                   ("symbol", "<"), ("symbol", "=")]
+                and scan[11][0] == "number" and re.fullmatch(r"[0-9]+", scan[11][1])
+                and scan[12] == ("symbol", ")") and scan[13] == scan[6]):
+            table = scan[6][1]
+            if set(schema.get(table, [])) != {"src", "dst"}:
+                raise ValueError(f"Graph input-filter scan requires the two-column src/dst schema: {table}")
+            scan_columns.update((f"{table}.src", f"{table}.dst"))
+            flattened.extend((scan[6], scan[13]))
+            index += 14
+            continue
+        flattened.append(tokens[index])
+        index += 1
+    tokens = flattened
     words = [value for kind, value in tokens if kind == "word"]
     unsupported = set(words) & {"with", "union", "except", "intersect", "using", "natural", "columns",
                                 "exclude", "replace", "pivot", "unpivot", "lateral"}
@@ -2839,7 +2874,7 @@ def participating_columns(sql: str, schema: dict[str, list[str]]) -> list[str]:
         if token == ("word", "as") and index + 1 not in consumed:
             output_aliases.add(values[index + 1])
             consumed.add(index + 1)
-    columns = set()
+    columns = set(scan_columns)
     for index in sorted(identifiers - consumed):
         if index in consumed or index + 2 >= len(tokens) or values[index + 1] != ".":
             continue
@@ -2952,7 +2987,7 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
                    for value, rows in selected.groupby(dimension, dropna=False, sort=True)],
         "method": {
             **report["method"],
-            "corpus": "Main corpus counts use only eligible complete measured pairs with at least one runtime >= 1 s; raw deduplicated input counts are retained separately as input_corpus",
+            "corpus": "Main corpus counts use eligible complete measured pairs; raw deduplicated input counts are retained separately as input_corpus. " + runtime_filter_description(),
             "phase_percent": "100 * sum(phase operator CPU seconds) / sum(profile CPU seconds) over every eligible complete selected profile, not a representative sample or wall-time share",
             "optimization_percent": "100 * optimizer_ENGINE_total_s / tm_ENGINE, calculated separately for DuckDB/OFF and OuterYan/ON; optimizer times come from separate profiles",
             "representatives": f"Up to {limit} per family, measured OuterYan-selected queries with complete paired optimizer totals; shape quotas then evenly spaced OFF-runtime ranks; no ranking by speed-up",
@@ -2965,13 +3000,17 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
 
 def composition_tex(report: dict) -> str:
     corpus = report["corpus"]
-    text = (f"After excluding invalid, unmeasured, and sub-second pairs, the evaluated benchmark contains {number(corpus['structural'], 0)} "
+    includes_subsecond = report.get("method", {}).get("minimum_runtime_seconds", 1) == 0
+    exclusions = "invalid and unmeasured pairs" if includes_subsecond else "invalid, unmeasured, and sub-second pairs"
+    text = (f"After excluding {exclusions}, the evaluated benchmark contains {number(corpus['structural'], 0)} "
             f"structural queries and {number(corpus['supplementary'], 0)} supplementary queries, "
             f"for a total of {number(corpus['total'], 0)} query instances")
     if corpus["unclassified"]:
         text += f", including {number(corpus['unclassified'], 0)} additional unclassified instances"
-    text += (". Each retained instance completes within its recorded per-statement timeout and has complete measured runtimes with at least one runtime "
-             r"at or above $1$\,s. We report results by workload family, join-tree shape, join-graph topology, join-type composition, and selectivity level." + "\n")
+    text += ". Each retained instance completes within its recorded per-statement timeout and has complete measured runtimes"
+    text += (r"; pairs with both runtimes below $1$\,s are retained for review. " if includes_subsecond
+             else r" with at least one runtime at or above $1$\,s. ")
+    text += "We report results by workload family, join-tree shape, join-graph topology, join-type composition, and selectivity level.\n"
     population = report.get("method", {}).get("population", "")
     if population.startswith("Performance-screened"):
         text += (r"This is a performance-screened subset: both runtimes exceed $1$\,s and remain below the recorded timeout, "
@@ -3038,8 +3077,12 @@ def overall_tex(report: dict) -> str:
         ) + ". "
     other = (coverage["excluded"] - coverage["both_runtimes_below_1s"]
              - coverage["fallback_skips"] - timeout["total"])
-    text += (f"We additionally exclude {number(coverage['both_runtimes_below_1s'], 0)} pairs for which both runtimes "
-             rf"are strictly below $1$\,s and {number(coverage['fallback_skips'], 0)} untimed fallback cases")
+    if report.get("method", {}).get("minimum_runtime_seconds", 1) == 0:
+        text += (r"Sub-second pairs are retained. "
+                 f"We additionally exclude {number(coverage['fallback_skips'], 0)} untimed fallback cases")
+    else:
+        text += (f"We additionally exclude {number(coverage['both_runtimes_below_1s'], 0)} pairs for which both runtimes "
+                 rf"are strictly below $1$\,s and {number(coverage['fallback_skips'], 0)} untimed fallback cases")
     if other:
         text += f", plus {number(other, 0)} other incomplete or failed cases"
     text += (". Reported corpus counts include valid measured queries only; the performance overview further "
@@ -3283,7 +3326,7 @@ def write_result_bundle(output_dir: Path, population: pd.DataFrame, *, group_by:
         if column in population]))
     (output_dir / "plot_selection.json").write_text(json.dumps({
         "group_by": group_by, "group": run,
-        "runtime_filter": "require eligible measured pairs with at least one runtime >= 1 s; exclude untimed fallbacks; speed-up summaries use OuterYan-selected plans",
+        "runtime_filter": runtime_filter_description() + "; exclude untimed fallbacks; speed-up summaries use OuterYan-selected plans",
         "both_runtimes_below_1s": int(below_runtime_threshold(population).sum()),
         "deduplication": "latest observation per execution family and normalized SQL; includes failures; preserves literals, join kinds and grouping; unresolved SQL stays separate",
         "workloads": population["workload_category"].value_counts().to_dict(),
@@ -3294,6 +3337,7 @@ def write_result_bundle(output_dir: Path, population: pd.DataFrame, *, group_by:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global MIN_RUNTIME_SECONDS
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--statistics-only" in arguments:
         # The benchmark runner keeps its batch-specific output directory and
@@ -3313,6 +3357,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="phase-figure representatives per family (default: 15)")
     parser.add_argument("--exclude-selectivity-stress", action="store_true",
                         help="exclude the wide-range ablation from all generated results")
+    parser.add_argument("--include-subsecond", action="store_true",
+                        help="retain measured pairs even when both runtimes are below 1 s (review mode)")
     parser.add_argument("--statistics-only", action="store_true",
                         help="internal harness mode: requires --run and --output-dir; skips figures/LaTeX")
     args = parser.parse_args(arguments)
@@ -3338,13 +3384,18 @@ def main(argv: list[str] | None = None) -> int:
         directories = result_directories(frame, args.output_dir, args.group_by)
     except ValueError as error:
         parser.error(str(error))
-    for run, output in directories.items():
-        population = frame.loc[frame["run"].eq(run)].copy()
-        paper = write_result_bundle(output, population, group_by=args.group_by,
-                                    representatives=args.representatives_per_benchmark,
-                                    phase_samples=args.phase_samples_per_benchmark)
-        print(f"Results: {output} ({paper['corpus']['total']} valid instances from {paper['input_corpus']['total']} input instances, "
-              f"{paper['coverage']['measured']} retained measured pairs)")
+    previous_threshold = MIN_RUNTIME_SECONDS
+    try:
+        MIN_RUNTIME_SECONDS = 0.0 if args.include_subsecond else 1.0
+        for run, output in directories.items():
+            population = frame.loc[frame["run"].eq(run)].copy()
+            paper = write_result_bundle(output, population, group_by=args.group_by,
+                                        representatives=args.representatives_per_benchmark,
+                                        phase_samples=args.phase_samples_per_benchmark)
+            print(f"Results: {output} ({paper['corpus']['total']} valid instances from {paper['input_corpus']['total']} input instances, "
+                  f"{paper['coverage']['measured']} retained measured pairs)")
+    finally:
+        MIN_RUNTIME_SECONDS = previous_threshold
     return 0
 
 

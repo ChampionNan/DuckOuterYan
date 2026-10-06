@@ -12,6 +12,7 @@ import balanced_benchmark as b
 from benchmark_corpus import count_base_relations
 import qualify_benchmark as q
 import tpcds_refresh as refresh
+import benchmark_speedup_screen as screen
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
@@ -24,21 +25,22 @@ class BalancedBenchmarkTest(unittest.TestCase):
 
     def test_active_matrix_and_mixed_kinds(self):
         rows = b.validate(b.ROOT / "benchmark")
-        self.assertEqual(len(rows), 741)
-        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=180, tpch=180, tpcds=201, job=180))
-        self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in rows if r["family"] != "tpcds"),
+        self.assertEqual(len(rows), 729)
+        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=179, tpch=179, tpcds=194, job=177))
+        before_screen = rows + screen.policy()["excluded"]
+        self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in before_screen if r["family"] != "tpcds"),
                          {(f, t, s):20 for f in ("graph", "tpch", "job") for t in b.TIERS for s in b.SHAPES})
         self.assertTrue(all(len(set(r["join_vector"])) >= 2 for r in rows))
         self.assertFalse(any(r["source_seed"] == "tpcds_q72_fulfillment" for r in rows))
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
         self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
         graph = [r for r in rows if r["family"] == "graph"]
-        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 126, 5: 54})
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 126, 5: 53})
         for tier in b.TIERS:
             for shape in b.SHAPES:
                 self.assertEqual(Counter(int(r["relation_count"]) for r in graph
                                          if r["semantic_tier"] == tier and r["tree_shape"] == shape),
-                                 {4: 14, 5: 6})
+                                 {4: 14, 5: 5 if tier == "low" and shape == "left_deep" else 6})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
         self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows if not refresh.is_recovery(r)))
@@ -214,7 +216,7 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
-            self.assertEqual(report["balanced_candidates"], 741)
+            self.assertEqual(report["balanced_candidates"], 729)
             self.assertEqual(report["historical_supplementary_candidates"], 0)
             self.assertEqual(report["historical_supplementary_observations"], 0)
             self.assertEqual(report["qualification_timeout_seconds"], 600)

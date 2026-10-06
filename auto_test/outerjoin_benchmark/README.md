@@ -2,33 +2,40 @@
 
 Base revision: `balanced-screened-20261002`, with the primary-batch
 `tpcds-recovery-20261005` component pinned in `tpcds_refresh.json` and the manifest.
-The active `benchmark/` contains **741 queries**: **201 TPC-DS** and **180 each**
-for Graph, TPC-H and JOB. The other families' SQL is unchanged.
+The active `benchmark/` contains **729 queries**: **179 Graph**, **179 TPC-H**,
+**194 TPC-DS**, and **177 JOB**. The cumulative all-family speed-up screen is
+pinned in `sources/speedup_screen_20261007.json` and `benchmark/speedup_screen.json`.
 TPC-DS removes 28 timed-out and 8 measured speed-up <0.5 queries from the
-20261002 run, retains 147 definitions, and adds 54 pending recovery candidates.
+20261002 run, retains 147 definitions, and initially adds 54 recovery candidates.
+The 20261005_201226_t32 TPC-DS run completed all 201 equivalence checks, with
+43 measured pairs, 158 fallback-skip rows and no timeout. Seven measured
+speed-ups below 0.5 are now retired: 47 recovery candidates remain, and the
+194 active TPC-DS queries contain 36 measured pairs plus 158 fallback-skip rows.
 The target of about **50 complete TPC-DS measured pairs is not yet achieved**:
-only 7 of the retained definitions have complete prior measurements; the 54
-new candidates require cpu9 testing, including equivalence checks.
+unexecuted fallback policy defaults are not measured pairs. Other families
+still contain queries that timed out; this screen does not remove those queries.
 
 | Family | Low `(0,5%)` | Medium `[5,40%)` | High `[40,60%]` | Total |
 |---|---:|---:|---:|---:|
-| Graph | 60 | 60 | 60 | 180 |
-| TPC-H | 60 | 60 | 60 | 180 |
-| TPC-DS | 69 | 66 | 66 | 201 |
-| JOB | 60 | 60 | 60 | 180 |
+| Graph | 59 | 60 | 60 | 179 |
+| TPC-H | 59 | 60 | 60 | 179 |
+| TPC-DS | 69 | 63 | 62 | 194 |
+| JOB | 60 | 59 | 58 | 177 |
 
-The unchanged families have 60 left-deep, 60 right-deep and 60 bushy input expressions:
-20 of each shape in each selectivity band. Shapes describe input expressions,
+Before exact-query screening, Graph/TPC-H/JOB had 60 expressions per shape,
+20 of each shape per selectivity band. Graph and TPC-H now each have 59 left-deep,
+60 right-deep and 60 bushy expressions; JOB has 60/57/60 respectively.
+The active set is no longer exactly balanced. Shapes describe input expressions,
 not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
-approximately balanced, not claimed exactly equal. TPC-DS now has 74 left-deep,
-84 right-deep and 43 bushy expressions; do not claim exact shape balance for its
-performance-conditioned recovery component.
+approximately balanced, not claimed exactly equal. TPC-DS shape counts are
+reported in `benchmark/design_summary.json`; do not claim exact shape balance
+for its performance-conditioned recovery component.
 
-Graph now has **126 four-relation and 54 five-relation queries; no six-relation queries**
-(previously 72/90/18). Each selectivity-by-shape cell uses the same 14/6 split.
-This changes query selection, not the graph database or dataset. Both active
-and reserve batches follow this relation-count quota.
+Graph now has **126 four-relation and 53 five-relation queries; no six-relation queries**.
+The base generator uses a 14/6 split per selectivity-by-shape cell; the active
+low/left-deep cell has 14/5 after removing one measured slow query.
+The graph database and dataset are unchanged. Reserve batches retain the base quota.
 
 Graph names include `__inputcap1__` to distinguish the new filtered inputs from
 old measurements. R1 retains `src <= 2/83/306` (local Bitcoin fractions
@@ -42,12 +49,31 @@ Do not multiply these correlated marginal fractions to estimate join selectivity
 the harness saves a per-run manifest snapshot. Server audits count R2..Rn
 independently and qualification requires every input cap to pass its own band.
 The caps were not selected using ON/OFF speed-ups. They reduce the input scale
-but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of all 180 candidates.
+but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of every candidate.
 
-Current types: 376 `join`, 163 `graph` (including industry-inspired controls), and
-202 `aggregate`. Aggregates comprise 96 COUNT, 34 MIN, 36 MAX and 36 SUM queries.
-Type and family differ: `--only graph` runs 180 Graph-family candidates, whereas
-`--query-type graph` selects 163 graph/control queries across families.
+Current types: 372 `join`, 162 `graph` (including industry-inspired controls), and
+195 `aggregate`. Aggregates comprise 89 COUNT, 34 MIN, 36 MAX and 36 SUM queries.
+Type and family differ: `--only graph` runs 179 Graph-family candidates, whereas
+`--query-type graph` selects 162 graph/control queries across families.
+
+## All-family speed-up screen
+
+The 20261002_213551_t32 run contains 13 verified measured queries with
+DuckDB/OuterYan <0.5. Eight TPC-DS definitions were already retired above;
+this screen additionally removed one Graph, one TPC-H and three JOB queries.
+The new 20261005_201226_t32 TPC-DS batch contributes seven further exact-query
+exclusions (six COUNT queries and one join query), applied on 20261007.
+Only the exact measured SQL is excluded, not all tiers of its join expression.
+Equality at 0.5 is retained. No additional timeout or fallback is removed.
+
+`benchmark/speedup_excluded.csv` lists all twelve additional exclusions and timings.
+The first five SQL definitions and original manifest rows remain recoverable under
+`revisions/retired_speedup_20261005/benchmark/`; the new seven are archived under
+`revisions/retired_speedup_20261007/benchmark/`. The cumulative policy preserves
+both measurement sources. Raw result CSVs are unchanged.
+Normal regeneration reapplies the frozen screen without accessing `results/`.
+The primary manifest uses speed-up >=0.5 for all families' subsequent qualification;
+existing runtime requirements and legacy/reserve policies remain unchanged.
 
 ## TPC-DS historical recovery and removed cases
 
@@ -71,9 +97,11 @@ or audited semantic band. Do not describe these definitions as unchanged origina
 TPC-DS queries, or as complying with the balanced component's source-key/filter rules.
 
 The replacement component is explicitly marked
-`evaluation_role=historical_selectivity_recovery`: 18 historical expressions ×
+`evaluation_role=historical_selectivity_recovery`: initially 18 historical expressions ×
 three tiers = 54 candidates (30 global COUNT, 21 join and 3 synthetic-control
-queries). Sources cover Q5, Q40, Q80, Q93, SQLStorm 10809/14368/28643 and one
+queries). After the new exact-query screen, 47 remain: 24 global COUNT, 20 join
+and 3 synthetic-control queries. Sources cover Q5, Q40, Q80, Q93,
+SQLStorm 10809/14368/28643 and one
 industry control. SQLStorm 11376 is not replenished. Archived mixed join types,
 parentheses, relations and join keys are retained. Some historical fact/fact
 patterns intentionally retain item-only edges and must not be described as
@@ -90,8 +118,9 @@ must re-audit their actual fractions. All profiles fit `(0,5%)`, `[5,40%)`,
 variants, not a hidden wrapper around timed SQL. Both engines execute the same
 bare query. Historical times are selection evidence, never assigned to new SQL.
 
-Exclusions match exact SQL, not every tier sharing an expression. The three
-recovery tiers are kept together; changing a query's name cannot restore an
+Exclusions match exact SQL, not every tier sharing an expression. Recovery
+expressions initially receive three tiers, but the measured exact-query screen
+now leaves some expressions with fewer than three. Changing a query's name cannot restore an
 exact query known to time out or run below 0.5× in the pinned comparison runs.
 The policy is applied automatically during normal regeneration, without reading
 machine-local results. `--batch >0` and custom-size reserve corpora retain the
@@ -103,7 +132,7 @@ Build, regenerate and retest all active TPC-DS queries on cpu9:
 bash auto_test/run_all.sh --only tpcds --timeout 600 --check-correctness
 ```
 
-To test only the 54 new candidates with an already compiled binary:
+To retest only the 47 retained recovery candidates with an already compiled binary:
 
 ```bash
 bash auto_test/experiment_onoff.sh --all --timeout 600 \
@@ -214,9 +243,10 @@ Qualification checks SQL/manifest hashes, host, database path/size/mtime signatu
 10-minute-per-engine configuration and audited bands. Database changes require re-audit and
 remeasurement. The signature is a guard, not a full database checksum.
 
-Qualification uses each manifest row's thresholds: refreshed TPC-DS keeps
-positive subsecond times and requires DuckDB/OuterYan **>=0.5**; other candidates
-retain **both >1s, speed-up >=0.8**. Both sides must complete below 600s and pass
+Qualification uses each manifest row's thresholds: the screened primary batch
+requires DuckDB/OuterYan **>=0.5 for every family**. TPC-DS keeps positive subsecond
+times; the other families retain **both >1s**. Legacy/reserve manifests keep their
+own thresholds. Both sides must complete below 600s and pass
 the selectivity audit. Correctness is verified unless explicitly disabled.
 Unchecked rows remain performance-only evidence, not a correctness claim.
 Qualification rejects mixed timing protocols/sample counts/correctness modes;

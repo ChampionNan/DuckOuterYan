@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 741 条当前查询（TPC-DS 201，其它 family 各 180）、manifest、固定筛选证据与历史档案；新增 54 条 TPC-DS 候选待 cpu9 实测 |
+| `outerjoin_benchmark/` | 729 条当前查询（Graph 179、TPC-H 179、TPC-DS 194、JOB 177）、manifest、固定筛选证据与历史档案；TPC-DS 新批次已实测，移出 7 条 speed-up <0.5 的查询 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -204,12 +204,11 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **723 条唯一候选 SQL**。
-其中 **720 条配平候选**：
-Graph/TPC-H/TPC-DS/JOB **各 180 条**。每 family 的三档 selectivity 各 60，
-left-deep/right-deep/bushy 各 60；每档每 shape 各 20。join kind 仍为 mixed。
-Graph 的 4/5 relation 数量分别为 **126/54**，不再生成 6 relation 查询
-（上一版为 72/90/18）。每个 selectivity×shape 单元为 14/6；数据库及数据集不变。
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **729 条唯一候选 SQL**：
+Graph 179、TPC-H 179、TPC-DS 194、JOB 177。
+基础设计原为每 family 180 条，每档每 shape 各 20；经性能筛选后不再严格配平。
+join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **126/53**，不再生成 6 relation 查询。
+基础单元为 14/6，low/left-deep 因移出一条变为 14/5；数据库及数据集不变。
 Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
 放在 `(SELECT src,dst FROM Ri WHERE ...) Ri` 中，避免在根 WHERE 误删 NULL-padded 行。
@@ -220,22 +219,39 @@ R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的�
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 376、`graph` 163（含 industry controls）、`aggregate` 202。
-`--only graph` 选择 Graph family 全部 180 条，与 `--query-type graph` 不同。
-原版本已合并；**候选数不是最终有效数**。新 SQL 均等待 cpu9 实测。
+类型为 `join` 372、`graph` 162（含 industry controls）、`aggregate` 195。
+`--only graph` 选择 Graph family 全部 179 条，与 `--query-type graph` 不同。
+原版本已合并；**候选数不是最终有效实测数**，fallback 和 timeout 不能算作完整实测配对。
 
 20261005 的 TPC-DS 调整按 20261002 实测移出 28 条 timeout、8 条 speed-up <0.5 的 SQL，
-保留 147 条，并加入 18 组历史表达式 × 三档 = 54 条候选，总计 201 条；完整默认运行共 741 条。
+保留 147 条，并加入 18 组历史表达式 × 三档 = 54 条候选，总计 201 条。
 Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移出。
 36 条原 SQL 可在 `outerjoin_benchmark/revisions/retired_tpcds_20261005/benchmark/` 恢复；原始 CSV 不改。
 生成器读取固定 `sources/tpcds_refresh_20261005.json`，不会在下次 `run_all.sh` 恢复已剔除 SQL。
 
-目标约 50 条完整 TPC-DS 实测：保留定义中此前只有 7 条配对，新增 54 条仍需 cpu9 实测，
-不能把旧速度比当成新查询结果。新组保留旧 join expression 与过滤 relation，
+同一批实测共有 13 条 speed-up <0.5，其中 8 条 TPC-DS 已移出。
+全 benchmark 筛选另外移出 Graph 1、TPC-H 1、JOB 3，故总数从 741 降至 736。
+仅排除确切 SQL，保留同表达式其它档位；0.5 本身保留，不额外剔除 timeout/fallback。
+这次筛选证据原固定在 `sources/speedup_screen_20261005.json`；
+5 条原 SQL 和 manifest 归档到 `revisions/retired_speedup_20261005/benchmark/`，原始结果 CSV 不改。
+
+20261005_201226_t32 的新 TPC-DS 批次已在 cpu9 测完：201 条均通过等价性检查，
+43 条有完整实测配对，158 条 fallback-skip，无 TPC-DS timeout。
+20261007 再按该批次实测移出 7 条 speed-up <0.5 的查询（6 条 aggregate、1 条 join），
+当前 TPC-DS 为 194 条，其中 36 条有完整配对、158 条 fallback-skip；原 54 条恢复候选保留 47 条。
+因此约 50 条完整实测的目标尚未达到，不能把 fallback 默认 1× 当成实测。
+累计 12 条额外 speed-up 剔除（旧 5 条 + 新 7 条）的固定证据为
+`sources/speedup_screen_20261007.json`，清单为 `benchmark/speedup_excluded.csv`。
+新移出的 7 条 SQL 和 manifest 可从 `revisions/retired_speedup_20261007/benchmark/` 恢复；
+旧档案与所有原始结果不变，常规重新生成也不会恢复这些确切 SQL。
+本次不额外移出其它 timeout/fallback，也不修改其余档位的 SQL。
+
+不能把旧速度比当成新查询结果。恢复组保留旧 join expression 与过滤 relation，
 旧取模模式采用约 3%/30%/55% 的 identifier buckets，Q93/control 保留语义谓词。
 它们明确标为性能筛选的历史扩展，不宣称业务语义过滤或无偏采样。
 Q5/Q40/Q80 大输出模式采用明确命名的 COUNT 变体，仍由两侧执行同一裸查询。
-每组包含三档，不因一个档位表现差而默认排除整个表达式。
+恢复组最初每组包含三档；确切 SQL 筛选后，部分表达式不再三档齐全，
+不因一个档位表现差而默认排除整个表达式。
 
 只重测 TPC-DS（含编译/重新生成），或仅测新增候选（使用现有编译）：
 
@@ -294,7 +310,8 @@ python3 auto_test/qualify_benchmark.py \
 CSV 新增 timeout、执行 host、SQL/manifest hash、数据库签名，旁边保存 `.manifest.csv` 快照。
 `qualified_TIMESTAMP/qualification.csv` 查看每条去留原因；`coverage.csv` 查看每档缺口；
 `qualification_summary.json` 查看各 benchmark geomean/min/max/median/std。
-资格门槛读取 manifest：TPC-DS 当前为时间 >0、<600s，speed-up >=0.5；其它 family 仍为双侧 >1s、<600s、speed-up >=0.8。
+资格门槛读取 manifest：当前主查询集所有 family 都要求 speed-up >=0.5；TPC-DS 时间 >0，其它 family 仍为双侧 >1s，双方均 <600s。
+这不改变亚秒结果的 review 统计口径；旧版/备用 batch 保持其 manifest 中的门槛。
 正确性通过或显式关闭检查（后者不能宣称已验证），fallback-skip 不算有效测量。
 `qualify_benchmark.py` 的默认 180/family 配平目标是旧资格流程，不等于本次约 50 条 TPC-DS 完整配对的探索目标。
 缺额必须补候选并重测，不能补成默认 1×。完整结果与筛选后结果分别保留。
@@ -842,6 +859,9 @@ Matplotlib 图形和论文 LaTeX。默认输出位置根据输入实验日期决
 
 有效 query 必须正确、有完整有限正数 OFF/ON 实测时间，且 **至少一方达到 1 秒**。
 双方都严格小于 1 秒的 pair、未执行 fallback、失败及超时均不计入有效总数。
+Review 时可传 `--include-subsecond`，在图、统计、phase/optimizer 汇总和 LaTeX 中
+统一保留双方都小于 1 秒的实测 pair；建议用 `--output-dir` 指定独立 review 目录。
+该选项不纳入超时、错误或 fallback-skip，不按 speed-up 删点，也不修改原始 CSV。
 未执行 fallback 原始 CSV 的 `1×` 占位不进入任何性能统计。原始 CSV 不修改；
 JSON 的 `input_corpus` / `unique_queries` 保留过滤前输入数，`corpus` / `valid_queries`
 记录有效实测数，覆盖记录保留每条排除原因。
@@ -963,10 +983,15 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 723 unique candidates under `outerjoin_benchmark/benchmark`:
-180 balanced candidates each for Graph, TPC-H, TPC-DS and JOB, plus three historical
-TPC-DS case studies. Qualification is a separate measured filter; historical cases
-are reported separately and do not consume balanced quotas.
+The comparison runs 729 unique candidates under `outerjoin_benchmark/benchmark`:
+179 Graph, 179 TPC-H, 194 TPC-DS and 177 JOB. Exact measured speed-up <0.5 queries
+have been retired, in addition to the earlier TPC-DS timeout exclusions.
+The new TPC-DS run has completed: 47 of its 54 recovery candidates remain after
+retiring seven measured regressions. Across the 194 active TPC-DS definitions,
+36 have complete measured pairs and 158 are fallback-skip; none timed out in
+that run. Qualification is a separate measured filter; the active corpus is
+performance-screened, not claimed to be exactly balanced or free of timeouts
+in other families. Raw results and retired SQL remain available.
 The harness checks one bare-query OFF/ON result pair for every query by default,
 including fallbacks. After equivalence passes, it measures one post-warm-up
 execution per side for performance-eligible queries. Explicitly unchecked rows

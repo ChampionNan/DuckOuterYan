@@ -656,8 +656,24 @@ class PlotSpeedupLoadTest(unittest.TestCase):
             enriched = PLOT.enrich(frame, "20260830_002656")
         self.assertEqual(enriched.iloc[0]["relation_count"], 3)
 
+    def test_graph_scan_subqueries_count_base_relations_only(self):
+        frame = pd.DataFrame([{
+            "query": "graph__graph__sample__inputcap1__sel_high",
+            "sql_path": "graph/sample.sql", "relation_count": 3,
+        }])
+        sql = ("SELECT * FROM R1 LEFT JOIN (SELECT src, dst FROM R2 WHERE src <= 40) R2 "
+               "ON R1.dst=R2.src RIGHT JOIN (SELECT src, dst FROM R3 WHERE src <= 40) R3 "
+               "ON R2.dst=R3.src")
+        with mock.patch.object(Path, "read_text", return_value=sql), mock.patch.object(
+                PLOT, "resolve_sql_path", return_value=Path("sample.sql")):
+            enriched = PLOT.enrich(frame, "20261002_213551")
+        self.assertEqual(enriched.iloc[0]["relation_count"], 3)
+
 
 class PlotSpeedupPhaseTest(unittest.TestCase):
+    def test_short_phase_seconds_are_not_rounded_to_zero(self):
+        self.assertEqual(PLOT.format_seconds_label(0.004174538), "0.0042s")
+
     @staticmethod
     def phase_row(query, family, total, baseline):
         return {
@@ -1530,6 +1546,22 @@ class QueryAttributesTest(unittest.TestCase):
             "SELECT a.id, SUM(a.value * 2) AS total FROM ta a GROUP BY a.id HAVING SUM(a.value)>0",
             self.schema), ["a.id", "a.value"])
 
+    def test_graph_input_filter_scan_attributes_preserve_dependencies(self):
+        schema = {name: ["src", "dst"] for name in ("r1", "r2", "r3")}
+        sql = ("SELECT COUNT(*) FROM R1 LEFT JOIN "
+               "(SELECT src, dst FROM R2 WHERE src <= 40) R2 ON R1.dst=R2.src "
+               "RIGHT JOIN (SELECT src, dst FROM R3 WHERE src <= 40) R3 ON R2.dst=R3.src")
+        self.assertEqual(RESULT.participating_columns(sql, schema),
+                         ["r1.dst", "r2.dst", "r2.src", "r3.dst", "r3.src"])
+        self.assertEqual(len(RESULT.participating_columns(sql.replace("COUNT(*)", "*"), schema)), 6)
+        for modified in (sql.replace("src <= 40", "dst >= 40"),
+                         sql.replace("src, dst", "src AS dst, dst AS src"),
+                         sql.replace(") R2", ") other")):
+            with self.subTest(sql=modified), self.assertRaises(ValueError):
+                RESULT.participating_columns(modified, schema)
+        with self.assertRaises(ValueError):
+            RESULT.participating_columns(sql, dict(schema, r2=["src", "dst", "weight"]))
+
     def test_unqualified_columns_resolve_uniquely_and_unsupported_scopes_fail(self):
         self.assertEqual(RESULT.participating_columns(
             "SELECT value FROM ta a JOIN tb b ON a.id=b.id", self.schema),
@@ -1631,6 +1663,34 @@ class UnifiedResultEntryTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(json.loads((output / "statistics.json").read_text())["unique_queries"], 2)
             self.assertFalse((output / "overview.pdf").exists())
+
+    def test_include_subsecond_cli_changes_all_outputs_and_restores_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "experiment_onoff_benchmark_20261002_213551_t32.csv"
+            frame = PaperStatisticsTest.frame().iloc[[3]].copy()
+            frame["profile_threads"] = 32
+            frame["profile_total_time_s"] = frame["profile_cpu_time_s"]
+            for _, seconds, ratio, _ in RESULT.PHASES:
+                frame[ratio] = frame[seconds] / frame["profile_cpu_time_s"]
+            frame.to_csv(source, index=False)
+            output = root / "review"
+            self.assertEqual(RESULT.main([str(source), "--output-dir", str(output),
+                                          "--include-subsecond"]), 0)
+            report = json.loads((output / "statistics.json").read_text())
+            paper = json.loads((output / "paper_statistics.json").read_text())
+            phases = json.loads((output / "phase_queries.json").read_text())
+            self.assertEqual(report["valid_queries"], 1)
+            self.assertEqual(report["method"]["minimum_runtime_seconds"], 0)
+            self.assertEqual(len(report["phase_profiles"]["queries"]), 1)
+            self.assertEqual(paper["corpus"]["total"], 1)
+            self.assertEqual(len(phases["queries"]), 1)
+            self.assertIn("No minimum runtime filter", phases["runtime_filter"])
+            latex = (output / "paper_statistics.tex").read_text()
+            self.assertIn("retained for review", latex)
+            self.assertNotIn("at or above $1$", latex)
+            self.assertEqual(RESULT.MIN_RUNTIME_SECONDS, 1)
+            self.assertEqual(RESULT.build_statistics(frame)["valid_queries"], 0)
 
     def test_invalid_date_and_sample_counts_fail_before_loading(self):
         with mock.patch.object(RESULT, "load") as loader:
