@@ -43,9 +43,13 @@ export DUCKDB_BIN
 # ===========================================================================
 # 2) Database files
 # ===========================================================================
+# Resolve the scale before the default path; explicit paths always win. A path
+# identifies one dataset and is never renamed/resized merely by changing SF.
+export TPCH_SF="${TPCH_SF:-50}"
+export TPCDS_SF="${TPCDS_SF:-50}"
 export GRAPH_DB="${GRAPH_DB:-$OY_REPO_ROOT/graph_db}"
-export TPCH_DB="${TPCH_DB:-$OY_REPO_ROOT/tpch_db}"
-export TPCDS_DB="${TPCDS_DB:-$OY_REPO_ROOT/tpcds_db}"
+export TPCH_DB="${TPCH_DB:-$OY_REPO_ROOT/tpch_${TPCH_SF}.duckdb}"
+export TPCDS_DB="${TPCDS_DB:-$OY_REPO_ROOT/tpcds_${TPCDS_SF}.duckdb}"
 # JOB DB: built externally from IMDb csv (no dbgen equivalent). Set JOB_DB env
 # or pre-populate the default path before running --only job/bench/all.
 export JOB_DB="${JOB_DB:-$OY_REPO_ROOT/job_db}"
@@ -62,10 +66,8 @@ export OY_CORPUS="${OY_CORPUS:-$OY_REPO_ROOT/auto_test/outerjoin_benchmark/bench
 # Options: bitcoin (24K edges), epinions (509K), google (5.1M), wiki (28.5M), dblp (1M).
 export GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
 
-# TPC scale factors. Used by both correctness and performance scripts.
-# Existing files are reused; changing these values alone does not resize data.
-export TPCH_SF="${TPCH_SF:-50}"
-export TPCDS_SF="${TPCDS_SF:-50}"
+# TPC scale factors and their scale-qualified file defaults are set above.
+# Existing files are reused; changing SF never resizes an explicit *_DB path.
 
 # ===========================================================================
 # 4) Threading
@@ -127,6 +129,8 @@ if [ "${OY_CONFIG_VERBOSE:-0}" = "1" ]; then
         echo "  DUCKDB_BIN       = $DUCKDB_BIN"
         echo "  GRAPH_DATASET    = $GRAPH_DATASET"
         echo "  TPCH_SF/TPCDS_SF = $TPCH_SF / $TPCDS_SF"
+        echo "  TPCH_DB          = $TPCH_DB"
+        echo "  TPCDS_DB         = $TPCDS_DB"
         echo "  OY_THREADS       = $OY_THREADS"
         echo "  OY_THREAD_COUNTS = $OY_THREAD_COUNTS (sequential)"
         echo "  TIMEOUT          = DuckDB ${OY_DUCKDB_TIMEOUT_SECS}s / OuterYan ${OY_OUTERYAN_TIMEOUT_SECS}s per statement"

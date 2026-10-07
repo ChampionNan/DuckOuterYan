@@ -156,9 +156,9 @@ public:
 //! `IsHolistic` helper is involved.
 enum class OuterYanAggregationType : uint8_t {
 	NONE,            //!< query has no root aggregation
-	COUNT_STAR,      //!< `count_star()` with empty GROUP BY
+	COUNT_STAR,      //!< `count_star()`, with or without GROUP BY
 	MINMAX,          //!< only `min` / `max` aggregates
-	SUM,             //!< `sum`, or `count` / `count_star` with non-empty GROUP BY
+	SUM,             //!< `sum`; COUNT(expr) requires separate non-NULL annotations
 	SELECT_DISTINCT, //!< root is a `LogicalDistinct`; aggregation pushdown
 	                 //!< wraps each push site with a child `LogicalDistinct`
 	                 //!< over its bindings. No annot projection or root rewrite.

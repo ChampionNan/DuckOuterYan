@@ -372,6 +372,10 @@ unique_ptr<LogicalOperator> SemijoinInsertion::Apply(unique_ptr<LogicalOperator>
 	for (auto &p : bu) {
 		process_pair(p, /*top_down=*/false);
 	}
+	// A relation can be reduced between its bottom-up and top-down builds.
+	// Reusing the earlier filter would expose its pre-reduction key set and
+	// bypass the top-down dependency. Share filters only within one round.
+	keyMapping.clear();
 	for (auto &p : td) {
 		process_pair(p, /*top_down=*/true);
 	}

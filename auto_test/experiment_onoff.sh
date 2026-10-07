@@ -453,6 +453,10 @@ OY_DECISION_ROUND1_PAIRS="NA"
 OY_DECISION_ROUND1_FILTERS="NA"
 OY_DECISION_ROUND2_PAIRS="NA"
 OY_DECISION_ROUND2_FILTERS="NA"
+OY_DECISION_EXECUTED_ROUND1_PAIRS="NA"
+OY_DECISION_EXECUTED_ROUND1_FILTERS="NA"
+OY_DECISION_EXECUTED_ROUND2_PAIRS="NA"
+OY_DECISION_EXECUTED_ROUND2_FILTERS="NA"
 OY_DECISION_RAW_COST_DELTA="NA"
 OY_DECISION_RAW_COST_RATIO="NA"
 OY_DECISION_GATE_LHS="NA"
@@ -521,6 +525,10 @@ oy_reset_decision() {
     OY_DECISION_ROUND1_FILTERS="NA"
     OY_DECISION_ROUND2_PAIRS="NA"
     OY_DECISION_ROUND2_FILTERS="NA"
+    OY_DECISION_EXECUTED_ROUND1_PAIRS="NA"
+    OY_DECISION_EXECUTED_ROUND1_FILTERS="NA"
+    OY_DECISION_EXECUTED_ROUND2_PAIRS="NA"
+    OY_DECISION_EXECUTED_ROUND2_FILTERS="NA"
     OY_DECISION_RAW_COST_DELTA="NA"
     OY_DECISION_RAW_COST_RATIO="NA"
     OY_DECISION_GATE_LHS="NA"
@@ -607,6 +615,10 @@ oy_decision() {
         OY_DECISION_ROUND1_FILTERS="$(oy_record_value "$record" round1_filters)"
         OY_DECISION_ROUND2_PAIRS="$(oy_record_value "$record" round2_pairs)"
         OY_DECISION_ROUND2_FILTERS="$(oy_record_value "$record" round2_filters)"
+        OY_DECISION_EXECUTED_ROUND1_PAIRS="$(oy_record_value "$record" executed_round1_pairs)"
+        OY_DECISION_EXECUTED_ROUND1_FILTERS="$(oy_record_value "$record" executed_round1_filters)"
+        OY_DECISION_EXECUTED_ROUND2_PAIRS="$(oy_record_value "$record" executed_round2_pairs)"
+        OY_DECISION_EXECUTED_ROUND2_FILTERS="$(oy_record_value "$record" executed_round2_filters)"
         OY_DECISION_RAW_COST_DELTA="$(oy_record_value "$record" raw_cost_delta)"
         OY_DECISION_RAW_COST_RATIO="$(oy_record_value "$record" raw_cost_ratio)"
         OY_DECISION_GATE_LHS="$(oy_record_value "$record" gate_lhs)"
@@ -778,8 +790,8 @@ for fam in $FAMS; do
     graph) need_graph=1;; tpch) need_tpch=1;; tpcds) need_tpcds=1;;
     job) need_job=1;; esac; done
 
-GRAPH_DB="${GRAPH_DB:-}"; TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}"
-TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"
+GRAPH_DB="${GRAPH_DB:-}"; TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_${TPCH_SF}.duckdb}"
+TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_${TPCDS_SF}.duckdb}"
 JOB_DB="${JOB_DB:-$REPO_ROOT/job_db}"
 
 # Delegate DB builds to build_db.sh
@@ -966,6 +978,7 @@ CSV_HEADER=(
     correctness_check timing_protocol timing_samples timing_estimator warmup_runs_per_side
     duckdb_timeout_seconds outeryan_timeout_seconds duckdb_status outeryan_status
     duckdb_timeout_stage outeryan_timeout_stage duckdb_correctness_status outeryan_correctness_status
+    executed_round1_pairs executed_round1_filters executed_round2_pairs executed_round2_filters
 )
 EXECUTION_HOST="$(hostname)"
 CORPUS_MANIFEST_SHA256="-"
@@ -1064,6 +1077,8 @@ PY
     local cost_ratio_limit="-" baseline_threshold="-"
     local round1_build="-" round1_probe="-" round2_build="-" round2_probe="-"
     local round1_pairs="-" round1_filters="-" round2_pairs="-" round2_filters="-"
+    local executed_round1_pairs="NA" executed_round1_filters="NA"
+    local executed_round2_pairs="NA" executed_round2_filters="NA"
     local raw_delta="-" raw_ratio="-" gate_lhs="-" gate_rhs="-" gate_margin="-"
     local inner_weight="-" unmatched_left_weight="-" unmatched_right_weight="-"
     local sj_materialize_weight="-" sj_filter_build_weight="-" sj_replay_weight="-"
@@ -1147,6 +1162,10 @@ PY
         round1_filters="$OY_DECISION_ROUND1_FILTERS"
         round2_pairs="$OY_DECISION_ROUND2_PAIRS"
         round2_filters="$OY_DECISION_ROUND2_FILTERS"
+        executed_round1_pairs="$OY_DECISION_EXECUTED_ROUND1_PAIRS"
+        executed_round1_filters="$OY_DECISION_EXECUTED_ROUND1_FILTERS"
+        executed_round2_pairs="$OY_DECISION_EXECUTED_ROUND2_PAIRS"
+        executed_round2_filters="$OY_DECISION_EXECUTED_ROUND2_FILTERS"
         raw_delta="$OY_DECISION_RAW_COST_DELTA"
         raw_ratio="$OY_DECISION_RAW_COST_RATIO"
         gate_lhs="$OY_DECISION_GATE_LHS"
@@ -1344,9 +1363,27 @@ PY
                 profile_threads="$OY_THREADS"
                 profile_status=ERROR
                 if [ "$optimizer_status" = OK ] || [ "$optimizer_status" = PARTIAL ]; then
+                    # The final profiled plan can omit reducers after the cost
+                    # gate. Never validate its phases against pre-RBO estimates
+                    # when actual schedule metadata is available. Prefer the
+                    # profiled decision over the separate EXPLAIN observation.
+                    local profiled_decision value expected_r1 expected_r2
+                    profiled_decision="$(awk '/^\[OY_DECISION\]/ {record=$0} END {print record}' \
+                        "$optimizer_profile_directory/optimizer_outeryan.trace")"
+                    value="$(oy_record_value "$profiled_decision" executed_round1_pairs)"
+                    [ "$value" = NA ] || executed_round1_pairs="$value"
+                    value="$(oy_record_value "$profiled_decision" executed_round1_filters)"
+                    [ "$value" = NA ] || executed_round1_filters="$value"
+                    value="$(oy_record_value "$profiled_decision" executed_round2_pairs)"
+                    [ "$value" = NA ] || executed_round2_pairs="$value"
+                    value="$(oy_record_value "$profiled_decision" executed_round2_filters)"
+                    [ "$value" = NA ] || executed_round2_filters="$value"
+                    expected_r1="$executed_round1_pairs"; expected_r2="$executed_round2_pairs"
+                    [ "$expected_r1" != NA ] || expected_r1="$round1_pairs"
+                    [ "$expected_r2" != NA ] || expected_r2="$round2_pairs"
                     praw="$(oy_phase_profile_from_json \
                         "$optimizer_profile_directory/optimizer_outeryan_1.json" "$sql" "$selected_plan" \
-                        "$round1_pairs" "$round2_pairs" "$proven_empty")" || profile_rc=$?
+                        "$expected_r1" "$expected_r2" "$proven_empty")" || profile_rc=$?
                     read -r -a profile_fields <<< "$praw"
                     if [ "$profile_rc" = 0 ] && [ "${#profile_fields[@]}" -eq 15 ] && \
                        [ "${profile_fields[3]}" != NA ]; then
@@ -1465,6 +1502,10 @@ PY
                 "$sj_lookup_weight" "$sj_emit_weight"
             decision_line+="$detail_suffix"
         fi
+        printf -v detail_suffix ' executed_SJ=[R1(pairs=%s filters=%s) R2(pairs=%s filters=%s)]' \
+            "$executed_round1_pairs" "$executed_round1_filters" \
+            "$executed_round2_pairs" "$executed_round2_filters"
+        decision_line+="$detail_suffix"
         if [ "$CAPTURE_PLANS" = 1 ]; then
             printf -v detail_suffix ' artifacts=[duckdb=%s enabled=%s trace=%s cost=%s]' \
                 "$duckdb_plan" "$enabled_plan" "$trace_file" "$cost_file"
@@ -1517,7 +1558,8 @@ PY
         "$RECORDED_TIMEOUT" "$sql_content_sha256" "$EXECUTION_HOST" "$database_signature" "$CORPUS_MANIFEST_SHA256" \
         "$CORRECTNESS_MODE" "$TIMING_PROTOCOL" "$RUNS" "$TIMING_ESTIMATOR" "$((1 + PROFILE))" \
         "$OY_DUCKDB_TIMEOUT_SECS" "$OY_OUTERYAN_TIMEOUT_SECS" "$duckdb_status" "$outeryan_status" \
-        "$duckdb_timeout_stage" "$outeryan_timeout_stage" "$duckdb_correctness_status" "$outeryan_correctness_status"
+        "$duckdb_timeout_stage" "$outeryan_timeout_stage" "$duckdb_correctness_status" "$outeryan_correctness_status" \
+        "$executed_round1_pairs" "$executed_round1_filters" "$executed_round2_pairs" "$executed_round2_filters"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============

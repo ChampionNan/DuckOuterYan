@@ -95,7 +95,8 @@ struct OuterYanDecisionCosts {
 	double round1_probe = 0.0;
 	double round2_build = 0.0;
 	double round2_probe = 0.0;
-	//! Planned semi-join applications and newly constructed filters per round.
+	//! Pre-Post reference-schedule applications and newly constructed filters
+	//! used by the cost model. These estimates do not change after RBO pruning.
 	//! A reused filter contributes a pair but not another filter build.
 	idx_t round1_pairs = 0;
 	idx_t round1_filters = 0;
@@ -144,6 +145,14 @@ struct OuterYanDecisionRecord {
 	OuterYanCostWinner raw_cost_winner = OuterYanCostWinner::UNAVAILABLE;
 	OuterYanGateResult gate_result = OuterYanGateResult::SKIPPED;
 	string reason = "INAPPLICABLE";
+	//! Final selected execution-plan schedule, counted after Post and aggregate
+	//! rewriting. Separate from the reference counts used by the cost gate:
+	//! partial reduction can remove an entire round after costing finishes.
+	bool executed_schedule_available = false;
+	idx_t executed_round1_pairs = 0;
+	idx_t executed_round1_filters = 0;
+	idx_t executed_round2_pairs = 0;
+	idx_t executed_round2_filters = 0;
 	OuterYanDecisionCosts costs;
 	OuterYanPhaseTimings phase_timings;
 };

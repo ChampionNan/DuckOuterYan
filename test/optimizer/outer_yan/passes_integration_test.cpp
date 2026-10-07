@@ -2035,6 +2035,9 @@ TEST_CASE("outer_yan passes: SemijoinInsert — pairs recorded vs simplified tre
 	DuckDB db(nullptr);
 	Connection con(db);
 	SeedTen(con);
+	// This test inspects the reference two-pass schedule. Order-aware pruning
+	// is covered separately and may legitimately remove its entire top-down round.
+	REQUIRE_NO_FAIL(con.Query("SET VARIABLE outer_yan_partial_reduction = false"));
 	// LEFT (a,b) + INNER (a,c): the INNER edge fires in BOTH Yannakakis sweeps,
 	// the LEFT edge fires top-down — so both pair vectors are populated.
 	auto tree = BuildFullIRFor(con,

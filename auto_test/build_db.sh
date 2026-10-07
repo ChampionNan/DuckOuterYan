@@ -8,8 +8,8 @@
 #
 # Databases:
 #   graph_db   — R1..R10 tables from SNAP graph data (default: epinions)
-#   tpch_db    — TPC-H via CALL dbgen(sf=N)
-#   tpcds_db   — TPC-DS via CALL dsdgen(sf=N)
+#   tpch_N.duckdb  — TPC-H via CALL dbgen(sf=N)
+#   tpcds_N.duckdb — TPC-DS via CALL dsdgen(sf=N)
 #   job_db     — IMDb/JOB (21 parquet files from duckdb-data release)
 #
 # Environment (all optional):
@@ -18,6 +18,7 @@
 #                    Options: bitcoin | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 50)
 #   TPCDS_SF         TPC-DS scale factor (default 50)
+#   TPCH_DB/TPCDS_DB Explicit paths override scale-qualified defaults
 #   GRAPH_DATA_DIR   SNAP graph download dir (default $REPO/graph_data)
 #   FORCE=1          Rebuild even if DB already exists
 # ============================================================================
@@ -91,12 +92,11 @@ _graph_read_expr() {
 }
 
 # --- helper: add a PRIMARY KEY if the table lacks one ------------------------
-# OuterYan's PK-FK semi-join elimination keys off UNIQUE / PRIMARY KEY
-# constraints (CheckPKFK in src/optimizer/outer_yan/common/outer_yan_tree.cpp);
-# no foreign keys are needed. dbgen / dsdgen emit only NOT NULL and CTAS-from-
-# parquet emits nothing, so the elimination never fires without this. We add PKs
-# only to PK/build-side (dimension) tables — that is all the elimination looks
-# at, and it avoids costly index builds on the large central fact tables.
+# These keys expose build-side uniqueness; they alone do not prove that every
+# probe row has a match. Safe PK-FK semi-join elimination additionally requires
+# a catalog-backed, NOT NULL foreign key (CheckPKFK in outer_yan_tree.cpp).
+# dbgen / dsdgen emit no foreign keys, and we do not infer or invent them here.
+# Add keys only to dimension tables to avoid costly indexes on large facts.
 # Idempotent (skips when a PK already exists) and non-fatal under `set -e`
 # (duplicate/NULL keys or a missing table warn instead of aborting the build).
 _add_pk() {
@@ -172,7 +172,7 @@ _need_rebuild
 # 3. tpch_db — TPC-H via dbgen extension
 # ============================================================================
 if want tpch; then
-    TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_db}"
+    TPCH_DB="${TPCH_DB:-$REPO_ROOT/tpch_${TPCH_SF}.duckdb}"
     if [ -f "$TPCH_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[tpch_db] already exists ($TPCH_DB, $(echo "SELECT count(*) FROM lineitem;" | "$DUCKDB_BIN" "$TPCH_DB" -csv -noheader 2>/dev/null || echo '?') rows lineitem). Requested SF=$TPCH_SF does not change existing data. Set FORCE=1 to rebuild."
     else
@@ -199,7 +199,7 @@ fi
 # 4. tpcds_db — TPC-DS via dsdgen extension
 # ============================================================================
 if want tpcds; then
-    TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_db}"
+    TPCDS_DB="${TPCDS_DB:-$REPO_ROOT/tpcds_${TPCDS_SF}.duckdb}"
     if [ -f "$TPCDS_DB" ] && [ "${FORCE:-0}" != "1" ]; then
         echo "[tpcds_db] already exists ($TPCDS_DB). Requested SF=$TPCDS_SF does not change existing data. Set FORCE=1 to rebuild."
     else

@@ -394,6 +394,10 @@ tpch_db
 tpch_db.wal
 tpcds_db
 tpcds_db.wal
+/tpch_*.duckdb
+/tpch_*.duckdb.wal
+/tpcds_*.duckdb
+/tpcds_*.duckdb.wal
 job_db
 job_db.wal
 graph_data/

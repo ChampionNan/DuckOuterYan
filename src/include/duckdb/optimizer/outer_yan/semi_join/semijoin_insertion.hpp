@@ -39,10 +39,11 @@ class LogicalGet;
 //!   1. Walk pairs in decision order — `bottom_up_pairs` (pass 0), then
 //!      `top_down_pairs` (pass 1). Pairs are grouped by shared-filter key
 //!      (the sorted set of `keys[i].build_binding`, canonicalising {a,b} ==
-//!      {b,a}) so two pairs that build the same column set share one
+//!      {b,a}) so two same-pass pairs that build the same column set share one
 //!      `SemiJoinFilter`. The LogicalSJBuild that materialises a filter is
 //!      remembered alongside it, so a reused filter's probe wires straight to
-//!      that build — no separate relation→build map.
+//!      that build — no separate relation→build map. The sharing map is cleared
+//!      at the pass boundary: a top-down probe may have reduced the build input.
 //!   2. For each pair, append a build to its build relation's nest stack and
 //!      a probe to its probe relation's nest stack (`stacks_`). A new op
 //!      coalesces into the relation's current top op only when that op is the

@@ -28,6 +28,7 @@ low_selectivity_cost_ratio_limit baseline_join_input_rows candidate_join_input_r
 semijoin_retained_cardinality_ratio uncertain_filter_cardinality_amplification baseline_cost candidate_join_cost
 semijoin_raw_cost semijoin_cost_ratio weighted_semijoin_cost candidate_total cost_ratio_limit baseline_threshold
 round1_build round1_probe round2_build round2_probe round1_pairs round1_filters round2_pairs round2_filters
+executed_round1_pairs executed_round1_filters executed_round2_pairs executed_round2_filters
 raw_cost_delta raw_cost_ratio gate_lhs gate_rhs gate_margin inner_output_weight unmatched_left_weight unmatched_right_weight
 semijoin_materialize_weight semijoin_filter_build_weight semijoin_replay_weight semijoin_probe_lookup_weight
 semijoin_probe_emit_weight kernel kernel_detail kernel_hash_reasons correct note timing_status timing_threads tm_off tm_on
@@ -142,6 +143,11 @@ def parse_record(query, result, context, decision):
         if match:
             mapped(row, match.group(1), {key: f"round{number}_{key}" for key in ("build", "probe", "pairs", "filters")})
     mapped(row, sj, {"weighted": "weighted_semijoin_cost"})
+    executed_sj = section(decision, "executed_SJ")
+    for number in (1, 2):
+        match = re.search(r"R" + str(number) + r"\(([^)]*)\)", executed_sj)
+        if match:
+            mapped(row, match.group(1), {key: f"executed_round{number}_{key}" for key in ("pairs", "filters")})
     weights = section(decision, "weights")
     for name, mapping in (
         ("join", {"inner": "inner_output_weight", "unmatched_left": "unmatched_left_weight", "unmatched_right": "unmatched_right_weight"}),

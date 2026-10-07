@@ -61,6 +61,8 @@ class RunAllSelectionTest(unittest.TestCase):
                         "corpus_present": "OY_CORPUS" in os.environ,
                         "tpch_sf": os.environ.get("TPCH_SF"),
                         "tpcds_sf": os.environ.get("TPCDS_SF"),
+                        "tpch_db": os.environ.get("TPCH_DB"),
+                        "tpcds_db": os.environ.get("TPCDS_DB"),
                         "timeout_seconds": os.environ.get("OY_TIMEOUT_SECS"),
                         "timing_runs": os.environ.get("OY_RUNS"),
                         "check_correctness": os.environ.get("OY_CHECK_CORRECTNESS"),
@@ -125,6 +127,8 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
+        self.assertEqual(Path(experiment["tpch_db"]), self.root / "tpch_50.duckdb")
+        self.assertEqual(Path(experiment["tpcds_db"]), self.root / "tpcds_50.duckdb")
         self.assertEqual(experiment["timeout_seconds"], "600")
         self.assertEqual(experiment["timing_runs"], "1")
         self.assertEqual(experiment["check_correctness"], "1")
@@ -148,6 +152,23 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("1", "10"))
+        self.assertEqual(Path(experiment["tpch_db"]), self.root / "tpch_1.duckdb")
+        self.assertEqual(Path(experiment["tpcds_db"]), self.root / "tpcds_10.duckdb")
+
+    def test_sf100_paths_reach_experiment(self):
+        result = self.run_driver("--all", TPCH_SF="100", TPCDS_SF="100")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
+        self.assertEqual(Path(experiment["tpch_db"]), self.root / "tpch_100.duckdb")
+        self.assertEqual(Path(experiment["tpcds_db"]), self.root / "tpcds_100.duckdb")
+
+    def test_database_overrides_reach_experiment_unchanged(self):
+        result = self.run_driver(TPCH_SF="100", TPCDS_SF="100", TPCH_DB="/preserved/tpch_db",
+                                 TPCDS_DB="/preserved/tpcds_sf100.duckdb")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiment = next(call for call in self.calls() if call["kind"] == "experiment")
+        self.assertEqual(experiment["tpch_db"], "/preserved/tpch_db")
+        self.assertEqual(experiment["tpcds_db"], "/preserved/tpcds_sf100.duckdb")
 
     def test_query_type_is_forwarded_without_duplicate_generation(self):
         result = self.run_driver("--query-type", "aggregate", "--timeout", "600")

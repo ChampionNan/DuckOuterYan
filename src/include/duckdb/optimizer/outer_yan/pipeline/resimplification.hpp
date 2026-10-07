@@ -20,8 +20,9 @@ namespace duckdb {
 //! Rule (adjacency formulation). A de-simplified $\Diamond_i$ (i.e.
 //! `kind != original_kind`) is reverted iff some directly adjacent OJT edge
 //! $\Diamond_k$ satisfies
-//!   (i)  `\Diamond_k.order > \Diamond_i.order`, and
-//!   (ii) `\Diamond_k`'s arrow targets the node shared with $\Diamond_i$.
+//!   (i)  `\Diamond_k.order > \Diamond_i.order`,
+//!   (ii) `\Diamond_k`'s arrow targets the node shared with $\Diamond_i$, and
+//!   (iii) the selected binary join tree remains simple after restoration.
 //!
 //! Orientation: place the shared node `X` on the right of $\Diamond_k$; the
 //! arrow lies on the right iff the effective kind is LEFT or OUTER.
@@ -38,13 +39,20 @@ class Resimplification {
 public:
 	void Apply(OrderedJoinTree &ojt);
 
+	//! Conservative simplicity check on the selected binary tree, reconstructed
+	//! by merging edge endpoints in evaluation order as OJTToLogicalPlan does.
+	//! A non-preserved join input must not have NULL padding on its predicate
+	//! relation from an earlier join. Base-column NULLs are not NULL padding.
+	//! The supported predicates are null-rejecting equalities between columns.
+	static bool IsSimple(const OrderedJoinTree &ojt);
+
 private:
 	//! Post-order walk populating `all_edges`, `node_by_rel`,
 	//! `parent_edge_by_rel`.
 	void IndexOJT(OJTNode &node);
 
 	//! Reverts `i_edge` if a qualifying adjacent $\Diamond_k$ exists.
-	bool TryRevert(OJTEdge &i_edge);
+	bool TryRevert(OJTEdge &i_edge, const OrderedJoinTree &ojt);
 
 	//! True iff `k_edge`'s arrow lies on the side of its endpoint
 	//! `shared_rel`. The boolean `shared_is_child` derived from

@@ -14,6 +14,8 @@
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_post.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/outer_yan_pre.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
+#include "duckdb/planner/operator/logical_sj_build.hpp"
+#include "duckdb/planner/operator/logical_sj_probe.hpp"
 
 #include <cmath>
 #include <chrono>
@@ -36,6 +38,21 @@ struct BaselineEmptyProof {
 	PlanWorkSummary after;
 	string proof_plan;
 };
+
+void RecordExecutedSemijoinSchedule(const LogicalOperator &op, OuterYanDecisionRecord &record) {
+	if (op.type == LogicalOperatorType::LOGICAL_SJ_BUILD) {
+		const auto &build = op.Cast<LogicalSJBuild>();
+		auto &count = build.top_down ? record.executed_round2_filters : record.executed_round1_filters;
+		count += build.sj_to_create.size();
+	} else if (op.type == LogicalOperatorType::LOGICAL_SJ_PROBE) {
+		const auto &probe = op.Cast<LogicalSJProbe>();
+		auto &count = probe.top_down ? record.executed_round2_pairs : record.executed_round1_pairs;
+		count += probe.sj_to_use.size();
+	}
+	for (const auto &child : op.children) {
+		RecordExecutedSemijoinSchedule(*child, record);
+	}
+}
 
 bool ContainsAggregateLikeOperator(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY ||
@@ -850,6 +867,11 @@ OuterYanOptimizationResult OuterYanOptimizer::Optimize(unique_ptr<LogicalOperato
 		// the baseline after the cost gate selected it.
 		selected_plan = std::move(baseline_plan);
 	}
+	// Report the actual inserted schedule without changing the reference cost
+	// estimates or selection gate. Coalesced operators can contain multiple
+	// filters, so count applications rather than logical operator nodes.
+	RecordExecutedSemijoinSchedule(*selected_plan, decision);
+	decision.executed_schedule_available = true;
 	candidate_tree.phase_timings.available = true;
 	decision.phase_timings = candidate_tree.phase_timings;
 	OuterYanTrace::Decision(decision, QueryProfiler::Get(context).IsEnabled());

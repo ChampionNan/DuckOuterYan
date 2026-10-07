@@ -115,8 +115,10 @@ corresponding environment values.
 | `PYTHON_BIN` | `python3` | Python 3.7+ interpreter; statistics require NumPy/pandas; may be an absolute repo-local path |
 | `DUCKDB_BIN` | `build/release/duckdb` | Release CLI, with debug fallback if release is absent |
 | `GRAPH_DATASET` | `bitcoin` | SNAP source used when `graph_db` is built |
-| `TPCH_SF` | `50` | TPC-H scale used when `tpch_db` is built |
-| `TPCDS_SF` | `50` | TPC-DS scale used when `tpcds_db` is built |
+| `TPCH_SF` | `50` | TPC-H generation scale and default database filename suffix |
+| `TPCDS_SF` | `50` | TPC-DS generation scale and default database filename suffix |
+| `TPCH_DB` | `tpch_${TPCH_SF}.duckdb` under the repository root | Explicit database path overrides the scale-qualified default |
+| `TPCDS_DB` | `tpcds_${TPCDS_SF}.duckdb` under the repository root | Explicit database path overrides the scale-qualified default |
 | `OY_THREAD_COUNTS` | `32` | One default configuration; explicit space/comma-separated sweeps also work |
 | `OY_THREADS` | first configuration (`32`) | Scalar override to run only one thread count |
 | `OY_TIMEOUT_SECS` | `600` | Shared default per statement (10 minutes); `0` disables it |
@@ -154,31 +156,46 @@ bash auto_test/build_db.sh [graph|tpch|tpcds|job|all ...]
 | Database | Source |
 |---|---|
 | `graph_db` | One SNAP edge list copied into R1..R10, plus R/S/T/K views |
-| `tpch_db` | `CALL dbgen(sf=TPCH_SF)` |
-| `tpcds_db` | `CALL dsdgen(sf=TPCDS_SF)` |
+| `tpch_<SF>.duckdb` | `CALL dbgen(sf=TPCH_SF)`; default `tpch_50.duckdb` |
+| `tpcds_<SF>.duckdb` | `CALL dsdgen(sf=TPCDS_SF)`; default `tpcds_50.duckdb` |
 | `job_db` | 21 JOB/IMDb Parquet files cached under `job_data/`, then loaded locally |
 
-Existing database files are reused. Merely changing `GRAPH_DATASET`, `TPCH_SF`,
-or `TPCDS_SF` does not change an existing database. Use `FORCE=1` deliberately:
+TPC database defaults include the requested scale. SF50 and SF100 can coexist as
+`tpch_50.duckdb`, `tpch_100.duckdb`, `tpcds_50.duckdb`, and `tpcds_100.duckdb`.
+Existing files are reused. An explicit `TPCH_DB`/`TPCDS_DB` takes precedence, so
+changing only its corresponding SF does **not** resize that file. The Python
+selectivity-audit and qualification helpers use the same defaults.
+The historical design-bootstrap/legacy-query utilities and standalone paper
+examples are not normal experiment entry points; supply their database paths
+explicitly when supported, or export the paths from `configs.sh` first for the
+design-bootstrap utility. The frozen balanced-generator provenance is preserved.
 
-当前主实验统一使用 **TPC-H SF50 / TPC-DS SF50**。这是生成配置，不是已有数据库规模的证明。
-从旧库迁移时，先停止正在使用数据库的实验，并备份 `tpch_db`、`tpcds_db` 及存在的 `.wal` 文件。
-以下命令会**替换这两个 TPC 数据库**，不重建 Graph/JOB：
+默认仍为 **TPC-H SF50 / TPC-DS SF50**。在 cpu9 上先进入 Bash（tcsh 不支持 `export`），
+然后选择 scale；不会删除另一种规模的数据：
 
 ```bash
-# cpu9: after git pull and after stopping tests / backing up the old TPC databases
-export TPCH_DB=/home/data/bchenba/DuckYanOuter/tpch_db
-export TPCDS_DB=/home/data/bchenba/DuckYanOuter/tpcds_db
+bash
+cd /home/data/bchenba/DuckYanOuter
+unset FORCE TPCH_DB TPCDS_DB
+export TPCH_SF=100 TPCDS_SF=100
+bash auto_test/run_all.sh --all --threads 32 --runs 1 --timeout 600 --check-correctness
+
+# Later, switch to SF50 (only missing database files will be generated).
+unset TPCH_DB TPCDS_DB
 export TPCH_SF=50 TPCDS_SF=50
-FORCE=1 bash auto_test/build_db.sh tpch tpcds
-bash auto_test/run_all.sh --all
+bash auto_test/run_all.sh --all --threads 32 --runs 1 --timeout 600 --check-correctness
 ```
 
-不必另外手动删除：上述 `FORCE=1` 会删除指定的 `tpch_db`、`tpcds_db` 以及各自的 `.wal`，
-再生成 SF50。没有备份则旧文件不能通过脚本恢复；不会删除 Graph/JOB 或已有实验结果。
-不要使用 `FORCE=1 bash auto_test/run_all.sh` 代替上述定向重建，它会强制重建其它 family。
-若已确认两库实际都是 SF50，则不必重建。环境中的 `TPCH_SF/TPCDS_SF` 会覆盖默认值，
-切换后应清除旧覆盖值或都设为 50。原始 SF100 结果保留，不能和 SF50 结果当成同一次实验混合。
+脚本**不自动重命名旧库**：`tpch_db`、`tpcds_db` 和旧的 `*_sf100.duckdb` 都会保留，
+但不再自动选用。已有库的真实 scale 必须根据生成记录或已核验的行数确认，不能根据
+文件大小、名字或当前 `*_SF` 环境变量推断。确认后可继续显式设置 `TPCH_DB/TPCDS_DB`
+复用原路径；若要统一命名，先停止所有使用它的进程，用同版本 CLI 完成 `CHECKPOINT`
+并退出，再将已确认的库改名到相应的 `<family>_<SF>.duckdb`，不得覆盖已有目标，
+也不能丢弃尚有内容的 `.wal`。切换 scale 时清除旧的 `*_DB` 覆盖，或同步更换路径。
+
+`FORCE=1` 仍会删除并重建**选中的**数据库及其 WAL，不要用它进行普通的 scale 切换，
+更不要使用 `FORCE=1 bash auto_test/run_all.sh` 重建所有 family。
+原始 SF50/SF100 结果分别保留，不能当成同一次实验混合。
 换库后重新执行 selectivity audit 和计划选择审计；此前本地计划选择数不代表 cpu9 的 SF50 结果。
 当前默认 DuckDB/OFF 和 OuterYan/ON **各 600 秒（10 分钟）/statement**，独立计时；
 只停止超时的一侧，不自动延长或重试，另一侧继续执行。
@@ -187,9 +204,9 @@ bash auto_test/run_all.sh --all
 本次不修改代价模型；Graph 的 relation 数配额已调整（见下文）。
 
 ```bash
-# Small TPC databases
-FORCE=1 TPCH_SF=1 bash auto_test/build_db.sh tpch
-FORCE=1 TPCDS_SF=1 bash auto_test/build_db.sh tpcds
+# Small TPC databases, without replacing SF50/SF100 files
+env -u TPCH_DB TPCH_SF=1 bash auto_test/build_db.sh tpch
+env -u TPCDS_DB TPCDS_SF=1 bash auto_test/build_db.sh tpcds
 
 # Replace graph_db with the wiki graph
 FORCE=1 GRAPH_DATASET=wiki bash auto_test/build_db.sh graph
@@ -432,8 +449,8 @@ executing their joins:
 python3 auto_test/check_outeryan_dp.py --out auto_test/results/dp_coverage.json
 ```
 
-The check uses the release binary and existing `graph_db`, `tpch_db`,
-`tpcds_db`, and `job_db`; `DUCKDB_BIN` and the corresponding `*_DB` variables
+The check uses the release binary and existing `graph_db`, `tpch_<SF>.duckdb`,
+`tpcds_<SF>.duckdb`, and `job_db`; `DUCKDB_BIN` and the corresponding `*_DB` variables
 override them. It fails on planning errors or queries that do not complete
 DP. This is a planning check, not a correctness or performance benchmark.
 Aggregate pushdown is separately skipped when retained post-join filters or
@@ -936,6 +953,44 @@ bash auto_test/trace_outer_yan.sh -b build/release/duckdb --db graph_db fails
 
 The graph builder creates R/S/T/K views, so no manual view setup is required.
 
+## Order-aware semi-join reduction
+
+After join reordering and re-simplification, the optimizer can shorten the
+reduction schedule without changing the selected real-join tree. This is an
+order-based rule, not a lower cost-gate threshold. Compare it within one binary:
+
+```sql
+SET disabled_optimizers TO '';
+SET VARIABLE outer_yan_partial_reduction = false; -- reference schedule
+-- Run the bare query.
+SET VARIABLE outer_yan_partial_reduction = true;  -- default: guarded partial schedule
+-- Run the same bare query again.
+```
+
+The reduction tree is rooted at a preserved endpoint of the first selected
+join when possible. Preserved sides of the original simplified joins are never
+reduced. Bottom-up reductions remain, except the first join may absorb its root
+reducer when no top-down consumer depends on that root. Top-down reductions are
+retained along the complete ancestor paths for inputs joined with a child first
+or newly preserved by de-simplification. Other top-down reductions are omitted.
+The selected expression must remain simple; unsupported predicates, unsafe
+intermediate filters, and aggregate queries keep the reference schedule.
+The partial schedule is adopted only when it has strictly fewer logical pairs.
+Fewer pairs alone is not evidence of a runtime improvement.
+
+Re-simplification checks the selected binary expression for NULL-padding safety
+before restoring each original type. Semi-join filters are shared only within
+one round: a top-down build must see any preceding top-down reductions, not a
+cached bottom-up key set. Existing PK/FK pruning requires catalog-backed total
+coverage (including non-null FK columns) and an unreduced, unfiltered build
+input. A primary key alone does not imply that every probe has a match.
+
+Cost-gate estimates still describe the reference reduction schedule. The
+`executed_round1_pairs`, `executed_round2_pairs`, and corresponding `_filters`
+fields describe the selected post-RBO plan separately. Keep the cost estimate
+and executed count distinct when reviewing profiles. This optimization cannot
+rescue a candidate already rejected by reference-schedule costing.
+
 ## Semi-join kernel controls
 
 | Control | Current default | Effect |
@@ -1009,6 +1064,8 @@ OY_CORPUS=auto_test/outerjoin_benchmark/benchmark \
   bash auto_test/experiment_onoff.sh --only all
 ```
 
-`run_all.sh` and `build_db.sh` reuse existing database files. If a requested
-scale or graph differs from the database already on disk, rebuild that database
-explicitly with `FORCE=1` before running the experiment.
+`run_all.sh` and `build_db.sh` reuse existing database files. Changing a TPC
+scale selects a different scale-qualified default path, so the previous scale
+can remain on disk. An explicit `TPCH_DB`/`TPCDS_DB` override must match the
+requested scale; the filename is not a content check. Use a new path to retain
+old data rather than `FORCE=1`, which rebuilds the chosen file.

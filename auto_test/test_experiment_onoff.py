@@ -51,6 +51,15 @@ class MultiThreadExperimentTest(unittest.TestCase):
             profiling = "CALL enable_profiling(" in sql
             off = "disabled_optimizers TO 'outer_yan'" in sql
             side = "off" if off else "on"
+            def executed_schedule(profile=False):
+                if os.environ.get("LEGACY_SCHEDULE_TRACE"):
+                    return ""
+                default_r1 = "0" if os.environ.get("SELECTED_PLAN") == "DUCKDB" else "1"
+                prefix = "PROFILE_EXECUTED_" if profile else "EXECUTED_"
+                r1 = os.environ.get(prefix + "R1", os.environ.get("EXECUTED_R1", default_r1))
+                r2 = os.environ.get(prefix + "R2", os.environ.get("EXECUTED_R2", "0"))
+                return (f" executed_round1_pairs={r1} executed_round1_filters={r1}"
+                        f" executed_round2_pairs={r2} executed_round2_filters={r2}")
             if profiling and timing and not (sql.index("CALL enable_profiling(") < sql.index("PRAGMA disable_profiling;") < sql.index(".timer on")):
                 sys.exit("Error: profile was not disabled before timing")
             with open(os.environ["HARNESS_CALLS"], "a") as log:
@@ -86,6 +95,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
                     ]
                     if not enabled:
                         nodes = nodes[2:]
+                    if enabled and os.environ.get("OMIT_SJ_PROFILE"):
+                        nodes = nodes[2:]
                     if os.environ.get("BAD_PROFILE_ROUND") and enabled:
                         nodes[0]["operator_name"] = "SJ_BUILD_ROUND_2"
                     root = {
@@ -110,7 +121,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
                             "semijoin_insertion", "aggregate_pushdown",
                         )
                     )
-                    Path(profile_trace).write_text(f"[OY_DECISION] {phase_fields}\n")
+                    Path(profile_trace).write_text(f"[OY_DECISION] {phase_fields}{executed_schedule(True)}\n")
                     if os.environ.get("STALE_PROFILE_BINARY"):
                         with open(profile_trace, "a") as handle:
                             handle.write(f"[OY_DECISION] {phase_fields}\n")
@@ -143,7 +154,9 @@ class MultiThreadExperimentTest(unittest.TestCase):
                         "full_reduction_cardinality_lower_bound_applied=0 uncertain_filter_amplification_guard=0 "
                         "stretch_cost_gate_eligible=0 stretch_cost_gate_selected=0 "
                         "low_selectivity_cost_gate_eligible=0 low_selectivity_cost_gate_selected=0 "
-                        "round1_pairs=1 round2_pairs=0\n"
+                        f"round1_pairs={os.environ.get('REFERENCE_R1', '1')} "
+                        f"round2_pairs={os.environ.get('REFERENCE_R2', '0')}"
+                        f"{executed_schedule()}\n"
                     )
                 print("plan")
             if timing:
@@ -294,6 +307,57 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertIn("desimplification", json.loads(row["optimizer_outeryan_phases_json"]))
         self.assertEqual(row["profile_directory"], "-")
         self.assertFalse((self.root / "result.profiles").exists())
+
+    def test_phase_validation_uses_executed_not_costed_schedule(self):
+        result = self.run_harness(REFERENCE_R1="3", REFERENCE_R2="2", EXECUTED_R1="1", EXECUTED_R2="0")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["profile_status"], "OK")
+        self.assertEqual(row["round1_pairs"], "3")
+        self.assertEqual(row["round2_pairs"], "2")
+        self.assertEqual(row["executed_round1_pairs"], "1")
+        self.assertEqual(row["executed_round2_pairs"], "0")
+        self.assertEqual(row["executed_round1_filters"], "1")
+        self.assertEqual(row["executed_round2_filters"], "0")
+        self.assertNotIn(None, row)
+        self.assertIn("executed_SJ=[R1(pairs=1 filters=1) R2(pairs=0 filters=0)]",
+                      (self.root / "result.txt").read_text())
+
+    def test_partial_reduction_can_eliminate_both_rounds(self):
+        result = self.run_harness(REFERENCE_R1="3", REFERENCE_R2="2", EXECUTED_R1="0", EXECUTED_R2="0",
+                                  OMIT_SJ_PROFILE="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["profile_status"], "OK")
+        self.assertEqual(row["executed_round1_pairs"], "0")
+        self.assertEqual(row["executed_round2_pairs"], "0")
+        self.assertEqual(float(row["profile_round1_operator_s"]), 0)
+        self.assertEqual(float(row["profile_round2_operator_s"]), 0)
+
+    def test_profiled_schedule_takes_precedence_over_explain(self):
+        result = self.run_harness(EXECUTED_R2="1", PROFILE_EXECUTED_R2="0")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["profile_status"], "OK")
+        self.assertEqual(row["executed_round2_pairs"], "0")
+
+    def test_executed_schedule_still_detects_missing_required_round(self):
+        result = self.run_harness(REFERENCE_R2="0", EXECUTED_R2="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["profile_status"], "ERROR")
+        self.assertEqual(row["executed_round2_pairs"], "1")
+        self.assertEqual(row["profile_round2_operator_s"], "NA")
+        self.assertIn("R2 has planned pairs but did not run", result.stderr)
+
+    def test_legacy_schedule_trace_keeps_cost_count_fallback(self):
+        result = self.run_harness(LEGACY_SCHEDULE_TRACE="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["profile_status"], "OK")
+        self.assertEqual(row["round1_pairs"], "1")
+        self.assertEqual(row["executed_round1_pairs"], "NA")
+        self.assertEqual(row["executed_round2_pairs"], "NA")
 
     def test_query_type_selects_only_matching_sql(self):
         graph = self.scripts / "outerjoin_benchmark/benchmark/tpch/graph__tpch__sample.sql"

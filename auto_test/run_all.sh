@@ -15,6 +15,7 @@
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 50)
 #   TPCDS_SF         TPC-DS scale factor (default 50)
+#   TPCH_DB/TPCDS_DB Explicit paths (defaults: tpch_<SF>.duckdb / tpcds_<SF>.duckdb)
 #   OY_THREAD_COUNTS Sequential timing counts (default "32")
 #   OY_THREADS       Override with one multi-thread timing count
 #   OY_PROFILE       One pre-timing profile per side (default 1; set 0 to skip)

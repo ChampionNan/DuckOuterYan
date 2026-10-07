@@ -217,6 +217,10 @@ void OuterYanTrace::Decision(const OuterYanDecisionRecord &record, bool profilin
 	count_metric("round1_filters", costs.round1_filters, costs.available);
 	count_metric("round2_pairs", costs.round2_pairs, costs.available);
 	count_metric("round2_filters", costs.round2_filters, costs.available);
+	count_metric("executed_round1_pairs", record.executed_round1_pairs, record.executed_schedule_available);
+	count_metric("executed_round1_filters", record.executed_round1_filters, record.executed_schedule_available);
+	count_metric("executed_round2_pairs", record.executed_round2_pairs, record.executed_schedule_available);
+	count_metric("executed_round2_filters", record.executed_round2_filters, record.executed_schedule_available);
 	metric("raw_cost_delta", costs.raw_cost_delta, costs.available);
 	metric("raw_cost_ratio", costs.raw_cost_ratio, costs.available && costs.raw_cost_ratio_available);
 	metric("gate_lhs", costs.gate_lhs, costs.available);

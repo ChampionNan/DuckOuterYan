@@ -362,19 +362,17 @@ private:
 					// carried into every pushed partial aggregate. Keep them on the
 					// ordinary aggregate path until that representation is supported.
 					any_other = true;
-				} else if (agg.groups.empty()) {
-					any_count_star = true;
 				} else {
-					// count_star + GROUP BY decomposes to a SUM-shape during
-					// aggregation pushdown (see reference reclassification).
-					any_sum = true;
+					// Both grouped and global COUNT(*) need multiplicity
+					// annotations. The SUM path has no count input column and
+					// would otherwise deduplicate join inputs without weights.
+					any_count_star = true;
 				}
 			} else if (name == "count") {
-				if (!agg.groups.empty()) {
-					any_sum = true;
-				} else {
-					any_other = true;
-				}
+				// COUNT(expr) needs non-NULL multiplicity annotations, not the
+				// COUNT(*) padding rule. Keep its aggregation above the joins
+				// until that separate annotation semantics is implemented.
+				any_other = true;
 			} else if (name == "min" || name == "max") {
 				any_minmax = true;
 			} else if (name == "sum") {

@@ -11,6 +11,7 @@
 #include "duckdb/optimizer/outer_yan/pipeline/agg_pushdown.hpp"
 #include "duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp"
 #include "duckdb/optimizer/outer_yan/pipeline/resimplification.hpp"
+#include "duckdb/optimizer/outer_yan/pipeline/partial_reduction.hpp"
 #include "duckdb/optimizer/outer_yan/semi_join/semijoin_insertion.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -68,6 +69,9 @@ public:
 	//!   SET VARIABLE outer_yan_stats_prefilter = true;
 	static constexpr const char *kStatsPrefilterVar = "outer_yan_stats_prefilter";
 	static bool IsStatsPrefilterEnabled(ClientContext &context);
+	//! A/B escape hatch for guarded, order-aware reduction (default enabled).
+	static constexpr const char *kPartialReductionVar = "outer_yan_partial_reduction";
+	static bool IsPartialReductionEnabled(ClientContext &context);
 
 private:
 	ClientContext &context;

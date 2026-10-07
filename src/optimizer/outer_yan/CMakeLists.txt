@@ -22,6 +22,7 @@ add_library_unity(
   pipeline/outer_yan_optimizer.cpp
   pipeline/outer_yan_post.cpp
   pipeline/outer_yan_pre.cpp
+  pipeline/partial_reduction.cpp
   pipeline/resimplification.cpp
   pipeline/simplification.cpp)
 set(ALL_OBJECT_FILES

@@ -20,7 +20,7 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 		throw InternalException("OuterYanPost::Optimize: tree has no OJT");
 	}
 
-	// Pipeline: Resimplify → MarkAggPushdown → OJTToLogicalPlan →
+	// Pipeline: Resimplify → PartialReduction → MarkAggPushdown → OJTToLogicalPlan →
 	// SemijoinInsertOnPlan. Aggregation-driven root anchoring is already
 	// enforced by OuterYanDP, so the OJT seen here is order-correct.
 	using Clock = std::chrono::steady_clock;
@@ -33,6 +33,12 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 		                         " revert(s); OJT)",
 		                     tree.OJT().PrintAsTree(true));
 	}
+	phase_start = Clock::now();
+	if (IsPartialReductionEnabled(context)) {
+		PartialReduction().Apply(tree);
+	}
+	tree.phase_timings.semijoin_pair_planning +=
+	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 
 	// Record the per-edge aggregate-pushdown gate while the OJT is still
 	// live. Must run before OJTToLogicalPlan because the marker reads
@@ -100,6 +106,19 @@ bool OuterYanPost::IsStatsPrefilterEnabled(ClientContext &context) {
 	} catch (...) {
 		throw InvalidInputException("SET VARIABLE %s must be a boolean (got %s)", kStatsPrefilterVar,
 		                            it->second.ToString());
+	}
+}
+
+bool OuterYanPost::IsPartialReductionEnabled(ClientContext &context) {
+	auto &variables = ClientConfig::GetConfig(context).user_variables;
+	auto entry = variables.find(kPartialReductionVar);
+	if (entry == variables.end() || entry->second.IsNull()) {
+		return true;
+	}
+	try {
+		return entry->second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+	} catch (...) {
+		throw InvalidInputException("SET VARIABLE %s must be a boolean", kPartialReductionVar);
 	}
 }
 

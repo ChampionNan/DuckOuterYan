@@ -5,7 +5,8 @@
 # it does not rerun the query. CPU work and wall latency remain separate.
 
 # Read R1/R2/R3 operator work from the same post-warm-up ON execution used for
-# optimizer timing. No query is executed here.
+# optimizer timing. Expected pairs describe the final executed schedule, not
+# the pre-Post reference schedule used in cost estimates. No query is executed here.
 oy_phase_profile_from_json() {
     local profile_json="$1" query="$2" expected_plan="$3"
     local expected_r1_pairs="$4" expected_r2_pairs="$5" proven_empty="$6"

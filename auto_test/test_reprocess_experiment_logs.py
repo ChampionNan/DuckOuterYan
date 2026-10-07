@@ -67,6 +67,18 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(rows[0]["timing_samples"], "1")
         self.assertEqual(rows[0]["timing_estimator"], "single_post_warmup")
 
+    def test_executed_schedule_is_distinct_from_costed_reference(self):
+        self.log.write_text(LOG.replace(
+            "weighted=20]", "weighted=20] executed_SJ=[R1(pairs=1 filters=1) R2(pairs=0 filters=0)]"))
+        rows, _ = self.recover()
+        self.assertEqual(rows[0]["round2_pairs"], "2")
+        self.assertEqual(rows[0]["round2_filters"], "2")
+        self.assertEqual(rows[0]["executed_round1_pairs"], "1")
+        self.assertEqual(rows[0]["executed_round1_filters"], "1")
+        self.assertEqual(rows[0]["executed_round2_pairs"], "0")
+        self.assertEqual(rows[0]["executed_round2_filters"], "0")
+        self.assertEqual(rows[1]["executed_round1_pairs"], "NA")
+
     def test_sibling_precision_and_phase_maps_survive_recovery(self):
         original = {
             "query": "measured", "family": "tpch", "correct": "TRUE", "selected_plan": "OUTERYAN",

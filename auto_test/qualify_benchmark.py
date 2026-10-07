@@ -13,7 +13,6 @@ import csv
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import socket
 import statistics
@@ -21,6 +20,7 @@ import subprocess
 
 import balanced_benchmark as benchmark
 from benchmark_corpus import read_manifest
+from database_paths import database_path
 
 
 def database_signature(path):
@@ -48,7 +48,7 @@ def audit_selectivity(root, binary, output, timeout):
         if relation and (name != "graph_aux_source_range" or relation not in ("R2", "R3", "R4", "R5")):
             raise ValueError(f"Invalid input-filter audit target: {name}/{relation}")
         family = profile["family"]
-        database = Path(os.environ.get(f"{family.upper()}_DB", benchmark.legacy.REPO_ROOT / f"{family}_db"))
+        database = database_path(family, benchmark.legacy.REPO_ROOT)
         signature = database_signature(database)
         ordered = [tier for tier in benchmark.TIERS if tier in tiers]
         column = f"{relation}.src" if relation else profile["column"]

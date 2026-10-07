@@ -12,6 +12,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from database_paths import database_path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS_ROOT = ROOT / "auto_test" / "outerjoin_benchmark"
@@ -80,7 +82,7 @@ def main():
                 parser.error(f"no queries found for {corpus}")
             for query in queries:
                 family = query.parent.name
-                database = Path(os.environ.get(f"{family.upper()}_DB", ROOT / f"{family}_db"))
+                database = database_path(family, ROOT)
                 row = audit_query(binary, database.resolve(), query, trace, args.timeout)
                 item = metadata[str(query.relative_to(CORPUS_ROOT / corpus))]
                 rows.append({"corpus": corpus, "query": str(query.relative_to(CORPUS_ROOT)),

@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from benchmark_corpus import ARCHIVE_NAME, canonical_query_id, read_manifest, sql_fingerprint
+from database_paths import database_path
 
 from legacy_corpus import (
     COMPLETED_QUERY_PATHS,
@@ -3594,7 +3595,7 @@ def audit_selectivity(root: Path, binary: Path, output: Path, timeout: int) -> b
     for profile_id, tiers in sorted(used.items()):
         profile = SEMANTIC_DESIGN["profiles"][profile_id]
         family = profile["family"]
-        database = Path(os.environ.get(f"{family.upper()}_DB", REPO_ROOT / f"{family}_db")).expanduser().resolve()
+        database = database_path(family, REPO_ROOT).resolve()
         if not database.is_file():
             raise FileNotFoundError(f"Set {family.upper()}_DB to an existing database: {database}")
         ordered = [tier for tier in SEMANTIC_TIERS if tier in tiers]
