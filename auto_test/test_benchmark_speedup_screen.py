@@ -9,6 +9,7 @@ import unittest
 
 import balanced_benchmark as b
 import benchmark_speedup_screen as screen
+import tpcds_selectivity_extension as extension
 from benchmark_corpus import resolve_sql_path, historical_manifests
 from test_gen_outerjoin_benchmark import forbid_result_access
 
@@ -29,9 +30,11 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
     def test_exact_exclusions_and_pending_candidates(self):
         rows = b.validate(b.ROOT / "benchmark")
         spec = screen.policy()
-        self.assertEqual(Counter(r["family"] for r in spec["excluded"]), dict(graph=1, tpch=1, tpcds=7, job=3))
+        self.assertEqual(Counter(r["family"] for r in spec["excluded"]), dict(graph=3, tpch=1, tpcds=7, job=12))
         self.assertEqual(len(spec["previously_retired_tpcds_queries"]), 8)
-        self.assertEqual(Counter(r["family"] for r in rows), dict(graph=179, tpch=179, tpcds=194, job=177))
+        self.assertEqual(Counter(r["family"] for r in rows), extension.policy()["expected_counts_after"])
+        self.assertEqual(Counter(r["family"] for r in rows if not extension.is_extension(r)),
+                         dict(graph=177, tpch=179, tpcds=194, job=168))
         excluded = {r["sql_fingerprint"] for r in spec["excluded"]}
         self.assertTrue(excluded.isdisjoint(r["sql_fingerprint"] for r in rows))
         self.assertEqual(sum(r.get("evaluation_role") == "historical_selectivity_recovery" for r in rows), 47)
@@ -48,7 +51,8 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
 
     def test_archive_preserves_sql_and_original_manifest(self):
         archived_ids = set()
-        for revision, expected in (("retired_speedup_20261005", 5), ("retired_speedup_20261007", 7)):
+        for revision, expected in (("retired_speedup_20261005", 5), ("retired_speedup_20261007", 7),
+                                   ("retired_speedup_20261008", 11)):
             with self.subTest(revision=revision):
                 archive = b.ROOT / "revisions" / revision / "benchmark"
                 rows = b.read_manifest(archive / "manifest.csv")
@@ -62,6 +66,26 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
                     self.assertFalse((b.ROOT / "benchmark" / row["path"]).exists())
                 self.assertIn((None, archive / "manifest.csv"), list(historical_manifests()))
         self.assertEqual(archived_ids, {r["query_id"] for r in screen.policy()["excluded"]})
+
+    def test_scoped_inclusive_boundary_and_disabled_correctness(self):
+        result = dict(correct="NOT-CHECKED", correctness_check="disabled",
+                      timing_status="measured", tm_off="0.7", tm_on="1")
+        self.assertFalse(screen.below_threshold(result, .7, inclusive=True))
+        self.assertFalse(screen.below_threshold(result, .7, allow_unchecked=True))
+        self.assertTrue(screen.below_threshold(result, .7, inclusive=True, allow_unchecked=True))
+        for change in (dict(tm_off="0.700000001"), dict(correctness_check="enabled"),
+                       dict(correct="FALSE"), dict(correct="TIMEOUT"), dict(tm_on="nan"),
+                       dict(timing_status="fallback-skip")):
+            self.assertFalse(screen.below_threshold(dict(result, **change), .7,
+                                                    inclusive=True, allow_unchecked=True))
+        spec = screen.policy()
+        old = json.loads((b.ROOT / "sources/speedup_screen_20261007.json").read_text())
+        self.assertEqual(spec["excluded"][:len(old["excluded"])], old["excluded"])
+        new = [r for r in spec["excluded"] if r.get("screen_rule")]
+        self.assertEqual(Counter(r["family"] for r in new), dict(graph=2, job=9))
+        self.assertTrue(all(r["correct"] == "NOT-CHECKED" and r["correctness_check"] == "disabled"
+                            for r in new))
+        self.assertEqual(spec["minimum_speedup"], .5)  # No dynamic global 0.7 filter.
 
     def test_tpcds_retirement_is_exact_query_not_whole_pattern(self):
         excluded = {r["query_id"] for r in screen.policy()["excluded"] if r["family"] == "tpcds"}
@@ -92,6 +116,12 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
             marker["counts"]["graph"] += 1
             marker_path.write_text(json.dumps(marker))
             with self.assertRaisesRegex(ValueError, "screen counts"):
+                b.validate(root / "benchmark")
+            marker_path.write_text(original_marker)
+            marker = json.loads(original_marker)
+            marker["rule_removed_counts"]["graph-job-le-0.7-20261008"]["graph"] += 1
+            marker_path.write_text(json.dumps(marker))
+            with self.assertRaisesRegex(ValueError, "Scoped speed-up exclusion counts"):
                 b.validate(root / "benchmark")
             marker_path.write_text(original_marker)
             excluded_path = root / "benchmark/speedup_excluded.csv"

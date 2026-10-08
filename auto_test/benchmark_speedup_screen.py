@@ -5,26 +5,38 @@ import math
 
 import balanced_benchmark as b
 
-POLICY = b.ROOT / "sources/speedup_screen_20261007.json"
+POLICY = b.ROOT / "sources/speedup_screen_20261008.json"
 MARKER = "speedup_screen.json"
 
 
-def below_threshold(result, threshold=.5):
-    """Only verified, complete measurements can establish a slow query."""
-    if result.get("correct") != "TRUE" or result.get("timing_status") != "measured":
+def below_threshold(result, threshold=.5, *, inclusive=False, allow_unchecked=False):
+    """Compare complete measurements, without mistaking disabled checks for proof."""
+    correctness_eligible = result.get("correct") == "TRUE" or (
+        allow_unchecked and result.get("correct") == "NOT-CHECKED"
+        and result.get("correctness_check") == "disabled")
+    if not correctness_eligible or result.get("timing_status") != "measured":
         return False
     try:
         off, on = float(result["tm_off"]), float(result["tm_on"])
     except (KeyError, TypeError, ValueError):
         return False
-    return all(math.isfinite(t) and t > 0 for t in (off, on)) and off / on < threshold
+    if not all(math.isfinite(t) and t > 0 for t in (off, on)):
+        return False
+    return off / on <= threshold if inclusive else off / on < threshold
 
 
 def policy():
     spec = json.loads(POLICY.read_text(encoding="utf-8"))
     for row in spec["excluded"]:
         result = dict(row, tm_off=row["duckdb_s"], tm_on=row["outeryan_s"])
-        if not below_threshold(result, spec["minimum_speedup"]):
+        rule_id = row.get("screen_rule")
+        rule = spec.get("rules", {}).get(rule_id) if rule_id else None
+        if rule_id and (rule is None or row["family"] not in rule["families"]
+                        or row["measurement_source"] != rule["measurement_source"]):
+            raise ValueError(f"Invalid scoped speed-up rule: {row['query_id']}")
+        if not below_threshold(result, rule["threshold"] if rule else spec["minimum_speedup"],
+                               inclusive=rule["inclusive"] if rule else False,
+                               allow_unchecked=rule["allow_unchecked"] if rule else False):
             raise ValueError(f"Invalid speed-up exclusion evidence: {row['query_id']}")
     return spec
 
@@ -62,10 +74,14 @@ def apply(records, output):
         revision=spec["revision"], policy_sha256=b.digest(POLICY),
         source=spec["source"], source_sha256=spec["source_sha256"],
         evidence_sources=spec["evidence_sources"],
+        rules=spec.get("rules", {}),
+        rule_removed_counts={rule: dict(Counter(row["family"] for row in removed
+                                               if row.get("screen_rule") == rule))
+                             for rule in spec.get("rules", {})},
         removed_queries=len(removed), previously_retired_tpcds_queries=len(spec["previously_retired_tpcds_queries"]),
         counts=dict(Counter(r["family"] for r in retained)),
         minimum_speedup=spec["minimum_speedup"],
-        note="Exact measured SQL exclusions; no extra timeout/fallback removal; pending candidates are not measured results."))
+        note="Frozen exact-SQL exclusions, not dynamic screening of new results. New Graph/JOB evidence has correctness checks disabled. No extra timeout/fallback removal; pending candidates are not measured results."))
     return retained
 
 
@@ -75,6 +91,13 @@ def validate(benchmark, rows):
     marker = json.loads((benchmark / MARKER).read_text(encoding="utf-8"))
     if marker["revision"] != spec["revision"] or marker["policy_sha256"] != b.digest(POLICY):
         raise ValueError("Speed-up screening policy changed; regenerate")
+    if marker.get("rules", {}) != spec.get("rules", {}):
+        raise ValueError("Scoped speed-up screening rules changed; regenerate")
+    rule_counts = {rule: dict(Counter(row["family"] for row in spec["excluded"]
+                                     if row.get("screen_rule") == rule))
+                   for rule in spec.get("rules", {})}
+    if marker.get("rule_removed_counts", {}) != rule_counts:
+        raise ValueError("Scoped speed-up exclusion counts changed; regenerate")
     counts = dict(Counter(r["family"] for r in rows))
     if counts != spec["expected_counts_after"] or marker["counts"] != counts:
         raise ValueError("Speed-up screen counts do not match the pinned design")

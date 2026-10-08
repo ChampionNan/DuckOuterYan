@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 729 条当前查询（Graph 179、TPC-H 179、TPC-DS 194、JOB 177）、manifest、固定筛选证据与历史档案；TPC-DS 新批次已实测，移出 7 条 speed-up <0.5 的查询 |
+| `outerjoin_benchmark/` | 733 条当前查询（Graph 177、TPC-H 179、TPC-DS 209、JOB 168）、manifest、固定筛选证据与历史档案；含 15 条待 SF50 复测的 TPC-DS 三档扩展 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -221,11 +221,12 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **729 条唯一候选 SQL**：
-Graph 179、TPC-H 179、TPC-DS 194、JOB 177。
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **733 条唯一候选 SQL**：
+Graph 177、TPC-H 179、TPC-DS 209、JOB 168。
 基础设计原为每 family 180 条，每档每 shape 各 20；经性能筛选后不再严格配平。
-join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **126/53**，不再生成 6 relation 查询。
-基础单元为 14/6，low/left-deep 因移出一条变为 14/5；数据库及数据集不变。
+join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **125/52**，不再生成 6 relation 查询。
+基础单元为 14/6；筛选后 low/left-deep 和 low/right-deep 均为 14/5，
+low/bushy 为 13/6，其余单元不变；数据库及数据集不变。
 Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
 放在 `(SELECT src,dst FROM Ri WHERE ...) Ri` 中，避免在根 WHERE 误删 NULL-padded 行。
@@ -236,8 +237,8 @@ R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的�
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 372、`graph` 162（含 industry controls）、`aggregate` 195。
-`--only graph` 选择 Graph family 全部 179 条，与 `--query-type graph` 不同。
+类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 194。
+`--only graph` 选择 Graph family 全部 177 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效实测数**，fallback 和 timeout 不能算作完整实测配对。
 
 20261005 的 TPC-DS 调整按 20261002 实测移出 28 条 timeout、8 条 speed-up <0.5 的 SQL，
@@ -255,13 +256,36 @@ Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移�
 20261005_201226_t32 的新 TPC-DS 批次已在 cpu9 测完：201 条均通过等价性检查，
 43 条有完整实测配对，158 条 fallback-skip，无 TPC-DS timeout。
 20261007 再按该批次实测移出 7 条 speed-up <0.5 的查询（6 条 aggregate、1 条 join），
-当前 TPC-DS 为 194 条，其中 36 条有完整配对、158 条 fallback-skip；原 54 条恢复候选保留 47 条。
+该次筛选后 TPC-DS 为 194 条，其中 36 条有完整配对、158 条 fallback-skip；原 54 条恢复候选保留 47 条。
 因此约 50 条完整实测的目标尚未达到，不能把 fallback 默认 1× 当成实测。
 累计 12 条额外 speed-up 剔除（旧 5 条 + 新 7 条）的固定证据为
 `sources/speedup_screen_20261007.json`，清单为 `benchmark/speedup_excluded.csv`。
 新移出的 7 条 SQL 和 manifest 可从 `revisions/retired_speedup_20261007/benchmark/` 恢复；
 旧档案与所有原始结果不变，常规重新生成也不会恢复这些确切 SQL。
 本次不额外移出其它 timeout/fallback，也不修改其余档位的 SQL。
+
+20261008 按 `experiment_onoff_benchmark_20261007_161108_t32.csv` 的完整实测，
+再从当前 benchmark 移出 **2 条 Graph 和 9 条 JOB 的 speed-up <=0.7 查询**。
+只移出确切 SQL；TPC-H/TPC-DS 不变，不连带删除其它档位或 timeout/fallback。
+这 11 条均为双方 <1s 的单次计时，且本轮为 `NOT-CHECKED`，不将其冒充验证过的慢查询。
+新增固定证据为 `sources/speedup_screen_20261008.json`；SQL 可从
+`revisions/retired_speedup_20261008/benchmark/` 恢复。
+重新生成会重放固定排除清单，因此 `run_all.sh --all` 和 `experiment_onoff.sh --all`
+均不会恢复这 11 条；该次移出后为 718 条，不会根据未来的 CSV 自动追加新的筛选。
+同一次原始测量在新 manifest 上有 242 条有效 OuterYan-selected 配对。
+论文须披露这一基于实测结果的筛选，不能把删减后加速比的增加描述成优化器性能提升。
+
+随后增加 `sources/tpcds_extension_20261008.json` 固定的 5 个历史 mixed-join 表达式，
+每个改为当前 low/medium/high 三档，共 15 条新候选（9 bushy、6 left-deep，均非聚合）。
+来源的历史实测 >=0.9×，但新 SQL 必须重新测试；不复用旧计时、不以目标几何平均选择。
+现在共 733 条，TPC-DS 209 条，其中 15 条待 SF50 测量；约 50 条有效配对是目标而非保证。
+只编译并复测这 15 条（复用数据库，关闭完整正确性比较）：
+
+```bash
+env SKIP_DATA=1 TPCDS_SF=50 OY_RUNS=1 OY_PROFILE=1 OY_CHECK_CORRECTNESS=0 \
+  bash auto_test/run_all.sh --all --threads 32 --timeout 600 \
+  --query-list auto_test/outerjoin_benchmark/benchmark/tpcds_extension.txt
+```
 
 不能把旧速度比当成新查询结果。恢复组保留旧 join expression 与过滤 relation，
 旧取模模式采用约 3%/30%/55% 的 identifier buckets，Q93/control 保留语义谓词。
@@ -1038,11 +1062,16 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 729 unique candidates under `outerjoin_benchmark/benchmark`:
-179 Graph, 179 TPC-H, 194 TPC-DS and 177 JOB. Exact measured speed-up <0.5 queries
-have been retired, in addition to the earlier TPC-DS timeout exclusions.
+The comparison runs 733 unique candidates under `outerjoin_benchmark/benchmark`:
+177 Graph, 179 TPC-H, 209 TPC-DS and 168 JOB. Fifteen TPC-DS three-tier extension
+queries are new pending candidates, not additional valid measurements yet. Earlier exact measured speed-up <0.5
+and TPC-DS timeout exclusions remain. The 20261008 frozen screen additionally
+retires two Graph and nine JOB queries with observed speed-up <=0.7 in the
+20261007_161108 full run. These are single-sample, unchecked performance results,
+not correctness-verified evidence. Other families and timeout/fallback rows are
+unchanged; normal regeneration does not restore the retired SQL.
 The new TPC-DS run has completed: 47 of its 54 recovery candidates remain after
-retiring seven measured regressions. Across the 194 active TPC-DS definitions,
+retiring seven measured regressions. Across the 194 previously tested TPC-DS definitions,
 36 have complete measured pairs and 158 are fallback-skip; none timed out in
 that run. Qualification is a separate measured filter; the active corpus is
 performance-screened, not claimed to be exactly balanced or free of timeouts

@@ -4,27 +4,30 @@
   "batch": 0,
   "target_host": "cpu9:/home/data/bchenba/DuckYanOuter",
   "counts": {
-    "graph": 179,
-    "job": 177,
-    "tpcds": 194,
+    "graph": 177,
+    "job": 168,
+    "tpcds": 209,
     "tpch": 179
   },
   "balanced_counts": {
-    "graph": 179,
+    "graph": 177,
     "tpch": 179,
     "tpcds": 147,
-    "job": 177
+    "job": 168
   },
   "base_matrix_complete": false,
   "recovery_counts": {
     "tpcds": 47
+  },
+  "extension_counts": {
+    "tpcds": 15
   },
   "supplementary_counts": {},
   "family_tiers": {
     "graph": {
       "high": 60,
       "medium": 60,
-      "low": 59
+      "low": 57
     },
     "tpch": {
       "high": 60,
@@ -32,21 +35,21 @@
       "medium": 60
     },
     "tpcds": {
-      "high": 62,
-      "low": 69,
-      "medium": 63
+      "high": 67,
+      "low": 74,
+      "medium": 68
     },
     "job": {
-      "high": 58,
-      "low": 60,
-      "medium": 59
+      "high": 57,
+      "low": 53,
+      "medium": 58
     }
   },
   "family_shapes": {
     "graph": {
       "left_deep": 59,
-      "bushy": 60,
-      "right_deep": 60
+      "bushy": 59,
+      "right_deep": 59
     },
     "tpch": {
       "bushy": 60,
@@ -54,19 +57,19 @@
       "right_deep": 60
     },
     "tpcds": {
-      "left_deep": 72,
+      "left_deep": 78,
       "right_deep": 79,
-      "bushy": 43
+      "bushy": 52
     },
     "job": {
-      "right_deep": 57,
-      "bushy": 60,
-      "left_deep": 60
+      "right_deep": 55,
+      "bushy": 54,
+      "left_deep": 59
     }
   },
   "graph_relation_counts": {
-    "5": 53,
-    "4": 126
+    "5": 52,
+    "4": 125
   },
   "graph_relation_weights": {
     "4": 7,
@@ -92,8 +95,8 @@
     "note": "Measured-pair target is not guaranteed. Historical selection and exclusions must be disclosed."
   },
   "speedup_screen": {
-    "revision": "all-family-speedup-screen-20261007",
-    "policy_sha256": "20196cc76efaaca5c95491348fc3b6526b3bcac5a566f8f2a754a68955538c70",
+    "revision": "graph-job-speedup-screen-20261008",
+    "policy_sha256": "f060bfeafd3dafd152f4c1e30257fb670c269932202fff557b8d77e07bed0183",
     "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
     "source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74",
     "evidence_sources": [
@@ -104,18 +107,57 @@
       {
         "source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
         "source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
+      },
+      {
+        "source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
+        "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564",
+        "correctness_check": "disabled"
       }
     ],
-    "removed_queries": 12,
+    "rules": {
+      "graph-job-le-0.7-20261008": {
+        "families": [
+          "graph",
+          "job"
+        ],
+        "threshold": 0.7,
+        "inclusive": true,
+        "allow_unchecked": true,
+        "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
+        "measurement_source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564",
+        "frozen_query_count": 11
+      }
+    },
+    "rule_removed_counts": {
+      "graph-job-le-0.7-20261008": {
+        "graph": 2,
+        "job": 9
+      }
+    },
+    "removed_queries": 23,
     "previously_retired_tpcds_queries": 8,
     "counts": {
-      "graph": 179,
+      "graph": 177,
       "tpch": 179,
       "tpcds": 194,
-      "job": 177
+      "job": 168
     },
     "minimum_speedup": 0.5,
-    "note": "Exact measured SQL exclusions; no extra timeout/fallback removal; pending candidates are not measured results."
+    "note": "Frozen exact-SQL exclusions, not dynamic screening of new results. New Graph/JOB evidence has correctness checks disabled. No extra timeout/fallback removal; pending candidates are not measured results."
+  },
+  "tpcds_extension": {
+    "revision": "tpcds-selectivity-extension-20261008",
+    "policy_sha256": "1a589ef7281fe657cbd7c4b7de4f54d38b1488f6d843f37ea27622368cce8feb",
+    "target_complete_pairs": 50,
+    "new_candidates": 15,
+    "status": "PENDING_CPU9_MEASUREMENT",
+    "counts": {
+      "graph": 177,
+      "tpch": 179,
+      "tpcds": 209,
+      "job": 168
+    },
+    "note": "New three-band SQL requires CPU9 selectivity audit and bare-query ON/OFF measurement. Historical runtimes are selection provenance, not results for these candidates."
   },
   "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",

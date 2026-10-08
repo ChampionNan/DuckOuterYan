@@ -25,9 +25,10 @@ def is_recovery(row):
     return row.get("evaluation_role") == ROLE
 
 
-def recovery_queries():
+def recovery_queries(spec=None, *, role=ROLE, namespace="recovery", component="historical_recovery",
+                     revision_key="tpcds_refresh_revision", template_key="recovery_template", parameter_policy=None):
     """Keep archived FROM expressions and filter relations in three cohorts."""
-    spec = policy()
+    spec = policy() if spec is None else spec
     design = b.load_design()
     for template in spec["templates"]:
         source = b.ROOT / template["archive_sql"]
@@ -50,14 +51,14 @@ def recovery_queries():
             metadata = b.profile_metadata(design, template["selectivity_profile"],
                                           template["selectivity_anchor"], tier)
             metadata["filter_design_revision"] = spec["revision"]
-            metadata["parameter_policy"] = (
+            metadata["parameter_policy"] = parameter_policy or (
                 "Historical-performance-selected pattern; fixed 3/30/55 identifier buckets on the old filter relation"
                 if template["selectivity_profile"].startswith("recovery_modulo_") else
                 "Historical-performance-selected pattern; frozen semantic cohorts") + "; CPU9 audit required"
             sql = b.legacy.replace_where(original, metadata["selectivity_predicate"]).strip() + "\n"
             if b.expression_key(sql, "tpcds") != template["expression_fingerprint"]:
                 raise ValueError(f"Recovery changed the FROM expression: {source}")
-            query = (f"{category}__tpcds__recovery__{template['name']}__"
+            query = (f"{category}__tpcds__{namespace}__{template['name']}__"
                      f"{template['join_vector'].lower()}__{template['expression_fingerprint'][:8]}__sel_{tier}")
             source_label = f"{template['source_benchmark']} {template['source_query']}".rstrip()
             content = (f"-- corpus_revision: {b.REVISION}; component: {spec['revision']}\n"
@@ -76,14 +77,14 @@ def recovery_queries():
                        join_vector=template["join_vector"], relation_count=template["relation_count"],
                        expression_fingerprint=template["expression_fingerprint"],
                        provenance_class="industry_synthetic_control" if control else "historical_pattern_adaptation",
-                       source_component="historical_recovery", evaluation_role=ROLE,
+                       source_component=component, evaluation_role=role,
                        query_id=query, path=f"tpcds/{query}.sql", query_class=category, workload_category=category,
                        corpus_revision=b.REVISION, sql_fingerprint=b.sql_fingerprint(sql, "tpcds"),
                        aggregate_variant=aggregate, aggregate_anchor="", selectivity_stress="false",
                        regression_guard="false", candidate_batch=0, qualification_status="PENDING_CPU9_MEASUREMENT",
                        qualification_timeout_seconds=b.QUALIFICATION_TIMEOUT_SECONDS,
                        qualification_min_runtime_s=0, qualification_min_speedup=.5,
-                       tpcds_refresh_revision=spec["revision"], recovery_template=template["name"],
+                       **{revision_key: spec["revision"], template_key: template["name"]},
                        historical_source_sql=template["archive_sql"], historical_source_query=template["historical_query"],
                        historical_source_run=template["historical_run"], historical_projection_policy=template["projection_policy"],
                        content_sha256=hashlib.sha256(content.encode()).hexdigest())

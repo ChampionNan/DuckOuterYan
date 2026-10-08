@@ -104,10 +104,15 @@ def load_design():
     """Base design plus pinned recovery cohorts; no machine-local measurements."""
     design = json.loads(DESIGN.read_text())
     import tpcds_refresh
-    additions = tpcds_refresh.policy().get("recovery_profiles", {})
-    if set(additions).intersection(design["profiles"]):
-        raise ValueError("Recovery profile collides with the base design")
-    design["profiles"].update(additions)
+    import tpcds_selectivity_extension
+    policies = [tpcds_refresh.policy()]
+    if tpcds_selectivity_extension.POLICY.exists():
+        policies.append(tpcds_selectivity_extension.policy())
+    for spec in policies:
+        additions = spec.get("recovery_profiles", {})
+        if set(additions).intersection(design["profiles"]):
+            raise ValueError("Recovery profile collides with the base design")
+        design["profiles"].update(additions)
     return design
 
 
@@ -574,9 +579,12 @@ def generate(root=ROOT, per_family=180, batch=0):
         if refreshed:
             import tpcds_refresh
             import benchmark_speedup_screen
+            import tpcds_selectivity_extension
             records = tpcds_refresh.apply(records, output)
             records = benchmark_speedup_screen.apply(records, output)
-            balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r) and not is_historical_case(r)]
+            records = tpcds_selectivity_extension.apply(records, output)
+            balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
+                                and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
         write_csv(output/"manifest.csv", records)
         write_csv(output/"aliases.csv", [], ["canonical_query_id", "sql_fingerprint"])
@@ -591,6 +599,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             "base_matrix_complete": not refreshed,
             "recovery_counts": dict(Counter(r["family"] for r in records
                                               if r.get("evaluation_role") == "historical_selectivity_recovery")),
+            "extension_counts": dict(Counter(r["family"] for r in records
+                                               if r.get("evaluation_role") == "historical_selectivity_extension")),
             "supplementary_counts": dict(Counter(r["family"] for r in records if is_historical_case(r))),
             "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
             "family_shapes": {f:dict(Counter(r["tree_shape"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
@@ -601,6 +611,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "historical_exclusion_observations": len(evidence["excluded"]),
             "tpcds_refresh": json.loads((output / "tpcds_refresh.json").read_text()) if refreshed else None,
             "speedup_screen": json.loads((output / "speedup_screen.json").read_text()) if refreshed else None,
+            "tpcds_extension": json.loads((output / "tpcds_extension.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -650,6 +661,10 @@ def validate(benchmark):
     graph_sources = {s.seed_id: s for s in graph_seeds()}
     expected_cases = {r["query_id"]: r for r, _ in historical_cases()}
     refreshed = (benchmark / "tpcds_refresh.json").exists()
+    import tpcds_selectivity_extension
+    if not refreshed and ((benchmark / tpcds_selectivity_extension.MARKER).exists()
+                          or any(tpcds_selectivity_extension.is_extension(r) for r in rows)):
+        raise ValueError("TPC-DS extension belongs to the refreshed primary batch only")
     if refreshed:
         import tpcds_refresh
         excluded_ids = {r["query_id"] for r in tpcds_refresh.policy()["excluded"]}
@@ -700,7 +715,8 @@ def validate(benchmark):
         raise ValueError("Historical cases must occur exactly once in the primary batch only")
     if refreshed:
         import benchmark_speedup_screen
-        before_screen = benchmark_speedup_screen.validate(benchmark, rows)
+        before_extension = tpcds_selectivity_extension.validate(benchmark, rows)
+        before_screen = benchmark_speedup_screen.validate(benchmark, before_extension)
         tpcds_refresh.validate(benchmark, before_screen)
         return rows
     if {r["family"] for r in balanced} != set(FAMILIES) or len(set(Counter(r["family"] for r in balanced).values()))!=1:
