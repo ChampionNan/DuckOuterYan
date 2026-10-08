@@ -166,8 +166,9 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 if os.environ.get("FAIL_TIMING_THREADS") == str(threads):
                     sys.exit("Error: timing failed")
                 count = len(re.findall(r"(?m)^SELECT ", sql.split(".timer on\n", 1)[1]))
-                for index in range(count):
-                    seconds = (160 if off else 80) / threads
+                supplied = os.environ.get("TIMER_VALUES_" + side.upper())
+                values = json.loads(supplied) if supplied else [(160 if off else 80) / threads] * count
+                for seconds in values:
                     print(f"Run Time (s): real {seconds:.9f} user 0 sys 0")
             elif os.environ.get("DUCKDB_SJ_KERNEL_TRACE"):
                 if os.environ.get("TIMEOUT_KERNEL"):
@@ -249,7 +250,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(self.read_row()["relation_count"], "3")
         self.assertEqual(self.read_row()["correct"], "TRUE")
 
-    def test_default_warms_and_profiles_before_single_timing_in_each_process(self):
+    def test_default_warms_and_profiles_before_five_timings_in_each_process(self):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = self.assert_result(self.root / "result.csv", 32)
@@ -261,24 +262,24 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual({call["threads"] for call in calls}, {32})
         timed = [call for call in calls if call["timing"]]
         self.assertEqual(len(timed), 2)
-        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 3 for call in timed))
+        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 7 for call in timed))
         self.assertTrue(all("CALL disable_profiling();" in call["sql"] for call in calls))
         profiles = [call for call in calls if call["profiling"]]
         self.assertEqual(len(profiles), 2)
         self.assertNotIn("EXPLAIN", profiles[0]["sql"])
         self.assertTrue(profiles[0]["off"])
-        self.assertEqual(profiles[0]["sql"].count("SELECT * FROM example;"), 3)
+        self.assertEqual(profiles[0]["sql"].count("SELECT * FROM example;"), 7)
         self.assertEqual([call["off"] for call in profiles], [True, False])
         for call in timed:
             sql = call["sql"]
             self.assertLess(sql.index("CALL enable_profiling("), sql.index("PRAGMA disable_profiling;"))
             self.assertLess(sql.index("PRAGMA disable_profiling;"), sql.index(".timer on"))
-            self.assertEqual(sql.split(".timer on\n")[1].count("SELECT * FROM example;"), 1)
+            self.assertEqual(sql.split(".timer on\n")[1].count("SELECT * FROM example;"), 5)
         row = self.read_row()
         self.assertEqual(row["timeout_seconds"], "0")
         self.assertEqual(row["correctness_check"], "enabled")
-        self.assertEqual(row["timing_samples"], "1")
-        self.assertEqual(row["timing_estimator"], "single_post_warmup")
+        self.assertEqual(row["timing_samples"], "5")
+        self.assertEqual(row["timing_estimator"], "median_post_warmup")
         self.assertEqual(row["warmup_runs_per_side"], "2")
         self.assertIn("correct=1  not-checked=0", report)
         checked = [call for call in calls if "EXPLAIN" not in call["sql"] and ".mode trash" not in call["sql"]]
@@ -403,7 +404,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual([call["threads"] for call in calls], sorted(call["threads"] for call in calls))
         timed = [call for call in calls if call["timing"]]
         self.assertEqual(len(timed), 4)
-        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 3 for call in timed))
+        self.assertTrue(all(call["sql"].count("SELECT * FROM example;") == 7 for call in timed))
         self.assertTrue(all("CALL disable_profiling();" in call["sql"] for call in calls))
         self.assertEqual([call["threads"] for call in calls if call["profiling"]], [16, 16, 32, 32])
 
@@ -610,6 +611,40 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 self.assertEqual(call["sql"].count("SELECT * FROM example;"), 5)
                 self.assertEqual(call["sql"].split(".timer on\n")[1].count("SELECT * FROM example;"), 3)
 
+    def test_default_uses_all_five_samples_and_ratio_of_independent_medians(self):
+        result = self.run_harness(TIMER_VALUES_OFF="[11, 5, 9, 1, 7]",
+                                  TIMER_VALUES_ON="[4, 1, 2, 8, 3]")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(float(row["tm_off"]), 7)
+        self.assertEqual(float(row["tm_on"]), 3)
+        self.assertEqual(row["tm_speedup"], "2.333")
+        self.assertEqual(row["timing_samples"], "5")
+
+    def test_incomplete_five_samples_do_not_produce_partial_median(self):
+        result = self.run_harness(TIMER_VALUES_OFF="[11, 5, 9]")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["timing_status"], "error")
+        self.assertEqual(row["tm_off"], "NA")
+        self.assertEqual(row["tm_speedup"], "NA")
+        self.assertEqual(row["outeryan_status"], "measured")
+
+    def test_cli_runs_override_environment_and_can_select_one_sample(self):
+        result = self.run_harness("--runs", "1", OY_RUNS="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.read_row()
+        self.assertEqual(row["timing_samples"], "1")
+        self.assertEqual(row["timing_estimator"], "single_post_warmup")
+        for call in [json.loads(line) for line in self.calls.read_text().splitlines()]:
+            if call["timing"]:
+                self.assertEqual(call["sql"].count("SELECT * FROM example;"), 3)
+
+    def test_environment_runs_override_default(self):
+        result = self.run_harness(OY_RUNS="3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read_row()["timing_samples"], "3")
+
     def test_no_profile_flag_preserves_unprofiled_performance(self):
         result = self.run_harness("--no-profile")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -624,7 +659,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertEqual(row["warmup_runs_per_side"], "1")
         for call in calls:
             if call["timing"]:
-                self.assertEqual(call["sql"].count("SELECT * FROM example;"), 2)
+                self.assertEqual(call["sql"].count("SELECT * FROM example;"), 6)
         self.assertFalse((self.root / "result.profiles").exists())
 
     def test_profile_flag_overrides_environment(self):
@@ -751,8 +786,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 self.assertEqual(row["tm_speedup"], "2.000")
                 self.assertEqual(row["profile_status"], "OK" if profile else "disabled")
                 self.assertEqual(row["optimizer_profile_status"], "OK" if profile else "disabled")
-                self.assertEqual(row["timing_samples"], "1")
-                self.assertEqual(row["timing_estimator"], "single_post_warmup")
+                self.assertEqual(row["timing_samples"], "5")
+                self.assertEqual(row["timing_estimator"], "median_post_warmup")
                 self.assertEqual(row["warmup_runs_per_side"], "2" if profile else "1")
                 calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
                 self.assertTrue(all("EXPLAIN" in call["sql"] or ".mode trash" in call["sql"] for call in calls))
@@ -760,8 +795,8 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 self.assertEqual([call["off"] for call in timed], [True, False])
                 self.assertEqual(len([call for call in calls if call["profiling"]]), 2 if profile else 0)
                 for call in timed:
-                    self.assertEqual(call["sql"].count(query), 3 if profile else 2)
-                    self.assertEqual(call["sql"].split(".timer on\n")[1].count(query), 1)
+                    self.assertEqual(call["sql"].count(query), 7 if profile else 6)
+                    self.assertEqual(call["sql"].split(".timer on\n")[1].count(query), 5)
 
     def test_aggregate_outeryan_with_pushdown_is_executed(self):
         result = self.run_harness(AGGREGATE_QUERY="1", AGGREGATE_PUSHDOWN="1")

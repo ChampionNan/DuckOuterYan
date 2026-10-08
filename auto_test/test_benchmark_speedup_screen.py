@@ -9,6 +9,7 @@ import unittest
 
 import balanced_benchmark as b
 import benchmark_speedup_screen as screen
+import benchmark_retirements as retirements
 import tpcds_selectivity_extension as extension
 from benchmark_corpus import resolve_sql_path, historical_manifests
 from test_gen_outerjoin_benchmark import forbid_result_access
@@ -29,6 +30,8 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
 
     def test_exact_exclusions_and_pending_candidates(self):
         rows = b.validate(b.ROOT / "benchmark")
+        self.assertEqual(Counter(r["family"] for r in rows), retirements.policy()["expected_counts_after"])
+        rows, _ = retirements.validate(b.ROOT / "benchmark", rows)
         spec = screen.policy()
         self.assertEqual(Counter(r["family"] for r in spec["excluded"]), dict(graph=3, tpch=1, tpcds=7, job=12))
         self.assertEqual(len(spec["previously_retired_tpcds_queries"]), 8)

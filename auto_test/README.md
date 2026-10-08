@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 733 条当前查询（Graph 177、TPC-H 179、TPC-DS 209、JOB 168）、manifest、固定筛选证据与历史档案；含 15 条待 SF50 复测的 TPC-DS 三档扩展 |
+| `outerjoin_benchmark/` | 724 条当前查询（Graph 176、TPC-H 176、TPC-DS 206、JOB 166）、manifest、固定筛选证据与历史档案；含 15 条 TPC-DS 三档扩展 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -125,7 +125,7 @@ corresponding environment values.
 | `OY_DUCKDB_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` | Independent OFF limit; timeout does not skip ON |
 | `OY_OUTERYAN_TIMEOUT_SECS` | `OY_TIMEOUT_SECS` | Independent ON limit; timeout does not skip OFF |
 | `OY_BATCH_GRACE_SECS` | `30` | External timing-batch startup/serialization grace |
-| `OY_RUNS` | `1` | First unprofiled execution after warm-up/profile; explicit odd N uses a median |
+| `OY_RUNS` | `5` | Median of all five unprofiled post-warmup executions per configuration; `--runs N` overrides |
 | `OY_CHECK_CORRECTNESS` | `1` | Compare one bare OFF/ON result pair for every query, including fallbacks |
 | `OY_PROFILE` | `1` | One post-warm-up OFF/ON execution profile for optimizer totals; the same ON sample supplies phase breakdown when OuterYan is selected |
 | `OY_CAPTURE_PLANS` | `0` | Save OFF/ON EXPLAIN, optimizer trace, and cost-step artifacts |
@@ -221,11 +221,11 @@ Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **733 条唯一候选 SQL**：
-Graph 177、TPC-H 179、TPC-DS 209、JOB 168。
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **724 条唯一候选 SQL**：
+Graph 176、TPC-H 176、TPC-DS 206、JOB 166。
 基础设计原为每 family 180 条，每档每 shape 各 20；经性能筛选后不再严格配平。
-join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **125/52**，不再生成 6 relation 查询。
-基础单元为 14/6；筛选后 low/left-deep 和 low/right-deep 均为 14/5，
+join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **124/52**，不再生成 6 relation 查询。
+基础单元为 14/6；筛选后 low/left-deep 为 13/5，low/right-deep 为 14/5，
 low/bushy 为 13/6，其余单元不变；数据库及数据集不变。
 Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
@@ -237,8 +237,8 @@ R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的�
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 194。
-`--only graph` 选择 Graph family 全部 177 条，与 `--query-type graph` 不同。
+类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 185。
+`--only graph` 选择 Graph family 全部 176 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效实测数**，fallback 和 timeout 不能算作完整实测配对。
 
 20261005 的 TPC-DS 调整按 20261002 实测移出 28 条 timeout、8 条 speed-up <0.5 的 SQL，
@@ -280,7 +280,7 @@ Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移�
 6 条候选移入归档，换成 SQLStorm 14368 的单事实表 4/5 表 connected-subgraph。
 其余 9 条 SQL 不变，扩展现为 9 bushy、3 left-deep、3 right-deep，均非聚合。
 新结构没有可复用的历史速度比；所有候选须重新测试，不以目标几何平均选择。
-现在共 733 条，TPC-DS 209 条，其中 15 条待 SF50 测量；约 50 条有效配对是目标而非保证。
+现在共 724 条，TPC-DS 206 条，其中 45 条有有效配对实测；约 50 条有效配对是目标而非保证。
 只编译并复测这 15 条（复用数据库，关闭完整正确性比较）：
 
 ```bash
@@ -388,11 +388,11 @@ For every corpus query included in the run at each thread count, `experiment_ono
 3. Keep the existing one-shot ON kernel diagnostic (bitmap/hash classification);
    it does not supply a runtime sample or warm the later connection's buffer pool.
 4. Start a fresh CLI for **each** of OFF and ON. In that same process execute:
-   **one unprofiled warm-up → one detailed profile → disable profiling → one
-   unprofiled timed execution**. Both preparatory executions are excluded from
-   runtime. The first execution after these preparations is the reported query
-   time; default `OY_RUNS=1`, not a median of three. Explicit `--runs N` still
-   accepts a positive odd N and selects the median of only those N timed samples.
+   **one unprofiled warm-up → one detailed profile → disable profiling → five
+   unprofiled timed executions**. Both preparatory executions are excluded from
+   runtime. Report the median of all five timed samples independently for OFF
+   and ON; speed-up is median(OFF) / median(ON), not the median of paired ratios.
+   Explicit `--runs N` accepts a positive odd N; `--runs 1` uses a single sample.
 5. Read optimizer totals and workflow phases from the already-produced profiles;
    read R1/R2/R3 and Other CPU work from that same ON profile. No further query
    execution is needed. OFF uses DuckDB's `all_optimizers`; ON additionally
@@ -400,10 +400,11 @@ For every corpus query included in the run at each thread count, `experiment_ono
    timings are not substituted for the named OuterYan workflow phases.
 
 With default correctness and profiling enabled, a fully completed selected query
-executes **nine** times: two correctness checks, one kernel diagnostic, and three
+executes **17** times: two correctness checks, one kernel diagnostic, and seven
 executions per configuration. A verified fallback executes only the two checks.
-Only two executions (one OFF and one ON) contribute to runtime/speed-up.
-`--no-profile` keeps one warm-up + one timed execution per configuration.
+Only ten executions (five OFF and five ON) contribute to runtime/speed-up.
+With `--no-check-correctness`, there are 15 executions including the kernel
+diagnostic. `--no-profile` keeps one warm-up + five timed executions per configuration.
 The compact profiling trace is emitted only while the native profiler is enabled;
 it does not write during formal timing. **Rebuild the binary** for this behavior:
 use `run_all.sh`, not a stale CLI with `experiment_onoff.sh`.
@@ -429,8 +430,28 @@ samples. Logs/CSV carry `correctness_check`, `timing_protocol`, `timing_samples`
 `timing_estimator`, and `warmup_runs_per_side` (including the profiling warm-up).
 Statistics accept explicit unchecked measured rows, preserve their status, and
 report their count; generated paper text must not call them correctness-verified.
-Do not pool old three-run medians and the new single-sample protocol as one
-measurement configuration; qualification rejects mixed protocols.
+Do not pool historical single-sample or three-run results with the new five-run
+medians as one measurement configuration; qualification rejects mixed protocols.
+
+**Where to change the sample count:** `configs.sh`, section 6, sets
+`export OY_RUNS="${OY_RUNS:-5}"`. `experiment_onoff.sh` reads that value and applies
+any `--runs N` override. `phase_profile.sh::oy_warm_profile_time` executes the
+timing loop and calls `statistics.median(values)` only if all N samples completed
+successfully. A timeout never produces a median from the remaining samples.
+The precedence is **CLI `--runs` > environment `OY_RUNS` > default 5**.
+
+Full SF50 performance rerun, reusing existing databases and omitting correctness
+comparison (compilation and query generation still run):
+
+```bash
+env SKIP_DATA=1 TPCH_SF=50 TPCDS_SF=50 \
+  bash auto_test/run_all.sh --all --threads 32 --runs 5 --timeout 600 \
+  --profile --no-check-correctness --capture-plans
+```
+
+`--timeout 600` applies to **each statement on each engine**, including every
+timed execution; it is not a 10-minute total budget for all five executions.
+DuckDB and OuterYan stop independently on their first timeout, without retrying.
 
 The read-only diagnostic [`graph_count_annotation_check.sql`](diagnostics/graph_count_annotation_check.sql)
 reproduces the count-weight arithmetic behind the previously incorrect `graph_branch5_forward`
@@ -660,7 +681,7 @@ the original `BIGINT` type and empty-input value.
 ```text
 bash auto_test/experiment_onoff.sh [options]
   -b, --bin PATH      DuckDB CLI
-  -n, --runs N        positive odd timed executions per configuration (default 1)
+  -n, --runs N        positive odd timed executions per configuration (default 5; median)
   -t, --timeout S     set both per-statement limits (default 600 each; 10 minutes)
       --duckdb-timeout S    independent DuckDB/OFF limit
       --outeryan-timeout S  independent OuterYan/ON limit
@@ -1065,9 +1086,9 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 733 unique candidates under `outerjoin_benchmark/benchmark`:
-177 Graph, 179 TPC-H, 209 TPC-DS and 168 JOB. Fifteen TPC-DS three-tier extension
-queries are new pending candidates, not additional valid measurements yet. Earlier exact measured speed-up <0.5
+The comparison runs 724 unique candidates under `outerjoin_benchmark/benchmark`:
+176 Graph, 176 TPC-H, 206 TPC-DS and 166 JOB. Fifteen TPC-DS three-tier extension
+queries have SF50 measurements. Earlier exact measured speed-up <0.5
 and TPC-DS timeout exclusions remain. The 20261008 frozen screen additionally
 retires two Graph and nine JOB queries with observed speed-up <=0.7 in the
 20261007_161108 full run. These are single-sample, unchecked performance results,

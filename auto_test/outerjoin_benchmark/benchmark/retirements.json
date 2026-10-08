@@ -1,0 +1,11 @@
+{
+  "revision": "all-family-le06-20261008",
+  "policy_sha256": "f2af0c8fd0012f3c18620faacf6e6f518f3064396b36932fbbdce338597e6873",
+  "counts": {
+    "graph": 176,
+    "job": 166,
+    "tpcds": 206,
+    "tpch": 176
+  },
+  "removed_queries": 9
+}

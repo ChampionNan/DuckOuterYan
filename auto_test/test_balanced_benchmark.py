@@ -13,6 +13,7 @@ from benchmark_corpus import count_base_relations
 import qualify_benchmark as q
 import tpcds_refresh as refresh
 import benchmark_speedup_screen as screen
+import benchmark_retirements as retirements
 import tpcds_selectivity_extension as extension
 from test_gen_outerjoin_benchmark import forbid_result_access
 
@@ -26,10 +27,11 @@ class BalancedBenchmarkTest(unittest.TestCase):
 
     def test_active_matrix_and_mixed_kinds(self):
         rows = b.validate(b.ROOT / "benchmark")
-        expected = extension.policy()["expected_counts_after"]
+        expected = retirements.policy()["expected_counts_after"]
         self.assertEqual(len(rows), sum(expected.values()))
         self.assertEqual(Counter(r["family"] for r in rows), expected)
-        before_screen = [r for r in rows if not extension.is_extension(r)] + screen.policy()["excluded"]
+        before_retirement, _ = retirements.validate(b.ROOT / "benchmark", rows)
+        before_screen = [r for r in before_retirement if not extension.is_extension(r)] + screen.policy()["excluded"]
         self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in before_screen if r["family"] != "tpcds"),
                          {(f, t, s):20 for f in ("graph", "tpch", "job") for t in b.TIERS for s in b.SHAPES})
         self.assertTrue(all(len(set(r["join_vector"])) >= 2 for r in rows))
@@ -37,12 +39,12 @@ class BalancedBenchmarkTest(unittest.TestCase):
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
         self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
         graph = [r for r in rows if r["family"] == "graph"]
-        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 125, 5: 52})
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 124, 5: 52})
         for tier in b.TIERS:
             for shape in b.SHAPES:
                 self.assertEqual(Counter(int(r["relation_count"]) for r in graph
                                          if r["semantic_tier"] == tier and r["tree_shape"] == shape),
-                                 {4: 13 if tier == "low" and shape == "bushy" else 14,
+                                 {4: 13 if tier == "low" and shape in ("bushy", "left_deep") else 14,
                                   5: 5 if tier == "low" and shape in ("left_deep", "right_deep") else 6})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
@@ -220,7 +222,7 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
-            self.assertEqual(report["balanced_candidates"], sum(extension.policy()["expected_counts_after"].values()))
+            self.assertEqual(report["balanced_candidates"], sum(retirements.policy()["expected_counts_after"].values()))
             self.assertEqual(report["historical_supplementary_candidates"], 0)
             self.assertEqual(report["historical_supplementary_observations"], 0)
             self.assertEqual(report["qualification_timeout_seconds"], 600)

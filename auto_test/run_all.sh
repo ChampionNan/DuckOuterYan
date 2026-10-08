@@ -20,7 +20,8 @@
 #   OY_THREADS       Override with one multi-thread timing count
 #   OY_PROFILE       One pre-timing profile per side (default 1; set 0 to skip)
 #   --threads LIST   CLI override, e.g. "16 32" or 16,32
-#   OY_RUNS          Timed iterations after warm-up/profiling (default 1)
+#   OY_RUNS          Timed iterations after warm-up/profiling (default 5; median)
+#   --runs N         Override OY_RUNS with a positive odd sample count
 #   OY_CHECK_CORRECTNESS  Compare every query's result multisets (default 1)
 #   OY_TIMEOUT_SECS  Shared default per statement (600 seconds; 10 minutes)
 #   OY_DUCKDB_TIMEOUT_SECS / OY_OUTERYAN_TIMEOUT_SECS  Independent engine limits

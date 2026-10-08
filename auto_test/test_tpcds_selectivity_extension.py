@@ -12,6 +12,7 @@ from unittest import mock
 
 import balanced_benchmark as b
 import benchmark_speedup_screen as screen
+import benchmark_retirements as retirements
 from benchmark_corpus import count_base_relations, historical_manifests, resolve_sql_path
 import qualify_benchmark as q
 import tpcds_refresh as refresh
@@ -148,7 +149,7 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
                 extension.archive_retired(corpus, old_rows, root)
 
     def test_overlay_preserves_every_existing_row_and_validates_its_list(self):
-        records = self.original_rows()
+        records = self.original_rows() + retirements.archived_rows()[0]
         before = copy.deepcopy(records)
         with tempfile.TemporaryDirectory() as tmp, forbid_result_access():
             output = Path(tmp)
@@ -163,7 +164,7 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
                 extension.validate(output, retained)
 
     def test_new_name_cannot_alias_existing_or_excluded_sql(self):
-        records = self.original_rows()
+        records = self.original_rows() + retirements.archived_rows()[0]
         additions = list(extension.extension_queries())
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
@@ -261,8 +262,10 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
             self.assertEqual(manifest, (corpus / "manifest.csv").read_bytes())
             for row in original:
                 self.assertEqual((generated / row["path"]).read_bytes(), (corpus / row["path"]).read_bytes())
-            before = extension.validate(generated, b.validate(generated))
-            self.assertEqual(before, original)
+            import benchmark_retirements
+            restored, _ = benchmark_retirements.validate(generated, b.validate(generated))
+            before = extension.validate(generated, restored)
+            self.assertEqual([r for r in before if r["query_id"] in {x["query_id"] for x in original}], original)
             self.assertEqual(len(before), sum(screen.policy()["expected_counts_after"].values()))
             b.generate(root)
             self.assertEqual(manifest, (generated / "manifest.csv").read_bytes())

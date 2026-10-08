@@ -128,7 +128,8 @@ PY
 # One CLI per configuration preserves its own warmed buffer pool. Only statements
 # after .timer on contribute to runtime. Profiler trace output is enabled only
 # while the native profiler is enabled (requires the matching rebuilt binary).
-# Echoes the timed sample (or median for explicit runs > 1) and sample count.
+# Echoes the median of all requested timed samples and their count (default five).
+# A timeout or incomplete sample set is a failure, never a partial-sample median.
 oy_warm_profile_time() {
     local db="$1" setting="$2" query="$3" threads="$4" runs="$5"
     local profiledir="$6" mode="$7" profile="$8"

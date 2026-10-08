@@ -95,14 +95,15 @@ export OY_BATCH_GRACE_SECS="${OY_BATCH_GRACE_SECS:-30}"
 # ===========================================================================
 # 6) Iteration counts
 # ===========================================================================
-# Positive odd number of timed runs per query; default is the first post-warm-up run.
+# Positive odd number of timed runs per query/configuration; report their median.
+# Default: five unprofiled runs after warm-up/profiling. CLI --runs overrides this.
 # NOTE: each side runs (OY_RUNS + 1 + OY_PROFILE) executions in ONE duckdb process
 # under ONE external timeout window. The harness keeps max_execution_time at
 # OY_TIMEOUT_SECS per statement, scales the watchdog by that execution count,
 # and adds a small process/serialization grace period.
 # Higher OY_RUNS therefore increases total experiment time and can expose more
 # timing-phase timeouts on slow (e.g. large-graph) queries.
-export OY_RUNS="${OY_RUNS:-1}"
+export OY_RUNS="${OY_RUNS:-5}"
 export OY_CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-1}"
 
 # Each side runs one warm-up, one optional profile, then unprofiled timing in the

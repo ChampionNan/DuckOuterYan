@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 # ============================================================================
-# experiment_onoff.sh  —  OuterYan ON-vs-OFF single-sample performance test.
+# experiment_onoff.sh  —  OuterYan ON-vs-OFF median-runtime performance test.
 #
 # Per corpus query, IN THIS ORDER:
 #   1. PLAN DECISION — oy_decision reads OuterYan's machine-readable trace:
 #      whether its candidate grouping differs from DuckDB, whether the cost gate
 #      ran, and which candidate was selected.
-#      A DuckDB fallback, or an aggregate query without an actual aggregate
-#      pushdown, skips performance measurements after the correctness check.
+#      Only a verified DuckDB fallback without aggregate pushdown skips timing;
+#      selected OuterYan aggregates are timed even without aggregate pushdown.
 #   2. CORRECTNESS — enabled by default for every query, including fallbacks.
 #      Compare one OFF/ON bare-query result pair. A mismatch is never timed.
 #      A timeout stops only that side; preserve the other side's measurements.
 #   3. KERNEL — oy_kernel: which semi-join filter kernel OuterYan committed to
 #      (not-run | bitmap(b=N,h=0) | hash(b=0,h=N) | mixed(b=N,h=M) |
 #      none(b=0,h=0)), from the DUCKDB_SJ_KERNEL_TRACE diagnostic.
-#   4. EACH SIDE — one warm-up, one optional native profile, then one unprofiled
-#      timed execution in the same CLI process. OFF/ON use separate processes.
+#   4. EACH SIDE — one warm-up, one optional native profile, then five unprofiled
+#      timed executions in the same CLI process; report their median.
+#      OFF/ON use separate processes.
 #      The same ON profile supplies optimizer and R1/R2/R3 phase times.
 # The default run uses 32 threads; explicit sweeps use separate result files.
 # Profiling defaults to on; no single-thread executions are performed.
 #
 # USAGE: experiment_onoff.sh [options]
 #   -b,--bin PATH     duckdb (default build/release/duckdb, else build/debug)
-#   -n,--runs N       positive odd timed iterations per config (default 1)
+#   -n,--runs N       positive odd timed iterations per config (default 5; median)
 #   -t,--timeout S    set both per-engine statement limits (default 600 each)
 #                     on every query; the external timing-batch watchdog is
 #                     (N+1+profile)×S plus startup grace per side.
@@ -64,7 +65,7 @@ QUERY_TYPE="all"
     echo "OY_CORPUS_VERSION is retired; unset it and select --query-type instead" >&2; exit 2;
 }
 
-RUNS="${OY_RUNS:-1}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
+RUNS="${OY_RUNS:-5}"; ONLY="all"; PATTERN="*"; EXCLUDE=""; LIMIT=0; OUT=""
 QUERY_LIST=""; CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 PROFILE="${OY_PROFILE:-1}"
 CHECK_CORRECTNESS="${OY_CHECK_CORRECTNESS:-1}"

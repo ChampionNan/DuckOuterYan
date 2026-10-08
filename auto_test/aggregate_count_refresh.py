@@ -124,9 +124,10 @@ def archive_retired(destination, old_rows, root):
                                  revision=spec["archive_revision"])
 
 
-def validate(benchmark, rows):
+def validate(benchmark, rows, retired_paths=None):
     """Reverse the projection edit and verify its original policy-pinned hash."""
     spec = policy()
+    retired_paths = retired_paths or {}
     marker = json.loads((benchmark / MARKER).read_text(encoding="utf-8"))
     if marker.get("policy_sha256") != b.digest(POLICY) or marker.get("revision") != spec["revision"]:
         raise ValueError("Aggregate COUNT policy changed; regenerate")
@@ -144,7 +145,7 @@ def validate(benchmark, rows):
     for row in actual:
         pinned = pins[row["replaces_query_id"]]
         entry = evidence[pinned["query_id"]]
-        content = (benchmark / row["path"]).read_text(encoding="utf-8")
+        content = retired_paths.get(row["path"], benchmark / row["path"]).read_text(encoding="utf-8")
         prefix = _header(spec["revision"], pinned["query_id"])
         if not content.startswith(prefix):
             raise ValueError("Aggregate COUNT identity header changed")
@@ -165,8 +166,10 @@ def validate(benchmark, rows):
         if any(entry[k] != row[k] for k in ("query_id", "path", "content_sha256")):
             raise ValueError("Aggregate COUNT marker identity changed")
         historical[row["query_id"]] = old_row
-    expected_list = "".join(next(r["path"] for r in actual if r["replaces_query_id"] == pin["query_id"]) + "\n"
-                            for pin in spec["replacements"])
+    replacement_paths = {r["replaces_query_id"]: r["path"] for r in actual}
+    expected_list = "".join(replacement_paths[pin["query_id"]] + "\n"
+                            for pin in spec["replacements"]
+                            if replacement_paths[pin["query_id"]] not in retired_paths)
     if (benchmark / QUERY_LIST).read_text(encoding="utf-8") != expected_list:
         raise ValueError("Aggregate COUNT query list changed")
     return [historical.get(r["query_id"], r) for r in rows]

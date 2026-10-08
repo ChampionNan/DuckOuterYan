@@ -581,10 +581,12 @@ def generate(root=ROOT, per_family=180, batch=0):
             import benchmark_speedup_screen
             import tpcds_selectivity_extension
             import aggregate_count_refresh
+            import benchmark_retirements
             records = tpcds_refresh.apply(records, output)
             records = benchmark_speedup_screen.apply(records, output)
             records = tpcds_selectivity_extension.apply(records, output)
             records = aggregate_count_refresh.apply(records, output)
+            records = benchmark_retirements.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
                                 and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
@@ -615,6 +617,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "speedup_screen": json.loads((output / "speedup_screen.json").read_text()) if refreshed else None,
             "tpcds_extension": json.loads((output / "tpcds_extension.json").read_text()) if refreshed else None,
             "aggregate_count_refresh": json.loads((output / "aggregate_count_refresh.json").read_text()) if refreshed else None,
+            "retirements": json.loads((output / "retirements.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -721,8 +724,10 @@ def validate(benchmark):
     if refreshed:
         import benchmark_speedup_screen
         import aggregate_count_refresh
-        aggregate_count_refresh.validate(benchmark, rows)
-        before_extension = tpcds_selectivity_extension.validate(benchmark, rows)
+        import benchmark_retirements
+        before_retirement, retired_paths = benchmark_retirements.validate(benchmark, rows)
+        aggregate_count_refresh.validate(benchmark, before_retirement, retired_paths)
+        before_extension = tpcds_selectivity_extension.validate(benchmark, before_retirement)
         before_screen = benchmark_speedup_screen.validate(benchmark, before_extension)
         tpcds_refresh.validate(benchmark, before_screen)
         return rows

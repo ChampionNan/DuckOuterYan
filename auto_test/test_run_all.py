@@ -130,7 +130,7 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(Path(experiment["tpch_db"]), self.root / "tpch_50.duckdb")
         self.assertEqual(Path(experiment["tpcds_db"]), self.root / "tpcds_50.duckdb")
         self.assertEqual(experiment["timeout_seconds"], "600")
-        self.assertEqual(experiment["timing_runs"], "1")
+        self.assertEqual(experiment["timing_runs"], "5")
         self.assertEqual(experiment["check_correctness"], "1")
 
     def test_measurement_options_are_forwarded(self):

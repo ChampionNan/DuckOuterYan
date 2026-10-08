@@ -2,16 +2,16 @@
 
 Base revision: `balanced-screened-20261002`, with the primary-batch
 `tpcds-recovery-20261005` component pinned in `tpcds_refresh.json` and the manifest.
-The active `benchmark/` contains **733 queries**: **177 Graph**, **179 TPC-H**,
-**209 TPC-DS**, and **168 JOB**. The cumulative exact-SQL speed-up screen is
-pinned in `sources/speedup_screen_20261008.json` and `benchmark/speedup_screen.json`.
+The active `benchmark/` contains **724 queries**: **176 Graph**, **176 TPC-H**,
+**206 TPC-DS**, and **166 JOB**. The cumulative exact-SQL speed-up screen is
+pinned in `sources/speedup_screen_20261008.json` and `sources/retirements_20261008.json`.
 TPC-DS removes 28 timed-out and 8 measured speed-up <0.5 queries from the
 20261002 run, retains 147 definitions, and initially adds 54 recovery candidates.
 The 20261005_201226_t32 TPC-DS run completed all 201 equivalence checks, with
 43 measured pairs, 158 fallback-skip rows and no timeout. Seven measured
 speed-ups below 0.5 are now retired: 47 recovery candidates remain, and the
 194 previously measured TPC-DS definitions contain 36 measured pairs plus 158 fallback-skip rows.
-The 20261008 extension adds 15 new three-tier candidates, pending SF50 retesting;
+The 20261008 extension adds 15 new three-tier candidates, now measured at SF50;
 historical timings are not measurements of these new SQL definitions.
 The target of about **50 complete TPC-DS measured pairs is not yet achieved**:
 unexecuted fallback policy defaults are not measured pairs. Other families
@@ -19,15 +19,15 @@ still contain queries that timed out; this screen does not remove those queries.
 
 | Family | Low `(0,5%)` | Medium `[5,40%)` | High `[40,60%]` | Total |
 |---|---:|---:|---:|---:|
-| Graph | 57 | 60 | 60 | 177 |
-| TPC-H | 59 | 60 | 60 | 179 |
-| TPC-DS | 74 | 68 | 67 | 209 |
-| JOB | 53 | 58 | 57 | 168 |
+| Graph | 56 | 60 | 60 | 176 |
+| TPC-H | 58 | 59 | 59 | 176 |
+| TPC-DS | 73 | 67 | 66 | 206 |
+| JOB | 52 | 58 | 56 | 166 |
 
 Before exact-query screening, Graph/TPC-H/JOB had 60 expressions per shape,
-20 of each shape per selectivity band. Graph now has 59 expressions per shape;
-TPC-H has 59 left-deep, 60 right-deep and 60 bushy expressions, and JOB has
-59/55/54 respectively.
+20 of each shape per selectivity band. Graph now has 58/59/59 expressions;
+TPC-H has 59 left-deep, 60 right-deep and 57 bushy expressions, and JOB has
+59/53/54 respectively.
 The active set is no longer exactly balanced. Shapes describe input expressions,
 not physical plans or join-graph topology. Every query mixes join kinds; some
 use only outer joins, but none uses only FULL joins. I/L/R/F edge totals are
@@ -35,9 +35,9 @@ approximately balanced, not claimed exactly equal. TPC-DS shape counts are
 reported in `benchmark/design_summary.json`; do not claim exact shape balance
 for its performance-conditioned recovery component.
 
-Graph now has **125 four-relation and 52 five-relation queries; no six-relation queries**.
+Graph now has **124 four-relation and 52 five-relation queries; no six-relation queries**.
 The base generator uses a 14/6 split per selectivity-by-shape cell; the active
-low/left-deep and low/right-deep cells each have 14/5, and low/bushy has 13/6,
+low/left-deep and low/right-deep cells have 13/5 and 14/5, and low/bushy has 13/6,
 after exact-query retirement.
 The graph database and dataset are unchanged. Reserve batches retain the base quota.
 
@@ -56,9 +56,9 @@ The caps were not selected using ON/OFF speed-ups. They reduce the input scale
 but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of every candidate.
 
 Current types: 375 `join`, 164 `graph` (including industry-inspired controls), and
-194 `aggregate`. Aggregates comprise 127 COUNT (88 global, 39 grouped),
+185 `aggregate`. Aggregates comprise 118 COUNT (85 global, 33 grouped),
 19 MIN, 24 MAX and 24 SUM queries.
-Type and family differ: `--only graph` runs 177 Graph-family candidates, whereas
+Type and family differ: `--only graph` runs 176 Graph-family candidates, whereas
 `--query-type graph` selects 164 graph/control queries across families.
 
 ## COUNT(*) replacements (20261008)
@@ -77,7 +77,7 @@ SUM/MIN/MAX timings for these replacements. Total and per-family counts stay
 unchanged; other aggregate definitions, including existing COUNT(*), are unchanged.
 The generator applies the frozen `sources/aggregate_count_refresh_20261008.json`
 policy without inspecting results. Its focused new-query list is
-`benchmark/aggregate_count_refresh.txt`.
+`benchmark/aggregate_count_refresh.txt` (33 active queries).
 
 All 39 replacements passed local bare-query OFF/ON result-multiset comparison
 (78 executions, no errors or timeouts), using the existing Release binary,

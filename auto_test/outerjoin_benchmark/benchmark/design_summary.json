@@ -4,16 +4,16 @@
   "batch": 0,
   "target_host": "cpu9:/home/data/bchenba/DuckYanOuter",
   "counts": {
-    "graph": 177,
-    "job": 168,
-    "tpcds": 209,
-    "tpch": 179
+    "graph": 176,
+    "job": 166,
+    "tpcds": 206,
+    "tpch": 176
   },
   "balanced_counts": {
-    "graph": 177,
-    "tpch": 179,
-    "tpcds": 147,
-    "job": 168
+    "graph": 176,
+    "tpch": 176,
+    "tpcds": 144,
+    "job": 166
   },
   "base_matrix_complete": false,
   "recovery_counts": {
@@ -27,49 +27,49 @@
     "graph": {
       "high": 60,
       "medium": 60,
-      "low": 57
+      "low": 56
     },
     "tpch": {
-      "high": 60,
-      "low": 59,
-      "medium": 60
+      "high": 59,
+      "low": 58,
+      "medium": 59
     },
     "tpcds": {
-      "high": 67,
-      "low": 74,
-      "medium": 68
+      "high": 66,
+      "low": 73,
+      "medium": 67
     },
     "job": {
-      "high": 57,
-      "low": 53,
-      "medium": 58
+      "medium": 58,
+      "high": 56,
+      "low": 52
     }
   },
   "family_shapes": {
     "graph": {
-      "left_deep": 59,
+      "left_deep": 58,
       "bushy": 59,
       "right_deep": 59
     },
     "tpch": {
-      "bushy": 60,
+      "bushy": 57,
       "left_deep": 59,
       "right_deep": 60
     },
     "tpcds": {
       "left_deep": 75,
       "right_deep": 82,
-      "bushy": 52
+      "bushy": 49
     },
     "job": {
-      "right_deep": 55,
+      "right_deep": 53,
       "bushy": 54,
       "left_deep": 59
     }
   },
   "graph_relation_counts": {
     "5": 52,
-    "4": 125
+    "4": 124
   },
   "graph_relation_weights": {
     "4": 7,
@@ -440,6 +440,17 @@
     "replaced_queries": 39,
     "status": "PENDING_CPU9_MEASUREMENT",
     "note": "COUNT(*) changes aggregate semantics; prior runtime and correctness results do not apply."
+  },
+  "retirements": {
+    "revision": "all-family-le06-20261008",
+    "policy_sha256": "f2af0c8fd0012f3c18620faacf6e6f518f3064396b36932fbbdce338597e6873",
+    "counts": {
+      "graph": 176,
+      "job": 166,
+      "tpcds": 206,
+      "tpch": 176
+    },
+    "removed_queries": 9
   },
   "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
