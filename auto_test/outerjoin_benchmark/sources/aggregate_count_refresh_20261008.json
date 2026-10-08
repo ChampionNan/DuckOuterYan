@@ -1,0 +1,320 @@
+{
+  "revision": "aggregate-count-20261008",
+  "archive_revision": "retired_aggregate_count_20261008",
+  "expected_replacements": 39,
+  "reason": "User-requested COUNT(*) replacements for previously selected MIN/MAX/SUM queries without aggregate pushdown; preserve FROM, predicates and GROUP BY. New identities require new measurements.",
+  "replacements": [
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_sum",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_sum.sql",
+      "content_sha256": "ab8eb0c3c802d1c94f8910c09e7dbf53e31881a26d05dd708ecc77fd4b3251be",
+      "sql_fingerprint": "75f29f0aabb46e061b6326b1747aa42cf007d62e64935f91f089171aa1c1fa48",
+      "family": "graph",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_sum",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_sum.sql",
+      "content_sha256": "c051c8ae74f3e75f4658b85d64999076fc9d0b4f41709bd2660545411c0ad8f4",
+      "sql_fingerprint": "fd574cccbea12b4a64023449f46176927c9def38675aa290860af8bb587358b4",
+      "family": "graph",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_sum",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_sum.sql",
+      "content_sha256": "7d9baed24e18d44fb668b358aa48ea7c61dcbaf546ffe1d702b14f96c49b8ffc",
+      "sql_fingerprint": "196d5270fde35dd73051721cc8c1b3ed206a27694e0a404c8578e6d4c059c6d8",
+      "family": "graph",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_max",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_max.sql",
+      "content_sha256": "44cf386a82115aa5ba2776949c5fd177df6833006cfffa93d8d100529dfeb24c",
+      "sql_fingerprint": "4ce5a2458c3f6657c130126c75ae6f7662ea85ede7045d17ce38cca63e016774",
+      "family": "graph",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_max",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_max.sql",
+      "content_sha256": "9f39e2b69992126c7cde3a09789428276f21cebdf5cdbdc85eb132827eca70d9",
+      "sql_fingerprint": "03804494bfca95f597ebedad30b3f80098af16ef7dc262514c95d4985f07bc60",
+      "family": "graph",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_max",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_max.sql",
+      "content_sha256": "f7cc8eac442f0762aef93a2f50589e58b1fc525b270f6cce202b279d5e98f28b",
+      "sql_fingerprint": "08ff80d5299d7eaf32a5e72f79b4ca6b4a445f894420153f9069e00a91764a7d",
+      "family": "graph",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_min",
+      "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_min.sql",
+      "content_sha256": "4bde413ec7b8f33a123d181520647448db34e2d1e498d31469882023e227f249",
+      "sql_fingerprint": "0b3031b2a209c0a90c8202951adcb74f9beee2c362e4721e88ebd638de021ccb",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_min",
+      "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_min.sql",
+      "content_sha256": "9394db2e81cd29884af5d9bb5f3799de6a780138f9d4a4daf3484b88386e3325",
+      "sql_fingerprint": "b56a3886d50948d84f0e4a218500c3a99cc16c66d437d03e8e1400c88ce1afab",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_min",
+      "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_min.sql",
+      "content_sha256": "763f7dffaf94bdb4eab219b11404c063a034e418246838e045ea66fdd95c9018",
+      "sql_fingerprint": "8c1aecb8456f53acd56c5e57ebee87fe918aadf817b16b1a5ad01919a9b94368",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_min",
+      "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_min.sql",
+      "content_sha256": "c9accf566103d3532974e134e9357cbc75c0f0719137839cf3131111d4519fd7",
+      "sql_fingerprint": "8e22d625f858f1fdc88996c9154f9505834914b52ee20fb7b025bff8c11b11fb",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_min",
+      "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_min.sql",
+      "content_sha256": "0ab6f174bbfa87554a75e067a8a852f65888cdb6739274a918dd8df25a21ee0a",
+      "sql_fingerprint": "abd63ecc5ca749b38da087fc3b61d703e7d66acbc32e541a062d42d3b1d1ce18",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_min",
+      "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_min.sql",
+      "content_sha256": "7d657cd5120f0fbff87d13e30634f9ed3389f98e54482efd9c9e4f85c55a81fe",
+      "sql_fingerprint": "3dd6d7ab1d5d0ccfefa1c69910d7fb49bef9d293b81bffeb3f381b7b960790c2",
+      "family": "job",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_sum.sql",
+      "content_sha256": "64d53dac58bacdd6b00f05b10c8f402e2eb0b9f1517d0bfa070941aacb3e0104",
+      "sql_fingerprint": "7efac09cc6c25ed0db34de46a50e9823cea30bcdc90daccce8935f54f87e7f65",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_sum.sql",
+      "content_sha256": "f37b2e592924741f5a4c1ae4494742298603053b445051a991c1dfcd3b2d2ed3",
+      "sql_fingerprint": "b2de65801cf01d6b0cd150c39152e4254d4c18937fdef4b3b89f1850579c0423",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_sum.sql",
+      "content_sha256": "f8b365662e368ab4984b7836ac8cbbf0dfb4cfaf99203eab06e96ca600f29d66",
+      "sql_fingerprint": "0d2902b7f2fb53f60495696a0a4330cd7f16aa47211f025ad1797c3c17fcbd71",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_max",
+      "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_max.sql",
+      "content_sha256": "c1c87587c6f0075f5988d8457ce394df2b8581e75dac47c605e0a20005609a7b",
+      "sql_fingerprint": "67964ce368ffacaa52218f64e3ec139b7c6232ebac1bbec6c05403a6882463a3",
+      "family": "job",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_max",
+      "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_max.sql",
+      "content_sha256": "770c96d635cbcffd93a3795f9966de365fb56209dd624acbbc023590760e94d3",
+      "sql_fingerprint": "18899937aa47303af65b424d944ec985b10b73dd1a94e19b2aa9a5bef3164e5f",
+      "family": "job",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_max",
+      "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_max.sql",
+      "content_sha256": "a631c10eb51373394e1e985ed3017c76e4923824fd228ea883796d8bb6b92aa1",
+      "sql_fingerprint": "8e449f654c8422fd8752bde3babadbe9c6fb33e907515be11cac341356be694a",
+      "family": "job",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_sum.sql",
+      "content_sha256": "c9b7369a098febe519649a74e065b060b98064b335f8d77751536ce091acd52f",
+      "sql_fingerprint": "a0821c4ce753d507f7deeee1d8fbec7a79e81ac236fa334e2cfaa032b221e476",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_sum.sql",
+      "content_sha256": "e6d8d697a800d4d2eb678301c54fc17f13015f8c84d60b538055c12674ef5d66",
+      "sql_fingerprint": "4969e1ee6602ac98903c331537688e049bef8c01e098dec1cca789831dfb882d",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_sum",
+      "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_sum.sql",
+      "content_sha256": "328a463d04c75e665a115bb9c65e828f47117d112f81b25251161a45fcd284a5",
+      "sql_fingerprint": "5479c9d413651e69db0b2ddc16e32e9a24b8c942bafacce16858d10eb66e7c70",
+      "family": "job",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_max",
+      "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_max.sql",
+      "content_sha256": "f7e0a97a1e6cee0c94a50b0e294feaf9e4e19bf7c9ae9983cb558c734fc6ecbf",
+      "sql_fingerprint": "1959c8bd5c2195a44de6be5d8afc81d7acc58de5cdd54c9d8e81f3766065fa25",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_max",
+      "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_max.sql",
+      "content_sha256": "58ff5e5caa7cc71f0b6070303e3405799fe51450856e9afed3a66560483c5789",
+      "sql_fingerprint": "2b5231e3eb46f1e5f675756105af238e4ccb177ec3d256f5be00d11730376c3b",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_max",
+      "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_max.sql",
+      "content_sha256": "10cbf3b9b9912d9659d8822e6b19205e96998f987aa3d013ede5884cf91657c6",
+      "sql_fingerprint": "7c25b78f04c95f52fe3200cf4629fd86edbee70dbe40377d9ba8161313ec4f72",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_min.sql",
+      "content_sha256": "714ed9088d6610b522054bd80a7f641818776f0d165ef0c66e15b131ec6e83ed",
+      "sql_fingerprint": "4c89a21563bb74e4e6af8a7069fabccc54788bdb61ba82ca890c8d9b33faeb26",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_min.sql",
+      "content_sha256": "429f87e41d5e6c8f4d52892695bad77471fe0a0cea02bbea7461a98d047ffe0d",
+      "sql_fingerprint": "0861affc6dcc31a4c82473fca2c52afbb36346be662b245fb69c2bdf16a52a12",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_min.sql",
+      "content_sha256": "d165790d72fa90b3f5536cb4dd4a4ef8b07849108de4bde2f2f32c07aec17631",
+      "sql_fingerprint": "28418d1da92286c2b8853bfd27782336eebea6b7de2c02e5b82bf29ef6c2b24c",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_min.sql",
+      "content_sha256": "ec6704507108de6d5ae0ed5313d2f9965bc1098c3d54a50e9559eb13c0c02102",
+      "sql_fingerprint": "82ac43825c116ccd95ba9c10cdd2e57cbc0621005ba3898f0bfcd9fb0b926e4d",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_min.sql",
+      "content_sha256": "a3ebb619a25d43871ce0660d3150178ac7df930ec9bf4320c0e2decbb83cb71b",
+      "sql_fingerprint": "af9262750c701ca49851122e8242de6105fa36aa0e182304eadbbc7bee01d24b",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_min.sql",
+      "content_sha256": "6ebc8016488bac9eb417d5ec4a214750fe531269a7933d826982c6b7b9d45f90",
+      "sql_fingerprint": "4f823baeb197b60f53c993c1c1d375494f18684944bf2e454fcb8737bcd4475a",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_sum",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_sum.sql",
+      "content_sha256": "236a5e822186c151afabfb846a126d22b8b3410baa8ed3998eeb4765f1e1e3e7",
+      "sql_fingerprint": "c66e7ae32842064251693376d5e6ecbefc3e7491d212eec049ff9671a9d82f09",
+      "family": "tpch",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_sum",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_sum.sql",
+      "content_sha256": "ef999774e8b21803b0075d0c460954f8f555da7017cf10c77b16122321cffc50",
+      "sql_fingerprint": "858d2b08d809bb8acb31eb8ee7cfbaf23a8bf2df5e9a56420ccfde1388f0fa7f",
+      "family": "tpch",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_sum",
+      "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_sum.sql",
+      "content_sha256": "6278b664d613c6c3f986a46538228813d0d1df0a343e349825392ef2ce4f788f",
+      "sql_fingerprint": "0e95a4044b318dc7c2ba689f7e79632a853cdb8c04c136ef4e2853434a9d1ef5",
+      "family": "tpch",
+      "aggregate_variant": "grouped_sum"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_max",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_max.sql",
+      "content_sha256": "232e5a2bba94d1d9b976f721cafe4b5494c3a15a75663f22fc9822e4d7d0aed9",
+      "sql_fingerprint": "5da61c8b1e909880b118666c3b8869da7159b4427319e2c8ecb6621f9d71b39d",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_max",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_max.sql",
+      "content_sha256": "ffd983945440ca4f23dd4bd27ec13fd2a45d6e905a07767c18a1b7f89c43eedf",
+      "sql_fingerprint": "55a9c2b2ddcab1e9536eb0ece54aa81b21b2f65ea97c6546828299d52159e8b4",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_max",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_max.sql",
+      "content_sha256": "2b3b91a1fee6a88ae250e1e66136674d4b2a75f218bfd8bda96f7313adaed6f6",
+      "sql_fingerprint": "d89ebd3e05cfde694991cc3c81942fca4070bee46ad95dc6445de81c50c03575",
+      "family": "tpch",
+      "aggregate_variant": "grouped_max"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_min.sql",
+      "content_sha256": "8c2c711bffcd219141ede548df215887f5bf2d13b314d10b66f92dd3451fe88f",
+      "sql_fingerprint": "827676e183916d663e6ad3e64853038542529650273a1db1ea39076de3c601fb",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_min.sql",
+      "content_sha256": "463b79d474069f072175126ff9adc4f28b5cb1cd35792fd1319872a76c03dcba",
+      "sql_fingerprint": "93557dc7ac53911235bb8452236d7f14eb423f1039cd0a0f4e85d52b4d6d4ad5",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_min",
+      "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_min.sql",
+      "content_sha256": "50f395c33d690c100674244955e80c390b6fd766372fbde6ea1c78c076255d43",
+      "sql_fingerprint": "a2141b4525629eafbe0375e45ecefa0a43adbb2a88b9701807a52eb0a3821ed9",
+      "family": "tpch",
+      "aggregate_variant": "grouped_min"
+    }
+  ]
+}

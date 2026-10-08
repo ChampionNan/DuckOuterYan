@@ -159,6 +159,288 @@
     },
     "note": "New three-band SQL requires CPU9 selectivity audit and bare-query ON/OFF measurement. Historical runtimes are selection provenance, not results for these candidates."
   },
+  "aggregate_count_refresh": {
+    "revision": "aggregate-count-20261008",
+    "policy_sha256": "b428f126b5dc974d6a937f359de84f8a07cdb16dad65d2af0349571464150bf6",
+    "replacements": [
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_max",
+        "content_sha256": "f8023f30b33cbc467abc689f21e4d76289e3db279a5d1ffb831e9e377f5bbaed",
+        "previous_aggregate_expression": "MAX(R1.dst) AS max_key"
+      },
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_max",
+        "content_sha256": "634db745b5834538b67edd61d29fa9b9da7a8e68f92bb8b66d43b33215267bed",
+        "previous_aggregate_expression": "MAX(R1.dst) AS max_key"
+      },
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_max",
+        "content_sha256": "05d554092e6b4373fcd2174c13026ee68762258fe5271edbde23d82c660a4e86",
+        "previous_aggregate_expression": "MAX(R1.dst) AS max_key"
+      },
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_sum",
+        "content_sha256": "dfa0d8023f70e1a696270589c350ee0fad8bfefe42262a37b1323d008bf1588c",
+        "previous_aggregate_expression": "SUM(R1.dst) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_sum",
+        "content_sha256": "55a37d39052e286a1f83c49c1805507d51885a70fab4723152a74c0cc402fed4",
+        "previous_aggregate_expression": "SUM(R1.dst) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_count",
+        "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_sum",
+        "content_sha256": "41cd8f4ac248fe6a1f5fd5e5e8baaae52bcd1f5988ed2bd4362f609148c512c8",
+        "previous_aggregate_expression": "SUM(R1.dst) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_min",
+        "content_sha256": "cdaa1640c11232b2c489abb540333c57f5b873b516541a919394a4a8fb77d431",
+        "previous_aggregate_expression": "MIN(o.o_orderkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_min",
+        "content_sha256": "b3069e05508d8d29e031e5a8f3ed70c707a48b1f4527e896fbc07f501df86e08",
+        "previous_aggregate_expression": "MIN(o.o_orderkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_min",
+        "content_sha256": "f979b7f7f6f870dec85cefb8fcaa7f58ea05e3af03015d8e0c28a12210c4d518",
+        "previous_aggregate_expression": "MIN(o.o_orderkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_min",
+        "content_sha256": "f95aa770d6f876c64f26e0cc3e09019406178bbe482c03e6c1411a979ee987c8",
+        "previous_aggregate_expression": "MIN(n.n_nationkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_min",
+        "content_sha256": "dea36c1ece4450cc35e14c5e2337f73055208bcedd24a2c9408bbd54bc75586e",
+        "previous_aggregate_expression": "MIN(n.n_nationkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_min",
+        "content_sha256": "992bdbcce49e918bef23764addc2783abb23020f62716b79eed7aa239ac809fc",
+        "previous_aggregate_expression": "MIN(n.n_nationkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_max",
+        "content_sha256": "b9ab48bb1075ecb98a866a030d3968aff6c90fdbacef91a3d700d8c90d521b55",
+        "previous_aggregate_expression": "MAX(n.n_nationkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_max",
+        "content_sha256": "50fdfc86d43cb9378b26abb0cfaddd8e1219266bf0cf2f52b6d48f02e232cd1e",
+        "previous_aggregate_expression": "MAX(n.n_nationkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_max",
+        "content_sha256": "92e19185e0b40d6e9288aa825df058e631d2af0fa452fecc8597a05bc75705cf",
+        "previous_aggregate_expression": "MAX(n.n_nationkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_sum",
+        "content_sha256": "1135fb7688a83923c30d9e5a5cabf28b802ae0a8094290534dcadeb0c1f6a3a7",
+        "previous_aggregate_expression": "SUM(o.o_orderkey) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_sum",
+        "content_sha256": "99a9dee43ba91ac5487ec85bb53d2dcf71e606e2b57287c69e911d55caf4d1f1",
+        "previous_aggregate_expression": "SUM(o.o_orderkey) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_sum",
+        "content_sha256": "f93c5013be16c09cd439f9cadca01527f380fd89c01c0e973d35f6baca2fd72b",
+        "previous_aggregate_expression": "SUM(o.o_orderkey) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_min",
+        "content_sha256": "8a9473698465498d0b6f52f657f3cdb52f74b5967235bbb2012cd2fccd84cecb",
+        "previous_aggregate_expression": "MIN(o.o_custkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_min",
+        "content_sha256": "c0fdb76a276ba9f780a530f9e3502af4f424d3592821b98bf847c56675c64e59",
+        "previous_aggregate_expression": "MIN(o.o_custkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_min",
+        "content_sha256": "6834e5cfd2166e11a1a1f05817f963a46869c37e33b4bf8d1377db3ccfe4d134",
+        "previous_aggregate_expression": "MIN(o.o_custkey) AS min_key"
+      },
+      {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_count",
+        "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_max",
+        "content_sha256": "5437e9061cf5673793b549d38a2b83c5cabdad1e57d233972996fafd6f068db5",
+        "previous_aggregate_expression": "MAX(o.o_orderkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+        "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_max",
+        "content_sha256": "b34967958990a0462e849a2cc1bb37a42d792a2247b945c4841559bf42cb0a7b",
+        "previous_aggregate_expression": "MAX(o.o_orderkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count",
+        "path": "tpch/aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_max",
+        "content_sha256": "cc7466a2b19cda7d13ba5e15dc35f441efe8b468f27e9a2283c861ba4f4b6ff8",
+        "previous_aggregate_expression": "MAX(o.o_orderkey) AS max_key"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_sum",
+        "content_sha256": "a2663195734f6ec3ee26dca698d17ad3576ae84a5993a2da9bab3026044fa67f",
+        "previous_aggregate_expression": "SUM(c.person_id) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_sum",
+        "content_sha256": "d2d149e190c28f07de93988e10ae74e569c2a6339ea120a1fb66b90331a565d3",
+        "previous_aggregate_expression": "SUM(c.person_id) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_sum",
+        "content_sha256": "06d64e27835b2d9d901518ae84e3666d05525ec954546dc905f1d2fbf6aee873",
+        "previous_aggregate_expression": "SUM(c.person_id) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_count",
+        "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_min",
+        "content_sha256": "b7ac83320ee499b7a073a729457a35f2ef12a2b2c2464e01b311f09038e70581",
+        "previous_aggregate_expression": "MIN(mc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_count",
+        "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_min",
+        "content_sha256": "50a5191307d0af3414203b6febfd5e60a62ea198a948e1e73762d5a6e8d69c29",
+        "previous_aggregate_expression": "MIN(mc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_count",
+        "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_min",
+        "content_sha256": "d97a42c6969425bad19b6a05d5309265c5b1455fe57d944b84bc5c8484e6ccd2",
+        "previous_aggregate_expression": "MIN(mc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_count",
+        "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_min",
+        "content_sha256": "68ea78322ad1645597fffe0e9f651ec53662e3372abf2bd3eb8a5415e6774e63",
+        "previous_aggregate_expression": "MIN(cc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_count",
+        "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_min",
+        "content_sha256": "37ea73e738f43a6ea32a997f9e8e5718d2ffa8747eb6e1cbd48c364fdf656c4d",
+        "previous_aggregate_expression": "MIN(cc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_count",
+        "path": "job/aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_min",
+        "content_sha256": "859f6dad3260b7fccdf98b6adeb5d17d4014cccbeeceb0adde9dbd53b7446f47",
+        "previous_aggregate_expression": "MIN(cc.movie_id) AS min_key"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_max",
+        "content_sha256": "888e62ca2104e6ca06763b88876e514622bad07f60a86f04268a4ac218d613a7",
+        "previous_aggregate_expression": "MAX(c.person_id) AS max_key"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_max",
+        "content_sha256": "422aef16b73fc4fa932ef7c598fa6d84668b1e3de1f3bcdd6dbbfca0479c58ed",
+        "previous_aggregate_expression": "MAX(c.person_id) AS max_key"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_max",
+        "content_sha256": "1002f6400ebcafb89f7aefc3aa2b64ae7cc959b0e7808499906335d70374b5f1",
+        "previous_aggregate_expression": "MAX(c.person_id) AS max_key"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_sum",
+        "content_sha256": "33b4edf11c8fe1c5aba80275b7242f57059a7f7c7096e4f1511b8834b086b58e",
+        "previous_aggregate_expression": "SUM(ci.person_id) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_sum",
+        "content_sha256": "cd908a47ed290e84c73015c1c738dae244764e4538637d8aec0e4e5d57ce1ff8",
+        "previous_aggregate_expression": "SUM(ci.person_id) AS key_sum"
+      },
+      {
+        "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+        "path": "job/aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count.sql",
+        "replaces_query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_sum",
+        "content_sha256": "fdc5e84e3ff9e082bbd32a8b65362b848c02173e0283547bec3dc4994e52288a",
+        "previous_aggregate_expression": "SUM(ci.person_id) AS key_sum"
+      }
+    ],
+    "replaced_queries": 39,
+    "status": "PENDING_CPU9_MEASUREMENT",
+    "note": "COUNT(*) changes aggregate semantics; prior runtime and correctness results do not apply."
+  },
   "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
   "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."

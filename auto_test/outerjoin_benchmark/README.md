@@ -56,9 +56,48 @@ The caps were not selected using ON/OFF speed-ups. They reduce the input scale
 but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of every candidate.
 
 Current types: 375 `join`, 164 `graph` (including industry-inspired controls), and
-194 `aggregate`. Aggregates comprise 88 COUNT, 34 MIN, 36 MAX and 36 SUM queries.
+194 `aggregate`. Aggregates comprise 127 COUNT (88 global, 39 grouped),
+19 MIN, 24 MAX and 24 SUM queries.
 Type and family differ: `--only graph` runs 177 Graph-family candidates, whereas
 `--query-type graph` selects 164 graph/control queries across families.
+
+## COUNT(*) replacements (20261008)
+
+The `aggregate-count-20261008` component replaces 39 previously selected
+MIN/MAX/SUM queries without realized aggregate pushdown: 6 Graph, 18 TPC-H,
+and 15 JOB. Only the aggregate expression changes to `COUNT(*)`; the original
+GROUP BY, FROM expression, join types, predicates and three selectivity tiers
+are preserved. This is a workload change to use the supported count path,
+not an optimizer improvement or a guarantee of selection, speed-up or completion.
+
+New names end in `__grouped_count`. Their SQL hashes and fingerprints differ
+from the old queries, whose definitions and metadata remain recoverable under
+`revisions/retired_aggregate_count_20261008/benchmark/`. Do not reuse the old
+SUM/MIN/MAX timings for these replacements. Total and per-family counts stay
+unchanged; other aggregate definitions, including existing COUNT(*), are unchanged.
+The generator applies the frozen `sources/aggregate_count_refresh_20261008.json`
+policy without inspecting results. Its focused new-query list is
+`benchmark/aggregate_count_refresh.txt`.
+
+All 39 replacements passed local bare-query OFF/ON result-multiset comparison
+(78 executions, no errors or timeouts), using the existing Release binary,
+TPC-H SF1, the local JOB database, and Bitcoin Graph data. The six Graph plans
+also contain actual pushed aggregates below joins. The bounded checks and
+binary provenance are recorded in
+`sources/aggregate_count_refresh_20261008_local_smoke.json`; they do not replace
+CPU9 SF50 measurements or establish a performance improvement.
+
+After local correctness checks, the SF50 performance retest uses the existing
+Release binary, 32 threads, one unprofiled post-warmup sample, separate profiles,
+independent 600-second OFF/ON timeouts, and no full server-side result comparison:
+
+```bash
+TPCH_SF=50 TPCDS_SF=50 SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 \
+  bash auto_test/run_all.sh --only all --query-type aggregate --threads 32 \
+  --runs 1 --duckdb-timeout 600 --outeryan-timeout 600 \
+  --no-check-correctness --profile --capture-plans \
+  --query-list auto_test/outerjoin_benchmark/benchmark/aggregate_count_refresh.txt
+```
 
 ## TPC-DS three-tier extension (20261008)
 
