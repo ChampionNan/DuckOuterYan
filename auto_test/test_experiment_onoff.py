@@ -240,6 +240,35 @@ class MultiThreadExperimentTest(unittest.TestCase):
         self.assertTrue(all("SET max_execution_time=600000;" in call["sql"] for call in calls))
         self.assertIn("DuckDB=600s", (self.root / "result.txt").read_text())
 
+    def test_five_sample_watchdog_does_not_replace_per_statement_timeout(self):
+        # Observe the actual watchdog arguments without waiting for a slow SQL.
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        wrapper = binaries / "timeout"
+        wrapper.write_text(f"#!{sys.executable}\n" + textwrap.dedent('''
+            import json, os, sys
+            with open(os.environ["HARNESS_TIMEOUT_CALLS"], "a") as handle:
+                handle.write(json.dumps(sys.argv[1:]) + "\\n")
+            os.execv(sys.argv[2], sys.argv[2:])
+        ''').lstrip())
+        wrapper.chmod(0o755)
+        watchdogs = self.root / "watchdogs.jsonl"
+        result = self.run_harness(
+            "--timeout", "600", "--no-check-correctness",
+            PATH=str(binaries) + os.pathsep + os.environ["PATH"],
+            HARNESS_TIMEOUT_CALLS=str(watchdogs),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        self.assertTrue(all("SET max_execution_time=600000;" in c["sql"] for c in calls))
+        limits = [json.loads(line)[0] for line in watchdogs.read_text().splitlines()]
+        # One warm-up + one profile + five samples, independently for OFF/ON.
+        self.assertEqual(limits.count("4230"), 2)
+        self.assertTrue(all(limit in ("600", "4230") for limit in limits))
+        for call in calls:
+            if call["timing"]:
+                self.assertEqual(call["sql"].split(".timer on\n")[1].count("SELECT * FROM example;"), 5)
+
     def test_input_filter_subqueries_do_not_inflate_relation_count(self):
         sql = ("SELECT R1.src FROM ((R1 R1 LEFT JOIN (SELECT src,dst FROM R2 WHERE src<=10) R2 "
                "ON R1.dst=R2.src) FULL JOIN (SELECT src,dst FROM R3 WHERE src<=10) R3 "
