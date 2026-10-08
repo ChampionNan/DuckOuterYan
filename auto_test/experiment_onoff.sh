@@ -1112,10 +1112,10 @@ PY
         cost_file="${artifact_stem}.cost.txt"
     fi
 
-    # Decide first. A DuckDB fallback returns the exact baseline logical plan.
-    # Aggregate queries are timed only when the selected OuterYan plan actually
-    # contains an aggregate pushdown. Keep skipped rows for workload coverage
-    # with an explicit policy-default speed-up of 1.0.
+    # Decide first. Only a DuckDB fallback returns the exact baseline logical
+    # plan; selected OuterYan aggregate queries are timed with or without
+    # pushdown. Keep fallback rows for workload coverage with an explicit
+    # policy-default speed-up of 1.0.
     oy_decision "$db" "$sql" \
         "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$trace_file")" \
         "$([ "$CAPTURE_PLANS" = 1 ] && printf '%s' "$cost_file")"
@@ -1194,8 +1194,9 @@ PY
     case "$decision" in
         TRACE_ERROR|TRACE_MISSING|TRACE_INVALID) ;;
         *)
-            if [ "$selected_plan:$selected" = "DUCKDB:0" ] || \
-               { [ "$aggregate_query" = 1 ] && [ "$aggregate_pushdown_applied" = 0 ]; }; then
+            # No aggregate pushdown does not imply an unchanged plan: an
+            # OuterYan-selected query can still use a different join/SJ tree.
+            if [ "$selected_plan:$selected" = "DUCKDB:0" ]; then
                 fallback_skip=1
             fi
             ;;

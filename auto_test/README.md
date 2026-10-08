@@ -371,9 +371,10 @@ once before any requested sweep.
 
 For every corpus query included in the run at each thread count, `experiment_onoff.sh` performs:
 
-1. Read a traced `EXPLAIN` decision. A DuckDB fallback, or an aggregate query
-   without realized aggregate pushdown, will skip performance measurements,
-   but still undergoes the default correctness check.
+1. Read a traced `EXPLAIN` decision. Only a verified `DUCKDB:0` plan decision
+   skips performance measurements, while still undergoing the default correctness
+   check. An OuterYan-selected aggregate query is measured even without aggregate
+   pushdown: its join/SJ tree can still differ from DuckDB's native plan.
 2. **Correctness comparison is on by default for every query.** Run the bare
    query once OFF and once ON and compare their complete result multisets.
    A mismatch/error stops that query before profiling or timing. Both correctness

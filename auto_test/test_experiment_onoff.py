@@ -704,17 +704,64 @@ class MultiThreadExperimentTest(unittest.TestCase):
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call["timing"] for call in calls))
 
-    def test_aggregate_outeryan_without_pushdown_is_skipped(self):
-        result = self.run_harness(AGGREGATE_QUERY="1", AGGREGATE_PUSHDOWN="0")
+    def test_aggregate_outeryan_without_pushdown_is_executed(self):
+        (self.root / "corpus/tpch/sample.sql").write_text("SELECT COUNT(*) FROM example;\n")
+        result = self.run_harness(AGGREGATE_PUSHDOWN="0")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = self.read_row()
         self.assertEqual(row["aggregate_query"], "1")
         self.assertEqual(row["aggregate_pushdown_applied"], "0")
+        self.assertEqual(row["selected_plan"], "OUTERYAN")
+        self.assertEqual(row["outer_yan_selected"], "1")
         self.assertEqual(row["correct"], "TRUE")
-        self.assertEqual(row["timing_status"], "fallback-skip")
-        self.assertEqual(row["tm_speedup"], "1.000")
+        self.assertEqual(row["note"], "OK")
+        self.assertEqual(row["timing_status"], "measured")
+        self.assertEqual(row["tm_speedup"], "2.000")
+        self.assertEqual(row["profile_status"], "OK")
+        self.assertEqual(row["optimizer_profile_status"], "OK")
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        self.assertFalse(any(call["timing"] for call in calls))
+        self.assertEqual([call["off"] for call in calls if call["timing"]], [True, False])
+        checked = [call for call in calls if "EXPLAIN" not in call["sql"] and ".mode trash" not in call["sql"]]
+        self.assertEqual([call["off"] for call in checked], [True, False])
+
+    def test_unchecked_aggregate_outeryan_without_pushdown_is_measured_with_or_without_profiles(self):
+        query = "SELECT COUNT(*) FROM example;"
+        (self.root / "corpus/tpch/sample.sql").write_text(query + "\n")
+        for profile in (True, False):
+            with self.subTest(profile=profile):
+                self.calls.unlink(missing_ok=True)
+                result = self.run_harness(
+                    "--no-check-correctness", "--profile" if profile else "--no-profile",
+                    AGGREGATE_PUSHDOWN="0",
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                row = self.read_row()
+                self.assertEqual(row["aggregate_query"], "1")
+                self.assertEqual(row["aggregate_pushdown_applied"], "0")
+                self.assertEqual(row["selected_plan"], "OUTERYAN")
+                self.assertEqual(row["outer_yan_selected"], "1")
+                self.assertEqual(row["correct"], "NOT-CHECKED")
+                self.assertEqual(row["correctness_check"], "disabled")
+                self.assertEqual(row["note"], "OK;CORRECTNESS-NOT-CHECKED")
+                self.assertEqual(row["timing_status"], "measured")
+                self.assertEqual(row["duckdb_status"], "measured")
+                self.assertEqual(row["outeryan_status"], "measured")
+                self.assertEqual(float(row["tm_off"]), 5)
+                self.assertEqual(float(row["tm_on"]), 2.5)
+                self.assertEqual(row["tm_speedup"], "2.000")
+                self.assertEqual(row["profile_status"], "OK" if profile else "disabled")
+                self.assertEqual(row["optimizer_profile_status"], "OK" if profile else "disabled")
+                self.assertEqual(row["timing_samples"], "1")
+                self.assertEqual(row["timing_estimator"], "single_post_warmup")
+                self.assertEqual(row["warmup_runs_per_side"], "2" if profile else "1")
+                calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+                self.assertTrue(all("EXPLAIN" in call["sql"] or ".mode trash" in call["sql"] for call in calls))
+                timed = [call for call in calls if call["timing"]]
+                self.assertEqual([call["off"] for call in timed], [True, False])
+                self.assertEqual(len([call for call in calls if call["profiling"]]), 2 if profile else 0)
+                for call in timed:
+                    self.assertEqual(call["sql"].count(query), 3 if profile else 2)
+                    self.assertEqual(call["sql"].split(".timer on\n")[1].count(query), 1)
 
     def test_aggregate_outeryan_with_pushdown_is_executed(self):
         result = self.run_harness(AGGREGATE_QUERY="1", AGGREGATE_PUSHDOWN="1")
