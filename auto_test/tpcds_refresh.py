@@ -27,12 +27,15 @@ def is_recovery(row):
 
 def recovery_queries(spec=None, *, role=ROLE, namespace="recovery", component="historical_recovery",
                      revision_key="tpcds_refresh_revision", template_key="recovery_template", parameter_policy=None):
-    """Keep archived FROM expressions and filter relations in three cohorts."""
+    """Expand pinned mixed FROM expressions into three filter cohorts."""
     spec = policy() if spec is None else spec
     design = b.load_design()
     for template in spec["templates"]:
-        source = b.ROOT / template["archive_sql"]
-        if b.digest(source) != template["archive_sha256"]:
+        derived = template.get("source_kind") == "source_connected_subgraph"
+        source_path = template["template_sql"] if derived else template["archive_sql"]
+        source_sha256 = template["template_sha256"] if derived else template["archive_sha256"]
+        source = b.ROOT / source_path
+        if b.digest(source) != source_sha256:
             raise ValueError(f"Historical recovery source changed: {source}")
         original = b.body(source.read_text(encoding="utf-8"))
         if b.expression_key(original, "tpcds") != template["expression_fingerprint"]:
@@ -61,22 +64,30 @@ def recovery_queries(spec=None, *, role=ROLE, namespace="recovery", component="h
             query = (f"{category}__tpcds__{namespace}__{template['name']}__"
                      f"{template['join_vector'].lower()}__{template['expression_fingerprint'][:8]}__sel_{tier}")
             source_label = f"{template['source_benchmark']} {template['source_query']}".rstrip()
+            pattern_header = (f"-- source_connected_subgraph: {template['name']}\n" if derived else
+                              f"-- historical_pattern: {template['historical_query']}\n")
+            policy_header = ("-- policy: source-derived single-fact candidate; pending cpu9 measurement\n" if derived else
+                             "-- policy: performance-conditioned historical recovery; pending cpu9 measurement\n")
+            transformation = ("connected subgraph of source equality edges; mixed join kinds/grouping; " if derived else
+                              "archived mixed join expression and filter relation; ")
             content = (f"-- corpus_revision: {b.REVISION}; component: {spec['revision']}\n"
-                       f"-- historical_pattern: {template['historical_query']}\n"
-                       f"-- source: {source_label}\n"
+                       + pattern_header
+                       + f"-- source: {source_label}\n"
                        f"-- selectivity: {tier}; frozen base-entity calibration, not joined output\n"
-                       "-- policy: performance-conditioned historical recovery; pending cpu9 measurement\n"
-                       "-- transformation: archived mixed join expression and filter relation; three WHERE cohorts; "
+                       + policy_header
+                       + f"-- transformation: {transformation}three WHERE cohorts; "
                        f"projection={template['projection_policy']}\n" + sql)
             row = dict(metadata, family="tpcds", source_seed=template["source_seed"],
                        source_benchmark=template["source_benchmark"], source_query=template["source_query"],
                        source_location=str(source.relative_to(b.legacy.REPO_ROOT)),
-                       source_sha256=template["archive_sha256"], benchmark_source_location=template["source_location"],
-                       source_filter_adaptation="Archived join types/grouping/keys and filter relation retained; WHERE replaced by three cohorts; historical timings not reused",
+                       source_sha256=source_sha256, benchmark_source_location=template["source_location"],
+                       source_filter_adaptation=("Source connected subgraph and equality keys retained; mixed join types/grouping and three WHERE cohorts; no historical runtime assigned" if derived else
+                                                 "Archived join types/grouping/keys and filter relation retained; WHERE replaced by three cohorts; historical timings not reused"),
                        topology=template["topology"], tree_shape=template["tree_shape"],
                        join_vector=template["join_vector"], relation_count=template["relation_count"],
                        expression_fingerprint=template["expression_fingerprint"],
-                       provenance_class="industry_synthetic_control" if control else "historical_pattern_adaptation",
+                       provenance_class=("source_connected_subgraph" if derived else
+                                         "industry_synthetic_control" if control else "historical_pattern_adaptation"),
                        source_component=component, evaluation_role=role,
                        query_id=query, path=f"tpcds/{query}.sql", query_class=category, workload_category=category,
                        corpus_revision=b.REVISION, sql_fingerprint=b.sql_fingerprint(sql, "tpcds"),
@@ -85,9 +96,10 @@ def recovery_queries(spec=None, *, role=ROLE, namespace="recovery", component="h
                        qualification_timeout_seconds=b.QUALIFICATION_TIMEOUT_SECONDS,
                        qualification_min_runtime_s=0, qualification_min_speedup=.5,
                        **{revision_key: spec["revision"], template_key: template["name"]},
-                       historical_source_sql=template["archive_sql"], historical_source_query=template["historical_query"],
-                       historical_source_run=template["historical_run"], historical_projection_policy=template["projection_policy"],
                        content_sha256=hashlib.sha256(content.encode()).hexdigest())
+            if not derived:
+                row.update(historical_source_sql=template["archive_sql"], historical_source_query=template["historical_query"],
+                           historical_source_run=template["historical_run"], historical_projection_policy=template["projection_policy"])
             yield row, content
 
 

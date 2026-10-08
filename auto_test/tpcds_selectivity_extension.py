@@ -1,4 +1,4 @@
-"""Pinned historical patterns expanded into new, pending three-band candidates.
+"""Pinned historical and source-subgraph patterns expanded into three-band candidates.
 
 This overlay follows the frozen exact-SQL screens. Historical measurements are
 selection provenance only; generation never reads or changes raw results.
@@ -14,7 +14,7 @@ import benchmark_speedup_screen as screen
 from benchmark_corpus import count_base_relations
 import tpcds_refresh as refresh
 
-POLICY = b.ROOT / "sources/tpcds_extension_20261008.json"
+POLICY = b.ROOT / "sources/tpcds_extension_20261008_r2.json"
 ROLE = "historical_selectivity_extension"
 NAMESPACE = "extension_20261008"
 MARKER = "tpcds_extension.json"
@@ -54,19 +54,33 @@ def policy():
     expected["tpcds"] += spec["expected_new_candidates"]
     if spec["expected_counts_after"] != expected:
         raise ValueError("TPC-DS extension counts do not match its templates")
+    previous_policy = b.ROOT / spec["previous_policy"]
+    if b.digest(previous_policy) != spec["previous_policy_sha256"]:
+        raise ValueError("TPC-DS extension predecessor policy changed")
+    retired = spec["retired_queries"]
+    if len(retired) != 6 or len({r["query_id"] for r in retired}) != 6:
+        raise ValueError("TPC-DS extension retirement requires the exact six r1 queries")
     names, patterns = set(), set()
     previous = {(t["expression_fingerprint"], t["aggregate_variant"])
                 for t in refresh.policy()["templates"]}
     for template in templates:
-        if not historical_eligible(template, threshold):
+        derived = template.get("source_kind") == "source_connected_subgraph"
+        if not derived and not historical_eligible(template, threshold):
             raise ValueError(f"Invalid TPC-DS extension historical evidence: {template['name']}")
         name = template["name"]
-        source = Path(template["archive_sql"])
+        source = Path(template["template_sql"] if derived else template["archive_sql"])
         pattern = (template["expression_fingerprint"], template["aggregate_variant"])
         if not re.fullmatch(r"[a-z0-9_]+", name) or name in names:
             raise ValueError("Invalid or duplicate TPC-DS extension template name")
-        if source.is_absolute() or ".." in source.parts or not source.parts or source.parts[0] != "revisions":
+        expected_parent = "sources" if derived else "revisions"
+        if source.is_absolute() or ".." in source.parts or not source.parts or source.parts[0] != expected_parent:
             raise ValueError("Unsafe TPC-DS extension archive path")
+        if derived:
+            original = b.legacy.REPO_ROOT / template["source_location"]
+            if b.digest(original) != template["original_source_sha256"]:
+                raise ValueError(f"Connected-subgraph benchmark source changed: {original}")
+            if any(key.startswith("historical_") for key in template):
+                raise ValueError("New connected-subgraph SQL cannot inherit historical measurements")
         if pattern in patterns or pattern in previous:
             raise ValueError("TPC-DS extension repeats an existing historical pattern")
         names.add(name)
@@ -76,17 +90,30 @@ def policy():
 
 def extension_queries(spec=None):
     spec = policy() if spec is None else spec
-    yield from refresh.recovery_queries(
-        spec, role=ROLE, namespace=NAMESPACE, component="historical_extension",
-        revision_key="tpcds_extension_revision", template_key="extension_template",
-        parameter_policy="Historical-performance-selected pattern; fixed 3/30/55 base-entity cohorts "
-                         "on the old filter relation; CPU9 audit required")
+    for template in spec["templates"]:
+        derived = template.get("source_kind") == "source_connected_subgraph"
+        generation = dict(spec, templates=[template], revision=template.get("generation_revision", spec["revision"]))
+        yield from refresh.recovery_queries(
+            generation, role=ROLE, namespace=template.get("namespace", NAMESPACE), component="historical_extension",
+            revision_key="tpcds_extension_revision", template_key="extension_template",
+            parameter_policy=("Source-connected single-fact subgraph; fixed 3/30/55 base-entity cohorts "
+                              "on the customer relation; CPU9 audit required" if derived else
+                              "Historical-performance-selected pattern; fixed 3/30/55 base-entity cohorts "
+                              "on the old filter relation; CPU9 audit required"))
+
+
+def archive_retired(destination, old_rows, root):
+    """Archive the exact six r1 SQL files before replacing the active corpus."""
+    spec = policy()
+    refresh.archive_retired(destination, old_rows, root, exclusions=spec["retired_queries"],
+                            revision=spec["retirement_revision"])
 
 
 def excluded_fingerprints():
     old = refresh.policy()
     return {row["sql_fingerprint"] for row in
-            old["excluded"] + old["recovery_rejected_exact_sql"] + screen.policy()["excluded"]}
+            old["excluded"] + old["recovery_rejected_exact_sql"] + screen.policy()["excluded"]
+            + policy()["retired_queries"]}
 
 
 def _marker(spec, records):

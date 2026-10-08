@@ -637,6 +637,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             screen = benchmark_speedup_screen.policy()
             tpcds_refresh.archive_retired(destination, old, root,
                                          exclusions=screen["excluded"], revision=screen["archive_revision"])
+            tpcds_selectivity_extension.archive_retired(destination, old, root)
         retained = {r["path"] for r in records}
         for row in old:
             if row["path"] not in retained:

@@ -5,13 +5,14 @@ import copy
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest import mock
 
 import balanced_benchmark as b
 import benchmark_speedup_screen as screen
-from benchmark_corpus import count_base_relations
+from benchmark_corpus import count_base_relations, historical_manifests, resolve_sql_path
 import qualify_benchmark as q
 import tpcds_refresh as refresh
 import tpcds_selectivity_extension as extension
@@ -69,6 +70,82 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
             self.assertEqual(row["calibration_in_range"], "true")
             self.assertLessEqual(float(row["target_max_fraction"]), .6)
             self.assertIn("CPU9 audit required", row["parameter_policy"])
+
+    def test_replacement_preserves_nine_sql_and_does_not_inherit_old_timings(self):
+        spec = extension.policy()
+        previous_path = b.ROOT / spec["previous_policy"]
+        self.assertEqual(b.digest(previous_path), spec["previous_policy_sha256"])
+        previous = json.loads(previous_path.read_text())
+        previous_candidates = {row["query_id"]: (row, sql)
+                               for row, sql in extension.extension_queries(previous)}
+        retained, replaced = [], []
+        for row, sql in extension.extension_queries():
+            if row["query_id"] in previous_candidates:
+                self.assertEqual((row, sql), previous_candidates[row["query_id"]])
+                retained.append(row)
+            else:
+                replaced.append(row)
+                self.assertEqual(row["provenance_class"], "source_connected_subgraph")
+                self.assertFalse(any(key.startswith("historical_") for key in row))
+                self.assertIn("extension_20261008_r2", row["query_id"])
+        self.assertEqual(len(retained), 9)
+        self.assertEqual(len(replaced), 6)
+        retired = {r["query_id"] for r in spec["retired_queries"]}
+        self.assertEqual(retired, set(previous_candidates) - {r["query_id"] for r in retained})
+        self.assertEqual(Counter(r["retirement_reason"] for r in spec["retired_queries"]),
+                         dict(observed_dual_engine_timeout=3,
+                              same_item_only_fact_fact_fanout_risk_not_yet_measured=3))
+
+    def test_replacements_use_connected_single_fact_source_edges_and_mixed_joins(self):
+        spec = extension.policy()
+        templates = {t["name"]: t for t in spec["templates"]}
+        for row, sql in extension.extension_queries():
+            if row["provenance_class"] != "source_connected_subgraph":
+                continue
+            template = templates[row["extension_template"]]
+            source = (b.legacy.REPO_ROOT / template["source_location"]).read_text()
+            def edges(text):
+                return {tuple(sorted((m.group(1).lower(), m.group(2).lower())))
+                        for m in b.legacy.SIMPLE_EDGE_EQUALITY.finditer(text)}
+            self.assertTrue(edges(sql) <= edges(source))
+            graph = b.legacy.sql_join_graph(sql)
+            aliases = {alias for edge in graph for alias in edge}
+            self.assertEqual(len(aliases), int(row["relation_count"]))
+            self.assertEqual(sum(graph.values()), len(aliases) - 1)
+            reached = {next(iter(aliases))}
+            for _ in aliases:
+                reached |= {v for edge in graph if reached.intersection(edge) for v in edge}
+            self.assertEqual(reached, aliases)
+            facts = re.findall(r"\b(?:store_sales|web_sales|catalog_sales|store_returns|web_returns|catalog_returns)\b",
+                               b.body(sql), re.I)
+            self.assertEqual(facts, ["web_sales"])
+            self.assertEqual(b.legacy.sql_join_kind_counts(sql), Counter(row["join_vector"]))
+            self.assertGreater(len(set(row["join_vector"])), 1)
+
+    def test_exact_retirement_archive_is_recoverable_and_rejects_local_edits(self):
+        spec = extension.policy()
+        previous = json.loads((b.ROOT / spec["previous_policy"]).read_text())
+        retired_ids = {r["query_id"] for r in spec["retired_queries"]}
+        retired = [(r, sql) for r, sql in extension.extension_queries(previous) if r["query_id"] in retired_ids]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "benchmark"
+            (corpus / "tpcds").mkdir(parents=True)
+            for row, sql in retired:
+                (corpus / row["path"]).write_text(sql)
+            old_rows = [r for r, _ in retired]
+            extension.archive_retired(corpus, old_rows, root)
+            archive = root / "revisions" / spec["retirement_revision"] / "benchmark"
+            self.assertEqual(len(b.read_manifest(archive / "manifest.csv")), 6)
+            self.assertIn((None, archive / "manifest.csv"), list(historical_manifests(root)))
+            for row, sql in retired:
+                self.assertEqual((archive / row["path"]).read_text(), sql)
+                # Removing the active copy must leave report-time source lookup working.
+                (corpus / row["path"]).unlink()
+                self.assertEqual(resolve_sql_path(row["query_class"], row["path"], root), archive / row["path"])
+            (corpus / retired[0][0]["path"]).write_text("SELECT 1;\n")
+            with self.assertRaisesRegex(ValueError, "locally edited"):
+                extension.archive_retired(corpus, old_rows, root)
 
     def test_overlay_preserves_every_existing_row_and_validates_its_list(self):
         records = self.original_rows()

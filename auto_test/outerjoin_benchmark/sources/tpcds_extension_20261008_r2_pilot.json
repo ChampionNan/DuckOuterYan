@@ -1,0 +1,26 @@
+{
+  "date": "2026-10-08",
+  "purpose": "Bounded feasibility preflight only; never merge these observations into paper/runtime statistics",
+  "host": "yikecpu9.cse.ust.hk",
+  "database": "tpcds_50.duckdb",
+  "scale": 50,
+  "threads": 32,
+  "engine_commit": "12881bcad4fcaae0c2a7572288d304ff572dc8f2",
+  "statement_timeout_seconds": 60,
+  "process_watchdog_seconds": 70,
+  "protocol": "One bare SELECT execution per side, readonly CLI, trash output, CLI timer and decision trace; OFF before ON, no controlled warmup, no equivalence comparison",
+  "warning": "Cache state differs between executions. These times demonstrate completion in this preflight, not a measured speed-up or a timeout guarantee. Formal retest uses the normal warmup/profile/timing harness.",
+  "replacements": [
+    {"template": "storm14368_chain4_right", "tier": "high", "duckdb_s": 10.537250641, "outeryan_s": 2.922995813, "selected_plan": "OUTERYAN", "both_exit_codes": 0},
+    {"template": "storm14368_chain4_right", "tier": "medium", "duckdb_s": 2.031200107, "outeryan_s": 1.871763179, "selected_plan": "OUTERYAN", "both_exit_codes": 0},
+    {"template": "storm14368_chain4_right", "tier": "low", "duckdb_s": 0.849430915, "outeryan_s": 0.820019028, "selected_plan": "OUTERYAN", "both_exit_codes": 0},
+    {"template": "storm14368_branch5_bushy", "tier": "high", "duckdb_s": 4.091027318, "outeryan_s": 4.292076122, "selected_plan": "DUCKDB", "both_exit_codes": 0},
+    {"template": "storm14368_branch5_bushy", "tier": "medium", "duckdb_s": 3.316298073, "outeryan_s": 3.447624778, "selected_plan": "DUCKDB", "both_exit_codes": 0},
+    {"template": "storm14368_branch5_bushy", "tier": "low", "duckdb_s": 2.040649185, "outeryan_s": 2.077792211, "selected_plan": "DUCKDB", "both_exit_codes": 0}
+  ],
+  "retained_largest_cohort_checks": [
+    {"template": "storm14368_bushy_alt", "tier": "high", "duckdb_s": 3.978611179, "outeryan_s": 3.930999063, "selected_plan": "DUCKDB", "both_exit_codes": 0},
+    {"template": "storm28643_bushy_alt", "tier": "high", "duckdb_s": 4.100842751, "outeryan_s": 4.028691908, "selected_plan": "DUCKDB", "both_exit_codes": 0},
+    {"template": "line4a_control", "tier": "high", "duckdb_s": 7.101904931, "outeryan_s": 5.718836715, "selected_plan": "OUTERYAN", "both_exit_codes": 0}
+  ]
+}

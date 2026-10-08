@@ -275,9 +275,11 @@ Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移�
 同一次原始测量在新 manifest 上有 242 条有效 OuterYan-selected 配对。
 论文须披露这一基于实测结果的筛选，不能把删减后加速比的增加描述成优化器性能提升。
 
-随后增加 `sources/tpcds_extension_20261008.json` 固定的 5 个历史 mixed-join 表达式，
-每个改为当前 low/medium/high 三档，共 15 条新候选（9 bushy、6 left-deep，均非聚合）。
-来源的历史实测 >=0.9×，但新 SQL 必须重新测试；不复用旧计时、不以目标几何平均选择。
+随后增加的 15 条 TPC-DS 扩展采用当前 low/medium/high 三档。
+初版 SQLStorm 11376 的 bushy 三档在 SF50 双侧超时；r2 将两个 11376 结构的
+6 条候选移入归档，换成 SQLStorm 14368 的单事实表 4/5 表 connected-subgraph。
+其余 9 条 SQL 不变，扩展现为 9 bushy、3 left-deep、3 right-deep，均非聚合。
+新结构没有可复用的历史速度比；所有候选须重新测试，不以目标几何平均选择。
 现在共 733 条，TPC-DS 209 条，其中 15 条待 SF50 测量；约 50 条有效配对是目标而非保证。
 只编译并复测这 15 条（复用数据库，关闭完整正确性比较）：
 

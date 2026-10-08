@@ -62,37 +62,55 @@ Type and family differ: `--only graph` runs 177 Graph-family candidates, whereas
 
 ## TPC-DS three-tier extension (20261008)
 
-`sources/tpcds_extension_20261008.json` pins five historical mixed-join expressions
-that were absent from the active corpus: four SQLStorm-derived expressions and
-one industry-inspired control. Their latest available qualifying historical
-measurements selected OuterYan and had speed-up >=0.9. Selection is explicitly
-performance-conditioned; no target geometric mean is optimized. All other
-observed old tiers, including slowdowns and fallbacks, remain in the provenance.
-Q97 was not expanded because its historical running time was already large.
+The initial `sources/tpcds_extension_20261008.json` selected five historical
+mixed-join expressions. The SQLStorm 11376 bushy low/medium/high variants then
+timed out on both sides at SF50. Their item-only `store_sales`/`web_sales` join
+multiplies fact rows; replacing the old stacked sampling with a 3% customer
+cohort did not bound joined output. Both 11376 structures (six queries) are
+therefore retired: the three bushy timeouts are observed, while the left-deep
+triple is removed for the same structural risk, not labeled as measured timeouts.
+Old SQL and evidence are preserved in revisions and the frozen policy.
 
-| Historical expression | Shape | Relations | Historical speed-up |
+The r2 extension retains the other nine definitions unchanged and introduces
+six SQLStorm 14368 connected-subgraph variants. Each has one `web_sales` fact
+and dimensions connected through the original equality keys. The new four-table
+right-deep variant omits date and ship mode; the five-table bushy variant omits
+ship mode. Join types remain mixed. These are new source-derived expressions,
+not exact historical queries, so no historical speed-up is attributed to them.
+
+| Active expression | Shape | Relations | Historical source speed-up |
 |---|---|---:|---:|
-| SQLStorm 11376 bushy | bushy | 5 | 1.1828 |
-| SQLStorm 11376 left | left-deep | 5 | 1.1364 |
+| SQLStorm 14368 chain4 (r2) | right-deep | 4 | not measured for this expression |
+| SQLStorm 14368 branch5 (r2) | bushy | 5 | not measured for this expression |
 | SQLStorm 14368 alternate bushy | bushy | 6 | 1.0405 |
 | SQLStorm 28643 alternate bushy | bushy | 6 | 0.9040 |
 | line4a control | left-deep | 4 | 4.7102 |
 
-Each retains its archived FROM expression, ON conditions and `SELECT *`, replacing
-the entire old WHERE (including extra hash sampling) with current low/medium/high
-cohorts. All 15 are non-aggregate: 9 bushy and 6 left-deep, with five per tier.
+The nine retained queries keep their archived FROM expressions; the six r2
+queries use the documented subgraphs. All use `SELECT *` and current
+low/medium/high cohorts. The 15 are non-aggregate: 9 bushy, 3 left-deep and
+3 right-deep, with five per tier.
 This adds bushy coverage absent from the previous 36 measured TPC-DS pairs; it
 does not claim exact shape balance. SQLStorm uses customer identifier buckets
 at 3/30/55%; the control uses demographics-key prefixes with the same calibrated
 fractions. These are base-entity cohorts, not joined-output selectivity or
 business-semantic categories. The CPU9 audit rechecks the profiles on SF50.
 
+This remains performance-conditioned curation, now also conditioned on timeout
+feasibility; it is not an unbiased sample or an optimizer improvement. Q97 is
+still omitted because its historical running time was already large.
 The historical runs used SF50, 32 threads and three-run medians. The new SQL and
 one-sample protocol differ: old times are provenance only, never merged into
 current statistics. The target is about 50 measured selected pairs, not a promise
 that all 15 will select OuterYan or avoid timeouts. Before retesting, there are
 still only 36 valid measured TPC-DS pairs. Do not force plan selection or insert
 fallback defaults to reach 50; retain every new outcome for review.
+The SF50 bounded feasibility checks are recorded separately in
+`sources/tpcds_extension_20261008_r2_pilot.json`. All six replacements completed
+on both sides within the 60-second pilot cap, but the bushy triple selected
+DuckDB. These uncontrolled-cache pilot times are not paper measurements.
+The retest retains raw outcomes without speed-up filtering; the separate,
+optional qualifier still uses the existing manifest thresholds.
 
 Normal `--all` and `--only tpcds` runs include the extension. To build and retest
 only these 15, reusing existing databases without deleting them:
