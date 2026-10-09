@@ -390,6 +390,8 @@ test/optimizer/outer_yan/*.md
 # OuterYan test/bench artifacts (auto_test/)
 graph_db
 graph_db.wal
+/graph_*.duckdb
+/graph_*.duckdb.wal
 tpch_db
 tpch_db.wal
 tpcds_db
@@ -409,5 +411,6 @@ run_all_chain.log
 watchdog.log
 test/sql/optimizer/outer_yan/data/*.csv
 /auto_test/results/
+/auto_test/outerjoin_benchmark/graph_dataset_retest/*/dataset_audit.json
 /postgres/
 OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md

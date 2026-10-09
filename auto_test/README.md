@@ -219,6 +219,46 @@ second download.
 When `experiment_onoff.sh --only graph` is used, `graph_db` is reused by default.
 Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
+### Isolated Epinions retest for the 16 short Graph queries
+
+The frozen `sources/graph_dataset_retest_20261010.json` cohort consists of the
+16 active Graph queries whose Bitcoin OFF and ON five-run medians were both
+at most 0.1 seconds in `20261008_201332_t32`. It is selected by absolute runtime,
+not speed-up. The normal active corpus and `graph_db` still use Bitcoin while
+these replacements await CPU9 measurements.
+
+```bash
+# Prepare/calibrate only; do not execute the performance workload.
+bash auto_test/run_graph_dataset_retest.sh --prepare-only
+
+# CPU9: retest only these 16 candidates, with the existing Release binary.
+bash auto_test/run_graph_dataset_retest.sh --run
+```
+
+This creates/reuses **`graph_epinions.duckdb`**, never overwrites the Bitcoin
+database, and runs the separate corpus
+`outerjoin_benchmark/graph_dataset_retest/epinions/`. `GRAPH_EPINIONS_DB` can
+override that file but must not point at the Bitcoin database. Epinions has
+508,837 edges in the cached SNAP source, versus Bitcoin's 24,186. Larger input
+does not guarantee either a longer runtime or completion below the timeout.
+
+The generator calibrates source-ID cutoffs from base-table counts, before
+timing. It preserves each query's mixed join types, join expression, projection,
+aggregation, and selectivity band: anchor targets remain 3%/30%, and auxiliary
+input targets remain 9%/15%. It audits R1..R5 separately. Dataset-qualified query
+IDs, a manifest, a query list and `dataset_audit.json` distinguish these new
+measurements from the old Bitcoin results. These candidate queries must not be
+counted as additional active benchmark instances or inherit the old timings.
+
+The retest uses **32 threads, five timed executions per side and their median**,
+with an independent **600-second limit on each execution**, not on all five
+combined. Warm-up and profiling precede timing. Full result-multiset comparison
+is disabled for this performance retest, matching the latest full run; the
+local small-data check is not a full Epinions correctness certification. Plans,
+profiles and results use the existing `auto_test/results/` output convention.
+The wrapper does not compile, commit, push, or promote candidates into the
+active corpus automatically.
+
 ## Query corpus
 
 主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **724 条唯一候选 SQL**：

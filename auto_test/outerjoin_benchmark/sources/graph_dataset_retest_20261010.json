@@ -1,0 +1,193 @@
+{
+  "revision": "graph-dataset-retest-20261010",
+  "source_run": "20261008_201332_t32",
+  "source_dataset": "bitcoin",
+  "target_dataset": "epinions",
+  "expected_queries": 16,
+  "selection": "All currently active Graph queries with both five-run median runtimes <=0.1 seconds; frozen before target-dataset timing; not selected by speed-up.",
+  "dataset_identity": {
+    "n": 508837,
+    "sum_src": "6077109843",
+    "sum_dst": "5363312929",
+    "source_vertices": 60341,
+    "destination_vertices": 51957
+  },
+  "replacements": [
+    {
+      "query_id": "graph__graph__graph_star5_converging__left_deep__firl__48b03467__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_star5_converging__left_deep__firl__48b03467__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "ef5de2087891b76058133306a3005201fe68f9af997ef4220771fa0d2ed1f502",
+      "sql_fingerprint": "c608b6fc9037f46be4d7948c10be98a2ad68990363f7239a1f0ac8e84b647352",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.011306072,
+      "reference_outeryan_s": 0.010843782
+    },
+    {
+      "query_id": "graph__graph__graph_chain4_forward__left_deep__ifr__31f82989__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain4_forward__left_deep__ifr__31f82989__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "687be2aa899055c7ab2fabca602ad84dd2615fb3e4dadd217028c9b34a4d4242",
+      "sql_fingerprint": "c8196564c732fe381c1aadb6a23c4120eec57f9a5f97eb6b8dd45e5e8c1d956f",
+      "semantic_tier": "low",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.00944588,
+      "reference_outeryan_s": 0.011694496
+    },
+    {
+      "query_id": "graph__graph__graph_chain4_forward__bushy__fir__6ab35c4a__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain4_forward__bushy__fir__6ab35c4a__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "45af91f016f272e6de8c36b8d37a6217c19cbc744350fbace73c32e61110d3d8",
+      "sql_fingerprint": "85aee859fe82754c7509f8c7eaf2cf4b634fbea4829f4da1b408935c72cde383",
+      "semantic_tier": "low",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.012641508,
+      "reference_outeryan_s": 0.009895866
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_count",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_count.sql",
+      "family": "graph",
+      "content_sha256": "f8023f30b33cbc467abc689f21e4d76289e3db279a5d1ffb831e9e377f5bbaed",
+      "sql_fingerprint": "73b0d1f2269b8df543a11f63103f6194c5cca98d661ee34b712be9e06d046f57",
+      "semantic_tier": "low",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.011301345,
+      "reference_outeryan_s": 0.014254837
+    },
+    {
+      "query_id": "graph__graph__graph_chain5_forward__left_deep__flri__a7756989__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain5_forward__left_deep__flri__a7756989__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "34c8891e54e6a0a3393b58bb7511fe0c2b52d6a0fbb3fdfbc6be4e3c31875a78",
+      "sql_fingerprint": "2ac678a8a4e476c0fe80f15f4601104504274443336227acbce765819abf100f",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.012921274,
+      "reference_outeryan_s": 0.01752169
+    },
+    {
+      "query_id": "aggregate__graph__graph_chain4_converging__bushy__lif__b3c44a0a__inputcap1__sel_medium__global_count",
+      "path": "graph/aggregate__graph__graph_chain4_converging__bushy__lif__b3c44a0a__inputcap1__sel_medium__global_count.sql",
+      "family": "graph",
+      "content_sha256": "f48f1a228772b5023f64053baa758f71aa1b1dce3ae50c0553451d1f8671b158",
+      "sql_fingerprint": "ba8dabae5d11c07e9e35958cae0f0b9e2b19f5271f13dc67bf51394e2e9bd843",
+      "semantic_tier": "medium",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.018130632,
+      "reference_outeryan_s": 0.013861334
+    },
+    {
+      "query_id": "graph__graph__graph_chain4_converging__bushy__ifl__573f89ca__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain4_converging__bushy__ifl__573f89ca__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "b4918ac84a883855250a66ed1bf95c7b5674f9e8f50c9b0a5c2e170ea8af0908",
+      "sql_fingerprint": "abe14316ccb66da1713cad313b3674b77e1925de530fd9bcc5f61d95568ade3c",
+      "semantic_tier": "low",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.01633078,
+      "reference_outeryan_s": 0.019442411
+    },
+    {
+      "query_id": "graph__graph__graph_branch5_converging__right_deep__lfir__4152a86c__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_branch5_converging__right_deep__lfir__4152a86c__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "257eb602c3b7629e2efc7c921d69cdee20d3c4c21aa96161bcd6205f8cf70ce2",
+      "sql_fingerprint": "983a8143259ac2158f264f794baa8f0c4731b840ce1d1b50670f29eeeb0898c6",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.020948024,
+      "reference_outeryan_s": 0.01400056
+    },
+    {
+      "query_id": "graph__graph__graph_chain4_converging__right_deep__fri__cf59d112__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain4_converging__right_deep__fri__cf59d112__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "ec007903b98e30a2e2e8802c38459af53c0294efa579d9a03455cefedfcbd221",
+      "sql_fingerprint": "35e8c76bb1101ba04b475cd0e88bed503e785c7215739845f5a16f276d1515ec",
+      "semantic_tier": "low",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.020453,
+      "reference_outeryan_s": 0.026361373
+    },
+    {
+      "query_id": "graph__graph__graph_chain5_forward__bushy__lirf__f02b7b87__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain5_forward__bushy__lirf__f02b7b87__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "805f3acd7c750478e9710072b41249fc1aa8913851f65b3cd3c19a5037e0f08c",
+      "sql_fingerprint": "200b2d0b36c9311b3faf48db35ec0584bf05c9e9a663f4b5b264bd80f2a259c1",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.029698635,
+      "reference_outeryan_s": 0.029043676
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_count",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_medium__grouped_count.sql",
+      "family": "graph",
+      "content_sha256": "55a37d39052e286a1f83c49c1805507d51885a70fab4723152a74c0cc402fed4",
+      "sql_fingerprint": "9b8c51e9f5072dfac666267a20a0411fa5d6c12695295231cc56b63a49703ca9",
+      "semantic_tier": "medium",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.057136055,
+      "reference_outeryan_s": 0.016350577
+    },
+    {
+      "query_id": "graph__graph__graph_chain5_converging__bushy__rfli__0b18afaa__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain5_converging__bushy__rfli__0b18afaa__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "73d8bba6587457fe6569e72c9859937bcca3670146d95e7c8e53a51b69203029",
+      "sql_fingerprint": "fb21fb40221eded6008907838ee4f879fe6b3e503669ffbfc8ee3b1c58782ba9",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.062810947,
+      "reference_outeryan_s": 0.060126891
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_count",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_medium__grouped_count.sql",
+      "family": "graph",
+      "content_sha256": "634db745b5834538b67edd61d29fa9b9da7a8e68f92bb8b66d43b33215267bed",
+      "sql_fingerprint": "34e2ebe309ae7478482c35d01a3d095b5ad86b2b598edd7b400c62aaa6df06a6",
+      "semantic_tier": "medium",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.064318455,
+      "reference_outeryan_s": 0.016293003
+    },
+    {
+      "query_id": "graph__graph__graph_chain5_converging__right_deep__firl__af9b1e0b__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain5_converging__right_deep__firl__af9b1e0b__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "4ff0df60db394a75e61394707eb925b0674cd2ace9b45600bdd948fabd4e386e",
+      "sql_fingerprint": "d60f3e11d55f2e78e8007538e8373fda26994af50f6ac36a6357c979a7ab5bab",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.082514872,
+      "reference_outeryan_s": 0.029134437
+    },
+    {
+      "query_id": "graph__graph__graph_chain5_converging__left_deep__rilf__20d56999__inputcap1__sel_low",
+      "path": "graph/graph__graph__graph_chain5_converging__left_deep__rilf__20d56999__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "3b7752eaa65f3dd914a40f673d36d1b86bee2d8494271b5d0bba728c536815fb",
+      "sql_fingerprint": "ca6bbe72b5c4a03b93de19e605779dfb3503ed2a122173dc1edbb6810798faa9",
+      "semantic_tier": "low",
+      "relation_count": "5",
+      "reference_duckdb_s": 0.090061211,
+      "reference_outeryan_s": 0.059886043
+    },
+    {
+      "query_id": "graph__graph__graph_chain4_converging__bushy__ifl__573f89ca__inputcap1__sel_medium",
+      "path": "graph/graph__graph__graph_chain4_converging__bushy__ifl__573f89ca__inputcap1__sel_medium.sql",
+      "family": "graph",
+      "content_sha256": "a5d63c43797b5829400410c389b2c72a55bc161577909f23e8a6af46e8888192",
+      "sql_fingerprint": "31c71c7ee1b772297233861569a623605bf6515327f72d72fd1a95583a9e78c2",
+      "semantic_tier": "medium",
+      "relation_count": "4",
+      "reference_duckdb_s": 0.097293074,
+      "reference_outeryan_s": 0.069595993
+    }
+  ]
+}
