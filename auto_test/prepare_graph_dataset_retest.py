@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a separate, dataset-qualified retest of 16 pinned short Graph queries.
+"""Prepare a separate, dataset-qualified retest of pinned short Graph queries.
 
 The active Bitcoin corpus and historical results are never edited. Calibration
 uses base-table counts only, before any target-dataset performance measurement.
@@ -38,7 +38,7 @@ def load_policy(path=POLICY):
             raise ValueError("Duplicate Graph retest " + field)
     for row in pins:
         if (row["family"] != "graph" or row["semantic_tier"] not in ("low", "medium") or
-                not 0 < max(row["reference_duckdb_s"], row["reference_outeryan_s"]) <= .1 or
+                not 0 < max(row["reference_duckdb_s"], row["reference_outeryan_s"]) <= spec.get("maximum_reference_runtime_s", .1) or
                 min(row["reference_duckdb_s"], row["reference_outeryan_s"]) <= 0):
             raise ValueError("Invalid frozen Graph short-query evidence")
         path = Path(row["path"])
@@ -175,21 +175,26 @@ def prepare(corpus, output, binary, database, policy_path=POLICY):
     rows = {r["query_id"]: r for r in read_manifest(corpus / "manifest.csv")}
     sources = []
     archived_sources = {}
-    if (corpus / "graph_dataset_promotion.json").exists():
-        import graph_dataset_promotion
-        archived_sources = {r["query_id"]: r for r in graph_dataset_promotion.archived_rows()}
+    import graph_dataset_promotion
+    import graph_dataset_extension
+    for stage in (graph_dataset_promotion, graph_dataset_extension):
+        if (corpus / stage.MARKER).exists():
+            replacements = {r["graph_dataset_source_query"]: r for r in stage.candidates()}
+            for row in stage.archived_rows():
+                archived_sources[row["query_id"]] = (row, stage.ARCHIVE, replacements[row["query_id"]])
     for pin in spec["replacements"]:
-        row = rows.get(pin["query_id"]) or archived_sources.get(pin["query_id"])
+        row = rows.get(pin["query_id"])
+        archived = archived_sources.get(pin["query_id"])
+        source_path = corpus / pin["path"]
+        if row is None and archived:
+            row, archive, replacement = archived
+            source_path = archive / pin["path"]
+            if replacement["query_id"] != graph_dataset_promotion.RETIRED_QUERY:
+                if (replacement["query_id"] not in rows or
+                        digest(corpus / replacement["path"]) != replacement["content_sha256"]):
+                    raise ValueError("Promoted Graph query has changed")
         if row is None:
             raise ValueError("Missing pinned Graph query: " + pin["query_id"])
-        source_path = corpus / pin["path"]
-        if pin["query_id"] in archived_sources:
-            source_path = graph_dataset_promotion.ARCHIVE / pin["path"]
-            replacement = next(r for r in graph_dataset_promotion.candidates()
-                               if r["graph_dataset_source_query"] == pin["query_id"])
-            if (replacement["query_id"] not in rows or
-                    digest(corpus / replacement["path"]) != replacement["content_sha256"]):
-                raise ValueError("Promoted Graph query has changed")
         sql = source_path.read_text()
         if content_hash(sql) != pin["content_sha256"]:
             raise ValueError("Source query was edited: " + pin["path"])
@@ -241,8 +246,9 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "graph_dataset_retest/epinions")
     parser.add_argument("--duckdb", type=Path, default=SCRIPT.parent / "build/release/duckdb")
     parser.add_argument("--database", type=Path, default=SCRIPT.parent / "graph_epinions.duckdb")
+    parser.add_argument("--policy", type=Path, default=POLICY)
     args = parser.parse_args()
-    prepare(args.corpus, args.output, args.duckdb, args.database)
+    prepare(args.corpus, args.output, args.duckdb, args.database, args.policy)
 
 
 if __name__ == "__main__":

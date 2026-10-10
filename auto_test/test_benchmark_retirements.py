@@ -6,6 +6,8 @@ import unittest
 
 import balanced_benchmark as b
 import benchmark_retirements as r
+import graph_dataset_promotion as promotion
+import graph_dataset_extension as extension
 from benchmark_corpus import resolve_sql_path
 from benchmark_speedup_screen import below_threshold
 
@@ -21,13 +23,13 @@ class BenchmarkRetirementsTest(unittest.TestCase):
     def test_exact_removals_archive_and_lists(self):
         rows = b.validate(b.ROOT / "benchmark")
         archived, paths = r.archived_rows()
-        self.assertEqual(len(rows), 723)
+        self.assertEqual(len(rows), 722)
         self.assertEqual(Counter(x["family"] for x in archived), dict(graph=2, tpch=3, tpcds=3, job=2))
         for row in archived:
             self.assertFalse((b.ROOT / "benchmark" / row["path"]).exists())
             resolved = resolve_sql_path(row["query_class"], row["path"])
             self.assertEqual(resolved.read_bytes(), paths[row["path"]].read_bytes())
-        self.assertEqual(len((b.ROOT / "benchmark/aggregate_count_refresh.txt").read_text().splitlines()), 33)
+        self.assertEqual(len((b.ROOT / "benchmark/aggregate_count_refresh.txt").read_text().splitlines()), 32)
         ids = {x["query_id"] for x in rows}
         self.assertIn("aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_count", ids)
 
@@ -44,6 +46,8 @@ class BenchmarkRetirementsTest(unittest.TestCase):
 
     def test_changed_marker_or_stale_list_rejected(self):
         rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
+        rows, _ = extension.validate(b.ROOT / "benchmark", rows)
+        rows, _ = promotion.validate(b.ROOT / "benchmark", rows)
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp)
             marker = r.marker(r.policy())

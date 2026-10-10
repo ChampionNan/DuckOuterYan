@@ -97,6 +97,17 @@ class GraphDatasetRetestTest(unittest.TestCase):
                 retest.prepare(self.corpus, output, "unused", "unused")
         self.assertEqual(before, {p: retest.digest(p) for p in before})
 
+    def test_active_corpus_can_rebuild_both_frozen_retest_batches(self):
+        import graph_dataset_extension as extension
+        active = retest.ROOT / "benchmark"
+        before = retest.digest(active / "manifest.csv")
+        for policy, count in ((retest.POLICY, 16), (extension.POLICY, 3)):
+            with tempfile.TemporaryDirectory(prefix="graph-retest-") as tmp, \
+                    patch.object(retest, "calibrate", return_value=copy.deepcopy(self.audit)):
+                rows, _ = retest.prepare(active, Path(tmp) / "epinions", "unused", "unused", policy)
+                self.assertEqual(len(rows), count)
+        self.assertEqual(retest.digest(active / "manifest.csv"), before)
+
     def test_output_cannot_be_inside_active_corpus(self):
         with self.assertRaisesRegex(ValueError, "separate"):
             retest.prepare(self.corpus, self.corpus / "test", "unused", "unused")

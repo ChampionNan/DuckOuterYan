@@ -589,6 +589,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             records = benchmark_retirements.apply(records, output)
             import graph_dataset_promotion
             records = graph_dataset_promotion.apply(records, output)
+            import graph_dataset_extension
+            records = graph_dataset_extension.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
                                 and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
@@ -621,6 +623,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "aggregate_count_refresh": json.loads((output / "aggregate_count_refresh.json").read_text()) if refreshed else None,
             "retirements": json.loads((output / "retirements.json").read_text()) if refreshed else None,
             "graph_datasets": json.loads((output / "graph_dataset_promotion.json").read_text()) if refreshed else None,
+            "graph_dataset_extension": json.loads((output / "graph_dataset_extension.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -715,6 +718,9 @@ def validate(benchmark):
                 import graph_dataset_promotion
                 pinned = {r["query_id"]: r for r in graph_dataset_promotion.candidates()}.get(r["query_id"])
                 if pinned is None:
+                    import graph_dataset_extension
+                    pinned = {r["query_id"]: r for r in graph_dataset_extension.candidates()}.get(r["query_id"])
+                if pinned is None:
                     raise ValueError("Unpinned Epinions query")
                 expected = json.loads(pinned["input_filter_profiles_json"])
             if json.loads(r.get("input_filter_profiles_json") or "[]") != expected:
@@ -735,7 +741,10 @@ def validate(benchmark):
         import aggregate_count_refresh
         import benchmark_retirements
         import graph_dataset_promotion
-        before_promotion, replaced_paths = graph_dataset_promotion.validate(benchmark, rows)
+        import graph_dataset_extension
+        before_extension_graph, extension_paths = graph_dataset_extension.validate(benchmark, rows)
+        before_promotion, replaced_paths = graph_dataset_promotion.validate(benchmark, before_extension_graph)
+        replaced_paths.update(extension_paths)
         before_retirement, retired_paths = benchmark_retirements.validate(benchmark, before_promotion)
         retired_paths.update(replaced_paths)
         promoted_paths = {r["graph_dataset_source_query"]: r["path"] for r in rows

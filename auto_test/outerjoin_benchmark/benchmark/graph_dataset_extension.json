@@ -1,0 +1,10 @@
+{
+  "revision": "graph-dataset-extension-20261010",
+  "replaced_queries": 3,
+  "candidate_manifest_sha256": "2e17cf3d28d3a8795fd8effd6c579b41fffead332e99244532e63eca4a6a5daf",
+  "policy_sha256": "96f34dc869ea825941d4c7fdb464da60f8720b49d38d0feb853cb6d762fd7678",
+  "dataset_counts": {
+    "bitcoin": 156,
+    "epinions": 18
+  }
+}

@@ -17,6 +17,10 @@ ARCHIVE = b.ROOT / "revisions/replaced_graph_bitcoin_20261010/benchmark"
 CANDIDATES = b.ROOT / "graph_dataset_retest/epinions"
 MANIFEST_SHA = "0d41aea482115c47bd535556ea78a7e3a16a0e20c51fa998149475880fbd54c2"
 PIN_FIELDS = ("query_id", "path", "content_sha256", "sql_fingerprint", "family")
+RETIRED_QUERY = (
+    "aggregate__graph__epinions__graph_star4_converging__left_deep__rfl__9b9e596c"
+    "__inputcap1__sel_low__grouped_count"
+)
 
 
 def candidates():
@@ -40,7 +44,9 @@ def candidates():
 
 def marker():
     return dict(revision="graph-dataset-promotion-20261010", replaced_queries=16,
-                dataset_counts={"bitcoin": 159, "epinions": 16},
+                dataset_counts={"bitcoin": 159, "epinions": 15},
+                retired_queries=[RETIRED_QUERY],
+                retirement_reason="User requested removal after reviewing the unusual predicates; SQL retained in the frozen retest archive",
                 candidate_manifest_sha256=MANIFEST_SHA,
                 policy="All 16 frozen short-query candidates adopted, including timeout and fallback outcomes",
                 result_csv="experiment_onoff_graph_epinions_20261010_005733_t32.csv",
@@ -105,8 +111,11 @@ def apply(records, output):
     for row in records:
         if row["query_id"] in targets:
             new = dict(targets[row["query_id"]])
-            shutil.copyfile(CANDIDATES / new["path"], output / new["path"])
             (output / row["path"]).unlink()
+            if new["query_id"] == RETIRED_QUERY:
+                path_map[row["path"]] = None
+                continue
+            shutil.copyfile(CANDIDATES / new["path"], output / new["path"])
             path_map[row["path"]] = new["path"]
         else:
             new = dict(row)
@@ -115,7 +124,8 @@ def apply(records, output):
         updated.append(new)
     for path in output.glob("*.txt"):
         lines = path.read_text().splitlines()
-        path.write_text("".join(path_map.get(line, line) + "\n" for line in lines))
+        path.write_text("".join(path_map.get(line, line) + "\n" for line in lines
+                                if path_map.get(line, line) is not None))
     b.write_json(output / MARKER, marker())
     return updated
 
@@ -129,8 +139,11 @@ def validate(benchmark, rows):
     if set(old).intersection(r["query_id"] for r in rows):
         raise ValueError("Replaced Bitcoin SQL is still active")
     actual = [r for r in rows if r["query_id"] in expected]
-    if len(actual) != 16:
+    if len(actual) != 15 or any(r["query_id"] == RETIRED_QUERY for r in actual):
         raise ValueError("Missing promoted Epinions queries")
+    retired = expected[RETIRED_QUERY]
+    if (benchmark / retired["path"]).exists():
+        raise ValueError("Retired Epinions SQL is still active")
     for row in actual:
         if any(str(row.get(k, "")) != str(v) for k, v in expected[row["query_id"]].items()):
             raise ValueError("Promoted Epinions metadata changed")
@@ -140,9 +153,12 @@ def validate(benchmark, rows):
     if counts != marker()["dataset_counts"]:
         raise ValueError("Unexpected mixed Graph dataset counts")
     for path in benchmark.glob("*.txt"):
+        if retired["path"] in path.read_text().splitlines():
+            raise ValueError("Retired Epinions SQL remains in query list")
         if set(path.read_text().splitlines()).intersection(r["path"] for r in old.values()):
             raise ValueError("Replaced Bitcoin SQL remains in query list")
     restored = [old[r["graph_dataset_source_query"]] if r["query_id"] in expected else r for r in rows]
+    restored.append(old[retired["graph_dataset_source_query"]])
     return restored, {r["path"]: ARCHIVE / r["path"] for r in old.values()}
 
 

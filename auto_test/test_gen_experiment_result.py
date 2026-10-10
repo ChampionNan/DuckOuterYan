@@ -1542,9 +1542,9 @@ class PaperStatisticsTest(unittest.TestCase):
         provenance = provenance[provenance["filter_design_revision"].isin(
             ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1"])]
         counts = provenance["workload_component"].value_counts().to_dict()
-        self.assertEqual(counts, {"structural": 462, "evaluation": 199})
+        self.assertEqual(counts, {"structural": 462, "evaluation": 198})
         capped = provenance[provenance["graph_filter_revision"].eq("inputcap1")]
-        self.assertEqual(len(capped), 175)
+        self.assertEqual(len(capped), 174)
         self.assertTrue(capped["input_filter_placement"].eq("base_relation_subquery").all())
         self.assertTrue(capped["input_filter_profiles_json"].map(lambda value: len(json.loads(value)) in (3, 4)).all())
         stress = PLOT.benchmark_provenance().loc[lambda frame: frame["workload_category"].eq("v3_selectivity_stress") & frame["filter_design_revision"].notna()]
