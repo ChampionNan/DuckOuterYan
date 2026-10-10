@@ -174,11 +174,23 @@ def prepare(corpus, output, binary, database, policy_path=POLICY):
         raise ValueError("Retest output must be separate from the active corpus")
     rows = {r["query_id"]: r for r in read_manifest(corpus / "manifest.csv")}
     sources = []
+    archived_sources = {}
+    if (corpus / "graph_dataset_promotion.json").exists():
+        import graph_dataset_promotion
+        archived_sources = {r["query_id"]: r for r in graph_dataset_promotion.archived_rows()}
     for pin in spec["replacements"]:
-        row = rows.get(pin["query_id"])
+        row = rows.get(pin["query_id"]) or archived_sources.get(pin["query_id"])
         if row is None:
             raise ValueError("Missing pinned Graph query: " + pin["query_id"])
-        sql = (corpus / pin["path"]).read_text()
+        source_path = corpus / pin["path"]
+        if pin["query_id"] in archived_sources:
+            source_path = graph_dataset_promotion.ARCHIVE / pin["path"]
+            replacement = next(r for r in graph_dataset_promotion.candidates()
+                               if r["graph_dataset_source_query"] == pin["query_id"])
+            if (replacement["query_id"] not in rows or
+                    digest(corpus / replacement["path"]) != replacement["content_sha256"]):
+                raise ValueError("Promoted Graph query has changed")
+        sql = source_path.read_text()
         if content_hash(sql) != pin["content_sha256"]:
             raise ValueError("Source query was edited: " + pin["path"])
         sources.append((row, sql, pin))

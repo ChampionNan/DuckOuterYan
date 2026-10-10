@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 724 条当前查询（Graph 176、TPC-H 176、TPC-DS 206、JOB 166）、manifest、固定筛选证据与历史档案；含 15 条 TPC-DS 三档扩展 |
+| `outerjoin_benchmark/` | 723 条当前查询（Graph 175、TPC-H 176、TPC-DS 206、JOB 166）、manifest、固定筛选证据与历史档案；含 15 条 TPC-DS 三档扩展 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -219,13 +219,24 @@ second download.
 When `experiment_onoff.sh --only graph` is used, `graph_db` is reused by default.
 Set `OY_FORCE_GRAPH_REBUILD=1` only when replacing it is intentional.
 
-### Isolated Epinions retest for the 16 short Graph queries
+### Mixed Graph datasets and the 16-query Epinions retest
 
 The frozen `sources/graph_dataset_retest_20261010.json` cohort consists of the
 16 active Graph queries whose Bitcoin OFF and ON five-run medians were both
 at most 0.1 seconds in `20261008_201332_t32`. It is selected by absolute runtime,
-not speed-up. The normal active corpus and `graph_db` still use Bitcoin while
-these replacements await CPU9 measurements.
+not speed-up. After the completed CPU9 retest, all 16 replacements are now
+active, including its 12 timeout outcomes and one fallback. The Graph family
+contains 159 Bitcoin and 16 Epinions queries, still 175 instances in total.
+Other families are unchanged. No old Bitcoin timing is retained for a replaced query.
+
+The manifest's `graph_dataset` column routes each query: Bitcoin uses `GRAPH_DB`
+(default `graph_db`), Epinions uses `GRAPH_EPINIONS_DB` (default
+`graph_epinions.duckdb`). `experiment_onoff.sh` builds the Epinions database if
+needed without rebuilding Bitcoin. The mixed active corpus requires
+`GRAPH_DATASET=bitcoin`; do not globally change it to Epinions. Both `run_all.sh`
+and direct harness runs honor this per-query routing. Normal regeneration
+reapplies the pinned replacement; original SQL is recoverable under
+`outerjoin_benchmark/revisions/replaced_graph_bitcoin_20261010/benchmark/`.
 
 ```bash
 # Prepare/calibrate only; do not execute the performance workload.
@@ -247,8 +258,8 @@ timing. It preserves each query's mixed join types, join expression, projection,
 aggregation, and selectivity band: anchor targets remain 3%/30%, and auxiliary
 input targets remain 9%/15%. It audits R1..R5 separately. Dataset-qualified query
 IDs, a manifest, a query list and `dataset_audit.json` distinguish these new
-measurements from the old Bitcoin results. These candidate queries must not be
-counted as additional active benchmark instances or inherit the old timings.
+measurements from the old Bitcoin results. They replace, rather than add to,
+the original 16 instances and must never inherit the old timings.
 
 The retest uses **32 threads, five timed executions per side and their median**,
 with an independent **600-second limit on each execution**, not on all five
@@ -261,14 +272,14 @@ active corpus automatically.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **724 条唯一候选 SQL**：
-Graph 176、TPC-H 176、TPC-DS 206、JOB 166。
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **723 条唯一候选 SQL**：
+Graph 175、TPC-H 176、TPC-DS 206、JOB 166。
 基础设计原为每 family 180 条，每档每 shape 各 20；经性能筛选后不再严格配平。
-join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **124/52**，不再生成 6 relation 查询。
-基础单元为 14/6；筛选后 low/left-deep 为 13/5，low/right-deep 为 14/5，
-low/bushy 为 13/6，其余单元不变；数据库及数据集不变。
+join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **124/51**，不再生成 6 relation 查询。
+基础单元为 14/6；筛选后 low/left-deep 为 13/5，low/right-deep 为 14/4，
+low/bushy 为 13/6，其余单元不变；159 条使用 Bitcoin，16 条使用 Epinions。
 Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
-R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
+Bitcoin 的 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
 放在 `(SELECT src,dst FROM Ri WHERE ...) Ri` 中，避免在根 WHERE 误删 NULL-padded 行。
 本地 Bitcoin 的 R1 保留率为 2.83%/30.00%/54.99%；其余每个输入约为
 9.33%/14.35%/21.19%。三档配平指 **R1 主过滤**，不能宣称所有输入过滤率均匀分布，
@@ -277,9 +288,14 @@ R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的�
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 185。
-`--only graph` 选择 Graph family 全部 176 条，与 `--query-type graph` 不同。
+类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 184。
+`--only graph` 选择 Graph family 全部 175 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效实测数**，fallback 和 timeout 不能算作完整实测配对。
+
+20261009 按用户要求精确移出 Graph star5/converging、right-deep、low 的 global COUNT 查询
+（5 次中位数：DuckDB 8.52 ms、OuterYan 17.44 ms）。medium/high 不变，不按新的通用阈值删减。
+固定清单为 `sources/retirements_20261009.json`，可恢复 SQL 在
+`outerjoin_benchmark/revisions/retired_queries_20261009/`；重新生成和默认执行均不会恢复此查询。
 
 20261005 的 TPC-DS 调整按 20261002 实测移出 28 条 timeout、8 条 speed-up <0.5 的 SQL，
 保留 147 条，并加入 18 组历史表达式 × 三档 = 54 条候选，总计 201 条。
@@ -320,7 +336,7 @@ Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移�
 6 条候选移入归档，换成 SQLStorm 14368 的单事实表 4/5 表 connected-subgraph。
 其余 9 条 SQL 不变，扩展现为 9 bushy、3 left-deep、3 right-deep，均非聚合。
 新结构没有可复用的历史速度比；所有候选须重新测试，不以目标几何平均选择。
-现在共 724 条，TPC-DS 206 条，其中 45 条有有效配对实测；约 50 条有效配对是目标而非保证。
+现在共 723 条，TPC-DS 206 条，其中 45 条有有效配对实测；约 50 条有效配对是目标而非保证。
 只编译并复测这 15 条（复用数据库，关闭完整正确性比较）：
 
 ```bash
@@ -1126,8 +1142,8 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 724 unique candidates under `outerjoin_benchmark/benchmark`:
-176 Graph, 176 TPC-H, 206 TPC-DS and 166 JOB. Fifteen TPC-DS three-tier extension
+The comparison runs 723 unique candidates under `outerjoin_benchmark/benchmark`:
+175 Graph, 176 TPC-H, 206 TPC-DS and 166 JOB. Fifteen TPC-DS three-tier extension
 queries have SF50 measurements. Earlier exact measured speed-up <0.5
 and TPC-DS timeout exclusions remain. The 20261008 frozen screen additionally
 retires two Graph and nine JOB queries with observed speed-up <=0.7 in the

@@ -4,13 +4,13 @@
   "batch": 0,
   "target_host": "cpu9:/home/data/bchenba/DuckYanOuter",
   "counts": {
-    "graph": 176,
+    "graph": 175,
     "job": 166,
     "tpcds": 206,
     "tpch": 176
   },
   "balanced_counts": {
-    "graph": 176,
+    "graph": 175,
     "tpch": 176,
     "tpcds": 144,
     "job": 166
@@ -25,9 +25,9 @@
   "supplementary_counts": {},
   "family_tiers": {
     "graph": {
-      "high": 60,
       "medium": 60,
-      "low": 56
+      "low": 55,
+      "high": 60
     },
     "tpch": {
       "high": 59,
@@ -47,9 +47,9 @@
   },
   "family_shapes": {
     "graph": {
-      "left_deep": 58,
       "bushy": 59,
-      "right_deep": 59
+      "left_deep": 58,
+      "right_deep": 58
     },
     "tpch": {
       "bushy": 57,
@@ -68,8 +68,10 @@
     }
   },
   "graph_relation_counts": {
-    "5": 52,
-    "4": 124
+    "5": 7,
+    "5": 44,
+    "4": 115,
+    "4": 9
   },
   "graph_relation_weights": {
     "4": 7,
@@ -442,15 +444,27 @@
     "note": "COUNT(*) changes aggregate semantics; prior runtime and correctness results do not apply."
   },
   "retirements": {
-    "revision": "all-family-le06-20261008",
-    "policy_sha256": "f2af0c8fd0012f3c18620faacf6e6f518f3064396b36932fbbdce338597e6873",
+    "revision": "exact-query-retirements-20261009",
+    "policy_sha256": "8b7352ea64afad7b4ad1fd1eed2ad7d1e505d8fdb7456445d357913b739faa9b",
     "counts": {
-      "graph": 176,
+      "graph": 175,
       "job": 166,
       "tpcds": 206,
       "tpch": 176
     },
-    "removed_queries": 9
+    "removed_queries": 10
+  },
+  "graph_datasets": {
+    "revision": "graph-dataset-promotion-20261010",
+    "replaced_queries": 16,
+    "dataset_counts": {
+      "bitcoin": 159,
+      "epinions": 16
+    },
+    "candidate_manifest_sha256": "0d41aea482115c47bd535556ea78a7e3a16a0e20c51fa998149475880fbd54c2",
+    "policy": "All 16 frozen short-query candidates adopted, including timeout and fallback outcomes",
+    "result_csv": "experiment_onoff_graph_epinions_20261010_005733_t32.csv",
+    "result_csv_sha256": "5b054ef96e1dc6a4cbe4329f5919d6abebd98d31563eef4d415b766e1b654e05"
   },
   "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
   "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",

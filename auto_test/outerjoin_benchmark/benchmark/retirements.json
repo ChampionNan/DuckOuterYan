@@ -1,11 +1,11 @@
 {
-  "revision": "all-family-le06-20261008",
-  "policy_sha256": "f2af0c8fd0012f3c18620faacf6e6f518f3064396b36932fbbdce338597e6873",
+  "revision": "exact-query-retirements-20261009",
+  "policy_sha256": "8b7352ea64afad7b4ad1fd1eed2ad7d1e505d8fdb7456445d357913b739faa9b",
   "counts": {
-    "graph": 176,
+    "graph": 175,
     "job": 166,
     "tpcds": 206,
     "tpch": 176
   },
-  "removed_queries": 9
+  "removed_queries": 10
 }

@@ -2,6 +2,7 @@
 """Exercise the real shell harness with a tiny, deterministic DuckDB stand-in."""
 
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,7 @@ class MultiThreadExperimentTest(unittest.TestCase):
                 sys.exit("Error: profile was not disabled before timing")
             with open(os.environ["HARNESS_CALLS"], "a") as log:
                 log.write(json.dumps({"threads": threads, "timing": timing, "profiling": profiling,
+                                      "argv": sys.argv[1:],
                                       "off": off, "sql": sql}) + "\n")
             if profiling:
                 if os.environ.get("FAIL_PROFILE") in ("1", side):
@@ -210,6 +212,51 @@ class MultiThreadExperimentTest(unittest.TestCase):
     def read_row(self):
         with (self.root / "result.csv").open(newline="") as handle:
             return next(csv.DictReader(handle))
+
+    def mixed_graph_fixture(self):
+        corpus = self.root / "mixed_graph"
+        (corpus / "graph").mkdir(parents=True)
+        records = []
+        for index, dataset in enumerate(("bitcoin", "epinions"), start=1):
+            relative = f"graph/graph__{dataset}.sql"
+            sql = f"SELECT * FROM R1 WHERE src = {index};\n"
+            (corpus / relative).write_text(sql)
+            records.append(dict(query_id=f"graph__{dataset}", path=relative, family="graph",
+                                graph_dataset=dataset, content_sha256=hashlib.sha256(sql.encode()).hexdigest()))
+        with (corpus / "manifest.csv").open("w", newline="") as handle:
+            writer = csv.DictWriter(handle, records[0].keys())
+            writer.writeheader()
+            writer.writerows(records)
+        (corpus / "graph_dataset_promotion.json").write_text("{}")
+        self.epinions = self.root / "graph_epinions.duckdb"
+        self.epinions.touch()
+        return corpus
+
+    def test_mixed_graph_routes_each_statement_to_its_manifest_database(self):
+        corpus = self.mixed_graph_fixture()
+        result = self.run_harness("--only", "graph", OY_CORPUS=str(corpus),
+                                  GRAPH_DB=str(self.database), GRAPH_EPINIONS_DB=str(self.epinions),
+                                  GRAPH_DATASET="bitcoin")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with (self.root / "result.csv").open() as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual({r["graph_dataset"] for r in rows}, {"bitcoin", "epinions"})
+        for row in rows:
+            self.assertIn(row["graph_dataset"], row["query"])
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
+        for index, database in ((1, self.database), (2, self.epinions)):
+            matching = [call for call in calls if f"src = {index}" in call["sql"]]
+            self.assertTrue(matching)
+            self.assertTrue(all(str(database) in call["argv"] for call in matching))
+
+    def test_mixed_graph_rejects_shared_database_path_before_executing(self):
+        corpus = self.mixed_graph_fixture()
+        result = self.run_harness("--only", "graph", OY_CORPUS=str(corpus),
+                                  GRAPH_DB=str(self.database), GRAPH_EPINIONS_DB=str(self.database),
+                                  GRAPH_DATASET="bitcoin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("database paths must differ", result.stderr)
+        self.assertFalse(self.calls.exists())
 
     def assert_result(self, path, threads, expected_correct="TRUE", expected_speedup="2.000"):
         with path.open(newline="") as handle:

@@ -2119,6 +2119,9 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
     lower = min(float(all_values.min() - padding), -padding)
     upper = max(float(all_values.max() + padding), padding)
     candidates = np.asarray([0.1, 0.25, 0.5, 1, 2, 4, 10, 25, 50, 100, 250], dtype=float)
+    # Extend decade labels for large measured outliers without truncating them.
+    if upper >= 3:
+        candidates = np.concatenate((candidates, 10.0 ** np.arange(3, math.floor(upper) + 1)))
     ticks = np.log10(candidates)
     visible = (ticks >= lower) & (ticks <= upper)
     ax.set_xlim(lower, upper)
@@ -2228,11 +2231,6 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
                markeredgewidth=0.20, markersize=5.6),
     ])
     legend_labels.extend(["OuterYan faster/equal", "OuterYan slower"])
-    excluded_fast = int((correct & below_runtime_threshold(frame, metric)).sum())
-    figure.text(0.5, -0.025,
-                (f"Exclude pairs with both runtimes < 1 s ({excluded_fast} queries); "
-                 if MIN_RUNTIME_SECONDS else "Sub-second measured pairs retained; ") +
-                "right panel: measured OuterYan-selected plans only.", ha="center", va="top", fontsize=7.5)
     figure.legend(
         handles=legend_handles, labels=legend_labels,
         handler_map={tuple: HandlerTuple(ndivide=None, pad=0.18)},
@@ -2407,6 +2405,40 @@ def phase_group_layout(
     return np.asarray(positions, dtype=float), centers, separators
 
 
+def diverse_phase_samples(frame: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
+    """Farthest-point sampling of CPU shares among measured speed-ups >= 1.
+
+    Start at the composition nearest the family centroid, then maximize the
+    distance to the closest selected composition. Query identity breaks ties;
+    speed-up magnitude is not a ranking criterion.
+    """
+    if limit < 1:
+        raise ValueError("Phase sample size must be positive")
+    rows = phase_baseline_rows(add_short_query_labels(frame))
+    rows = complete_runtime_rows(rows)
+    if rows.empty:
+        return rows
+    off = pd.to_numeric(rows["baseline_time_s"], errors="coerce")
+    on = pd.to_numeric(rows["tm_on"], errors="coerce")
+    rows = rows.loc[np.isfinite(on) & on.gt(0) & off.ge(on)]
+    columns = [seconds for _, seconds, _, _ in PHASES]
+    chosen = []
+    for family in FAMILY_ORDER:
+        candidates = rows.loc[rows.family.eq(family)].sort_values(query_identity_columns(rows), kind="stable")
+        if candidates.empty:
+            continue
+        shares = candidates[columns].to_numpy(float) / candidates["_profile_cpu_time"].to_numpy(float)[:, None]
+        selected = [int(np.argmin(np.sum((shares - shares.mean(axis=0)) ** 2, axis=1)))]
+        while len(selected) < min(limit, len(candidates)):
+            distances = np.min(np.sum((shares[:, None, :] - shares[selected][None, :, :]) ** 2, axis=2), axis=1)
+            distances[selected] = -1
+            selected.append(int(np.argmax(distances)))
+        sample = candidates.iloc[selected].copy()
+        sample["_family_available"] = len(candidates)
+        chosen.append(sample)
+    return pd.concat(chosen) if chosen else rows.iloc[:0].copy()
+
+
 def page_phase(
     pdf: PdfPages, frame: pd.DataFrame, run: str, notice: str | None = None, preselected: bool = False,
 ) -> None:
@@ -2461,7 +2493,7 @@ def page_phase(
     for phase_index, (label, _, _, color) in enumerate(PHASES):
         widths = shares[:, phase_index]
         axis.barh(
-            y, widths, left=left, height=0.72, color=color, edgecolor="white",
+            y, widths, left=left, height=0.54, color=color, edgecolor="white",
             linewidth=0.30, label=label,
         )
         seconds = phase_values[:, phase_index]
@@ -2566,17 +2598,11 @@ def page_phase(
             columnspacing=0.8, handletextpad=0.35,
         )
     figure.text(
-        0.52, 0.045,
-        ("(1) Exclude pairs with both unprofiled runtimes < 1 s; " if MIN_RUNTIME_SECONDS
-         else "(1) Sub-second measured pairs retained; ") + "bars sum to CPU time (operator seconds).",
-        ha="center", va="bottom", fontsize=8.7,
-    )
-    figure.text(
-        0.52, 0.018, "(2) " + QUERY_CODE_KEY,
+        0.52, 0.018, QUERY_CODE_KEY,
         ha="center", va="bottom", fontsize=8.7,
     )
     figure.subplots_adjust(left=0.135 if versioned_labels else 0.116,
-                           right=0.932, bottom=0.120, top=0.865 if notice else 0.910)
+                           right=0.932, bottom=0.105, top=0.865 if notice else 0.910)
     save_page(pdf, figure)
 
 
@@ -2631,6 +2657,7 @@ def write_standalone_runtime_figures(
     sample_per_family: int = REPRESENTATIVE_QUERIES_PER_FAMILY,
     representative_scope: str = "outeryan",
     phase_placeholder: pd.DataFrame | None = None,
+    phase_sample_per_family: int | None = None,
 ) -> list[Path]:
     """Write the all-query comparison and optional representative phase breakdown."""
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -2650,7 +2677,10 @@ def write_standalone_runtime_figures(
         for suffix in (".pdf", ".png"):
             remove_generated_file(output_directory / ("speedup_all_queries" + suffix))
     phase_frame, notice = phase_source(frame, phase_placeholder)
-    _, phases = paired_representative_samples(frame, phase_frame, sample_per_family, representative_scope)
+    if phase_sample_per_family is None:
+        _, phases = paired_representative_samples(frame, phase_frame, sample_per_family, representative_scope)
+    else:
+        phases = diverse_phase_samples(phase_frame, phase_sample_per_family)
     if not phases.empty:
         outputs.append(("phase_breakdown_outeryan", lambda pdf: page_phase(pdf, phases, run, notice, True)))
         columns = [column for column in (
@@ -2665,6 +2695,8 @@ def write_standalone_runtime_figures(
             "placeholder": notice is not None,
             "notice": notice,
             "runtime_filter": runtime_filter_description(),
+            "selection": ("phase-share farthest-point sample; speed-up >= 1"
+                          if phase_sample_per_family is not None else "shape and baseline-runtime ranks"),
             "queries": json.loads(phases[columns].to_json(orient="records", double_precision=15)),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     else:
@@ -3092,14 +3124,14 @@ def overall_tex(report: dict) -> str:
 
 def runtime_tex(report: dict) -> str:
     lines = [r"\begin{table}[t]", r"\centering\small\setlength{\tabcolsep}{6pt}",
-             r"\begin{tabular}{lrrrrrr}", r"\toprule", r"Family & $n$ & Geomean & Mean & Median & Max & Total \\", r"\midrule"]
+             r"\begin{tabular}{lrrrrr}", r"\toprule", r"Family & $n$ & Geomean & Median & Max & Total \\", r"\midrule"]
     for index, (subset, label) in enumerate((("all", "All valid measured queries"), ("outeryan_selected", "OuterYan-selected measured queries"))):
         if index:
             lines.append(r"\midrule")
-        lines.append(r"\multicolumn{7}{l}{\textit{" + label + r"}} \\")
+        lines.append(r"\multicolumn{6}{l}{\textit{" + label + r"}} \\")
         for group in report["runtime"][subset]:
             values = [number(group["counts"]["valid"], 0)]
-            values.extend(number(group["speedup"][key]) for key in ("geomean", "mean", "median", "max"))
+            values.extend(number(group["speedup"][key]) for key in ("geomean", "median", "max"))
             values.append(number(group["totals"]["speedup"]))
             lines.append(latex_escape(group["family"]) + " & " + " & ".join(values) + r" \\")
     caption = (r"Statistics across benchmark workloads after excluding recorded timeouts and measured pairs with both runtimes below $1$\,s. "

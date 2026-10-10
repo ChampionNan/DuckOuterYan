@@ -48,6 +48,8 @@ export DUCKDB_BIN
 export TPCH_SF="${TPCH_SF:-50}"
 export TPCDS_SF="${TPCDS_SF:-50}"
 export GRAPH_DB="${GRAPH_DB:-$OY_REPO_ROOT/graph_db}"
+# The active mixed Graph corpus routes its 16 dataset-qualified queries here.
+export GRAPH_EPINIONS_DB="${GRAPH_EPINIONS_DB:-$OY_REPO_ROOT/graph_epinions.duckdb}"
 export TPCH_DB="${TPCH_DB:-$OY_REPO_ROOT/tpch_${TPCH_SF}.duckdb}"
 export TPCDS_DB="${TPCDS_DB:-$OY_REPO_ROOT/tpcds_${TPCDS_SF}.duckdb}"
 # JOB DB: built externally from IMDb csv (no dbgen equivalent). Set JOB_DB env

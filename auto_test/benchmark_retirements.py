@@ -5,7 +5,7 @@ import json
 import balanced_benchmark as b
 from benchmark_speedup_screen import below_threshold
 
-POLICY = b.ROOT / "sources/retirements_20261008.json"
+POLICY = b.ROOT / "sources/retirements_20261009.json"
 MARKER = "retirements.json"
 
 

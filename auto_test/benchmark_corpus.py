@@ -53,6 +53,28 @@ def read_manifest(path):
         return list(csv.DictReader(handle))
 
 
+def graph_query_dataset(corpus, relative, default="bitcoin"):
+    """Resolve a verified manifest identity without importing query generators."""
+    manifest = Path(corpus) / "manifest.csv"
+    if not manifest.is_file():
+        return default
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("Unsafe Graph SQL path")
+    rows = [r for r in read_manifest(manifest) if r["path"] == relative]
+    if len(rows) != 1:
+        raise ValueError("Graph query absent or duplicated in manifest: " + relative)
+    row = rows[0]
+    if row["family"] != "graph":
+        raise ValueError("Not a Graph manifest entry")
+    if hashlib.sha256((Path(corpus) / path).read_bytes()).hexdigest() != row["content_sha256"]:
+        raise ValueError("Graph SQL does not match manifest")
+    dataset = row.get("graph_dataset") or default
+    if dataset not in ("bitcoin", "epinions", "google", "wiki", "dblp"):
+        raise ValueError("Unknown Graph dataset: " + dataset)
+    return dataset
+
+
 def historical_manifests(root=ROOT):
     """Oldest first, so newer definitions take precedence for the same old ID."""
     for revision in ("pre_semantic_20260925", ARCHIVE_NAME):
@@ -63,7 +85,8 @@ def historical_manifests(root=ROOT):
     for revision in ("unique_semantic_20260929", "retired_tpcds_20261005",
                      "retired_speedup_20261005", "retired_speedup_20261007", "retired_speedup_20261008",
                      "retired_tpcds_extension_20261008_r1", "retired_aggregate_count_20261008",
-                     "retired_speedup_le06_20261008"):
+                     "retired_speedup_le06_20261008", "retired_queries_20261009",
+                     "replaced_graph_bitcoin_20261010"):
         path = root / "revisions" / revision / "benchmark/manifest.csv"
         if path.is_file():
             yield None, path
@@ -92,6 +115,8 @@ def resolve_sql_path(category, relative, root=ROOT):
         candidates.append(root / "revisions/retired_tpcds_extension_20261008_r1/benchmark" / path)
         candidates.append(root / "revisions/retired_aggregate_count_20261008/benchmark" / path)
         candidates.append(root / "revisions/retired_speedup_le06_20261008/benchmark" / path)
+        candidates.append(root / "revisions/retired_queries_20261009/benchmark" / path)
+        candidates.append(root / "revisions/replaced_graph_bitcoin_20261010/benchmark" / path)
         # The former query-type prefix is a naming alias; SQL identity is unchanged.
         if path.name.startswith("control__"):
             candidates.append(root / "benchmark" / path.with_name(

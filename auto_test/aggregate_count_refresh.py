@@ -124,7 +124,7 @@ def archive_retired(destination, old_rows, root):
                                  revision=spec["archive_revision"])
 
 
-def validate(benchmark, rows, retired_paths=None):
+def validate(benchmark, rows, retired_paths=None, query_path_replacements=None):
     """Reverse the projection edit and verify its original policy-pinned hash."""
     spec = policy()
     retired_paths = retired_paths or {}
@@ -167,9 +167,12 @@ def validate(benchmark, rows, retired_paths=None):
             raise ValueError("Aggregate COUNT marker identity changed")
         historical[row["query_id"]] = old_row
     replacement_paths = {r["replaces_query_id"]: r["path"] for r in actual}
-    expected_list = "".join(replacement_paths[pin["query_id"]] + "\n"
+    query_path_replacements = query_path_replacements or {}
+    expected_list = "".join(query_path_replacements.get(replacement_paths[pin["query_id"]],
+                                                        replacement_paths[pin["query_id"]]) + "\n"
                             for pin in spec["replacements"]
-                            if replacement_paths[pin["query_id"]] not in retired_paths)
+                            if replacement_paths[pin["query_id"]] not in retired_paths
+                            or replacement_paths[pin["query_id"]] in query_path_replacements)
     if (benchmark / QUERY_LIST).read_text(encoding="utf-8") != expected_list:
         raise ValueError("Aggregate COUNT query list changed")
     return [historical.get(r["query_id"], r) for r in rows]

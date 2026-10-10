@@ -21,14 +21,26 @@ class BenchmarkRetirementsTest(unittest.TestCase):
     def test_exact_removals_archive_and_lists(self):
         rows = b.validate(b.ROOT / "benchmark")
         archived, paths = r.archived_rows()
-        self.assertEqual(len(rows), 724)
-        self.assertEqual(Counter(x["family"] for x in archived), dict(graph=1, tpch=3, tpcds=3, job=2))
+        self.assertEqual(len(rows), 723)
+        self.assertEqual(Counter(x["family"] for x in archived), dict(graph=2, tpch=3, tpcds=3, job=2))
         for row in archived:
             self.assertFalse((b.ROOT / "benchmark" / row["path"]).exists())
-            self.assertEqual(resolve_sql_path(row["query_class"], row["path"]), paths[row["path"]])
+            resolved = resolve_sql_path(row["query_class"], row["path"])
+            self.assertEqual(resolved.read_bytes(), paths[row["path"]].read_bytes())
         self.assertEqual(len((b.ROOT / "benchmark/aggregate_count_refresh.txt").read_text().splitlines()), 33)
         ids = {x["query_id"] for x in rows}
         self.assertIn("aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_count", ids)
+
+    def test_short_graph_retirement_preserves_other_tiers(self):
+        rows = b.validate(b.ROOT / "benchmark")
+        ids = {x["query_id"] for x in rows}
+        prefix = "aggregate__graph__graph_star5_converging__right_deep__rlif__aa6e2644__inputcap1__sel_"
+        self.assertNotIn(prefix + "low__global_count", ids)
+        for tier in ("medium", "high"):
+            self.assertIn(prefix + tier + "__global_count", ids)
+        pin = next(x for x in r.policy()["excluded"] if x["query_id"] == prefix + "low__global_count")
+        self.assertEqual(pin["retirement_reason"], "user_requested_exact_short_query_removal")
+        self.assertEqual(pin["timing_samples"], "5")
 
     def test_changed_marker_or_stale_list_rejected(self):
         rows = b.read_manifest(b.ROOT / "benchmark/manifest.csv")

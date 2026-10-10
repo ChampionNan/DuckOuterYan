@@ -587,6 +587,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             records = tpcds_selectivity_extension.apply(records, output)
             records = aggregate_count_refresh.apply(records, output)
             records = benchmark_retirements.apply(records, output)
+            import graph_dataset_promotion
+            records = graph_dataset_promotion.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
                                 and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
@@ -618,6 +620,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "tpcds_extension": json.loads((output / "tpcds_extension.json").read_text()) if refreshed else None,
             "aggregate_count_refresh": json.loads((output / "aggregate_count_refresh.json").read_text()) if refreshed else None,
             "retirements": json.loads((output / "retirements.json").read_text()) if refreshed else None,
+            "graph_datasets": json.loads((output / "graph_dataset_promotion.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -708,6 +711,12 @@ def validate(benchmark):
             if seed is None or r.get("graph_filter_revision") != GRAPH_FILTER_REVISION:
                 raise ValueError(f"Obsolete graph design: {path}; regenerate the corpus")
             expected = graph_input_filters(design, seed, r["semantic_tier"])
+            if r.get("graph_dataset") == "epinions":
+                import graph_dataset_promotion
+                pinned = {r["query_id"]: r for r in graph_dataset_promotion.candidates()}.get(r["query_id"])
+                if pinned is None:
+                    raise ValueError("Unpinned Epinions query")
+                expected = json.loads(pinned["input_filter_profiles_json"])
             if json.loads(r.get("input_filter_profiles_json") or "[]") != expected:
                 raise ValueError(f"Missing/changed graph input filters: {path}")
             for extra in expected:
@@ -725,8 +734,15 @@ def validate(benchmark):
         import benchmark_speedup_screen
         import aggregate_count_refresh
         import benchmark_retirements
-        before_retirement, retired_paths = benchmark_retirements.validate(benchmark, rows)
-        aggregate_count_refresh.validate(benchmark, before_retirement, retired_paths)
+        import graph_dataset_promotion
+        before_promotion, replaced_paths = graph_dataset_promotion.validate(benchmark, rows)
+        before_retirement, retired_paths = benchmark_retirements.validate(benchmark, before_promotion)
+        retired_paths.update(replaced_paths)
+        promoted_paths = {r["graph_dataset_source_query"]: r["path"] for r in rows
+                          if r.get("graph_dataset") == "epinions"}
+        path_replacements = {r["path"]: promoted_paths[r["query_id"]]
+                             for r in before_promotion if r["query_id"] in promoted_paths}
+        aggregate_count_refresh.validate(benchmark, before_retirement, retired_paths, path_replacements)
         before_extension = tpcds_selectivity_extension.validate(benchmark, before_retirement)
         before_screen = benchmark_speedup_screen.validate(benchmark, before_extension)
         tpcds_refresh.validate(benchmark, before_screen)

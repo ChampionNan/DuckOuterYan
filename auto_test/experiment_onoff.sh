@@ -801,6 +801,13 @@ BUILD_DB="$SCRIPT_DIR/build_db.sh"
 # graph DB: R1..R10 from SNAP graph data
 if [ "$need_graph" = 1 ]; then
     GRAPH_DATASET="${GRAPH_DATASET:-bitcoin}"
+    if [ -f "$CORPUS/graph_dataset_promotion.json" ]; then
+        [ "$GRAPH_DATASET" = bitcoin ] || {
+            echo "The mixed Graph manifest requires GRAPH_DB=Bitcoin; Epinions uses GRAPH_EPINIONS_DB" >&2; exit 2;
+        }
+        "$PYTHON_BIN" -c 'from pathlib import Path; import sys; sys.exit(0 if Path(sys.argv[1]).resolve() != Path(sys.argv[2]).resolve() else "Bitcoin and Epinions database paths must differ")' \
+            "$GRAPH_DB" "$GRAPH_EPINIONS_DB" || exit 2
+    fi
     GRAPH_DATA_DIR="${GRAPH_DATA_DIR:-$REPO_ROOT/graph_data}"
     echo "Building graph R1..R10 from dataset=$GRAPH_DATASET ..." >&2
     # Reuse an existing small graph DB by default. Set
@@ -826,7 +833,7 @@ fi
 # ============================================================================
 # COLLECT QUERIES — each tagged with its family DB
 # ============================================================================
-LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=(); QUERY_TYPES=()
+LABELS=(); SQLS=(); DBS=(); QUERY_FAMILIES=(); SQL_PATHS=(); RELATION_COUNTS=(); QUERY_TYPES=(); GRAPH_DATASETS=()
 
 # Count base relations, not SELECT wrappers used for graph input predicates.
 # Counting every FROM/JOIN token would mislabel a four-table query as seven.
@@ -847,7 +854,7 @@ db_for_family() {
 
 append_query() {
     local family="$1" rel="$2" fdb existing query_sql relation_count
-    local full="$CORPUS/$rel" query_type
+    local full="$CORPUS/$rel" query_type graph_dataset=""
     query_type="$(basename "$full" .sql)"
     query_type="${query_type%%__*}"
     case "$query_type" in join|graph|aggregate) ;; *) query_type="custom";; esac
@@ -857,6 +864,20 @@ append_query() {
         [ "$existing" != "$rel" ] || { echo "Duplicate query in selection: $rel" >&2; exit 2; }
     done
     fdb="$(db_for_family "$family")" || { echo "Unknown query family: $family" >&2; exit 2; }
+    if [ "$family" = graph ]; then
+        graph_dataset="$(PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" \
+            -c 'import sys; from benchmark_corpus import graph_query_dataset; print(graph_query_dataset(*sys.argv[1:]))' \
+            "$CORPUS" "$rel" "$GRAPH_DATASET")" || exit 2
+        if [ "$graph_dataset" = epinions ]; then
+            fdb="$GRAPH_EPINIONS_DB"
+            if [ ! -f "$fdb" ]; then
+                GRAPH_DB="$fdb" GRAPH_DATASET=epinions FORCE=0 bash "$BUILD_DB" graph || exit 2
+            fi
+        elif [ "$graph_dataset" != "$GRAPH_DATASET" ]; then
+            echo "Graph manifest requires $graph_dataset for $rel, but GRAPH_DB is configured for $GRAPH_DATASET" >&2
+            exit 2
+        fi
+    fi
     [ -n "$fdb" ] && [ -f "$fdb" ] || { echo "Database unavailable for $rel: $fdb" >&2; exit 2; }
     query_sql="$(<"$full")"
     relation_count="$(oy_relation_count "$query_sql")"
@@ -868,6 +889,7 @@ append_query() {
     QUERY_FAMILIES+=("$family")
     SQL_PATHS+=("$rel")
     RELATION_COUNTS+=("$relation_count")
+    GRAPH_DATASETS+=("$graph_dataset")
 }
 
 if [ -n "$QUERY_LIST" ]; then
@@ -910,7 +932,7 @@ else
     done
 fi
 [ "${#LABELS[@]}" -gt 0 ] || { echo "No corpus queries matched (only=$ONLY pattern=$PATTERN)" >&2; exit 1; }
-SIZES="families=[$FAMS]  graph=$GRAPH_DATASET  tpch sf=$TPCH_SF  tpcds sf=$TPCDS_SF  job db=$JOB_DB"
+SIZES="families=[$FAMS] graph_default=$GRAPH_DATASET graph_epinions_db=$GRAPH_EPINIONS_DB (per-query manifest routing) tpch sf=$TPCH_SF tpcds sf=$TPCDS_SF job db=$JOB_DB"
 
 # ============================================================================
 # RUN: gate -> decision -> kernel/time, streaming to TXT/CSV
@@ -980,6 +1002,7 @@ CSV_HEADER=(
     duckdb_timeout_seconds outeryan_timeout_seconds duckdb_status outeryan_status
     duckdb_timeout_stage outeryan_timeout_stage duckdb_correctness_status outeryan_correctness_status
     executed_round1_pairs executed_round1_filters executed_round2_pairs executed_round2_filters
+    graph_dataset
 )
 EXECUTION_HOST="$(hostname)"
 CORPUS_MANIFEST_SHA256="-"
@@ -1561,7 +1584,8 @@ PY
         "$CORRECTNESS_MODE" "$TIMING_PROTOCOL" "$RUNS" "$TIMING_ESTIMATOR" "$((1 + PROFILE))" \
         "$OY_DUCKDB_TIMEOUT_SECS" "$OY_OUTERYAN_TIMEOUT_SECS" "$duckdb_status" "$outeryan_status" \
         "$duckdb_timeout_stage" "$outeryan_timeout_stage" "$duckdb_correctness_status" "$outeryan_correctness_status" \
-        "$executed_round1_pairs" "$executed_round1_filters" "$executed_round2_pairs" "$executed_round2_filters"
+        "$executed_round1_pairs" "$executed_round1_filters" "$executed_round2_pairs" "$executed_round2_filters" \
+        "${GRAPH_DATASETS[$i]}"
 }
 
 # ==== Every query, once, under the fixed per-statement timeout =============

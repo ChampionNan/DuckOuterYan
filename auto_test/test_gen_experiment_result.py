@@ -671,6 +671,42 @@ class PlotSpeedupLoadTest(unittest.TestCase):
 
 
 class PlotSpeedupPhaseTest(unittest.TestCase):
+    def test_requested_footer_lines_are_absent_from_both_figures(self):
+        frame = pd.DataFrame([dict(self.phase_row("q", "JOB", 10, 3), timing_threads=8)])
+        figures = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: figures.append(fig)):
+            PLOT.page_phase(object(), frame, "test")
+            PLOT.page_speedup_scatter(object(), frame, "test", "tm")
+        self.assertEqual(len(figures), 2)
+        for figure in figures:
+            labels = "\n".join(text.get_text() for text in figure.texts)
+            self.assertNotIn("Sub-second measured pairs retained", labels)
+            self.assertNotIn("bars sum to CPU time", labels)
+            self.assertNotIn("right panel: measured OuterYan-selected", labels)
+            self.assertNotIn("(2)", labels)
+            plt.close(figure)
+
+    def test_diverse_phase_sample_keeps_only_speedups_and_covers_phase_extremes(self):
+        rows = []
+        compositions = [(2.5, 2.5, 2.5, 2.5), (10, 0, 0, 0), (0, 10, 0, 0),
+                        (0, 0, 10, 0), (0, 0, 0, 10), (2.4, 2.6, 2.5, 2.5)]
+        for family in PLOT.FAMILY_ORDER:
+            for index, composition in enumerate(compositions):
+                row = dict(self.phase_row(f"q{index}", family, 10, 2), timing_threads=8)
+                for (_, seconds, ratio, _), value in zip(PLOT.PHASES, composition):
+                    row[seconds], row[ratio] = value, value / 10
+                rows.append(row)
+            rows.append(dict(rows[-1], query="slow", tm_off=.99, tm_on=1))
+            rows.append(dict(rows[-1], query="invalid", tm_off=float("nan")))
+        frame = pd.DataFrame(rows)
+        sampled = PLOT.diverse_phase_samples(frame, 5)
+        self.assertEqual(sampled.groupby("family").size().to_dict(), {f: 5 for f in PLOT.FAMILY_ORDER})
+        self.assertTrue((sampled.tm_off / sampled.tm_on).ge(1).all())
+        for family in PLOT.FAMILY_ORDER:
+            self.assertEqual(set(sampled.loc[sampled.family.eq(family), "query"]), {f"q{i}" for i in range(5)})
+        shuffled = PLOT.diverse_phase_samples(frame.sample(frac=1, random_state=42), 5)
+        self.assertEqual(sampled[["family", "query"]].values.tolist(), shuffled[["family", "query"]].values.tolist())
+
     def test_short_phase_seconds_are_not_rounded_to_zero(self):
         self.assertEqual(PLOT.format_seconds_label(0.004174538), "0.0042s")
 
@@ -949,6 +985,19 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             "tm_on": (8.0 + offset) / speedup,
             "tm_speedup": speedup,
         }
+
+    def test_large_speedup_outlier_has_readable_decade_ticks(self):
+        frame = pd.DataFrame([
+            self.runtime_row("one", "graph", "OUTERYAN", 1.2, 0),
+            self.runtime_row("outlier", "graph", "OUTERYAN", 7743.112, 1),
+        ])
+        captured = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_speedup_scatter(object(), frame, "test", "tm")
+        axis = captured[0].axes[1]
+        self.assertIn("1000×", [tick.get_text() for tick in axis.get_xticklabels()])
+        self.assertGreaterEqual(axis.get_xlim()[1], math.log10(7743.112))
+        plt.close(captured[0])
 
     def test_all_queries_use_compact_runtime_pair_without_query_names(self):
         frame = pd.DataFrame([
@@ -1485,12 +1534,17 @@ class PaperStatisticsTest(unittest.TestCase):
         self.assertEqual(set(supplementary["selectivity_level"]), {"Legacy modulo (unverified)"})
         historical = provenance[provenance["filter_design_revision"].isna()]
         self.assertEqual(len(historical), 932)
+        # Historical definitions remain resolvable after retirement/replacement;
+        # composition counts must use active identities rather than that union.
+        active = pd.read_csv(PLOT.SCRIPT_DIR / "outerjoin_benchmark/benchmark/manifest.csv")
+        provenance = provenance[provenance["query_id"].isin(active["query_id"])]
+        self.assertEqual(len(provenance), len(active))
         provenance = provenance[provenance["filter_design_revision"].isin(
             ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1"])]
         counts = provenance["workload_component"].value_counts().to_dict()
-        self.assertEqual(counts, {"structural": 513, "evaluation": 207})
+        self.assertEqual(counts, {"structural": 462, "evaluation": 199})
         capped = provenance[provenance["graph_filter_revision"].eq("inputcap1")]
-        self.assertEqual(len(capped), 180)
+        self.assertEqual(len(capped), 175)
         self.assertTrue(capped["input_filter_placement"].eq("base_relation_subquery").all())
         self.assertTrue(capped["input_filter_profiles_json"].map(lambda value: len(json.loads(value)) in (3, 4)).all())
         stress = PLOT.benchmark_provenance().loc[lambda frame: frame["workload_category"].eq("v3_selectivity_stress") & frame["filter_design_revision"].notna()]

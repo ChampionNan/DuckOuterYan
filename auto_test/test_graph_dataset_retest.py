@@ -32,6 +32,9 @@ class GraphDatasetRetestTest(unittest.TestCase):
     def setUpClass(cls):
         cls.spec = retest.load_policy()
         cls.corpus = retest.ROOT / "benchmark"
+        if (cls.corpus / "graph_dataset_promotion.json").exists():
+            import graph_dataset_promotion
+            cls.corpus = graph_dataset_promotion.ARCHIVE
         cls.rows = {r["query_id"]: r for r in read_manifest(cls.corpus / "manifest.csv")}
         cls.audit = audit_fixture(cls.spec)
 

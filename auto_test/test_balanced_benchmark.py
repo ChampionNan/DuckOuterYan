@@ -39,13 +39,14 @@ class BalancedBenchmarkTest(unittest.TestCase):
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
         self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
         graph = [r for r in rows if r["family"] == "graph"]
-        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 124, 5: 52})
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 124, 5: 51})
         for tier in b.TIERS:
             for shape in b.SHAPES:
                 self.assertEqual(Counter(int(r["relation_count"]) for r in graph
                                          if r["semantic_tier"] == tier and r["tree_shape"] == shape),
                                  {4: 13 if tier == "low" and shape in ("bushy", "left_deep") else 14,
-                                  5: 5 if tier == "low" and shape in ("left_deep", "right_deep") else 6})
+                                  5: ({"left_deep": 5, "right_deep": 4}.get(shape, 6)
+                                      if tier == "low" else 6)})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
         banned = {e["expression_fingerprint"] for e in self.evidence["excluded"]}
         self.assertTrue(banned.isdisjoint(r["expression_fingerprint"] for r in rows
@@ -81,6 +82,8 @@ class BalancedBenchmarkTest(unittest.TestCase):
             outer_where = sql.split("\nWHERE ")[-1].split("\nGROUP BY")[0].rstrip(";\n")
             self.assertEqual(outer_where, row["selectivity_predicate"])
             cap = (10, 20, 40)[b.TIERS.index(row["semantic_tier"])]
+            if row.get("graph_dataset") == "epinions":
+                cap = {"low": 539, "medium": 824}[row["semantic_tier"]]
             for extra in inputs:
                 alias = extra["relation"]
                 self.assertNotEqual(alias, "R1")
