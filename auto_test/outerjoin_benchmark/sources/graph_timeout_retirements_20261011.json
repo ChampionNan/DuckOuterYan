@@ -1,0 +1,34 @@
+{
+  "revision": "graph-timeout-retirements-20261011",
+  "reason": "User-requested exact-instance retirement after CPU8 observed OuterYan timeouts. This is outcome-conditioned workload curation, not evidence of an optimizer improvement. Other tiers are unchanged.",
+  "statistics_policy": "Exclude a query if either engine times out at any stage. No timeout-limit substitution; preserve raw outcomes for diagnostics.",
+  "timeout_seconds_per_engine_per_statement": 600,
+  "evidence_csv": "experiment_onoff_graph_epinions_cpu8_20261010_202204_t32.csv",
+  "evidence_csv_sha256": "69b6e67acf54b3e2195bd53068c273df0aa634dc7ffcfcdea2adc15874f49314",
+  "evidence_scope": "CPU8 reproduction, separate from CPU9 performance statistics. OuterYan timed out before formal timing; no OuterYan median was measured.",
+  "sql_archive": "graph_dataset_retest/epinions_extension",
+  "retired_queries": [
+    {
+      "query_id": "graph__graph__epinions__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_low",
+      "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "7e08923ccb8d2160f26070261aa6ee332395b3245d31ff0bad2c11c36c587759",
+      "sql_fingerprint": "9db6e5b9c3664811e8ca8085749cdd6b56d544a6112cd4d1e1e3d298a4b67e6b",
+      "duckdb_median_seconds": 510.765160100,
+      "duckdb_status": "measured",
+      "outeryan_status": "timeout",
+      "outeryan_timeout_stage": "profile"
+    },
+    {
+      "query_id": "graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low",
+      "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low.sql",
+      "family": "graph",
+      "content_sha256": "07cc4a4b21ae775872497d48dc5f09d7f0874c5454c9261e0a96a4ca03cb7081",
+      "sql_fingerprint": "591296ddd5410d1d21d29f882cb3e8ced29fd4875474c2ea5b0a3eab806b13b6",
+      "duckdb_median_seconds": 527.059898653,
+      "duckdb_status": "measured",
+      "outeryan_status": "timeout",
+      "outeryan_timeout_stage": "kernel"
+    }
+  ]
+}

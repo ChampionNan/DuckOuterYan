@@ -250,28 +250,16 @@ def current_observations(sources: list[str], manifest_path: Path, replace_tpcds:
     return manifest, matched, rejected, pending
 
 
-def apply_timeout_substitution(frame: pd.DataFrame, seconds: int = 600) -> pd.DataFrame:
-    """Derived reporting view; source frames/statuses and measured times stay intact."""
+def apply_timeout_substitution(frame: pd.DataFrame, seconds: int = 0) -> pd.DataFrame:
+    """Compatibility entry point: preserve raw times; timeout imputation is retired."""
+    if seconds != 0:
+        raise ValueError("Timeout substitution is retired: exclude a query if either engine times out")
     result = frame.copy()
     result["recorded_tm_off"] = frame.tm_off
     result["recorded_tm_on"] = frame.tm_on
-    result["runtime_treatment"] = "measured"
-    if seconds == 0:
-        return result
-    if seconds != 600:
-        raise ValueError("Only the explicit 600-second reporting convention is supported")
-    def column(name):
-        return frame.get(name, pd.Series("", index=frame.index))
-    on = pd.to_numeric(frame.tm_on, errors="coerce")
-    correct = (column("correct").astype(str).str.upper().eq("TRUE")
-               | (column("correct").eq("NOT-CHECKED") & column("correctness_check").eq("disabled")))
-    eligible = (column("duckdb_status").eq("timeout") & column("outeryan_status").eq("measured")
-                & column("selected_plan").eq("OUTERYAN") & correct
-                & pd.to_numeric(column("duckdb_timeout_seconds"), errors="coerce").eq(600)
-                & on.gt(0) & on.lt(float("inf")))
-    result.loc[eligible, "tm_off"] = 600.0
-    result.loc[eligible, "tm_speedup"] = 600.0 / on.loc[eligible]
-    result.loc[eligible, "runtime_treatment"] = "duckdb_timeout_600s"
+    result["runtime_treatment"] = "not-measured"
+    result.loc[plot.prepare_queries(frame, "tm").valid_timing.to_numpy(), "runtime_treatment"] = "measured"
+    result.loc[plot.timeout_mask(frame), "runtime_treatment"] = "excluded_timeout"
     return result
 
 
@@ -280,9 +268,7 @@ def reporting_cohort(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     detail = plot.prepare_queries(frame, "tm")
     reasons = detail.exclusion_reason.copy()
     valid = detail.valid_timing
-    substituted = plot.timeout_substitution_mask(frame).to_numpy()
-    valid = valid | substituted
-    measured_status = frame.timing_status.astype(str).str.lower().eq("measured").to_numpy() | substituted
+    measured_status = frame.timing_status.astype(str).str.lower().eq("measured").to_numpy()
     reasons.loc[valid & ~measured_status] = "timing_status_not_measured"
     selected = detail.selected_plan.eq("OUTERYAN")
     reasons.loc[valid & measured_status & ~selected] = "not_outeryan_selected"
@@ -334,20 +320,21 @@ def replacement_audit(merged: pd.DataFrame, rejected: pd.DataFrame) -> pd.DataFr
 
 
 def export_runtime_data(out, manifest, merged, reporting_view, labels):
-    """Full active coverage; keep measured times separate from report substitutions."""
+    """Full active coverage; only complete eligible pairs get a reported speed-up."""
     raw = merged.set_index("query")
     view = reporting_view.set_index("query")
     ids = labels.set_index("query").short_query.to_dict()
+    cohort, _ = reporting_cohort(reporting_view)
+    eligible_queries = set(cohort["query"])
+    timed_out_queries = set(merged.loc[plot.timeout_mask(merged), "query"])
     details = []
     for _, item in manifest.iterrows():
         query = item.query_id
         row = raw.loc[query] if query in raw.index else pd.Series(dtype=object)
         report = view.loc[query] if query in view.index else pd.Series(dtype=object)
         off, on = row.get("tm_off", float("nan")), row.get("tm_on", float("nan"))
-        pair = (row.get("timing_status") == "measured" and pd.notna(off) and pd.notna(on)
-                and off > 0 and on > 0 and row.get("selected_plan") == "OUTERYAN")
+        pair = query in eligible_queries
         treatment = report.get("runtime_treatment", "unavailable")
-        substituted = treatment == "duckdb_timeout_600s"
         details.append(dict(
             family=plot.normalize_family(item.family), graph_dataset=item.get("graph_dataset", ""),
             query=query, reference_query_label=ids.get(query, ""),
@@ -359,8 +346,9 @@ def export_runtime_data(out, manifest, merged, reporting_view, labels):
             duckdb_status=row.get("duckdb_status", "pending"), outeryan_status=row.get("outeryan_status", "pending"),
             duckdb_s=off, outeryan_s=on, measured_speedup=off / on if pair else None,
             complete_selected_pair=pair, runtime_treatment=treatment,
-            reported_duckdb_s=600 if substituted else off,
-            reported_speedup=600 / on if substituted else off / on if pair else None,
+            reported_duckdb_s=off if pair else None,
+            reported_speedup=off / on if pair else None,
+            excluded_timeout=query in timed_out_queries,
             duckdb_timeout_stage=row.get("duckdb_timeout_stage", ""),
             outeryan_timeout_stage=row.get("outeryan_timeout_stage", ""),
             source_run=row.get("source_run", ""), sql_content_sha256=item.content_sha256,
@@ -388,8 +376,8 @@ def export_runtime_data(out, manifest, merged, reporting_view, labels):
         f"Active queries: {len(data)}; complete measured selected pairs: {int(data.complete_selected_pair.sum())}; "
         f"timeout substitutions: {int(data.runtime_treatment.eq('duckdb_timeout_600s').sum())}; "
         f"pending: {int(data.timing_status.eq('pending').sum())}.\n"
-        "Runtime bins use actual measurements only. Speed-up reporting additionally uses the explicitly "
-        "requested 600-second DuckDB-only timeout convention; see reported_speedup and runtime_treatment.\n")
+        "Performance statistics use complete non-timeout selected pairs only, with no timeout substitution. "
+        "The all_measured_engine_sides bins are coverage diagnostics, not the performance cohort.\n")
 
 
 def benchmark_composition(frame: pd.DataFrame, population: str) -> dict:
@@ -511,6 +499,8 @@ def replace_case_analysis(fragment: str, case_analysis: str | None) -> str:
 
 
 def runtime_table_tex(rows: list[dict], minimum_speedup: float = 0.0) -> str:
+    if any(row.get("timeout_substituted", 0) for row in rows):
+        raise ValueError("Performance tables require complete non-timeout measured pairs")
     lines = [r"\begin{table}[t]", r"\centering\small\setlength{\tabcolsep}{6pt}",
              r"\begin{tabular}{lrrrrr}", r"\toprule",
              r"Family & $n$ & Geomean & Median & Max & Total \\", r"\midrule"]
@@ -521,17 +511,10 @@ def runtime_table_tex(rows: list[dict], minimum_speedup: float = 0.0) -> str:
                  ("geomean", "median", "max", "total_ratio")]
         lines.append(row["family"] + " & " + " & ".join(cells) + r" \\")
     selected = next(row for row in rows if row["family"] == "All" and row["subset"] == "outeryan_selected")
-    substitutions = selected.get("timeout_substituted", 0)
     note = (
-        "The table, overall analysis and runtime figure use " + plot.number(selected["measured"], 0)
-        + " complete measured pairs and " + plot.number(substitutions, 0)
-        + r" DuckDB-only timeout substitutions of \fix{600}\,s. Total uses these reporting-time sums. "
-        + "Substitutions are not measured DuckDB medians. A warmup/profile timeout does not establish "
-        + "a lower bound on the post-warmup median. Other incomplete pairs and fallback defaults are excluded."
-    ) if substitutions else (
         "The table, overall analysis and runtime figure use the same " +
         plot.number(selected["measured"], 0) + " valid measured OuterYan-selected pairs. "
-        r"Pairs with both runtimes below $1$\,s are retained. Timeouts, failed checks, "
+        r"Pairs with both runtimes below $1$\,s are retained. Any timeout on either engine, failed checks, "
         r"unexecuted fallback defaults and exact $1\times$ ratios are excluded. "
         r"No default ratios are imputed. Total is the ratio of measured runtime sums.")
     lines += [r"\bottomrule", r"\end{tabular}",
@@ -543,10 +526,12 @@ def runtime_table_tex(rows: list[dict], minimum_speedup: float = 0.0) -> str:
 
 
 def figure_includes_tex(measured_count: int, minimum_speedup: float, substitutions: int = 0) -> str:
+    if substitutions:
+        raise ValueError("Figures exclude every query with a timeout on either engine")
     overall = (
         "Runtime and speed-up comparison over " + plot.number(measured_count, 0)
         + " valid measured OuterYan-selected query instances, matching the performance table and text. "
-        + r"Pairs with both runtimes below $1$\,s are retained; unexecuted policy defaults "
+        + r"Pairs with both runtimes below $1$\,s are retained. Any timeout on either engine is excluded; unexecuted policy defaults "
         r"and exact $1\times$ ratios are not plotted."
     )
     phase = (
@@ -554,11 +539,6 @@ def figure_includes_tex(measured_count: int, minimum_speedup: float, substitutio
         "reporting subset. Left: normalized profiled CPU work; right: unprofiled running times. "
         "CPU work accumulates across threads and is not wall-clock time."
     )
-    if substitutions:
-        overall = ("Runtime and speed-up comparison for " + plot.number(measured_count, 0)
-                   + " complete measured pairs and " + plot.number(substitutions, 0)
-                   + r" DuckDB-only timeout substitutions at \fix{600}\,s (triangles). "
-                   + "Substituted values are reporting conventions, not measured medians.")
     pieces = []
     for name, caption, label in (
         ("speedup_all_queries", overall, "fig:speedup-all-queries"),
@@ -712,7 +692,8 @@ def fill_fragment(paper: dict, intro_n: int, pg: list[dict], corpus: dict | None
                   policy_rows: list[dict] | None = None) -> str:
     groups = {row["family"]: row for row in paper["runtime"]["outeryan_selected"]}
     total = groups["All"]
-    capped = paper.get("refresh_audit", {}).get("timeout_substituted", 0)
+    if paper.get("refresh_audit", {}).get("timeout_substituted", 0):
+        raise ValueError("Manuscript statistics must exclude all timeout substitutions")
     values = {
         "intro_n": plot.number(intro_n, 0),
         "selected_n": plot.number(total["counts"]["valid"], 0),
@@ -721,15 +702,12 @@ def fill_fragment(paper: dict, intro_n: int, pg: list[dict], corpus: dict | None
         "overall_gm": plot.factor(total["speedup"]["geomean"]),
         "overall_max": plot.factor(total["speedup"]["max"]),
         "total_ratio": plot.factor(total["totals"]["speedup"]),
-        "runtime_cohort": "reported" if capped else "valid measured",
+        "runtime_cohort": "valid measured",
         "overall_exclusions": (
-            "The reporting cohort includes complete measured OuterYan-selected pairs and explicit "
-            r"DuckDB-only timeout substitutions of \fix{600}\,s when OuterYan completes. "
-            "Other incomplete pairs, unexecuted defaults and exact unit ratios are excluded. "
-            "Substitutions are not measured DuckDB medians."
-        ) if capped else (
             "We report performance statistics only for valid measured queries for which an OuterYan "
-            r"plan is selected, excluding timed-out queries, unexecuted defaults and exact $1\times$ ratios."
+            "plan is selected. A query is excluded if either DuckDB or OuterYan times out, "
+            "including during warmup or profiling; no timeout limit is substituted for a measured runtime. "
+            r"Unexecuted defaults and exact $1\times$ ratios are also excluded."
         ),
     }
     values.update(runtime_wording(paper["method"]["timing_protocols"]))
@@ -742,10 +720,6 @@ def fill_fragment(paper: dict, intro_n: int, pg: list[dict], corpus: dict | None
         + plot.number(total["counts"]["valid"], 0)
         + " queries with valid paired runtime measurements and an OuterYan plan selected."
     )
-    if capped:
-        values["benchmark_sentence"] = values["benchmark_sentence"].replace(
-            "queries with valid paired runtime measurements and an OuterYan plan selected.",
-            "OuterYan-selected queries with complete measured pairs or the specified DuckDB timeout substitution.")
     values["runtime_table"] = runtime_table_tex(
         policy_rows, paper.get("method", {}).get("reporting_minimum_speedup", 0.0)) if policy_rows else ""
     distribution = paper.get("query_distribution", [])
@@ -778,18 +752,6 @@ def fill_fragment(paper: dict, intro_n: int, pg: list[dict], corpus: dict | None
             r"exact $1\times$ ratios. No missing speed-up is replaced with $1\times$."
             + correctness_scope_tex(audit)
         )
-        if capped:
-            values["cohort_note"] = (
-                r"\paragraph{Reporting scope.} The full benchmark count differs from the performance sample. "
-                "The headline, table and runtime figure use " + plot.number(audit["valid_measured_outeryan"], 0)
-                + " complete measured pairs and " + plot.number(capped, 0)
-                + r" DuckDB-only timeout substitutions of \fix{600}\,s. "
-                + "Original statuses and timeout stages remain available in the statistics. "
-                + "These substitutions are a reporting convention, not measured DuckDB runtimes; "
-                + "timeouts in warmup do not prove a lower bound on a post-warmup median. "
-                + "Sub-second pairs and measured slowdowns are retained. Native/fallback rows, "
-                + "other incomplete pairs, failed checks and exact unit ratios are excluded."
-                + correctness_scope_tex(audit))
     for family, code in zip(FAMILY_ORDER, ("graph", "tpch", "tpcds", "job", "all")):
         values[code + "_gm"] = plot.factor(groups[family]["speedup"]["geomean"])
         values[code + "_max"] = plot.factor(groups[family]["speedup"]["max"])
@@ -859,8 +821,8 @@ def main(argv=None) -> int:
                         help="Deprecated; must be zero. Retain measured slowdowns in the selected cohort")
     parser.add_argument("--case-analysis", type=Path,
                         help="Reviewed LaTeX subsection to replace the Case Query Analysis placeholder")
-    parser.add_argument("--duckdb-timeout-substitute", type=int, choices=(0, 600), default=600,
-                        help="Report DuckDB-only timeouts as 600 s; 0 keeps measured pairs only")
+    parser.add_argument("--duckdb-timeout-substitute", type=int, choices=(0,), default=0,
+                        help="Deprecated compatibility option; only 0 is allowed. All timeouts are excluded")
     args = parser.parse_args(argv)
     if args.samples_per_family < 1:
         parser.error("--samples-per-family must be positive")
@@ -885,7 +847,7 @@ def main(argv=None) -> int:
     if manifest_composition.workload_component.isna().any():
         raise ValueError("Unknown manifest provenance_class; cannot count the complete benchmark")
     corpus = benchmark_composition(manifest_composition, "Full active SQL manifest, independent of execution outcome")
-    performance_corpus = benchmark_composition(frame, "Reported OuterYan-selected non-unit performance cohort; explicit timeout substitutions identified separately")
+    performance_corpus = benchmark_composition(frame, "Complete non-timeout OuterYan-selected non-unit measured pairs")
     out = output_directory(merged, args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     report = plot.build_statistics(frame, sources=args.csv)
@@ -911,12 +873,9 @@ def main(argv=None) -> int:
     measured = detail.valid_timing.to_numpy()
     substituted = plot.timeout_substitution_mask(frame)
     report["method"]["timeout"] = (
-        "Explicit reporting convention: DuckDB-only timeouts use 600 s when OuterYan completed. "
-        "These are substitutions, not measured medians or proven timed-stage lower bounds. "
-        "Original timeout stages are preserved; other timeouts remain excluded."
+        "Exclude the entire query if either DuckDB or OuterYan times out at any stage. "
+        "No timeout-limit substitution. Retain original statuses and partial times for diagnostics only."
     )
-    report["method"]["excluded"] = "Native/fallback, failed, exact-unit and unresolved timeout rows excluded; explicit DuckDB-only substitutions retained."
-    report["method"]["cohort"] = "Measured selected pairs plus explicitly labeled DuckDB-only 600-second timeout substitutions."
     # A complete phase profile alone is not enough: require the same valid pair.
     report["phase_profiles"] = plot.build_phase_statistics(frame.loc[measured], "tm")
     paper = plot.build_paper_report(frame, report, args.samples_per_family)
@@ -973,7 +932,7 @@ def main(argv=None) -> int:
         "both_subsecond_included": int((measured & frame.tm_off.lt(1) & frame.tm_on.lt(1)).sum()),
         "historical_screening": SCREENING,
         "active_performance_screens": active_performance_screens(args.manifest),
-        "intro_definition": "Same measured plus explicitly timeout-substituted selected cohort as table, figures and prose; not the entire manifest",
+        "intro_definition": "Same complete non-timeout measured selected cohort as table, figures and prose; not the entire manifest",
         "main_runtime_protocol": frame[["timing_threads", "timing_protocol", "timing_samples", "timing_estimator", "warmup_runs_per_side"]].drop_duplicates().to_dict("records"),
         "optimizer_measurement": "optimizer_*_total_s = all_optimizers; not just instrumented OuterYan workflow phases",
     }
@@ -1053,11 +1012,11 @@ current_results.csv is the selected non-unit reporting view; recorded_tm_off/on 
 merged_current_results.csv retains raw timing values and timeout statuses without substitution.
 Graph dataset counts in the active manifest: {json.dumps(audit['graph_dataset_counts'], sort_keys=True)}.
 Graph dataset/status counts: {json.dumps(audit['graph_dataset_statuses'], sort_keys=True)}.
-Intro, table, prose and runtime figure: {intro_n} selected non-unit rows: {audit['valid_measured_outeryan']} complete measured pairs and {audit['timeout_substituted']} explicit DuckDB-only 600-second substitutions.
+Intro, table, prose and runtime figure: {intro_n} valid selected non-unit rows, all complete measured non-timeout pairs. No timeout substitution.
 The source diagnostics retain {audit['timeouts']} timeout rows, {int(selected_untimed.sum())} selected-but-untimed
-rows and {len(pending)} pending manifest rows. Only the explicitly reported DuckDB-only timeout rows receive the user-requested substitution.
+rows and {len(pending)} pending manifest rows. Any timeout on either engine, at any stage, excludes that query from performance statistics and valid selected counts.
 Both runtimes <1s: {audit['both_subsecond_included']} retained.
-The table has one panel. Its sample and geometric mean equal the headline, including labeled substitutions.
+The table has one panel. Its sample and geometric mean equal the headline; all timeout rows are excluded.
 Excluded exact 1x means full-precision tm_off/tm_on == 1, not a rounded or approximately-one measurement.
 See reporting_excluded.csv for each excluded row and its reason. Native fallback counts are diagnostic only.
 Correctness: {audit['measured_verified']} verified; {audit['measured_correctness_disabled']} explicitly unchecked
@@ -1087,7 +1046,7 @@ These rows are NOT established native-plan fallbacks and are NOT measured speed-
 See selected_but_untimed.csv. Their trace flags are preserved rather than relabeled.
 
 Figures and representative selection
-All reporting-cohort rows are plotted, including sub-second pairs, slowdowns and labeled 600-second substitutions.
+All reporting-cohort rows are plotted, including sub-second pairs and slowdowns. No timeout query is plotted.
 Phase figure uses up to {args.phase_samples_per_family} queries per family with speed-up >= 1,
 selected by farthest-point sampling of normalized CPU shares, starting nearest the family centroid.
 Optimization table uses up to {args.samples_per_family} queries per family:

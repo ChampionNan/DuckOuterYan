@@ -177,6 +177,7 @@ def prepare(corpus, output, binary, database, policy_path=POLICY):
     archived_sources = {}
     import graph_dataset_promotion
     import graph_dataset_extension
+    retired = {graph_dataset_promotion.RETIRED_QUERY} | graph_dataset_extension.retired_queries()
     for stage in (graph_dataset_promotion, graph_dataset_extension):
         if (corpus / stage.MARKER).exists():
             replacements = {r["graph_dataset_source_query"]: r for r in stage.candidates()}
@@ -189,7 +190,7 @@ def prepare(corpus, output, binary, database, policy_path=POLICY):
         if row is None and archived:
             row, archive, replacement = archived
             source_path = archive / pin["path"]
-            if replacement["query_id"] != graph_dataset_promotion.RETIRED_QUERY:
+            if replacement["query_id"] not in retired:
                 if (replacement["query_id"] not in rows or
                         digest(corpus / replacement["path"]) != replacement["content_sha256"]):
                     raise ValueError("Promoted Graph query has changed")

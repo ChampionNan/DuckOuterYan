@@ -612,7 +612,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "supplementary_counts": dict(Counter(r["family"] for r in records if is_historical_case(r))),
             "family_tiers": {f:dict(Counter(r["semantic_tier"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
             "family_shapes": {f:dict(Counter(r["tree_shape"] for r in records if r["family"]==f and not is_historical_case(r))) for f in FAMILIES},
-            "graph_relation_counts": dict(Counter(r["relation_count"] for r in balanced_records if r["family"] == "graph")),
+            "graph_relation_counts": dict(Counter(int(r["relation_count"]) for r in balanced_records if r["family"] == "graph")),
             "graph_relation_weights": GRAPH_RELATION_WEIGHTS,
             "graph_filter_revision": GRAPH_FILTER_REVISION,
             "graph_input_filter_policy": "R1 retains the three primary bands; every other graph relation has a tier-paired src cap before the join. Audit each input independently; do not multiply marginal fractions as a selectivity estimate.",

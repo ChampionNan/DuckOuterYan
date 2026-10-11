@@ -132,8 +132,26 @@ def correctness_eligible(frame: pd.DataFrame) -> pd.Series:
     status = frame.get("correct", pd.Series("TRUE", index=frame.index)).astype(str).str.upper()
     mode = frame.get("correctness_check", pd.Series("", index=frame.index)).astype(str).str.lower()
     measured = frame.get("timing_status", pd.Series("", index=frame.index)).astype(str).str.lower().eq("measured")
-    return status.eq("TRUE") | (status.eq("NOT-CHECKED") & mode.eq("disabled")
-                               & (measured | timeout_substitution_mask(frame)))
+    return status.eq("TRUE") | (status.eq("NOT-CHECKED") & mode.eq("disabled") & measured)
+
+
+def timeout_mask(frame: pd.DataFrame) -> pd.Series:
+    """Either engine's recorded timeout excludes the pair, even with finite times.
+
+    Status fields are authoritative even when the human-readable note is absent.
+    Recognize old capped exports too; never infer timeout from a runtime value.
+    """
+    result = pd.Series(False, index=frame.index)
+    for name in ("note", "correct", "timing_status", "duckdb_status", "outeryan_status",
+                 "duckdb_correctness_status", "outeryan_correctness_status",
+                 "profile_status", "optimizer_profile_status", "runtime_treatment"):
+        if name in frame:
+            result |= frame[name].fillna("").astype(str).str.contains("timeout", case=False, regex=False)
+    for name in ("duckdb_timeout_stage", "outeryan_timeout_stage"):
+        if name in frame:
+            stage = frame[name].fillna("").astype(str).str.strip().str.lower()
+            result |= ~stage.isin(("", "-", "na", "n/a", "nan", "none", "null", "not-run"))
+    return result
 
 
 def timeout_substitution_mask(frame: pd.DataFrame) -> pd.Series:
@@ -188,20 +206,17 @@ def prepare_queries(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
     with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
         speedup = off / on
     pair = np.isfinite(off) & off.gt(0) & np.isfinite(on) & on.gt(0)
-    timeout = notes.str.contains("TIMEOUT", case=False, regex=False)
+    timeout = timeout_mask(frame).reset_index(drop=True)
     fallback = timing_status.eq("fallback-skip") | notes.str.upper().eq("FALLBACK-SKIP")
     measured = correct & ~timeout & ~fallback & pair & np.isfinite(speedup) & speedup.gt(0)
     too_fast = measured & below_runtime_threshold(frame, metric).reset_index(drop=True)
     measured &= ~too_fast
-    substituted = (timeout_substitution_mask(frame).reset_index(drop=True)
-                   & correct & pair & ~fallback) if metric == "tm" else measured & False
-    valid = measured | substituted
+    valid = measured
     detail["off_s"], detail["on_s"] = off, on
     detail["speedup"] = speedup.where(valid)
     detail["valid_timing"] = measured
     detail["valid_speedup"] = valid
-    detail["speedup_source"] = np.where(substituted, "duckdb_timeout_600s",
-                                      np.where(fallback, "not-measured", np.where(measured, "measured", "")))
+    detail["speedup_source"] = np.where(fallback, "not-measured", np.where(measured, "measured", ""))
     # Exclusive reasons make coverage totals reconcile without double-counting.
     detail["exclusion_reason"] = np.select(
         [valid, timeout, too_fast, fallback, ~correct, ~pair],
@@ -374,8 +389,7 @@ def build_phase_statistics(frame: pd.DataFrame, metric: str) -> dict:
     selected = detail["selected_plan"].fillna("").astype(str).str.upper().eq("OUTERYAN")
     complete = detail["profile_status"].fillna("").astype(str).str.upper().eq("OK")
     correct = correctness_eligible(detail)
-    notes = detail.get("note", pd.Series("", index=detail.index)).fillna("").astype(str)
-    not_timeout = ~notes.str.contains("TIMEOUT", case=False, regex=False)
+    not_timeout = ~timeout_mask(frame).reset_index(drop=True)
     finite = np.isfinite(detail["profile_wall_time_s"]) & detail["profile_wall_time_s"].gt(0)
     finite &= np.isfinite(detail["profile_cpu_time_s"]) & detail["profile_cpu_time_s"].gt(0)
     for _, column in PHASE_COMPONENTS:
@@ -543,7 +557,7 @@ def build_optimizer_statistics(frame: pd.DataFrame, metric: str = "tm") -> dict:
     for column in numeric:
         detail[column] = pd.to_numeric(detail[column], errors="coerce")
     correct = correctness_eligible(detail)
-    not_timeout = ~detail["note"].fillna("").astype(str).str.contains("TIMEOUT", case=False, regex=False)
+    not_timeout = ~timeout_mask(frame).reset_index(drop=True)
     complete = detail["optimizer_profile_status"].fillna("").astype(str).str.upper().eq("OK")
     finite = (
         np.isfinite(detail["optimizer_duckdb_total_s"])
@@ -728,8 +742,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
         "sources": source_info, "input_rows": sum(source["rows"] for source in source_info) if source_info else None,
         "unique_queries": len(detail),
         "valid_queries": int(detail["valid_speedup"].sum()),
-        "headline": {"population": ("reported_outeryan_selected" if timeout_substitution_mask(frame).any()
-                                    else "measured_outeryan_selected"), **summarize(
+        "headline": {"population": "measured_outeryan_selected", **summarize(
             detail.loc[detail["valid_speedup"] & detail["selected_plan"].eq("OUTERYAN")]
         )},
         "method": {
@@ -753,7 +766,7 @@ def build_statistics(frame: pd.DataFrame, metric: str = "tm", sources: list[str]
             "stddev_variance": "Sample statistics (ddof=1); unavailable for n < 2",
             "percentiles": "Linear interpolation; p50 is median",
             "excluded": "No timeout substitution, runtime imputation, speed-up trimming, or use of the representative display sample",
-            "timeout": "A query is a timeout only when the harness recorded TIMEOUT; use each CSV's timeout_seconds (legacy CSVs default to 600 s). Timeout runtimes are censored and excluded rather than replaced with the limit",
+            "timeout": "Any recorded timeout on either engine, at any stage, excludes the query from valid pairs, performance statistics and plots. Status, stage and note fields are checked; legacy capped values are also excluded. No timeout-limit substitution is permitted. Limits are retained for diagnostics only",
             "uncertainty": "Descriptive query-level statistics, not confidence intervals over repeated runs",
         },
         "groups": groups,
@@ -1896,6 +1909,7 @@ def positive_runtime_rows(frame: pd.DataFrame, metric: str) -> pd.DataFrame:
     return sub.loc[
         np.isfinite(sub[off_column]) & sub[off_column].gt(0)
         & np.isfinite(sub[on_column]) & sub[on_column].gt(0)
+        & ~timeout_mask(sub)
         & ~below_runtime_threshold(sub, metric)
     ].copy()
 
@@ -1957,10 +1971,7 @@ def runtime_series(frame: pd.DataFrame) -> list[tuple[str, str, str]]:
 def complete_runtime_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep correct, non-timeout queries with complete timings for their schema."""
     correct = correctness_eligible(frame)
-    timeout = frame.get("note", pd.Series("", index=frame.index)).fillna("").astype(str).str.contains(
-        "TIMEOUT", case=False, regex=False
-    )
-    sub = frame.loc[correct & (~timeout | timeout_substitution_mask(frame))].copy()
+    sub = frame.loc[correct & ~timeout_mask(frame)].copy()
     complete = pd.Series(True, index=sub.index)
     for _, column, _ in runtime_series(frame):
         values = pd.to_numeric(
@@ -2119,20 +2130,14 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
 
     for position, family, values in zip(positions, families, data):
         ordered = np.sort(values)
-        ordered_rows = frame.loc[frame["family"].eq(family)].sort_values("_speedup", kind="stable")
-        censored = timeout_substitution_mask(ordered_rows).to_numpy()
         # Deterministic low-discrepancy jitter exposes density without suggesting
         # another measured variable on the y axis.
         jitter = ((np.arange(len(ordered)) * 0.61803398875) % 1.0 - 0.5) * 0.34
         color = FAMILY_COLORS[family]
         ax.scatter(
-            ordered[~censored], position + jitter[~censored], s=QUERY_POINT_SIZE, color=color, edgecolor="white",
+            ordered, position + jitter, s=QUERY_POINT_SIZE, color=color, edgecolor="white",
             linewidth=0.25, alpha=QUERY_POINT_ALPHA, zorder=3,
         )
-        if censored.any():
-            ax.scatter(ordered[censored], position + jitter[censored], marker="^",
-                       s=QUERY_POINT_SIZE * 1.3, facecolor="none", edgecolor=color,
-                       linewidth=1.0, alpha=QUERY_POINT_ALPHA, zorder=5)
         lower, median, upper = np.quantile(ordered, [0.25, 0.5, 0.75])
         ax.plot([lower, upper], [position, position], color=color, linewidth=3.0,
                 solid_capstyle="round", zorder=4)
@@ -2223,18 +2228,12 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     for family in families:
         rows = sub.loc[sub["family"].eq(family)].sort_values("query", kind="stable")
         faster = rows[on_column].le(rows[off_column])
-        censored = timeout_substitution_mask(rows)
         family_axis.scatter(
-            rows.loc[faster & ~censored, off_column], rows.loc[faster & ~censored, on_column], marker="o",
+            rows.loc[faster, off_column], rows.loc[faster, on_column], marker="o",
             s=QUERY_POINT_SIZE,
             color=FAMILY_COLORS[family], edgecolor="white", linewidth=0.25,
             alpha=QUERY_POINT_ALPHA, zorder=3,
         )
-        if censored.any():
-            family_axis.scatter(rows.loc[censored, off_column], rows.loc[censored, on_column],
-                                marker="^", s=QUERY_POINT_SIZE * 1.3, facecolor="none",
-                                edgecolor=FAMILY_COLORS[family], linewidth=1.0,
-                                alpha=QUERY_POINT_ALPHA, zorder=5)
         family_axis.scatter(
             rows.loc[~faster, off_column], rows.loc[~faster, on_column], marker="X",
             s=QUERY_POINT_SIZE, color=FAMILY_COLORS[family], edgecolor="white",
@@ -2263,17 +2262,12 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
                markeredgewidth=0.20, markersize=5.6),
     ])
     legend_labels.extend(["OuterYan faster/equal", "OuterYan slower"])
-    if timeout_substitution_mask(sub).any():
-        legend_handles.append(Line2D([], [], color="0.28", marker="^", markerfacecolor="none",
-                                     linestyle="none", markersize=6))
-        legend_labels.append("DuckDB timeout: 600 s")
     figure.legend(
         handles=legend_handles, labels=legend_labels,
         handler_map={tuple: HandlerTuple(ndivide=None, pad=0.18)},
         ncol=len(legend_handles), loc="upper center",
         bbox_to_anchor=(0.5, 0.965), frameon=False, borderaxespad=0.0,
         handlelength=1.7, handletextpad=0.30, columnspacing=0.72,
-        fontsize=8 if timeout_substitution_mask(sub).any() else None,
     )
     speedup_distribution(distribution_axis, distribution, distribution_families)
 
@@ -2296,7 +2290,7 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
     correct = correctness_eligible(frame)
     selected = frame.loc[plans.eq("OUTERYAN") & correct & ~below_runtime_threshold(frame)
-                         & ~timeout_substitution_mask(frame)].copy()
+                         & ~timeout_mask(frame)].copy()
     if selected.empty:
         return selected, 0
     for column in list(dict.fromkeys(
@@ -3045,8 +3039,8 @@ def build_paper_report(frame: pd.DataFrame, report: dict, limit: int = 3) -> dic
     return {
         "schema_version": 3, "run": report["run"], "timing_threads": report["timing_threads"],
         "sources": report["sources"],
-        "runtime_population": "measured_with_timeout_substitutions" if timeout_substitution_mask(frame).any() else "measured",
-        "headline_population": "reported_outeryan_selected" if timeout_substitution_mask(frame).any() else "measured_outeryan_selected",
+        "runtime_population": "measured",
+        "headline_population": "measured_outeryan_selected",
         "corpus": composition(frame.loc[detail["valid_timing"].to_numpy()]),
         "input_corpus": composition(frame), "coverage": summarize(detail)["counts"],
         "timeouts": report["timeouts"],

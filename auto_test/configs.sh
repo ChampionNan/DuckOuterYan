@@ -86,6 +86,9 @@ unset _oy_thread_defaults
 # 5) Timeouts
 # ===========================================================================
 # Independent per-engine statement limits (seconds; default 10 minutes each).
+# Fixed benchmark protocol (20261011): 600 s for EACH execution on EACH engine,
+# not for all five timed runs together. Either-side timeouts are excluded from
+# performance statistics; raw statuses remain available for diagnostics.
 # OY_TIMEOUT_SECS remains a common override; engine-specific values take precedence.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
 export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-600}"

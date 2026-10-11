@@ -98,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/outeryan-mpl \
 
 | 目录 | 用途 |
 |---|---|
-| `outerjoin_benchmark/` | 722 条当前查询（Graph 174、TPC-H 176、TPC-DS 206、JOB 166）、manifest、固定筛选证据与历史档案；含 15 条 TPC-DS 三档扩展 |
+| `outerjoin_benchmark/` | 720 条当前查询（Graph 172、TPC-H 176、TPC-DS 206、JOB 166）、manifest、固定筛选证据与历史档案；含 15 条 TPC-DS 三档扩展 |
 | `outerjoin_query_old/` | 当前生成器仍使用的固定 legacy SQL 来源 |
 | `pg_oj_trace/` | PostgreSQL 枚举空间的历史分析报告与 witness SQL，独立于已删除的 replay 工作流 |
 | `results/` | 原始与重处理 CSV/TXT、profiles、统计、图和生成的论文片段 |
@@ -228,10 +228,17 @@ not speed-up. After the completed CPU9 retest, one grouped-count replacement
 (star4/converging, left-deep, low) was retired at user request after predicate
 review. The other 15 remain active, including 12 timeout outcomes and one fallback.
 Three more short queries (previous IDs G-G-RD-05, G-G-B-12 and G-G-B-09, both
-Bitcoin medians below 0.2 seconds) now use Epinions. Their policy is frozen in
+Bitcoin medians below 0.2 seconds) were moved to Epinions. Their policy is frozen in
 `sources/graph_dataset_extension_20261010.json`, with calibrated SQL in
 `graph_dataset_retest/epinions_extension/`. The Graph family now contains
-156 Bitcoin and 18 Epinions queries, 174 instances in total.
+156 Bitcoin and 16 active Epinions queries, 172 instances in total.
+On 20261011, the two low/bushy chain4 instances (`ifl/2bb39801`, `lfr/1170f7ed`)
+were retired after CPU8 OuterYan timeouts in profile/kernel, respectively.
+Exact SQL identities and evidence are pinned in
+`sources/graph_timeout_retirements_20261011.json`; historical SQL is retained
+in the frozen extension directory. These are outcome-conditioned removals,
+not an optimizer improvement. Normal generation and execution exclude them,
+without removing their Bitcoin medium/high variants or mixing CPU8 timings into CPU9 statistics.
 Other families are unchanged. No old Bitcoin timing is retained for a replaced query.
 
 The manifest's `graph_dataset` column routes each query: Bitcoin uses `GRAPH_DB`
@@ -278,12 +285,12 @@ active corpus automatically.
 
 ## Query corpus
 
-主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **722 条唯一候选 SQL**：
-Graph 174、TPC-H 176、TPC-DS 206、JOB 166。
+主查询集 `outerjoin_benchmark/benchmark/` 默认运行 **720 条唯一候选 SQL**：
+Graph 172、TPC-H 176、TPC-DS 206、JOB 166。
 基础设计原为每 family 180 条，每档每 shape 各 20；经性能筛选后不再严格配平。
-join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **123/51**，不再生成 6 relation 查询。
+join kind 仍为 mixed。Graph 的 4/5 relation 数量分别为 **121/51**，不再生成 6 relation 查询。
 基础单元为 14/6；筛选后 low/left-deep 为 12/5，low/right-deep 为 14/4，
-low/bushy 为 13/6，其余单元不变；156 条使用 Bitcoin，18 条使用 Epinions。
+low/bushy 为 11/6，其余单元不变；156 条使用 Bitcoin，16 条使用 Epinions。
 Graph 查询名带 `__inputcap1__`，不能将旧 SQL 的时间混入新结果。
 Bitcoin 的 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/20/40` 的输入谓词，
 放在 `(SELECT src,dst FROM Ri WHERE ...) Ri` 中，避免在根 WHERE 误删 NULL-padded 行。
@@ -294,8 +301,8 @@ Bitcoin 的 R1 保持三档 `src <= 2/83/306`；R2…Rn 分别增加 `src <= 10/
 每次实验保存对应的 `.manifest.csv` 快照。cpu9 的 selectivity audit 会检查每个参与输入，
 资格筛选要求主过滤和所有输入 caps 均已验证。更小的输入仍可能产生大中间结果，
 也可能使查询小于 1 秒；只有 cpu9 实测后才能确定有效数，不能保证 180 条全部合格。
-类型为 `join` 375、`graph` 164（含 industry controls）、`aggregate` 183。
-`--only graph` 选择 Graph family 全部 174 条，与 `--query-type graph` 不同。
+类型为 `join` 375、`graph` 162（含 industry controls）、`aggregate` 183。
+`--only graph` 选择 Graph family 全部 172 条，与 `--query-type graph` 不同。
 原版本已合并；**候选数不是最终有效实测数**，fallback 和 timeout 不能算作完整实测配对。
 
 20261009 按用户要求精确移出 Graph star5/converging、right-deep、low 的 global COUNT 查询
@@ -342,7 +349,7 @@ Q80-alt/Q80-left-deep/Q93-left-deep 三条旧非聚合补充也因 timeout 移�
 6 条候选移入归档，换成 SQLStorm 14368 的单事实表 4/5 表 connected-subgraph。
 其余 9 条 SQL 不变，扩展现为 9 bushy、3 left-deep、3 right-deep，均非聚合。
 新结构没有可复用的历史速度比；所有候选须重新测试，不以目标几何平均选择。
-现在共 722 条，TPC-DS 206 条，其中 45 条有有效配对实测；约 50 条有效配对是目标而非保证。
+现在共 720 条，TPC-DS 206 条，其中 45 条有有效配对实测；约 50 条有效配对是目标而非保证。
 只编译并复测这 15 条（复用数据库，关闭完整正确性比较）：
 
 ```bash
@@ -967,14 +974,19 @@ PDF、PNG、统计与 LaTeX 文件直接放在该目录下，不另建 `paper_re
 `paper_updates.tex`。优化时间采用两种配置的 `all_optimizers` 总时间，运行时间采用
 预热后无 profiling 的实测中位数（当前为五次），不将 optimizer 专属 phase 之和替代总时间。
 
-`refresh_paper_results.py --duckdb-timeout-substitute 600`（默认）按指定报告约定，
-仅对 DuckDB 超时且 OuterYan 成功实测的 selected 查询使用 600 秒计算比值。
-原始 CSV、timeout 状态和阶段保持不变；`current_results.csv` 的 `recorded_tm_off/on`
-保留原值，`runtime_treatment` 标识替代，`timeout_substitutions.csv` 单列这些记录。
-此值不是测得的 DuckDB 中位数，尤其 warmup 超时不能证明正式计时中位数的下界。
-图中替代点使用空心三角；phase/优化时间代表查询仍只选完整实测配对。
-传 `--duckdb-timeout-substitute 0` 可恢复只报告完整实测配对。所有新 SQL 在复测前均为 pending，
-不得沿用被替换查询的历史时间。
+论文统计统一只使用双方完整实测且没有超时的 OuterYan-selected 配对。
+20261011 固定协议：双方每条 statement（含五次计时中的每一次）各限时 **600 秒**，
+不是五次合计 600 秒；默认仍为五次预热后无 profiling 计时，全部完成后取中位数。
+使用 `--timeout 600` 可覆盖旧的 timeout 环境配置；不要额外设置其它单侧 CLI 限时。
+**只要 DuckDB 或 OuterYan 任意一侧在任何阶段超时（含 correctness、warmup、kernel、
+profile 或正式计时），整个 query 都不计入性能统计、有效 selected 数量或图中的数据点。**
+不再用 600 秒或其它 timeout 上限替代实测时间。
+`--duckdb-timeout-substitute` 已废弃，仅为兼容接受 `0`（默认）；`600` 会报错，
+防止旧命令重新启用替代值。表、正文、整体图、phase 与优化时间样本使用同一超时排除规则。
+原始 CSV 和部分完成的单侧计时不改；`timeout_queries.csv`、`timeout_summary.csv` 和
+`reporting_excluded.csv` 保留诊断，`timeout_substitutions.csv` 为空（仅留列名兼容旧工具）。
+已完成的亚秒级查询和实测减速案例保留，fallback/default 和精确的 $1\times$ 仍不计入论文性能集合。
+所有新 SQL 在复测前均为 pending，不得沿用被替换查询的历史时间。
 
 `--date` 也接受 `2026-09-26`。同一天存在多个线程数时，分别写入日期目录下的
 `t16/`、`t32/` 等子目录，绝不合并线程配置。省略日期则按输入日期分别输出。
@@ -1167,8 +1179,8 @@ OY_CORPUS=/path/to/custom_corpus \
   SKIP_BUILD=1 SKIP_DATA=1 bash auto_test/run_all.sh --only bench
 ```
 
-The comparison runs 722 unique candidates under `outerjoin_benchmark/benchmark`:
-174 Graph, 176 TPC-H, 206 TPC-DS and 166 JOB. Fifteen TPC-DS three-tier extension
+The comparison runs 720 unique candidates under `outerjoin_benchmark/benchmark`:
+172 Graph, 176 TPC-H, 206 TPC-DS and 166 JOB. Fifteen TPC-DS three-tier extension
 queries have SF50 measurements. Earlier exact measured speed-up <0.5
 and TPC-DS timeout exclusions remain. The 20261008 frozen screen additionally
 retires two Graph and nine JOB queries with observed speed-up <=0.7 in the

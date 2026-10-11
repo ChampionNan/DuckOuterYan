@@ -2,7 +2,7 @@
 
 Base revision: `balanced-screened-20261002`, with the primary-batch
 `tpcds-recovery-20261005` component pinned in `tpcds_refresh.json` and the manifest.
-The active `benchmark/` contains **722 queries**: **174 Graph**, **176 TPC-H**,
+The active `benchmark/` contains **720 queries**: **172 Graph**, **176 TPC-H**,
 **206 TPC-DS**, and **166 JOB**. The cumulative exact-SQL speed-up screen is
 pinned in `sources/speedup_screen_20261008.json` and `sources/retirements_20261009.json`.
 On 20261009, the Graph star5/converging right-deep low-selectivity global COUNT
@@ -24,13 +24,13 @@ still contain queries that timed out; this screen does not remove those queries.
 
 | Family | Low `(0,5%)` | Medium `[5,40%)` | High `[40,60%]` | Total |
 |---|---:|---:|---:|---:|
-| Graph | 54 | 60 | 60 | 174 |
+| Graph | 52 | 60 | 60 | 172 |
 | TPC-H | 58 | 59 | 59 | 176 |
 | TPC-DS | 73 | 67 | 66 | 206 |
 | JOB | 52 | 58 | 56 | 166 |
 
 Before exact-query screening, Graph/TPC-H/JOB had 60 expressions per shape,
-20 of each shape per selectivity band. Graph now has 57/58/59 expressions;
+20 of each shape per selectivity band. Graph now has 57/58/57 expressions;
 TPC-H has 59 left-deep, 60 right-deep and 57 bushy expressions, and JOB has
 59/53/54 respectively.
 The active set is no longer exactly balanced. Shapes describe input expressions,
@@ -40,11 +40,11 @@ approximately balanced, not claimed exactly equal. TPC-DS shape counts are
 reported in `benchmark/design_summary.json`; do not claim exact shape balance
 for its performance-conditioned recovery component.
 
-Graph now has **123 four-relation and 51 five-relation queries; no six-relation queries**.
+Graph now has **121 four-relation and 51 five-relation queries; no six-relation queries**.
 The base generator uses a 14/6 split per selectivity-by-shape cell; the active
-low/left-deep and low/right-deep cells have 12/5 and 14/4, and low/bushy has 13/6,
+low/left-deep and low/right-deep cells have 12/5 and 14/4, and low/bushy has 11/6,
 after exact-query retirement.
-Of these, 156 queries use Bitcoin and 18 dataset-qualified replacements use
+Of these, 156 queries use Bitcoin and 16 dataset-qualified replacements use
 Epinions. Reserve batches retain the Bitcoin base quota.
 
 The initial 20261010 replacement adopted a frozen 16-query cohort selected
@@ -55,8 +55,17 @@ low query was subsequently retired at user request after predicate review;
 its SQL remains in the historical retest corpus. The other 15 retain their
 observed outcomes: 2 complete pairs, 12 timeout instances and 1 fallback.
 Three additional short Bitcoin queries (previous IDs G-G-RD-05, G-G-B-12 and
-G-G-B-09, both runtimes below 0.2 seconds) now use Epinions under
+G-G-B-09, both runtimes below 0.2 seconds) were moved to Epinions under
 `sources/graph_dataset_extension_20261010.json`; their old timings are not reused.
+On 20261011, the two low/bushy chain4 instances (`ifl/2bb39801` and
+`lfr/1170f7ed`) were removed at user request after CPU8 observed OuterYan
+timeouts in the profile and kernel stages, respectively. Their Bitcoin
+medium/high variants are unchanged. This is outcome-conditioned curation,
+not an optimizer improvement, and these pre-timing failures are not measured
+OuterYan medians. The exact SQL identities and CPU8 evidence hash are pinned in
+`sources/graph_timeout_retirements_20261011.json`. Historical SQL remains in
+`graph_dataset_retest/epinions_extension/`; normal generation and `--all` do not
+reactivate it. CPU8 measurements are not merged into CPU9 performance statistics.
 This is a dataset/workload change,
 not an optimizer improvement. It does not certify result equivalence on Epinions.
 `graph_dataset_promotion.json` pins the cohort and the generator preserves it.
@@ -67,7 +76,7 @@ Graph names include `__inputcap1__` to distinguish the new filtered inputs from
 old measurements. R1 retains `src <= 2/83/306` (local Bitcoin fractions
 2.83%/30.00%/54.99%). Every other participating relation uses a pre-join source
 cap `src <= 10/20/40`, with local marginal fractions 9.33%/14.35%/21.19%.
-For the 18 Epinions instances, low/medium R1 cutoffs are 118/2177 and auxiliary
+For the 16 active Epinions instances, low/medium R1 cutoffs are 118/2177 and auxiliary
 input cutoffs are 539/824, with observed fractions 2.98%/30.00% and 9.00%/15.02%.
 These predicates are inside each relation's scan subquery, not added to the
 root WHERE: filtering NULL-padded output there could erase preserved rows.
@@ -79,11 +88,28 @@ independently and qualification requires every input cap to pass its own band.
 The caps were not selected using ON/OFF speed-ups. They reduce the input scale
 but cannot guarantee a sub-600s run, a >1s runtime, or eligibility of every candidate.
 
-Current types: 375 `join`, 164 `graph` (including industry-inspired controls), and
+Current types: 375 `join`, 162 `graph` (including industry-inspired controls), and
 183 `aggregate`. Aggregates comprise 116 COUNT (84 global, 32 grouped),
 19 MIN, 24 MAX and 24 SUM queries.
-Type and family differ: `--only graph` runs 174 Graph-family candidates, whereas
-`--query-type graph` selects 164 graph/control queries across families.
+Type and family differ: `--only graph` runs 172 Graph-family candidates, whereas
+`--query-type graph` selects 162 graph/control queries across families.
+
+## Fixed reporting and timeout policy (20261011)
+
+Each engine has an independent **600-second limit per statement**, including
+each of the five timed executions, not a shared 600-second batch limit. Report
+the median only after all five timed executions complete. A timeout stops only
+that engine, without retrying or increasing the limit; the other engine is still
+attempted. Use `--timeout 600` to override stale timeout environment settings.
+
+Exclude the entire query from performance statistics, valid selected counts,
+figures, and phase/optimizer samples if **either engine times out at any stage**,
+including warmup or profiling. Never replace a missing runtime with 600 seconds.
+Keep raw timeouts and partial measurements in diagnostics. The paper cohort
+contains complete measured OuterYan-selected pairs (excluding exact unit ratios
+and unexecuted fallbacks), not every SQL in the active manifest. Retain sub-second
+measurements and measured slowdowns. The two explicit retirements above do not
+imply removing every other timeout SQL from the benchmark.
 
 ## COUNT(*) replacements (20261008)
 

@@ -119,6 +119,7 @@ def resolve_sql_path(category, relative, root=ROOT):
         candidates.append(root / "revisions/replaced_graph_bitcoin_20261010/benchmark" / path)
         candidates.append(root / "revisions/replaced_graph_bitcoin_extension_20261010/benchmark" / path)
         candidates.append(root / "graph_dataset_retest/epinions" / path)
+        candidates.append(root / "graph_dataset_retest/epinions_extension" / path)
         # The former query-type prefix is a naming alias; SQL identity is unchanged.
         if path.name.startswith("control__"):
             candidates.append(root / "benchmark" / path.with_name(

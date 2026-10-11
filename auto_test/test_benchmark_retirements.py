@@ -23,7 +23,7 @@ class BenchmarkRetirementsTest(unittest.TestCase):
     def test_exact_removals_archive_and_lists(self):
         rows = b.validate(b.ROOT / "benchmark")
         archived, paths = r.archived_rows()
-        self.assertEqual(len(rows), 722)
+        self.assertEqual(len(rows), 720)
         self.assertEqual(Counter(x["family"] for x in archived), dict(graph=2, tpch=3, tpcds=3, job=2))
         for row in archived:
             self.assertFalse((b.ROOT / "benchmark" / row["path"]).exists())

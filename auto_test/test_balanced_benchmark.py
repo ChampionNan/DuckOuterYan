@@ -29,7 +29,7 @@ class BalancedBenchmarkTest(unittest.TestCase):
 
     def test_active_matrix_and_mixed_kinds(self):
         rows = b.validate(b.ROOT / "benchmark")
-        expected = dict(retirements.policy()["expected_counts_after"], graph=174)
+        expected = dict(retirements.policy()["expected_counts_after"], graph=172)
         self.assertEqual(len(rows), sum(expected.values()))
         self.assertEqual(Counter(r["family"] for r in rows), expected)
         before_promotion, _ = graph_extension.validate(b.ROOT / "benchmark", rows)
@@ -43,12 +43,12 @@ class BalancedBenchmarkTest(unittest.TestCase):
         self.assertEqual(self.design["curation"]["timeout_seconds"], 600)
         self.assertTrue(all(r["qualification_timeout_seconds"] == "600" for r in rows))
         graph = [r for r in rows if r["family"] == "graph"]
-        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 123, 5: 51})
+        self.assertEqual(Counter(int(r["relation_count"]) for r in graph), {4: 121, 5: 51})
         for tier in b.TIERS:
             for shape in b.SHAPES:
                 self.assertEqual(Counter(int(r["relation_count"]) for r in graph
                                          if r["semantic_tier"] == tier and r["tree_shape"] == shape),
-                                 {4: ({"bushy": 13, "left_deep": 12}.get(shape, 14) if tier == "low" else 14),
+                                 {4: ({"bushy": 11, "left_deep": 12}.get(shape, 14) if tier == "low" else 14),
                                   5: ({"left_deep": 5, "right_deep": 4}.get(shape, 6)
                                       if tier == "low" else 6)})
         self.assertIn("industry_synthetic_control", {r["provenance_class"] for r in rows})
@@ -229,7 +229,7 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
-            self.assertEqual(report["balanced_candidates"], sum(retirements.policy()["expected_counts_after"].values()) - 1)
+            self.assertEqual(report["balanced_candidates"], sum(retirements.policy()["expected_counts_after"].values()) - 3)
             self.assertEqual(report["historical_supplementary_candidates"], 0)
             self.assertEqual(report["historical_supplementary_observations"], 0)
             self.assertEqual(report["qualification_timeout_seconds"], 600)
