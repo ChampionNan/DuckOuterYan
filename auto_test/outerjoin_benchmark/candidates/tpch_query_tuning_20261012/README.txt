@@ -64,7 +64,18 @@ Reproduce generation without overwriting this review snapshot
   python3 auto_test/prepare_tpch_tuning.py --db tpch_1.duckdb --explain \
     --out /tmp/tpch_query_tuning_review
 
-CPU9 SF50 pilot (Bash, after reviewing and syncing these files)
+CPU9 SF50 full TPC-H pilot (requested after the candidate-only preparation)
+  bash auto_test/run_tpch_tuning_retest.sh --run
+
+  Runs 176 TPC-H queries: these 31 replacements and 145 unchanged queries.
+  A fresh isolated corpus and provenance are saved beside the result files.
+  The launcher checks SQL hashes, SF50 row counts and candidate selectivity
+  bands before testing. It uses the existing Release binary without rebuilding.
+  It explicitly uses 32 threads, five timed samples (median), separate profiles,
+  no full correctness comparison, and 600 seconds per execution per engine.
+  It does not promote candidates or change the active 720-query benchmark.
+
+Candidate-only command (not the requested full TPC-H run)
   OY_CORPUS="$PWD/auto_test/outerjoin_benchmark/candidates/tpch_query_tuning_20261012" \
   TPCH_SF=50 TPCH_DB="$PWD/tpch_50.duckdb" \
   bash auto_test/experiment_onoff.sh --only tpch --threads 32 --runs 5 \
