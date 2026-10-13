@@ -108,6 +108,8 @@ void QueryProfiler::Reset() {
 	phase_stack.clear();
 	running = false;
 	query_metrics.Reset();
+	// Sampled global peaks belong to this query, not earlier profiles in the session.
+	query_metrics.query_global_info.metrics.clear();
 	metrics_finalized = false;
 }
 
@@ -506,10 +508,15 @@ void QueryProfiler::Flush(OperatorProfiler &profiler) {
 			info.metrics[MetricType::EXTRA_INFO] = Value::MAP(node.second.extra_info);
 		}
 		if (ProfilingInfo::Enabled(profiler.settings, MetricType::SYSTEM_PEAK_BUFFER_MEMORY)) {
+			// Retain the buffer-pool observations for this operator as well as the query.
+			// These are shared, database-wide footprints sampled at EndOperator, not
+			// allocations owned by the operator. Merge across workers with MAX, never SUM.
+			info.MetricMax(MetricType::SYSTEM_PEAK_BUFFER_MEMORY, node.second.system_peak_buffer_manager_memory);
 			query_metrics.query_global_info.MetricMax(MetricType::SYSTEM_PEAK_BUFFER_MEMORY,
 			                                          node.second.system_peak_buffer_manager_memory);
 		}
 		if (ProfilingInfo::Enabled(profiler.settings, MetricType::SYSTEM_PEAK_TEMP_DIR_SIZE)) {
+			info.MetricMax(MetricType::SYSTEM_PEAK_TEMP_DIR_SIZE, node.second.system_peak_temp_directory_size);
 			query_metrics.query_global_info.MetricMax(MetricType::SYSTEM_PEAK_TEMP_DIR_SIZE,
 			                                          node.second.system_peak_temp_directory_size);
 		}

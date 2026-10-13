@@ -1,10 +1,40 @@
 #include "catch.hpp"
 #include "test_helpers.hpp"
+#include "duckdb/main/profiling_node.hpp"
 
 #include <iostream>
 #include <thread>
 
 using namespace duckdb;
+
+static idx_t MaximumOperatorMemory(const ProfilingNode &node, MetricType metric) {
+	idx_t maximum = 0;
+	for (auto &child : node.children) {
+		maximum = MaxValue(maximum, child->GetProfilingInfo().GetMetricValue<idx_t>(metric));
+		maximum = MaxValue(maximum, MaximumOperatorMemory(*child, metric));
+	}
+	return maximum;
+}
+
+TEST_CASE("Query profiler retains operator buffer observations", "[api][memory_profile]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE memory_profile_input AS SELECT range AS i FROM range(200000)"));
+	con.EnableProfiling();
+	con.context->config.emit_profiler_output = false;
+	const string query = "SELECT i % 53 AS k, count(*) FROM memory_profile_input GROUP BY k ORDER BY k";
+	for (idx_t run = 0; run < 2; run++) {
+		REQUIRE_NO_FAIL(con.Query(query));
+		auto tree = con.GetProfilingTree();
+		REQUIRE(tree);
+		const auto memory = MaximumOperatorMemory(*tree, MetricType::SYSTEM_PEAK_BUFFER_MEMORY);
+		REQUIRE(memory > 0);
+		REQUIRE(memory == tree->GetProfilingInfo().GetMetricValue<idx_t>(MetricType::SYSTEM_PEAK_BUFFER_MEMORY));
+		const auto spill = MaximumOperatorMemory(*tree, MetricType::SYSTEM_PEAK_TEMP_DIR_SIZE);
+		REQUIRE(spill == tree->GetProfilingInfo().GetMetricValue<idx_t>(MetricType::SYSTEM_PEAK_TEMP_DIR_SIZE));
+	}
+}
 
 TEST_CASE("Test query profiler", "[api]") {
 	duckdb::unique_ptr<QueryResult> result;
