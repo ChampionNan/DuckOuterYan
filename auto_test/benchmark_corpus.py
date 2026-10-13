@@ -86,7 +86,8 @@ def historical_manifests(root=ROOT):
                      "retired_speedup_20261005", "retired_speedup_20261007", "retired_speedup_20261008",
                      "retired_tpcds_extension_20261008_r1", "retired_aggregate_count_20261008",
                      "retired_speedup_le06_20261008", "retired_queries_20261009",
-                     "replaced_graph_bitcoin_20261010", "replaced_graph_bitcoin_extension_20261010"):
+                     "replaced_graph_bitcoin_20261010", "replaced_graph_bitcoin_extension_20261010",
+                     "replaced_tpch_tuning_20261013"):
         path = root / "revisions" / revision / "benchmark/manifest.csv"
         if path.is_file():
             yield None, path
@@ -118,6 +119,7 @@ def resolve_sql_path(category, relative, root=ROOT):
         candidates.append(root / "revisions/retired_queries_20261009/benchmark" / path)
         candidates.append(root / "revisions/replaced_graph_bitcoin_20261010/benchmark" / path)
         candidates.append(root / "revisions/replaced_graph_bitcoin_extension_20261010/benchmark" / path)
+        candidates.append(root / "revisions/replaced_tpch_tuning_20261013/benchmark" / path)
         candidates.append(root / "graph_dataset_retest/epinions" / path)
         candidates.append(root / "graph_dataset_retest/epinions_extension" / path)
         # The former query-type prefix is a naming alias; SQL identity is unchanged.

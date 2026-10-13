@@ -1,0 +1,34 @@
+{
+  "revision": "tpch-tuning-promotion-20261013",
+  "status": "USER_APPROVED_FROZEN_WORKLOAD",
+  "candidate_manifest_sha256": "d5b9bcac73d78757a3127e3c36531fde8a03f5273c6a7c621d05a3e3e103456f",
+  "replacement_map_sha256": "e7879c705a6af3e5b27e1b3e716e0bfb1c0d24ea70a365e81bd79e6a39f06bbc",
+  "prior_manifest_sha256": "47c1c1053951974d76ca422d14fb1e12ea8cfbcf59798f5691d5da003e0ba412",
+  "expected_counts": {"graph": 172, "tpch": 176, "tpcds": 206, "job": 166},
+  "selected_changes": {"selectivity_only": 14, "q5_bushy_donor": 3, "q5_alternate_right": 3},
+  "selected_slots": [
+    "A-H-B-04", "A-H-B-07", "A-H-LD-02", "A-H-RD-01", "A-H-RD-07",
+    "Q-H-B-01", "Q-H-B-03", "Q-H-B-04", "Q-H-B-05", "Q-H-B-07",
+    "Q-H-B-12", "Q-H-B-16", "Q-H-B-18", "Q-H-LD-02", "Q-H-LD-05",
+    "Q-H-RD-02", "Q-H-RD-03", "Q-H-RD-04", "Q-H-RD-07", "Q-H-RD-14"
+  ],
+  "selection_disclosure": "Post-hoc, performance-conditioned workload selection approved by the user. Starting with all 14 predicate-only candidates, 64 combinations of six complete candidate pattern groups were compared against a requested overall geometric mean near 1.849. The two complete Q5 groups were selected. This changes workload instances; it is not an optimizer-code improvement or an independently selected evaluation cohort.",
+  "generation_rule": "Always use these 20 exact SQL definitions. Never read result files, search subsets, enforce a geometric-mean target, or select the fastest run during generation.",
+  "measurement_snapshot": {
+    "baseline_csv": "auto_test/results/experiment_onoff_benchmark_20261010_150834_t32.csv",
+    "baseline_sha256": "b0ede9db5203dc0b760887ce65836535a37e7b05d47fd6b33120087984f9c46b",
+    "replacement_csv": "auto_test/results/experiment_onoff_tpch_tuning_full_20261013_000640_t32.csv",
+    "replacement_sha256": "77511c9b50d24ccd547f5239d9710a6f4b083d84bb68e7d55d9b1af319d9aba9",
+    "rule": "Use new CPU9 measurements only for the 20 replacement SQLs; keep all other original observations. This is a composite snapshot, not a new full run. Any future complete run must replace this snapshot as a whole, including regressions and timeouts.",
+    "complete_selected_queries": 281,
+    "complete_selected_tpch_queries": 80,
+    "overall_geomean": 1.8485904902358496,
+    "tpch_geomean": 1.4797431576133206,
+    "runtime_samples": 5,
+    "runtime_estimator": "median_post_warmup",
+    "threads": 32,
+    "tpch_scale": 50,
+    "timeout_seconds_per_execution_per_engine": 600,
+    "exclude_either_side_timeout": true
+  }
+}

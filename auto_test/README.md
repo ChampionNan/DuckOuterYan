@@ -136,6 +136,51 @@ corresponding environment values.
 Always inspect `configs.sh` before a server run because these experiment defaults
 are intentionally adjusted for the current machine.
 
+### Frozen TPC-H setting (2026-10-13)
+
+The active `outerjoin_benchmark/benchmark/tpch/` adopts exactly 20 reviewed SQL
+replacements: all 14 predicate-only candidates, plus the complete low/medium/high
+groups for Q5 bushy and Q5 right-deep. The other 11 tuning candidates are not
+adopted. Counts remain 720 total / 176 TPC-H SQL instances; the current composite
+measurement cohort contains 281 complete OuterYan-selected pairs / 80 TPC-H.
+`sources/tpch_tuning_promotion_20261013.json` pins the exact setting and discloses
+its post-hoc, performance-conditioned selection. This is a workload change, not
+an optimizer implementation improvement. The generator always reproduces the
+pinned SQL and never reads timing results or searches for a target speed-up.
+
+The retained measurement snapshot uses CPU9 run `20261013_000640_t32` only for
+the 20 changed SQLs and `20261010_150834_t32` for every other instance. Its overall
+geometric mean is 1.8485904902x, not a guarantee or acceptance criterion for
+future runs. Timing remains median-of-five, SF50 / 32 threads, 600 seconds per
+execution on each engine; either-side timeouts and unmeasured fallback defaults
+are excluded. A future complete run must replace this composite as a whole.
+
+Old SQL is recoverable under
+`outerjoin_benchmark/revisions/replaced_tpch_tuning_20261013/benchmark/`.
+Validate the fixed setting with:
+
+```bash
+python3 auto_test/tpch_tuning_promotion.py --validate
+```
+
+After synchronizing this revision to CPU9, the normal `run_all.sh` /
+`experiment_onoff.sh` commands use the fixed setting. The isolated
+`run_tpch_tuning_retest.sh` remains a historical **31-candidate** pilot; do not
+use it to run the promoted 20-query setting. No new run starts automatically.
+
+To explicitly start a new complete SF50 run after pulling this revision:
+
+```bash
+env TPCH_SF=50 TPCDS_SF=50 bash auto_test/run_all.sh \
+  --all --threads 32 --runs 5 --timeout 600 --no-check-correctness
+```
+
+This builds the release binary, prepares/reuses the databases, regenerates all
+720 queries, and measures them. The last flag follows the current performance
+protocol; omit it to enable complete result-equivalence comparisons. Existing
+database path overrides must point to the requested scale. Every individual
+execution has its own timeout, including each of the five timed executions.
+
 ## Build
 
 For all four families, build a release CLI with the TPC-H and TPC-DS generators:

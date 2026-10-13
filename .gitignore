@@ -380,6 +380,9 @@ tools/pythonpkg/duckdb_build/
 # own
 *_db*
 
+# Approved SQL fingerprints may start with "db"; these are queries, not databases.
+!/auto_test/outerjoin_benchmark/benchmark/tpch/join__tpch__tuning_20261012_q_h_b_*__tpch_q05_region_sales__bushy__irfl__db73eb5f__sel_*.sql
+
 lsqb*
 *_data
 

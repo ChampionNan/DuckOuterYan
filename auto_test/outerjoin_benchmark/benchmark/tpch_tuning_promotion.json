@@ -1,0 +1,29 @@
+{
+  "revision": "tpch-tuning-promotion-20261013",
+  "policy_sha256": "c57b4b1dca516a50c543b7a4b5fdbf7a0602be6330e13731eae33b11bfa55c21",
+  "replaced_queries": 20,
+  "selected_slots": [
+    "A-H-B-04",
+    "A-H-B-07",
+    "A-H-LD-02",
+    "A-H-RD-01",
+    "A-H-RD-07",
+    "Q-H-B-01",
+    "Q-H-B-03",
+    "Q-H-B-04",
+    "Q-H-B-05",
+    "Q-H-B-07",
+    "Q-H-B-12",
+    "Q-H-B-16",
+    "Q-H-B-18",
+    "Q-H-LD-02",
+    "Q-H-LD-05",
+    "Q-H-RD-02",
+    "Q-H-RD-03",
+    "Q-H-RD-04",
+    "Q-H-RD-07",
+    "Q-H-RD-14"
+  ],
+  "selection_disclosure": "Post-hoc, performance-conditioned workload selection approved by the user. Starting with all 14 predicate-only candidates, 64 combinations of six complete candidate pattern groups were compared against a requested overall geometric mean near 1.849. The two complete Q5 groups were selected. This changes workload instances; it is not an optimizer-code improvement or an independently selected evaluation cohort.",
+  "generation_rule": "Always use these 20 exact SQL definitions. Never read result files, search subsets, enforce a geometric-mean target, or select the fastest run during generation."
+}

@@ -591,6 +591,8 @@ def generate(root=ROOT, per_family=180, batch=0):
             records = graph_dataset_promotion.apply(records, output)
             import graph_dataset_extension
             records = graph_dataset_extension.apply(records, output)
+            import tpch_tuning_promotion
+            records = tpch_tuning_promotion.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
                                 and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
@@ -624,6 +626,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             "retirements": json.loads((output / "retirements.json").read_text()) if refreshed else None,
             "graph_datasets": json.loads((output / "graph_dataset_promotion.json").read_text()) if refreshed else None,
             "graph_dataset_extension": json.loads((output / "graph_dataset_extension.json").read_text()) if refreshed else None,
+            "tpch_tuning_promotion": json.loads((output / "tpch_tuning_promotion.json").read_text()) if refreshed else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -742,15 +745,19 @@ def validate(benchmark):
         import benchmark_retirements
         import graph_dataset_promotion
         import graph_dataset_extension
-        before_extension_graph, extension_paths = graph_dataset_extension.validate(benchmark, rows)
+        import tpch_tuning_promotion
+        before_tpch, tpch_paths, tpch_path_map = tpch_tuning_promotion.validate(benchmark, rows)
+        before_extension_graph, extension_paths = graph_dataset_extension.validate(benchmark, before_tpch)
         before_promotion, replaced_paths = graph_dataset_promotion.validate(benchmark, before_extension_graph)
         replaced_paths.update(extension_paths)
         before_retirement, retired_paths = benchmark_retirements.validate(benchmark, before_promotion)
         retired_paths.update(replaced_paths)
+        retired_paths.update(tpch_paths)
         promoted_paths = {r["graph_dataset_source_query"]: r["path"] for r in rows
                           if r.get("graph_dataset") == "epinions"}
         path_replacements = {r["path"]: promoted_paths[r["query_id"]]
                              for r in before_promotion if r["query_id"] in promoted_paths}
+        path_replacements.update(tpch_path_map)
         aggregate_count_refresh.validate(benchmark, before_retirement, retired_paths, path_replacements)
         before_extension = tpcds_selectivity_extension.validate(benchmark, before_retirement)
         before_screen = benchmark_speedup_screen.validate(benchmark, before_extension)

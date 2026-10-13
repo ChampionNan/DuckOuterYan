@@ -1,5 +1,14 @@
 TPC-H SQL-only tuning proposal, 2026-10-12
 
+Subsequent adoption (2026-10-13)
+  The active benchmark now uses exactly 20 of these 31 definitions: all 14
+  predicate-only candidates and both complete Q5 groups (bushy/right-deep).
+  sources/tpch_tuning_promotion_20261013.json freezes this reviewed choice and
+  discloses its post-hoc selection. The remaining 11 definitions stay candidates.
+  This directory and the full-pilot tool preserve the historical 31-candidate
+  experiment; the original proposal/status text below refers to 2026-10-12.
+  Default --all uses the active 20-replacement setting, not the full pilot.
+
 Scope
   31 one-for-one replacement candidates for the 31 TPC-H instances with
   measured speed-up below 1 in CPU9 run 20261010_150834_t32.

@@ -1540,7 +1540,8 @@ class PaperStatisticsTest(unittest.TestCase):
         provenance = provenance[provenance["query_id"].isin(active["query_id"])]
         self.assertEqual(len(provenance), len(active))
         provenance = provenance[provenance["filter_design_revision"].isin(
-            ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1"])]
+            ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1",
+             "tpch-query-tuning-20261012"])]
         counts = provenance["workload_component"].value_counts().to_dict()
         self.assertEqual(counts, {"structural": 462, "evaluation": 196})
         capped = provenance[provenance["graph_filter_revision"].eq("inputcap1")]

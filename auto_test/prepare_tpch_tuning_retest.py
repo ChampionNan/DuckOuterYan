@@ -25,9 +25,18 @@ def rows(path):
 
 def validate_inputs():
     spec = json.loads(POLICY.read_text())
+    active_manifest = ACTIVE / "manifest.csv"
+    archived_sources = {}
     if digest(ACTIVE / "manifest.csv") != spec["active_manifest_sha256"]:
-        raise ValueError("Active manifest changed; rebase the reviewed proposal first")
-    active = rows(ACTIVE / "manifest.csv")
+        # Preserve reproducibility of the historical 31-candidate pilot after
+        # the separate 20-candidate setting is promoted. Never silently rebase.
+        import tpch_tuning_promotion as promotion
+        active_manifest = promotion.ARCHIVE / "prior_manifest.csv"
+        if not active_manifest.is_file() or digest(active_manifest) != spec["active_manifest_sha256"]:
+            raise ValueError("Active manifest changed; rebase the reviewed proposal first")
+        promotion.validate(ACTIVE, rows(ACTIVE / "manifest.csv"))
+        archived_sources = {r["path"]: promotion.ARCHIVE for r in promotion.archived_rows()}
+    active = rows(active_manifest)
     candidates = rows(CANDIDATES / "manifest.csv")
     proposal = rows(CANDIDATES / "proposed_full_manifest.csv")
     if len(active) != 720 or len(candidates) != 31 or len(proposal) != 720:
@@ -51,7 +60,7 @@ def validate_inputs():
         path = Path(row["path"])
         if path.parts != ("tpch", row["query_id"] + ".sql"):
             raise ValueError("Unexpected SQL path")
-        source = CANDIDATES if row["query_id"] in candidate_ids else ACTIVE
+        source = CANDIDATES if row["query_id"] in candidate_ids else archived_sources.get(row["path"], ACTIVE)
         content = (source / path).read_bytes()
         if hashlib.sha256(content).hexdigest() != row["content_sha256"]:
             raise ValueError("SQL hash mismatch: " + row["query_id"])
