@@ -40,11 +40,6 @@
       "semantic_tier": "low",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.007285934",
-      "outeryan_s": "0.017271657",
-      "speedup": 0.42184337032630975,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5"
     },
     {
@@ -57,11 +52,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "join",
-      "duckdb_s": "0.637581396",
-      "outeryan_s": "1.349442982",
-      "speedup": 0.47247746255647277,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5"
     },
     {
@@ -74,11 +64,6 @@
       "semantic_tier": "medium",
       "relation_count": "5",
       "query_class": "join",
-      "duckdb_s": "0.389470300",
-      "outeryan_s": "0.868665777",
-      "speedup": 0.44835460347599254,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5"
     },
     {
@@ -91,11 +76,6 @@
       "semantic_tier": "high",
       "relation_count": "4",
       "query_class": "join",
-      "duckdb_s": "0.297296160",
-      "outeryan_s": "0.607696218",
-      "speedup": 0.4892183811484573,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5"
     },
     {
@@ -108,13 +88,9 @@
       "semantic_tier": "low",
       "relation_count": "4",
       "query_class": "graph",
-      "duckdb_s": "11.489172960",
-      "outeryan_s": "25.763386175",
-      "speedup": 0.4459496466015302,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5"
     }
   ],
-  "selection": "Performance-conditioned exact-SQL screening, not an unbiased overall workload. Raw measurements unchanged; new candidates remain pending."
+  "selection": "Performance-conditioned exact-SQL screening, not an unbiased overall workload. Raw measurements unchanged; new candidates remain pending.",
+  "representation": "frozen_workload_definition"
 }

@@ -7,4 +7,4 @@ FROM customer
     LEFT OUTER JOIN orders   ON c_custkey = o_custkey
     RIGHT OUTER JOIN lineitem ON o_orderkey = l_orderkey
     FULL OUTER JOIN nation   ON c_nationkey = n_nationkey
-WHERE orders.o_orderdate BETWEEN DATE '1993-05-24' AND DATE '1997-01-03';
+WHERE orders.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1994-09-26';

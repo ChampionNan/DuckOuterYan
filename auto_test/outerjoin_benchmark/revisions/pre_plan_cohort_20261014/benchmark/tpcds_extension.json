@@ -1,0 +1,14 @@
+{
+  "revision": "tpcds-selectivity-extension-20261008-r2",
+  "policy_sha256": "b1258f8a146d8c4dd325ac6b54c6a0dd509a601978b0039d8a5eb843f709d262",
+  "target_complete_pairs": 50,
+  "new_candidates": 15,
+  "status": "PENDING_CPU9_MEASUREMENT",
+  "counts": {
+    "graph": 177,
+    "tpch": 179,
+    "tpcds": 209,
+    "job": 168
+  },
+  "note": "New three-band SQL requires CPU9 selectivity audit and bare-query ON/OFF measurement. Historical runtimes are selection provenance, not results for these candidates."
+}

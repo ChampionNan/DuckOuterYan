@@ -1,367 +1,180 @@
-# Yannakakis<sup>+</sup>
+# OuterYan
 
-This repository is a DuckDB research fork for optimizing acyclic queries with
-inner and outer joins. Its `OuterYan` path combines join reordering, two-round
-semi-join reduction, and bitmap/hash semi-join kernels. Aggregate-pushdown code
-is retained for research, but the current policy keeps aggregate and DISTINCT
-queries on DuckDB's normal optimizer path.
+Anonymous research artifact based on DuckDB. OuterYan explores join reordering,
+two-round semi-join reduction, aggregate pushdown, and bitmap/hash filter kernels
+for queries containing inner and outer joins. Applicability and plan selection
+are determined by the current optimizer source.
 
 ## Build
 
-Building requires CMake, Python 3, Ninja, and a C++17 compiler. Use a release
-build for performance measurements:
-
-```bash
-GEN=ninja make release
-```
-
-TPC-H and TPC-DS database generation requires their extensions. You can include
-them up front, or let `auto_test/build_db.sh` rebuild the release binary if they
-are missing:
+Use CMake, Ninja, Python 3, and a supported C++ compiler. Build a release binary
+with the benchmark data generators enabled:
 
 ```bash
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 ```
 
-The resulting CLI is `build/release/duckdb`. A debug build is available with
-`GEN=ninja make debug`, but its timings are only directional.
+The CLI is `build/release/duckdb`. For assertions and focused C++ tests, use
+`GEN=ninja make debug`. Performance measurements require a release build.
 
-## One-command build and test
+## Benchmark inputs
 
-From the repository root:
+The current workload contains **350 SQL queries**: SGPB 67, TPC-H 87,
+TPC-DS 87, and JOB 109. SGPB uses the internal family key `graph` (61 Bitcoin
+and 6 Epinions queries). The workload contains 244 non-aggregate result queries
+and 106 aggregation queries; input shapes are 121 left-deep, 124 right-deep,
+and 105 bushy expressions. Queries and their manifest are in
+[`auto_test/outerjoin_benchmark/benchmark/`](auto_test/outerjoin_benchmark/benchmark/).
+Source queries, historical query definitions, and declarative generation policies
+are retained because the generator uses them to reproduce the workload.
+
+This is a historically curated, performance-conditioned workload. Its fixed
+membership must not be described as an independently selected evaluation sample.
+The repository contains query definitions and selection provenance, without
+historical runtime observations or performance claims. Measure each new run
+against the exact SQL identities in its manifest.
+
+The default runner uses these committed queries unchanged. To explicitly regenerate
+and verify the workload without running experiments:
+
+```bash
+bash auto_test/run_all.sh --prepare-only
+```
+
+The generator does not read experiment outputs. Start validation with a small
+sample before running the complete corpus:
+
+```bash
+TPCH_SF=1 TPCDS_SF=1 bash auto_test/build_db.sh all
+bash auto_test/experiment_onoff.sh --only graph --limit 3
+```
+
+The default experiment scales are TPC-H SF50 and TPC-DS SF50; the first command
+explicitly requests smaller databases. Existing database files are reused.
+Set `TPCH_DB`, `TPCDS_DB`, `GRAPH_DB`, `GRAPH_EPINIONS_DB`, and `JOB_DB` to override
+paths. Dataset generation, downloads, and a complete experiment can be expensive.
+
+## One-command experiment
+
+Install Python 3.10+ and the report dependencies with
+`python3 -m pip install -r auto_test/report_requirements.txt`. Dataset preparation
+downloads public SNAP graph files and JOB Parquet tables when absent, and generates
+TPC-H/TPC-DS through the built-in extensions. Network access and sufficient disk
+space are required; existing configured databases are reused.
+
+For an intentional complete run (potentially many hours):
 
 ```bash
 bash auto_test/run_all.sh
+# Reuse existing release binary and databases, using committed queries:
+bash auto_test/run_all.sh --skip-build --skip-data
+# Explicit query code generation/verification, then build + data + test + report:
+bash auto_test/run_all.sh --generate-queries
+# Generate and verify only; no benchmark execution or downloads:
+bash auto_test/run_all.sh --prepare-only
+# Inspect the command sequence without writes or executions:
+bash auto_test/run_all.sh --dry-run
 ```
 
-This builds the release DuckDB CLI and target databases, generates 650 unique
-queries, and runs the DuckDB Original/OuterYan correctness and performance
-comparison. Results, decision traces, and statistics go under `auto_test/results/`.
-The default is 32 threads; `--threads "16 32"` runs both configurations.
+The entry point validates the existing SQL/manifests without regenerating them,
+builds/reuses release and databases, runs the benchmark, and publishes statistics
+and PDF/PNG figures. It does not generate LaTeX. With `--generate-queries`, it calls
+the query generator and regenerates twice in isolated directories to verify
+byte-identical SQL/manifests/query lists before the normal build/test stages.
+This reconstructs the fixed workload; it does not select new queries from runtime
+results. Default protocol: SF50 for TPC-H/TPC-DS, 32 threads, five unprofiled
+post-warmup executions (median), separate profiles, 600 seconds **per execution
+per engine**. Full correctness comparison is off in this performance workflow;
+use `--check-correctness` to enable it. The underlying harness still defaults to
+correctness checks when invoked directly. `--threads` and `--runs` change those
+settings explicitly. Database environment overrides remain supported.
+
+Reports are written to `auto_test/results/plots/YYYYMMDD/`. Original run CSV/TXT
+and profiles remain under `auto_test/results/`. Each new run is reported alone;
+no historical measurements are silently merged. Reprocess a completed run with:
 
 ```bash
-# Select one query type; the default runs every unique SQL once.
-bash auto_test/run_all.sh --query-type join
-
-# Reuse the existing binary, databases, and generated queries.
-SKIP_BUILD=1 SKIP_DATA=1 SKIP_QUERY_GEN=1 bash auto_test/run_all.sh
-
-# Generate figures, statistics, and paper tables from a completed date.
-python3 auto_test/gen_experiment_result.py --date 20260926
+bash auto_test/run_all.sh --report-only --csv auto_test/results/EXACT_RUN.csv --date YYYYMMDD
 ```
 
-The last command writes to `auto_test/results/plots/20260926/` by default.
-Existing databases are reused; rebuild explicitly when dataset or scale changes:
+The current reporting rule excludes any OuterYan timeout. A DuckDB-only timeout
+uses 600 seconds only when OuterYan has a completed measurement; verified
+unexecuted native-plan fallbacks contribute a speed-up of 1x, not invented
+absolute runtimes. Measured and substituted results remain distinguishable.
+The 21 both-engine timeout definitions removed from the active set remain in
+the archived predecessor. This frozen curation does not automatically remove
+new timeouts or slow results from a future run.
 
-```bash
-FORCE=1 bash auto_test/build_db.sh all
-```
+See [`auto_test/README.md`](auto_test/README.md) for configuration, subset runs,
+diagnostics, and report generation.
 
-See [auto_test/README.md](auto_test/README.md) for configuration and output details.
+## Correctness and plan selection
 
-## OuterYan plan selection
-
-For an applicable query, `OuterYanOptimizer` builds two alternatives from the
-same logical input:
-
-1. DuckDB's normal outer-join-simplified and join-ordered plan.
-2. The OuterYan DP/OJT plan with its proposed semi-join reductions.
-
-The optimizer compares their base-relation join groupings using stable table
-identities. Join kind, left/right child orientation, and semi-join wrappers do
-not affect this comparison. A candidate with the same grouping uses DuckDB's
-plan, avoiding semi-join overhead without a join-order benefit.
-
-For a different grouping, the default source-level cost gate evaluates:
-
-```text
-candidate_total = candidate_join_cost
-                + SEMIJOIN_COST_RATIO * semijoin_raw_cost
-
-strict:  candidate_total <= (0.90 or 1.0) * baseline_cost
-stretch: candidate_total <= 1.20 * baseline_cost, only when confidence checks pass
-low-selectivity: interpolate from the strict limit toward 1.20 as a reliable
-                 unary-filter selectivity falls from 0.35 toward zero
-```
-
-The current build uses `GATED`. Its cost model uses
-`SEMIJOIN_COST_RATIO=1.0` and
-`MAX_CANDIDATE_TO_BASELINE_RATIO=1.0`. Cost formula V8 keeps that strict tier
-and adds confidence-aware stretch and low-selectivity tiers. The stretch tier is not a
-global multiplier: it requires no generic-filter uncertainty, no uncertain
-filter amplification guard, no active full-reduction lower-bound correction,
-a lower candidate real-join cost, and candidate real-join input work at most
-`0.30` of DuckDB's, with semi-join retention at least `0.95`. The
-low-selectivity tier requires the same confidence guards, a stats-backed unary
-selectivity at most `0.35`, lower candidate join cost, and join-input ratio at
-most `0.75`. V8 retains the lower-tail protections:
-
-- A fully reduced all-INNER candidate cannot estimate an intermediate result
-  below the largest reduced leaf in that subtree.
-- When DuckDB had to use its generic table-filter selectivity, both plans are
-  re-scored once with the unfiltered base cardinality. The gate must pass the
-  worse of the ordinary and conservative candidate/baseline ratios.
-- A candidate is rejected when such an uncertain tiny relation is amplified
-  by at least `1000x` while both reducer rounds retain at least `99%` of their
-  estimated input rows. In that pattern, the filter assumption is driving a
-  large reorder without a credible reduction benefit.
-
-The stretch thresholds are experimental safety margins rather than a runtime
-performance guarantee. Trace and CSV output distinguish stretch eligibility
-from an actual stretch selection.
-
-Before policy selection, a conservative
-proof copy runs DuckDB statistics propagation and empty-result pull-up; if that
-removes every real join, DuckDB is selected with `DUCKDB_PROVEN_EMPTY`.
-
-The trace and reports distinguish the raw cost winner, the threshold result,
-and the final selected plan. They also print the exact join-output and SJ
-materialize/build/replay/lookup/emit coefficients.
-
-The policy constants, including `APPLY_COST_GATE`, live in
-[`outer_yan_optimizer.hpp`](src/include/duckdb/optimizer/outer_yan/pipeline/outer_yan_optimizer.hpp).
-They are deliberately build-wide source knobs rather than SQL settings. The
-selected OuterYan plan receives semi-join insertion. Aggregate and DISTINCT
-queries bypass candidate construction entirely; inapplicable queries and
-queries with OuterYan disabled likewise continue through DuckDB's normal
-optimizer.
-
-### Force the OuterYan candidate for correctness validation
-
-`FORCE_OUTERYAN` is an optional source-level experiment mode. It bypasses the
-cost gate for a changed grouping, but the same-grouping policy can still select
-DuckDB. To execute a valid OuterYan candidate even when its grouping matches
-DuckDB or its estimated cost is worse, scope the diagnostic override to the
-test command:
-
-```bash
-DUCKDB_OY_FORCE_CANDIDATE=1 \
-bash auto_test/experiment_onoff.sh \
-    --only tpcds \
-    --pattern 'oy_ds_ds_bushy5b_v0' \
-    --runs 3 \
-    --capture-plans
-```
-
-The OFF execution still disables OuterYan, while every ON subprocess inherits
-the diagnostic override. This makes the bare-query equivalence check compare
-DuckDB with the actually executed OuterYan candidate. The override applies only
-to a complete, applicable, non-aggregate, non-proven-empty candidate; it does
-not override safety fallbacks for aggregate/DISTINCT, inapplicable, failed, or
-DuckDB-proven-empty plans.
-
-Confirm the result line contains `selected=OUTERYAN`, and confirm its decision
-contains:
-
-```text
-mode=FORCE_OUTERYAN_DIAGNOSTIC
-reason=FORCE_OUTERYAN_DIAGNOSTIC
-outer_yan_selected=1
-gate=SKIPPED
-```
-
-`reorder=0` is valid in this mode: it means only that the real-join grouping is
-the same, not that DuckDB executed. Kernel and R1/R2 fields provide additional
-evidence that the semi-join plan ran. Keep the variable command-scoped as shown;
-without it, normal `GATED`/`FORCE_OUTERYAN` selection is unchanged.
-
-Disable the cohesive OuterYan path for a session with:
+OFF disables only OuterYan; ON enables the normal optimizer list:
 
 ```sql
-SET disabled_optimizers TO 'outer_yan';
+SET disabled_optimizers = 'outer_yan'; -- OFF
+SET disabled_optimizers = '';          -- ON
 ```
 
-## Correctness and performance harness
+Correctness checks execute the bare query and compare complete result multisets.
+Do not wrap queries in `CREATE TABLE AS` or `COPY`, or add `LIMIT`: those changes
+can produce a different plan. The harness also records whether OuterYan was
+selected, timed out, or fell back to DuckDB.
 
-The scripts and corpus live under [`auto_test/`](auto_test/). See
-[`auto_test/README.md`](auto_test/README.md) for the complete command reference,
-dataset notes, output schema, and troubleshooting guidance.
+OuterYan compares its candidate with DuckDB's normally optimized join grouping.
+An identical grouping keeps the DuckDB candidate. Cost gates, applicability
+checks, and semi-join scheduling are source-level research controls. Keep both
+reduction rounds and build/probe dependencies intact when changing the engine.
 
-Common commands:
+## Focused checks
 
 ```bash
-# Build or reuse the graph, TPC-H, TPC-DS, and JOB databases.
-bash auto_test/build_db.sh all
-
-# Run the full ON/OFF corpus.
-bash auto_test/experiment_onoff.sh
-
-# Start with a small graph correctness/performance sample.
-bash auto_test/experiment_onoff.sh \
-    --only graph --query-type graph --limit 3 --runs 1
-
-# Run one exact TPC-H query label.
-bash auto_test/experiment_onoff.sh \
-    --only tpch --pattern 'join__tpch__q05_region_sales_ldmx__ilrf__sel_low'
-
-# Force one complete OuterYan candidate, ignoring grouping equality and cost.
-DUCKDB_OY_FORCE_CANDIDATE=1 \
-bash auto_test/experiment_onoff.sh \
-    --only tpcds --query-type join --limit 1 --capture-plans
-
-# Small unique-corpus validation using existing databases.
-SKIP_DATA=1 OY_THREAD_COUNTS="16 32" OY_RUNS=3 bash auto_test/run_all.sh \
-    --only graph --limit 10 --capture-plans
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s auto_test -p 'test_*.py'
+build/debug/test/unittest "[outer_yan]"
+build/debug/test/unittest test/sql/optimizer/outer_yan/bitmap_budget.test
 ```
 
-`run_all.sh` does not build HTTPFS. The benchmark databases use
-local files: graph and JOB downloads use the `curl` executable, and JOB is
-loaded from cached Parquet. HTTPFS can be built separately when needed on a
-host with compatible libcurl development headers.
+Script tests exercise corpus generation and the harness without a full timed
+benchmark. Some report tests require NumPy, pandas, and Matplotlib. Upstream
+`data/` and SQL test fixtures are test inputs, not generated experiment outputs.
 
-`experiment_onoff.sh` first executes the bare query with OuterYan ON and OFF,
-then compares the emitted result multisets outside DuckDB. Only equivalent
-queries are timed. It measures both `threads=1` and
-`threads=$OY_THREADS`, and writes a human-readable `.txt` report plus a matching
-`.csv` file under `auto_test/results/` by default.
+## Repository and publication policy
 
-The external correctness sort uses `<repo>/auto_test/results/tmp` by default.
-For the server checkout shown above, that is
-`/home/data/bchenba/DuckYanOuter/auto_test/results/tmp`, backed by the `/home`
-filesystem with roughly 3.9 TB free. The harness prints the resolved path,
-per-run subdirectory, available capacity, and mount point before the first
-query. The per-run directory is removed on normal exit and Ctrl+C. Set
-`OY_TMPDIR=/path/with/free/space` only when another filesystem is preferred.
-Sort or DuckDB write failures are reported as resource errors rather than
-correctness mismatches.
+Keep engine code, tests, benchmark SQL, required scripts/configuration/templates,
+reproduction documentation, and license notices. All experiment outputs belong
+under ignored `auto_test/results/`: logs, correctness exports, EXPLAIN plans,
+traces, profiles, timing CSVs, statistics, figures, and rendered paper fragments.
+There are no exceptions for selected results or paper examples. For a custom
+output path, use an ignored directory or a location outside the repository.
 
-The live log and reports distinguish:
+Local databases, downloaded datasets, build products, caches, and agent settings
+are also ignored. Query manifests and frozen selection policies describe inputs;
+they must not embed measured runtimes, observed speedups, or machine identities.
+Report templates contain placeholders rather than recorded results.
 
-- `outer_reordered`: the OuterYan grouping differs from DuckDB's grouping;
-- `outer_yan_selected`: the OuterYan candidate actually passed policy selection;
-- `selected_plan`, `raw_cost_winner`, and `gate_result` as separate decisions;
-- baseline, candidate-join, raw/weighted semi-join, and total estimated costs;
-- the full cost formula and all join/SJ coefficient values;
-- bitmap/hash kernel use; and
-- a matched, median profiled multi-thread query-latency sample (`Total-Time`)
-  plus native active-operator work for round-1 semi-joins, round-2 semi-joins,
-  real joins (`R3`), and the residual `OtherCPU`, with planned pair/new-filter
-  counts and observed operator counts per round.
-
-Every query is printed as a separate block beginning with a full-width
-separator followed by exactly four lines: query identity; correctness,
-selection, runtime, and optimizer totals; workload context and phase breakdown;
-and decision/formula details. Full optimizer-pass maps are stored in the CSV.
-Inapplicable queries print `cost=[UNAVAILABLE]` instead of a formula filled with
-`NA` values.
-
-R1, R2, and R3 are sums from DuckDB's native `OPERATOR_TIMING` tree, not
-contiguous phase wall timers. R1 matches `SJ_BUILD_ROUND_1` and
-`SJ_PROBE_ROUND_1`; R2 matches the corresponding round-2 names; R3 matches
-physical join operator types. Because worker intervals overlap, these values
-are aggregate work-seconds and can exceed wall latency. `CPU-Time` is DuckDB's
-recursive sum of all native operator timings; `OtherCPU` is its unclassified
-residual. Integer-nanosecond arithmetic makes
-`R1 + R2 + R3 + OtherCPU = CPU-Time` exact. The log renders CPU-work shares as
-percentages and reports matched physical-operator counts; the CSV retains
-ratios in `[0,1]`.
-Total-Time is DuckDB's high-resolution JSON wall latency from a separate
-profiled multi-thread median sample, so instrumentation can make it differ from
-the unprofiled `TM:on` median. T1/TM use fresh `-no-init` CLI processes, explicitly
-disable profiling before the timer starts, and do not run the native profile
-batch.
-A zero-pair round is printed as
-`NA(no-pairs,pairs=0)` rather than as a measured zero. The canonical CSV
-contains one row per query and no separate attempts file. Timed-out queries are
-not retried.
-`--capture-plans` also stores OFF/ON
-EXPLAIN plans, optimizer traces, and per-step cost details.
-
-Database builders reuse existing database files. To intentionally replace one
-at another scale or with another graph dataset, set `FORCE=1` explicitly:
+Check the publication tree and create an archive without Git history or local
+outputs using:
 
 ```bash
-TPCH_SF=1 FORCE=1 bash auto_test/build_db.sh tpch
-GRAPH_DATASET=wiki FORCE=1 bash auto_test/build_db.sh graph
+python3 scripts/anonymous_source.py --check
+python3 scripts/anonymous_source.py --output /tmp/outeryan-source.tar.gz
 ```
 
-The JOB builder downloads missing parquet files with `curl`, caches them under
-`job_data/`, and loads them locally. It does not require remote `httpfs` scans.
+An existing development checkout retains its original Git history and local
+configuration. Publish the checked source archive, or create a separate release
+branch with a fresh root commit and anonymous author and committer metadata.
+Point any anonymous repository mirror at that release branch. Do not distribute
+the development checkout's `.git` directory or its historical commits. No source
+export rewrites local history.
 
-## Tracing and runtime diagnostics
+## Source layout and attribution
 
-Tracing is available in release and debug builds. The helper runs one query
-against an existing database and records the OuterYan stages selected by
-`DUCKDB_OYTRACE`:
+- `src/optimizer/outer_yan/`: optimizer IR, passes, and plan construction.
+- `src/execution/operator/join/`: join execution and semi-join filters.
+- `auto_test/`: benchmark generation, execution, and reporting tools.
+- `test/optimizer/outer_yan/` and `test/sql/optimizer/outer_yan/`: focused tests.
+- `benchmark/`, `extension/`, and `third_party/`: retained DuckDB components.
 
-```bash
-bash auto_test/trace_outer_yan.sh \
-    --bin build/release/duckdb \
-    --db graph_db \
-    --file auto_test/outerjoin_benchmark/benchmark/graph/derived__rdeep_N4_mixB_s10.sql
-```
-
-Useful runtime controls are:
-
-- `DUCKDB_OYTRACE=/path/to/trace.txt`: record optimizer stages and the final
-  machine-readable candidate decision;
-- `DUCKDB_OY_FORCE_CANDIDATE=1`: diagnostic correctness mode that forces a
-  complete, applicable, non-proven-empty OuterYan candidate past grouping and
-  cost selection;
-- `DUCKDB_SJ_KERNEL_TRACE=1`: print the selected bitmap/hash kernel per filter;
-- `SET VARIABLE outer_yan_bitmap_max_bytes = N`: set the per-filter bitmap
-  budget (`0` forces hash fallback);
-- `SET VARIABLE outer_yan_hash_fn = 'duckdb'|'murmur'`: select the hash function;
-- `SET VARIABLE outer_yan_stats_prefilter = true|false`: enable or disable the
-  optional statistics prefilter.
-
-`DUCKDB_OY_SIMPLIFY_SCAN_FILTERS=1` is an experimental, generally unsound
-measurement switch. It must not be enabled for correctness conclusions.
-
-Run `bash auto_test/run_all.sh` for the Original/OuterYan workflow. Experiment
-arguments are forwarded to `experiment_onoff.sh`. Existing databases are reused
-unless explicitly rebuilt.
-
----
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: light)" srcset="logo/DuckDB_Logo-horizontal.svg">
-    <source media="(prefers-color-scheme: dark)" srcset="logo/DuckDB_Logo-horizontal-dark-mode.svg">
-    <img alt="DuckDB logo" src="logo/DuckDB_Logo-horizontal.svg" height="100">
-  </picture>
-</div>
-<br>
-
-<p align="center">
-  <a href="https://github.com/duckdb/duckdb/actions"><img src="https://github.com/duckdb/duckdb/actions/workflows/Main.yml/badge.svg?branch=main" alt="Github Actions Badge"></a>
-  <a href="https://discord.gg/tcvwpjfnZx"><img src="https://shields.io/discord/909674491309850675" alt="discord" /></a>
-  <a href="https://github.com/duckdb/duckdb/releases/"><img src="https://img.shields.io/github/v/release/duckdb/duckdb?color=brightgreen&display_name=tag&logo=duckdb&logoColor=white" alt="Latest Release"></a>
-</p>
-
-## DuckDB
-
-DuckDB is a high-performance analytical database system. It is designed to be fast, reliable, portable, and easy to use. DuckDB provides a rich SQL dialect with support far beyond basic SQL. DuckDB supports arbitrary and nested correlated subqueries, window functions, collations, complex types (arrays, structs, maps), and [several extensions designed to make SQL easier to use](https://duckdb.org/docs/current/sql/dialect/friendly_sql.html).
-
-DuckDB is available as a [standalone CLI application](https://duckdb.org/docs/current/clients/cli/overview) and has clients for [Python](https://duckdb.org/docs/current/clients/python/overview), [R](https://duckdb.org/docs/current/clients/r), [Java](https://duckdb.org/docs/current/clients/java), [Wasm](https://duckdb.org/docs/current/clients/wasm/overview), etc., with deep integrations with packages such as [pandas](https://duckdb.org/docs/guides/python/sql_on_pandas) and [dplyr](https://duckdb.org/docs/current/clients/r#duckplyr-dplyr-api).
-
-For more information on using DuckDB, please refer to the [DuckDB documentation](https://duckdb.org/docs/current/).
-
-## Installation
-
-If you want to install DuckDB, please see [our installation page](https://duckdb.org/docs/installation/) for instructions.
-
-## Data Import
-
-For CSV files and Parquet files, data import is as simple as referencing the file in the FROM clause:
-
-```sql
-SELECT * FROM 'myfile.csv';
-SELECT * FROM 'myfile.parquet';
-```
-
-Refer to our [Data Import](https://duckdb.org/docs/current/data/overview) section for more information.
-
-## SQL Reference
-
-The documentation contains a [SQL introduction and reference](https://duckdb.org/docs/current/sql/introduction).
-
-## Development
-
-For development, DuckDB requires [CMake](https://cmake.org), Python 3 and a `C++17` compliant compiler. In the root directory, run `make` to compile the sources. For development, use `make debug` to build a non-optimized debug version. You should run `make unit` and `make allunit` to verify that your version works properly after making changes. To test performance, you can run `BUILD_BENCHMARK=1 BUILD_TPCH=1 make` and then perform several standard benchmarks from the root directory by executing `./build/release/benchmark/benchmark_runner`. The details of benchmarks are in our [Benchmark Guide](benchmark/README.md).
-
-Please also refer to our [Build Guide](https://duckdb.org/docs/current/dev/building/overview) and [Contribution Guide](CONTRIBUTING.md).
-
-## Support
-
-See the [Support Options](https://duckdblabs.com/support/) page and the dedicated [`endoflife.date`](https://endoflife.date/duckdb) page.
+DuckDB's upstream attribution and third-party notices remain intact. See
+[`LICENSE`](LICENSE), [`CITATION.cff`](CITATION.cff), and the component licenses.

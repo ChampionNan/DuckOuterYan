@@ -671,6 +671,25 @@ class PlotSpeedupLoadTest(unittest.TestCase):
 
 
 class PlotSpeedupPhaseTest(unittest.TestCase):
+    def test_display_labels_preserve_statistics_family_keys(self):
+        self.assertEqual(PLOT.figure_family_label("graph"), "SGPB")
+        self.assertEqual(PLOT.figure_family_label("Graph"), "SGPB")
+        self.assertEqual(PLOT.figure_family_label("TPC-H"), "TPC-H")
+        self.assertEqual(PLOT.normalize_family("graph"), "Graph")
+        self.assertIn("G=SGPB", PLOT.QUERY_CODE_KEY)
+        self.assertEqual(
+            [label for label, _, _, _ in PLOT.PHASES],
+            ["Round 1", "Round 2", "Round 3", "Other OP"],
+        )
+
+    def test_sgpb_label_in_phase_figure(self):
+        frame = pd.DataFrame([self.phase_row("graph_chain4_ld", "graph", 2.0, 3.0)])
+        captured = []
+        with mock.patch.object(PLOT, "save_page", side_effect=lambda _, fig: captured.append(fig)):
+            PLOT.page_phase(object(), frame, "test")
+        self.assertIn("SGPB", [text.get_text() for text in captured[0].axes[0].texts])
+        plt.close(captured[0])
+
     def test_requested_footer_lines_are_absent_from_both_figures(self):
         frame = pd.DataFrame([dict(self.phase_row("q", "JOB", 10, 3), timing_threads=8)])
         figures = []
@@ -699,13 +718,38 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
             rows.append(dict(rows[-1], query="slow", tm_off=.99, tm_on=1))
             rows.append(dict(rows[-1], query="invalid", tm_off=float("nan")))
         frame = pd.DataFrame(rows)
-        sampled = PLOT.diverse_phase_samples(frame, 5)
+        sampled = PLOT.diverse_phase_samples(frame, 5, max_other_share=1.0)
         self.assertEqual(sampled.groupby("family").size().to_dict(), {f: 5 for f in PLOT.FAMILY_ORDER})
         self.assertTrue((sampled.tm_off / sampled.tm_on).ge(1).all())
         for family in PLOT.FAMILY_ORDER:
             self.assertEqual(set(sampled.loc[sampled.family.eq(family), "query"]), {f"q{i}" for i in range(5)})
-        shuffled = PLOT.diverse_phase_samples(frame.sample(frac=1, random_state=42), 5)
+        shuffled = PLOT.diverse_phase_samples(frame.sample(frac=1, random_state=42), 5, max_other_share=1.0)
         self.assertEqual(sampled[["family", "query"]].values.tolist(), shuffled[["family", "query"]].values.tolist())
+
+    def test_phase_display_prefers_low_other_and_keeps_four_stable_ids(self):
+        rows = []
+        for family in PLOT.FAMILY_ORDER:
+            others = [2, 5.4, 5.8, 6.3, 8.6] if family == "graph" else [1, 2, 3, 5, 8.4]
+            for index, other in enumerate(others):
+                row = dict(self.phase_row(f"q{index}", family, 10, 2), timing_threads=8,
+                           short_query=f"original-{family}-{index}")
+                for (_, seconds, ratio, _), value in zip(PLOT.PHASES, [0, 0, 10-other, other]):
+                    row[seconds], row[ratio] = value, value / 10
+                rows.append(row)
+        frame = pd.DataFrame(rows)
+        original = frame.copy(deep=True)
+        sampled = PLOT.diverse_phase_samples(frame)
+        self.assertEqual(sampled.groupby("family").size().to_dict(), {f: 4 for f in PLOT.FAMILY_ORDER})
+        self.assertNotIn("q4", sampled["query"].values)
+        self.assertTrue(sampled.loc[sampled.family.ne("graph"), "profile_other_ratio"].le(.5).all())
+        self.assertTrue(sampled.loc[sampled.family.eq("graph"), "_phase_other_limit_relaxed"].all())
+        self.assertTrue(sampled.short_query.str.startswith("original-").all())
+        shuffled = PLOT.diverse_phase_samples(frame.sample(frac=1, random_state=42))
+        self.assertEqual(sampled.short_query.tolist(), shuffled.short_query.tolist())
+        pd.testing.assert_frame_equal(frame, original)
+        for value in (-.1, 1.1, float("nan")):
+            with self.assertRaisesRegex(ValueError, "share limit"):
+                PLOT.diverse_phase_samples(frame, max_other_share=value)
 
     def test_short_phase_seconds_are_not_rounded_to_zero(self):
         self.assertEqual(PLOT.format_seconds_label(0.004174538), "0.0042s")
@@ -996,6 +1040,8 @@ class PlotSpeedupBenchmarkPageTest(unittest.TestCase):
             PLOT.page_speedup_scatter(object(), frame, "test", "tm")
         axis = captured[0].axes[1]
         self.assertIn("1000×", [tick.get_text() for tick in axis.get_xticklabels()])
+        self.assertEqual([tick.get_text() for tick in axis.get_yticklabels()], ["SGPB"])
+        self.assertIn("SGPB", [text.get_text() for text in captured[0].legends[0].get_texts()])
         self.assertGreaterEqual(axis.get_xlim()[1], math.log10(7743.112))
         plt.close(captured[0])
 
@@ -1537,15 +1583,17 @@ class PaperStatisticsTest(unittest.TestCase):
         # Historical definitions remain resolvable after retirement/replacement;
         # composition counts must use active identities rather than that union.
         active = pd.read_csv(PLOT.SCRIPT_DIR / "outerjoin_benchmark/benchmark/manifest.csv")
+        self.assertEqual(len(active), 350)
         provenance = provenance[provenance["query_id"].isin(active["query_id"])]
         self.assertEqual(len(provenance), len(active))
         provenance = provenance[provenance["filter_design_revision"].isin(
             ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1",
              "tpch-query-tuning-20261012"])]
         counts = provenance["workload_component"].value_counts().to_dict()
-        self.assertEqual(counts, {"structural": 462, "evaluation": 196})
+        # Frozen 350-query cohort; the revision filter above covers 301 identities.
+        self.assertEqual(counts, {"structural": 219, "evaluation": 82})
         capped = provenance[provenance["graph_filter_revision"].eq("inputcap1")]
-        self.assertEqual(len(capped), 172)
+        self.assertEqual(len(capped), 67)
         self.assertTrue(capped["input_filter_placement"].eq("base_relation_subquery").all())
         self.assertTrue(capped["input_filter_profiles_json"].map(lambda value: len(json.loads(value)) in (3, 4)).all())
         stress = PLOT.benchmark_provenance().loc[lambda frame: frame["workload_category"].eq("v3_selectivity_stress") & frame["filter_design_revision"].notna()]

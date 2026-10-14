@@ -8,12 +8,13 @@ import unittest
 import balanced_benchmark as b
 from benchmark_corpus import resolve_sql_path
 import tpch_tuning_promotion as promotion
+import benchmark_plan_cohort as cohort
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
 class TpchPromotionTests(unittest.TestCase):
     def test_exact_frozen_members_and_preserved_slots(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         with forbid_result_access():
             rows = b.validate(corpus)
             original, old_paths, path_map = promotion.validate(corpus, rows)
@@ -36,7 +37,7 @@ class TpchPromotionTests(unittest.TestCase):
                          promotion.policy()["prior_manifest_sha256"])
 
     def test_regeneration_of_promoted_stage_needs_no_results(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         rows = b.read_manifest(corpus / "manifest.csv")
         original, old_paths, _ = promotion.validate(corpus, rows)
         with tempfile.TemporaryDirectory(prefix="tpch-promotion-test-") as tmp:
@@ -53,7 +54,7 @@ class TpchPromotionTests(unittest.TestCase):
             self.assertFalse(set((stage / "sample.txt").read_text().splitlines()).intersection(old_paths))
 
     def test_validation_rejects_mutation_and_stale_query_list(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         with tempfile.TemporaryDirectory(prefix="tpch-promotion-test-") as tmp:
             stage = Path(tmp) / "benchmark"
             shutil.copytree(corpus, stage)

@@ -2,74 +2,73 @@
   "revision": "balanced-screened-20261002",
   "status": "CANDIDATES_ONLY_NOT_MEASURED",
   "batch": 0,
-  "target_host": "cpu9:/home/data/bchenba/DuckYanOuter",
   "counts": {
-    "graph": 172,
-    "job": 166,
-    "tpcds": 206,
-    "tpch": 176
+    "graph": 67,
+    "job": 109,
+    "tpcds": 87,
+    "tpch": 87
   },
   "balanced_counts": {
-    "graph": 172,
-    "tpch": 176,
-    "tpcds": 144,
-    "job": 166
+    "graph": 67,
+    "job": 109,
+    "tpcds": 41,
+    "tpch": 87
   },
   "base_matrix_complete": false,
   "recovery_counts": {
-    "tpcds": 47
+    "tpcds": 38
   },
   "extension_counts": {
-    "tpcds": 15
+    "tpcds": 8
   },
   "supplementary_counts": {},
   "family_tiers": {
     "graph": {
-      "medium": 60,
-      "high": 60,
-      "low": 52
+      "medium": 29,
+      "high": 24,
+      "low": 14
     },
     "tpch": {
-      "high": 59,
-      "low": 58,
-      "medium": 59
+      "high": 29,
+      "low": 29,
+      "medium": 29
     },
     "tpcds": {
-      "high": 66,
-      "low": 73,
-      "medium": 67
+      "high": 27,
+      "low": 32,
+      "medium": 28
     },
     "job": {
-      "medium": 58,
-      "high": 56,
-      "low": 52
+      "medium": 39,
+      "high": 37,
+      "low": 33
     }
   },
   "family_shapes": {
     "graph": {
-      "bushy": 57,
-      "left_deep": 57,
-      "right_deep": 58
+      "bushy": 20,
+      "left_deep": 26,
+      "right_deep": 21
     },
     "tpch": {
-      "bushy": 57,
-      "left_deep": 59,
-      "right_deep": 60
+      "bushy": 32,
+      "right_deep": 29,
+      "left_deep": 26
     },
     "tpcds": {
-      "left_deep": 75,
-      "right_deep": 82,
-      "bushy": 49
+      "left_deep": 37,
+      "right_deep": 36,
+      "bushy": 14
     },
     "job": {
-      "right_deep": 53,
-      "bushy": 54,
-      "left_deep": 59
+      "right_deep": 38,
+      "bushy": 39,
+      "left_deep": 32
     }
   },
   "graph_relation_counts": {
-    "5": 51,
-    "4": 121
+    "4": 40,
+    "5": 27
   },
   "graph_relation_weights": {
     "4": 7,
@@ -80,7 +79,7 @@
   "historical_exclusion_observations": 138,
   "tpcds_refresh": {
     "revision": "tpcds-recovery-20261005",
-    "policy_sha256": "65a230b07b06a41f91eb953151f7d183c131b31efff8b7077826b154e2d525f0",
+    "policy_sha256": "2d62a96448703afd1c943f97bf0c8fbe8e96b406a361151f6b196999263fa3c3",
     "target_complete_pairs": 50,
     "retained_previous_measured_pairs": 7,
     "new_candidates": 54,
@@ -96,7 +95,7 @@
   },
   "speedup_screen": {
     "revision": "graph-job-speedup-screen-20261008",
-    "policy_sha256": "f060bfeafd3dafd152f4c1e30257fb670c269932202fff557b8d77e07bed0183",
+    "policy_sha256": "d18b70219c0b7fc9566c96eee4ea87ac1cc6c66129a8c5430d35916c81d22e4d",
     "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
     "source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74",
     "evidence_sources": [
@@ -110,8 +109,7 @@
       },
       {
         "source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
-        "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564",
-        "correctness_check": "disabled"
+        "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564"
       }
     ],
     "rules": {
@@ -147,7 +145,7 @@
   },
   "tpcds_extension": {
     "revision": "tpcds-selectivity-extension-20261008-r2",
-    "policy_sha256": "93305dac184c80ec1a491260a56ef87b62fd6ba85a9c47aae7cf751f43dcce7f",
+    "policy_sha256": "b1258f8a146d8c4dd325ac6b54c6a0dd509a601978b0039d8a5eb843f709d262",
     "target_complete_pairs": 50,
     "new_candidates": 15,
     "status": "PENDING_CPU9_MEASUREMENT",
@@ -443,7 +441,7 @@
   },
   "retirements": {
     "revision": "exact-query-retirements-20261009",
-    "policy_sha256": "8b7352ea64afad7b4ad1fd1eed2ad7d1e505d8fdb7456445d357913b739faa9b",
+    "policy_sha256": "135be94fdc7a11742e6b38c9278967a251a98e81f8a26cbbc2710a9d832501dd",
     "counts": {
       "graph": 175,
       "job": 166,
@@ -472,7 +470,7 @@
     "revision": "graph-dataset-extension-20261010",
     "replaced_queries": 3,
     "candidate_manifest_sha256": "2e17cf3d28d3a8795fd8effd6c579b41fffead332e99244532e63eca4a6a5daf",
-    "policy_sha256": "96f34dc869ea825941d4c7fdb464da60f8720b49d38d0feb853cb6d762fd7678",
+    "policy_sha256": "91ced5cf66c8391a6337f22c04554d71bb78040edbb1663e352a183d8b0debc8",
     "timeout_retirements": {
       "revision": "graph-timeout-retirements-20261011",
       "reason": "User-requested exact-instance retirement after CPU8 observed OuterYan timeouts. This is outcome-conditioned workload curation, not evidence of an optimizer improvement. Other tiers are unchanged.",
@@ -488,22 +486,14 @@
           "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_low.sql",
           "family": "graph",
           "content_sha256": "7e08923ccb8d2160f26070261aa6ee332395b3245d31ff0bad2c11c36c587759",
-          "sql_fingerprint": "9db6e5b9c3664811e8ca8085749cdd6b56d544a6112cd4d1e1e3d298a4b67e6b",
-          "duckdb_median_seconds": 510.7651601,
-          "duckdb_status": "measured",
-          "outeryan_status": "timeout",
-          "outeryan_timeout_stage": "profile"
+          "sql_fingerprint": "9db6e5b9c3664811e8ca8085749cdd6b56d544a6112cd4d1e1e3d298a4b67e6b"
         },
         {
           "query_id": "graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low",
           "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low.sql",
           "family": "graph",
           "content_sha256": "07cc4a4b21ae775872497d48dc5f09d7f0874c5454c9261e0a96a4ca03cb7081",
-          "sql_fingerprint": "591296ddd5410d1d21d29f882cb3e8ced29fd4875474c2ea5b0a3eab806b13b6",
-          "duckdb_median_seconds": 527.059898653,
-          "duckdb_status": "measured",
-          "outeryan_status": "timeout",
-          "outeryan_timeout_stage": "kernel"
+          "sql_fingerprint": "591296ddd5410d1d21d29f882cb3e8ced29fd4875474c2ea5b0a3eab806b13b6"
         }
       ]
     },
@@ -514,7 +504,7 @@
   },
   "tpch_tuning_promotion": {
     "revision": "tpch-tuning-promotion-20261013",
-    "policy_sha256": "c57b4b1dca516a50c543b7a4b5fdbf7a0602be6330e13731eae33b11bfa55c21",
+    "policy_sha256": "d6f7c154e575f78a93e9c05cea5eed904c6e44f0075523116913e6c578bca00f",
     "replaced_queries": 20,
     "selected_slots": [
       "A-H-B-04",
@@ -541,7 +531,43 @@
     "selection_disclosure": "Post-hoc, performance-conditioned workload selection approved by the user. Starting with all 14 predicate-only candidates, 64 combinations of six complete candidate pattern groups were compared against a requested overall geometric mean near 1.849. The two complete Q5 groups were selected. This changes workload instances; it is not an optimizer-code improvement or an independently selected evaluation cohort.",
     "generation_rule": "Always use these 20 exact SQL definitions. Never read result files, search subsets, enforce a geometric-mean target, or select the fastest run during generation."
   },
-  "design_sha256": "ede3b978852b3245fa17586accb246cfbcaee068ec67e77cb0aebccf97f61484",
-  "exclusions_sha256": "8970f046f68583e7c853624d6bcb284df25d69a6507df5fc9cd3939c1a64dc32",
+  "job_selectivity_update": {
+    "revision": "job-selectivity-20261014",
+    "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_count",
+    "policy_sha256": "22142245cdc0d29227794b2ed558cc763276651b0a9b1d419eaff95adc6a6783",
+    "content_sha256": "afdd28339105307e1f1f1966c350ddc33e44f4bc7f031cde91ab2b615361e7ef"
+  },
+  "tpch_selectivity_update": {
+    "revision": "tpch-selectivity-update-20261014",
+    "policy_sha256": "cb5fc1b2de555a0bf522290fc02d631a36093eb307618253ecdb8be1131838cf",
+    "query_ids": [
+      "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+      "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_high"
+    ]
+  },
+  "plan_cohort": {
+    "revision": "selected-plus-cost-controls-20261014",
+    "policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90",
+    "counts": {
+      "graph": 67,
+      "job": 109,
+      "tpcds": 87,
+      "tpch": 87
+    },
+    "selected": 285,
+    "cost_controls": 65,
+    "removed": 370,
+    "retired_both_timeouts": 21,
+    "reporting_rule": {
+      "fallback_speedup": 1.0,
+      "duckdb_only_timeout_seconds": 600,
+      "outeryan_timeout": "exclude",
+      "both_timeout": "remove_from_benchmark",
+      "raw_measurements": "preserve",
+      "capped_speedup": "timeout_limit_proxy_not_measured"
+    }
+  },
+  "design_sha256": "ac14aed0d5e5b683b920cea7b49a478039e6a61496a712790e3db4d4327cd24d",
+  "exclusions_sha256": "be9716ea0d4827cba6caf5be7ad5c54485fe0c01d41ad64dbe74960b48cd1ef7",
   "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."
 }

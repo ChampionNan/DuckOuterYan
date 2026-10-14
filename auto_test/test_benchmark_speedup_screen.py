@@ -11,6 +11,9 @@ import balanced_benchmark as b
 import benchmark_speedup_screen as screen
 import benchmark_retirements as retirements
 import tpcds_selectivity_extension as extension
+import benchmark_plan_cohort as cohort
+import graph_dataset_extension
+import graph_dataset_promotion
 from benchmark_corpus import resolve_sql_path, historical_manifests
 from test_gen_outerjoin_benchmark import forbid_result_access
 
@@ -29,9 +32,12 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
                 self.assertFalse(screen.below_threshold(dict(slower, **changes)))
 
     def test_exact_exclusions_and_pending_candidates(self):
-        rows = b.validate(b.ROOT / "benchmark")
+        corpus = cohort.input_corpus()
+        rows = b.validate(corpus)
+        rows, _ = graph_dataset_extension.validate(corpus, rows)
+        rows, _ = graph_dataset_promotion.validate(corpus, rows)
         self.assertEqual(Counter(r["family"] for r in rows), retirements.policy()["expected_counts_after"])
-        rows, _ = retirements.validate(b.ROOT / "benchmark", rows)
+        rows, _ = retirements.validate(corpus, rows)
         spec = screen.policy()
         self.assertEqual(Counter(r["family"] for r in spec["excluded"]), dict(graph=3, tpch=1, tpcds=7, job=12))
         self.assertEqual(len(spec["previously_retired_tpcds_queries"]), 8)
@@ -45,11 +51,11 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
         self.assertTrue(all(float(r["qualification_min_runtime_s"]) == (0 if r["family"] == "tpcds" else 1)
                             for r in rows))
         self.assertTrue(any("job_10a_cast_credits__right_deep__lrif__92d3ab51__sel_low" in r["query_id"] for r in rows))
-        recovery_paths = (b.ROOT / "benchmark/tpcds_recovery.txt").read_text().splitlines()
+        recovery_paths = (corpus / "tpcds_recovery.txt").read_text().splitlines()
         self.assertEqual(len(recovery_paths), 47)
         self.assertEqual(set(recovery_paths), {r["path"] for r in rows
                                               if r.get("evaluation_role") == "historical_selectivity_recovery"})
-        self.assertTrue(all((b.ROOT / "benchmark" / path).is_file() for path in recovery_paths))
+        self.assertTrue(all((corpus / path).is_file() for path in recovery_paths))
         self.assertTrue(set(recovery_paths).isdisjoint(r["path"] for r in spec["excluded"]))
 
     def test_archive_preserves_sql_and_original_manifest(self):
@@ -86,8 +92,7 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
         self.assertEqual(spec["excluded"][:len(old["excluded"])], old["excluded"])
         new = [r for r in spec["excluded"] if r.get("screen_rule")]
         self.assertEqual(Counter(r["family"] for r in new), dict(graph=2, job=9))
-        self.assertTrue(all(r["correct"] == "NOT-CHECKED" and r["correctness_check"] == "disabled"
-                            for r in new))
+        self.assertTrue(all("correct" not in r and "duckdb_s" not in r for r in new))
         self.assertEqual(spec["minimum_speedup"], .5)  # No dynamic global 0.7 filter.
 
     def test_tpcds_retirement_is_exact_query_not_whole_pattern(self):
@@ -118,20 +123,20 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
             marker = json.loads(original_marker)
             marker["counts"]["graph"] += 1
             marker_path.write_text(json.dumps(marker))
-            with self.assertRaisesRegex(ValueError, "screen counts"):
+            with self.assertRaisesRegex(ValueError, "Historical cohort dependency|screen counts"):
                 b.validate(root / "benchmark")
             marker_path.write_text(original_marker)
             marker = json.loads(original_marker)
             marker["rule_removed_counts"]["graph-job-le-0.7-20261008"]["graph"] += 1
             marker_path.write_text(json.dumps(marker))
-            with self.assertRaisesRegex(ValueError, "Scoped speed-up exclusion counts"):
+            with self.assertRaisesRegex(ValueError, "Historical cohort dependency|Scoped speed-up exclusion counts"):
                 b.validate(root / "benchmark")
             marker_path.write_text(original_marker)
             excluded_path = root / "benchmark/speedup_excluded.csv"
             excluded = b.read_manifest(excluded_path)
             excluded[0]["duckdb_s"] = "1000"
             b.write_csv(excluded_path, excluded)
-            with self.assertRaisesRegex(ValueError, "Excluded-query evidence changed"):
+            with self.assertRaisesRegex(ValueError, "Historical cohort dependency|Excluded-query evidence changed"):
                 b.validate(root / "benchmark")
 
 

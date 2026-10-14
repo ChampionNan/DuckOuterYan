@@ -6,7 +6,13 @@
   "expected_queries": 3,
   "maximum_reference_runtime_s": 0.2,
   "selection": "Three exact short-running queries requested by the user; not selected by speed-up.",
-  "dataset_identity": {"n": 508837, "sum_src": "6077109843", "sum_dst": "5363312929", "source_vertices": 60341, "destination_vertices": 51957},
+  "dataset_identity": {
+    "n": 508837,
+    "sum_src": "6077109843",
+    "sum_dst": "5363312929",
+    "source_vertices": 60341,
+    "destination_vertices": 51957
+  },
   "replacements": [
     {
       "query_id": "graph__graph__graph_chain4_converging__right_deep__fri__cf59d112__inputcap1__sel_medium",
@@ -14,8 +20,8 @@
       "family": "graph",
       "content_sha256": "fdfdf8e8542c0e5737417594662599d768983a86ad63dd9f80d54589c65554fd",
       "sql_fingerprint": "36c9394b7e96f527de3b7095aa3d5ca75d111dd6e9206c3de49823d16bd90ace",
-      "semantic_tier": "medium", "relation_count": "4",
-      "reference_duckdb_s": 0.103856342, "reference_outeryan_s": 0.083869075
+      "semantic_tier": "medium",
+      "relation_count": "4"
     },
     {
       "query_id": "graph__graph__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_low",
@@ -23,8 +29,8 @@
       "family": "graph",
       "content_sha256": "e20d1a65c5d9997b0559fa30d48195e425b5111250d1f0cd6a17b944c24bcac9",
       "sql_fingerprint": "7b11a4a500ef0fc26b0aa381e5d90d194564186df4628929d285d6d46a0dd6ac",
-      "semantic_tier": "low", "relation_count": "4",
-      "reference_duckdb_s": 0.113782261, "reference_outeryan_s": 0.112636655
+      "semantic_tier": "low",
+      "relation_count": "4"
     },
     {
       "query_id": "graph__graph__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low",
@@ -32,8 +38,9 @@
       "family": "graph",
       "content_sha256": "b2c408039587930224d17488a6374492f80874dcdd889b479a55433361e025c3",
       "sql_fingerprint": "a391d9882f23bc26f88d2c466c8019d252c60292e14edc2e77ad57fc0b4449a9",
-      "semantic_tier": "low", "relation_count": "4",
-      "reference_duckdb_s": 0.160758163, "reference_outeryan_s": 0.143861113
+      "semantic_tier": "low",
+      "relation_count": "4"
     }
-  ]
+  ],
+  "representation": "frozen_workload_definition"
 }

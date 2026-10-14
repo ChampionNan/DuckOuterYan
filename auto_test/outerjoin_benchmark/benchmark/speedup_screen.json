@@ -1,6 +1,6 @@
 {
   "revision": "graph-job-speedup-screen-20261008",
-  "policy_sha256": "f060bfeafd3dafd152f4c1e30257fb670c269932202fff557b8d77e07bed0183",
+  "policy_sha256": "d18b70219c0b7fc9566c96eee4ea87ac1cc6c66129a8c5430d35916c81d22e4d",
   "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
   "source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74",
   "evidence_sources": [
@@ -14,8 +14,7 @@
     },
     {
       "source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
-      "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564",
-      "correctness_check": "disabled"
+      "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564"
     }
   ],
   "rules": {

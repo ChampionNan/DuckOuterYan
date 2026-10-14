@@ -17,6 +17,9 @@ from benchmark_corpus import count_base_relations, historical_manifests, resolve
 import qualify_benchmark as q
 import tpcds_refresh as refresh
 import tpcds_selectivity_extension as extension
+import benchmark_plan_cohort as cohort
+import graph_dataset_extension
+import graph_dataset_promotion
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
@@ -34,8 +37,11 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
                 self.assertFalse(extension.historical_eligible(dict(evidence, **change), .9))
 
     def original_rows(self):
-        return [r for r in b.read_manifest(b.ROOT / "benchmark/manifest.csv")
-                if not extension.is_extension(r)]
+        corpus = cohort.input_corpus()
+        rows = b.read_manifest(corpus / "manifest.csv")
+        rows, _ = graph_dataset_extension.validate(corpus, rows)
+        rows, _ = graph_dataset_promotion.validate(corpus, rows)
+        return [r for r in rows if not extension.is_extension(r)]
 
     def test_old_recovery_builder_is_unchanged(self):
         recorded = {r["query_id"]: r for r in self.original_rows()
@@ -252,8 +258,8 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
             self.assertEqual(audit["historical_cases_outside_band_audit"], [])
 
     def test_regeneration_preserves_screened_sql_and_never_reads_results(self):
-        original = self.original_rows()
         corpus = b.ROOT / "benchmark"
+        original = [r for r in b.read_manifest(corpus / "manifest.csv") if not extension.is_extension(r)]
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()), forbid_result_access():
             root = Path(tmp)
             b.generate(root)
@@ -263,9 +269,17 @@ class TPCDSSelectivityExtensionTest(unittest.TestCase):
             for row in original:
                 self.assertEqual((generated / row["path"]).read_bytes(), (corpus / row["path"]).read_bytes())
             import benchmark_retirements
-            restored, _ = benchmark_retirements.validate(generated, b.validate(generated))
-            before = extension.validate(generated, restored)
-            self.assertEqual([r for r in before if r["query_id"] in {x["query_id"] for x in original}], original)
+            # Validate this earlier transformation against its complete input,
+            # before the subsequent graph promotions and plan-cohort selection.
+            predecessor = cohort.input_corpus()
+            restored = b.validate(predecessor)
+            restored, _ = graph_dataset_extension.validate(predecessor, restored)
+            restored, _ = graph_dataset_promotion.validate(predecessor, restored)
+            restored, _ = benchmark_retirements.validate(predecessor, restored)
+            before = extension.validate(predecessor, restored)
+            historical_original = self.original_rows()
+            self.assertEqual([r for r in before if r["query_id"] in {x["query_id"] for x in historical_original}],
+                             historical_original)
             self.assertEqual(len(before), sum(screen.policy()["expected_counts_after"].values()))
             b.generate(root)
             self.assertEqual(manifest, (generated / "manifest.csv").read_bytes())

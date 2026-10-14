@@ -17,6 +17,7 @@ import benchmark_retirements as retirements
 import graph_dataset_promotion as promotion
 import graph_dataset_extension as graph_extension
 import tpcds_selectivity_extension as extension
+import benchmark_plan_cohort as cohort
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
@@ -27,14 +28,15 @@ class BalancedBenchmarkTest(unittest.TestCase):
         cls.evidence = json.loads(b.EVIDENCE.read_text())
         cls.groups = b.candidate_rows(cls.design, cls.evidence)
 
-    def test_active_matrix_and_mixed_kinds(self):
-        rows = b.validate(b.ROOT / "benchmark")
+    def test_pre_cohort_matrix_and_mixed_kinds(self):
+        corpus = cohort.input_corpus()
+        rows = b.validate(corpus)
         expected = dict(retirements.policy()["expected_counts_after"], graph=172)
         self.assertEqual(len(rows), sum(expected.values()))
         self.assertEqual(Counter(r["family"] for r in rows), expected)
-        before_promotion, _ = graph_extension.validate(b.ROOT / "benchmark", rows)
-        before_retirement, _ = promotion.validate(b.ROOT / "benchmark", before_promotion)
-        before_retirement, _ = retirements.validate(b.ROOT / "benchmark", before_retirement)
+        before_promotion, _ = graph_extension.validate(corpus, rows)
+        before_retirement, _ = promotion.validate(corpus, before_promotion)
+        before_retirement, _ = retirements.validate(corpus, before_retirement)
         before_screen = [r for r in before_retirement if not extension.is_extension(r)] + screen.policy()["excluded"]
         self.assertEqual(Counter((r["family"], r["semantic_tier"], r["tree_shape"]) for r in before_screen if r["family"] != "tpcds"),
                          {(f, t, s):20 for f in ("graph", "tpch", "job") for t in b.TIERS for s in b.SHAPES})
@@ -229,7 +231,9 @@ class QualificationTest(unittest.TestCase):
             self.assertEqual(report["selected"], 0)
             self.assertTrue(all(c["shortage"] == 60 for c in report["coverage"]))
             self.assertTrue(all(s["geomean"] is None for s in report["statistics"].values()))
-            self.assertEqual(report["balanced_candidates"], sum(retirements.policy()["expected_counts_after"].values()) - 3)
+            expected_count = (sum(cohort.policy()["expected_counts_after"].values()) if cohort.POLICY.exists()
+                              else sum(retirements.policy()["expected_counts_after"].values()) - 3)
+            self.assertEqual(report["balanced_candidates"], expected_count)
             self.assertEqual(report["historical_supplementary_candidates"], 0)
             self.assertEqual(report["historical_supplementary_observations"], 0)
             self.assertEqual(report["qualification_timeout_seconds"], 600)

@@ -45,6 +45,18 @@ class RunAllSelectionTest(unittest.TestCase):
             ).lstrip(),
             encoding="utf-8",
         )
+        for name, kind in (("verify_benchmark_reproduction.py", "verify"),
+                           ("publish_plan_cohort.py", "publish")):
+            (self.scripts / name).write_text(
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['RUN_ALL_TEST_LOG'], 'a') as f:\n"
+                f"    f.write(json.dumps(dict(kind={kind!r}, args=args)) + '\\n')\n"
+                "if '--csv' in args and not pathlib.Path(args[args.index('--csv') + 1]).is_file():\n"
+                "    sys.exit(4)\n"
+                "if '--output-dir' in args:\n"
+                "    pathlib.Path(args[args.index('--output-dir') + 1]).mkdir(parents=True, exist_ok=True)\n",
+                encoding="utf-8")
         (self.scripts / "record_experiment.py").write_text(
             textwrap.dedent(
                 """
@@ -72,8 +84,10 @@ class RunAllSelectionTest(unittest.TestCase):
                         output = pathlib.Path(args[args.index(option) + 1])
                         output.parent.mkdir(parents=True, exist_ok=True)
                         output.write_text("ok\\n", encoding="utf-8")
-                        output.with_suffix(".csv").write_text("query\\n", encoding="utf-8")
+                        if not os.environ.get("TEST_MISSING_CSV"):
+                            output.with_suffix(".csv").write_text("query\\n", encoding="utf-8")
                         break
+                sys.exit(int(os.environ.get("TEST_EXPERIMENT_STATUS", "0")))
                 """
             ).lstrip(),
             encoding="utf-8",
@@ -107,7 +121,7 @@ class RunAllSelectionTest(unittest.TestCase):
         )
         env.update(overrides)
         return subprocess.run(
-            ["bash", str(self.scripts / "run_all.sh"), *args],
+            ["bash", str(self.scripts / "run_all.sh"), "--no-figures", *args],
             cwd=self.root,
             env=env,
             text=True,
@@ -120,10 +134,11 @@ class RunAllSelectionTest(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
-    def test_default_generates_and_runs_one_unique_corpus(self):
+    def test_default_uses_committed_queries_and_publishes_one_fresh_run(self):
         result = self.run_driver()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call["args"] for call in self.calls() if call["kind"] == "generate"], [[]])
+        self.assertFalse([call for call in self.calls() if call["kind"] == "generate"])
+        self.assertEqual([c["args"] for c in self.calls() if c["kind"] == "verify"], [["--validate-only"]])
         self.assertEqual(len([call for call in self.calls() if call["kind"] == "experiment"]), 1)
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertEqual((experiment["tpch_sf"], experiment["tpcds_sf"]), ("50", "50"))
@@ -131,7 +146,10 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual(Path(experiment["tpcds_db"]), self.root / "tpcds_50.duckdb")
         self.assertEqual(experiment["timeout_seconds"], "600")
         self.assertEqual(experiment["timing_runs"], "5")
-        self.assertEqual(experiment["check_correctness"], "1")
+        self.assertEqual(experiment["check_correctness"], "0")
+        published = next(c for c in self.calls() if c["kind"] == "publish")["args"]
+        self.assertEqual(Path(published[published.index("--csv") + 1]), Path(experiment["args"][-1]).with_suffix(".csv"))
+        self.assertNotIn("--latex", published)
 
     def test_measurement_options_are_forwarded(self):
         result = self.run_driver("--runs", "1", "--check-correctness")
@@ -173,7 +191,7 @@ class RunAllSelectionTest(unittest.TestCase):
     def test_query_type_is_forwarded_without_duplicate_generation(self):
         result = self.run_driver("--query-type", "aggregate", "--timeout", "600")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([call["args"] for call in self.calls() if call["kind"] == "generate"], [[]])
+        self.assertFalse([call for call in self.calls() if call["kind"] in ("generate", "publish")])
         experiment = next(call for call in self.calls() if call["kind"] == "experiment")
         self.assertIn("--query-type", experiment["args"])
         self.assertIn("aggregate", experiment["args"])
@@ -201,6 +219,62 @@ class RunAllSelectionTest(unittest.TestCase):
         result = self.run_driver(RUN_PGPLAN="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("PGPlan workflow has been removed", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_generation_is_explicit_and_verified(self):
+        result = self.run_driver("--generate-queries")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["kind"] for c in self.calls()], ["generate", "verify", "experiment", "publish"])
+        self.assertNotIn("--validate-only", self.calls()[1]["args"])
+        self.assertNotIn("--generate-queries", self.calls()[2]["args"])
+
+    def test_prepare_only_does_not_test_or_publish(self):
+        result = self.run_driver("--prepare-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["kind"] for c in self.calls()], ["generate", "verify"])
+
+    def test_report_only_does_not_generate_or_execute(self):
+        source = self.root / "new.csv"
+        source.touch()
+        result = self.run_driver("--report-only", "--csv", str(source), "--date", "20261014")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["kind"] for c in self.calls()], ["publish"])
+        self.assertIn(str(source), self.calls()[0]["args"])
+
+    def test_dry_run_and_help_have_no_stage_side_effects(self):
+        for option in ("--dry-run", "--help"):
+            result = self.run_driver(option)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.calls(), [])
+            self.assertFalse((self.scripts / "results").exists())
+
+    def test_no_history_substitution_and_experiment_failure_is_preserved(self):
+        result = self.run_driver(TEST_EXPERIMENT_STATUS="7")
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(self.calls()[-1]["kind"], "publish")
+        # Both stub runs may have the same second-resolution timestamp.
+        experiment = next(c for c in self.calls() if c["kind"] == "experiment")
+        Path(experiment["args"][-1]).unlink()
+        Path(experiment["args"][-1]).with_suffix(".csv").unlink()
+        result = self.run_driver(TEST_MISSING_CSV="1")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("no historical results substituted", result.stderr)
+
+    def test_full_thread_sweep_keeps_reports_separate(self):
+        result = self.run_driver("--threads", "16,32")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        publications = [c["args"] for c in self.calls() if c["kind"] == "publish"]
+        self.assertEqual([Path(a[a.index("--output-dir") + 1]).name for a in publications], ["t16", "t32"])
+
+    def test_explicit_correctness_environment_is_preserved(self):
+        result = self.run_driver(OY_CHECK_CORRECTNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        experiment = next(c for c in self.calls() if c["kind"] == "experiment")
+        self.assertEqual(experiment["check_correctness"], "1")
+
+    def test_report_only_local_history_dry_run(self):
+        result = self.run_driver("--report-only", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls(), [])
 
 

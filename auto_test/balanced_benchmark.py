@@ -190,7 +190,7 @@ def freeze_history(root=ROOT):
             sqlpath = (old / scope if scope else root / "revisions" / ARCHIVE / "benchmark") / row["sql_path"]
             sql = sqlpath.read_text(encoding="utf-8")
             excluded.append({"family": row["family"], "query": row["query"],
-                             "source_csv": path.name, "reason": reason, "speedup": speed,
+                             "source_csv": path.name, "reason": reason,
                              "sql_fingerprint": sql_fingerprint(sql, row["family"]),
                              "expression_fingerprint": expression_key(sql, row["family"]),
                              "sql_path": str(sqlpath.relative_to(root)),
@@ -254,7 +254,7 @@ def bootstrap_design(binary, root=ROOT):
         "target_per_family": TARGET, "target_per_family_tier": TARGET // 3,
         "timeout_seconds": QUALIFICATION_TIMEOUT_SECONDS, "minimum_runtime_each_engine_exclusive": 1,
         "minimum_speedup": .8, "target_host": "cpu9",
-        "target_repository": "/home/data/bchenba/DuckYanOuter",
+        "target_repository": ".",
         "eligibility": "Only measured pairs passing target-database selectivity audit; "
                        "correctness is verified or explicitly NOT-CHECKED with checks disabled. "
                        "New SQL is pending measurement, never assumed eligible.",
@@ -593,6 +593,13 @@ def generate(root=ROOT, per_family=180, batch=0):
             records = graph_dataset_extension.apply(records, output)
             import tpch_tuning_promotion
             records = tpch_tuning_promotion.apply(records, output)
+            import job_selectivity_update
+            records = job_selectivity_update.apply(records, output)
+            import tpch_selectivity_update
+            records = tpch_selectivity_update.apply(records, output)
+            import benchmark_plan_cohort
+            if benchmark_plan_cohort.POLICY.exists():
+                records = benchmark_plan_cohort.apply(records, output)
             balanced_records = [r for r in records if not tpcds_refresh.is_recovery(r)
                                 and not tpcds_selectivity_extension.is_extension(r) and not is_historical_case(r)]
         records.sort(key=lambda r:r["path"])
@@ -604,7 +611,7 @@ def generate(root=ROOT, per_family=180, batch=0):
             (output/filename).write_text("")
         write_json(output/"design_summary.json", {
             "revision": REVISION, "status": "CANDIDATES_ONLY_NOT_MEASURED", "batch": batch,
-            "target_host": "cpu9:/home/data/bchenba/DuckYanOuter", "counts": dict(Counter(r["family"] for r in records)),
+            "counts": dict(Counter(r["family"] for r in records)),
             "balanced_counts": dict(Counter(r["family"] for r in balanced_records)),
             "base_matrix_complete": not refreshed,
             "recovery_counts": dict(Counter(r["family"] for r in records
@@ -627,6 +634,9 @@ def generate(root=ROOT, per_family=180, batch=0):
             "graph_datasets": json.loads((output / "graph_dataset_promotion.json").read_text()) if refreshed else None,
             "graph_dataset_extension": json.loads((output / "graph_dataset_extension.json").read_text()) if refreshed else None,
             "tpch_tuning_promotion": json.loads((output / "tpch_tuning_promotion.json").read_text()) if refreshed else None,
+            "job_selectivity_update": json.loads((output / "job_selectivity_update.json").read_text()) if refreshed else None,
+            "tpch_selectivity_update": json.loads((output / "tpch_selectivity_update.json").read_text()) if refreshed else None,
+            "plan_cohort": json.loads((output / "plan_cohort.json").read_text()) if (output / "plan_cohort.json").exists() else None,
             "design_sha256": digest(DESIGN), "exclusions_sha256": digest(EVIDENCE),
             "selection": "No speed-ups invented; final eligibility and shortages require target-server measurements. "
                          "The primary TPC-DS refresh and all-family speed-up screen are performance-conditioned and change base quotas; historical timings are not reused."})
@@ -670,6 +680,9 @@ def generate(root=ROOT, per_family=180, batch=0):
 
 
 def validate(benchmark):
+    import benchmark_plan_cohort
+    if (benchmark / benchmark_plan_cohort.MARKER).exists():
+        return benchmark_plan_cohort.validate(benchmark)
     rows=read_manifest(benchmark/"manifest.csv")
     if not rows or {r["path"] for r in rows} != {str(p.relative_to(benchmark)) for p in benchmark.glob("*/*.sql")}:
         raise ValueError("Manifest does not match the active SQL file set")
@@ -746,18 +759,26 @@ def validate(benchmark):
         import graph_dataset_promotion
         import graph_dataset_extension
         import tpch_tuning_promotion
-        before_tpch, tpch_paths, tpch_path_map = tpch_tuning_promotion.validate(benchmark, rows)
+        import job_selectivity_update
+        import tpch_selectivity_update
+        before_selectivity, selectivity_paths = tpch_selectivity_update.validate(benchmark, rows)
+        before_job, job_paths = job_selectivity_update.validate(benchmark, before_selectivity)
+        before_tpch, tpch_paths, tpch_path_map = tpch_tuning_promotion.validate(benchmark, before_job)
         before_extension_graph, extension_paths = graph_dataset_extension.validate(benchmark, before_tpch)
         before_promotion, replaced_paths = graph_dataset_promotion.validate(benchmark, before_extension_graph)
         replaced_paths.update(extension_paths)
         before_retirement, retired_paths = benchmark_retirements.validate(benchmark, before_promotion)
         retired_paths.update(replaced_paths)
         retired_paths.update(tpch_paths)
+        retired_paths.update(job_paths)
+        retired_paths.update(selectivity_paths)
         promoted_paths = {r["graph_dataset_source_query"]: r["path"] for r in rows
                           if r.get("graph_dataset") == "epinions"}
         path_replacements = {r["path"]: promoted_paths[r["query_id"]]
                              for r in before_promotion if r["query_id"] in promoted_paths}
         path_replacements.update(tpch_path_map)
+        path_replacements.update({p: p for p in job_paths})
+        path_replacements.update({p: p for p in selectivity_paths})
         aggregate_count_refresh.validate(benchmark, before_retirement, retired_paths, path_replacements)
         before_extension = tpcds_selectivity_extension.validate(benchmark, before_retirement)
         before_screen = benchmark_speedup_screen.validate(benchmark, before_extension)

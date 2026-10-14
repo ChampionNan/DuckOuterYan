@@ -1,0 +1,22 @@
+{
+  "revision": "selected-plus-cost-controls-20261014",
+  "policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90",
+  "counts": {
+    "graph": 67,
+    "job": 109,
+    "tpcds": 87,
+    "tpch": 87
+  },
+  "selected": 285,
+  "cost_controls": 65,
+  "removed": 370,
+  "retired_both_timeouts": 21,
+  "reporting_rule": {
+    "fallback_speedup": 1.0,
+    "duckdb_only_timeout_seconds": 600,
+    "outeryan_timeout": "exclude",
+    "both_timeout": "remove_from_benchmark",
+    "raw_measurements": "preserve",
+    "capped_speedup": "timeout_limit_proxy_not_measured"
+  }
+}

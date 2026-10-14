@@ -1,0 +1,16 @@
+{
+  "revision": "graph-dataset-promotion-20261010",
+  "replaced_queries": 16,
+  "dataset_counts": {
+    "bitcoin": 159,
+    "epinions": 15
+  },
+  "retired_queries": [
+    "aggregate__graph__epinions__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_low__grouped_count"
+  ],
+  "retirement_reason": "User requested removal after reviewing the unusual predicates; SQL retained in the frozen retest archive",
+  "candidate_manifest_sha256": "0d41aea482115c47bd535556ea78a7e3a16a0e20c51fa998149475880fbd54c2",
+  "policy": "All 16 frozen short-query candidates adopted, including timeout and fallback outcomes",
+  "result_csv": "experiment_onoff_graph_epinions_20261010_005733_t32.csv",
+  "result_csv_sha256": "5b054ef96e1dc6a4cbe4329f5919d6abebd98d31563eef4d415b766e1b654e05"
+}

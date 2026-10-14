@@ -3,7 +3,7 @@ from collections import Counter
 import json
 
 import balanced_benchmark as b
-from benchmark_speedup_screen import below_threshold
+from workload_policy import validate_pins
 
 POLICY = b.ROOT / "sources/retirements_20261009.json"
 MARKER = "retirements.json"
@@ -11,14 +11,7 @@ MARKER = "retirements.json"
 
 def policy():
     spec = json.loads(POLICY.read_text())
-    excluded = spec["excluded"]
-    for key in ("query_id", "path", "sql_fingerprint"):
-        if len({row[key] for row in excluded}) != len(excluded):
-            raise ValueError("Duplicate retirement identity")
-    for row in excluded:
-        if not below_threshold(row, spec["threshold"], inclusive=spec["inclusive"],
-                               allow_unchecked=spec["allow_unchecked"]):
-            raise ValueError("Invalid retirement timing evidence")
+    validate_pins(spec)
     return spec
 
 

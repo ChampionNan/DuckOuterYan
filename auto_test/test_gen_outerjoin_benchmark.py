@@ -136,7 +136,7 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
         self.assertEqual(
             MEMBERSHIP.LEGACY_OUTERYAN_WINS,
             tuple(
-                (row["family"], Path(row["path"]).name, row["observed_tm_speedup"])
+                (row["family"], Path(row["path"]).name)
                 for row in csv_rows(root / "supplemental" / "manifest.csv")
             ),
         )
@@ -145,9 +145,8 @@ class PortableBenchmarkGenerationTest(unittest.TestCase):
             if row["path"] in MEMBERSHIP.TIMEOUT_QUERY_PATHS:
                 self.assertEqual(row["content_status"], "removed_timeout_sql")
                 self.assertEqual(row["content_sha256"], "")
-        for family, filename, speedup in MEMBERSHIP.LEGACY_OUTERYAN_WINS:
+        for family, filename in MEMBERSHIP.LEGACY_OUTERYAN_WINS:
             self.assertIn(f"{family}/{filename}", MEMBERSHIP.COMPLETED_QUERY_PATHS)
-            self.assertGreater(float(speedup), 1.0)
 
     def test_legacy_import_does_not_need_results_or_generated_manifests(self):
         with tempfile.TemporaryDirectory(prefix="outeryan-import-") as directory:

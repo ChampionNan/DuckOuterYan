@@ -6,6 +6,7 @@ post-hoc workload selection; its historical statistics are not future targets.
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -20,6 +21,17 @@ ARCHIVE = b.ROOT / "revisions" / ARCHIVE_REVISION / "benchmark"
 MARKER = "tpch_tuning_promotion.json"
 QUERY_LIST = "tpch_tuning_promoted.txt"
 PIN_FIELDS = ("query_id", "path", "family", "content_sha256", "sql_fingerprint")
+
+
+def measurement_snapshot():
+    """Load optional local reporting inputs, never during corpus generation."""
+    default = b.legacy.REPO_ROOT / "auto_test/results/frozen_inputs/tpch_measurement_snapshot.json"
+    path = Path(os.environ.get("OY_MEASUREMENT_SNAPSHOT", str(default)))
+    if not path.is_file():
+        raise FileNotFoundError(
+            "Historical reporting inputs are not distributed. Set OY_MEASUREMENT_SNAPSHOT "
+            "to a local snapshot file, or report a new run with gen_experiment_result.py.")
+    return json.loads(path.read_text())
 
 
 def policy():

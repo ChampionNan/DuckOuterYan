@@ -651,17 +651,50 @@
       "column": "R2.src",
       "kind": "upper",
       "meaning": "additional pre-join source-vertex cap on every non-anchor graph relation",
-      "bounds": [10, 20, 40],
+      "bounds": [
+        10,
+        20,
+        40
+      ],
       "tiers": [
-        {"name": "low", "lower_bound": 0.05, "upper_bound": 0.1, "include_lower": true, "include_upper": false, "target_fraction": 0.09},
-        {"name": "medium", "lower_bound": 0.1, "upper_bound": 0.2, "include_lower": true, "include_upper": false, "target_fraction": 0.15},
-        {"name": "high", "lower_bound": 0.2, "upper_bound": 0.3, "include_lower": true, "include_upper": false, "target_fraction": 0.21}
+        {
+          "name": "low",
+          "lower_bound": 0.05,
+          "upper_bound": 0.1,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.09
+        },
+        {
+          "name": "medium",
+          "lower_bound": 0.1,
+          "upper_bound": 0.2,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.15
+        },
+        {
+          "name": "high",
+          "lower_bound": 0.2,
+          "upper_bound": 0.3,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.21
+        }
       ],
       "calibration": {
         "dataset": "Bitcoin Alpha; independently verify every R2..R5 copy on cpu9",
         "n": 24186,
-        "qualified_rows": [2256, 3471, 5126],
-        "observed_fractions": [0.09327710245596627, 0.14351277598610768, 0.21194079219383113]
+        "qualified_rows": [
+          2256,
+          3471,
+          5126
+        ],
+        "observed_fractions": [
+          0.09327710245596627,
+          0.14351277598610768,
+          0.21194079219383113
+        ]
       }
     },
     "tpch_part_color": {
@@ -1317,8 +1350,6 @@
     "timeout_seconds": 600,
     "minimum_runtime_each_engine_exclusive": 1,
     "minimum_speedup": 0.8,
-    "target_host": "cpu9",
-    "target_repository": "/home/data/bchenba/DuckYanOuter",
     "eligibility": "Only measured pairs passing target-database selectivity audit; correctness is verified or explicitly NOT-CHECKED with checks disabled. New SQL is pending measurement, never assumed eligible.",
     "excluded_seeds": {
       "tpcds_q72_fulfillment": "Reduced source subgraph omits sales/inventory week constraint; historical 1800s timeouts."

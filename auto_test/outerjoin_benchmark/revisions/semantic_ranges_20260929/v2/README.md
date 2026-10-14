@@ -59,8 +59,8 @@ owns a separate stress directory.
 
 The JOB guard suite contains mixed-v2 counterparts of two queries that were
 below the objective 0.95x threshold in the retired FULL-heavy revision:
-`ojb_sqlstorm_job_11914_bdmx` (historically 0.772x) and
-`oy_jb_jb_bushy4a_v2` (historically 0.857x). They remain in the main benchmark;
+`ojb_sqlstorm_job_11914_bdmx` and
+`oy_jb_jb_bushy4a_v2`. They remain in the main benchmark;
 the focused copies are not additional samples. Since their join labels have
 changed, the historical values are not v2 measurements, and the manifest marks
 both counterparts `requires_v2_remeasurement`.

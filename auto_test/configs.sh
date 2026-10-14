@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# DuckYanOuter auto_test — Unified Configuration (configs.sh)
+# OuterYan auto_test — Unified Configuration (configs.sh)
 # ----------------------------------------------------------------------------
 # Single source of truth for all tunable parameters across the test suite.
 # Sourced by: experiment_onoff.sh, build_db.sh, and run_all.sh.
@@ -48,7 +48,7 @@ export DUCKDB_BIN
 export TPCH_SF="${TPCH_SF:-50}"
 export TPCDS_SF="${TPCDS_SF:-50}"
 export GRAPH_DB="${GRAPH_DB:-$OY_REPO_ROOT/graph_db}"
-# The active mixed Graph corpus routes its 16 dataset-qualified queries here.
+# Dataset-qualified Graph queries route here according to the active manifest.
 export GRAPH_EPINIONS_DB="${GRAPH_EPINIONS_DB:-$OY_REPO_ROOT/graph_epinions.duckdb}"
 export TPCH_DB="${TPCH_DB:-$OY_REPO_ROOT/tpch_${TPCH_SF}.duckdb}"
 export TPCDS_DB="${TPCDS_DB:-$OY_REPO_ROOT/tpcds_${TPCDS_SF}.duckdb}"
@@ -87,8 +87,9 @@ unset _oy_thread_defaults
 # ===========================================================================
 # Independent per-engine statement limits (seconds; default 10 minutes each).
 # Fixed benchmark protocol (20261011): 600 s for EACH execution on EACH engine,
-# not for all five timed runs together. Either-side timeouts are excluded from
-# performance statistics; raw statuses remain available for diagnostics.
+# not for all five timed runs together. Raw statuses remain available; the active
+# cohort report substitutes 600 s only for DuckDB-only timeouts with completed ON
+# measurements. Legacy reports may retain the stricter complete-pair policy.
 # OY_TIMEOUT_SECS remains a common override; engine-specific values take precedence.
 # Each process also has a scaled external `timeout` watchdog. 0 disables both.
 export OY_TIMEOUT_SECS="${OY_TIMEOUT_SECS:-600}"
@@ -122,8 +123,7 @@ export OY_CAPTURE_PLANS="${OY_CAPTURE_PLANS:-0}"
 # Bare-query correctness emits and externally sorts the complete OFF and ON
 # result multisets. Keep these potentially large temporary files on the same
 # filesystem as the repository instead of the capacity-limited system /tmp.
-# On the Linux server checkout at /home/data/bchenba/DuckYanOuter this resolves
-# to /home/data/bchenba/DuckYanOuter/auto_test/results/tmp, backed by /home.
+# Override OY_TMPDIR when the local filesystem has insufficient scratch space.
 export OY_TMPDIR="${OY_TMPDIR:-$OY_REPO_ROOT/auto_test/results/tmp}"
 
 # ===========================================================================

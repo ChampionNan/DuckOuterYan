@@ -2,7 +2,7 @@
   "revision": "graph-dataset-extension-20261010",
   "replaced_queries": 3,
   "candidate_manifest_sha256": "2e17cf3d28d3a8795fd8effd6c579b41fffead332e99244532e63eca4a6a5daf",
-  "policy_sha256": "96f34dc869ea825941d4c7fdb464da60f8720b49d38d0feb853cb6d762fd7678",
+  "policy_sha256": "91ced5cf66c8391a6337f22c04554d71bb78040edbb1663e352a183d8b0debc8",
   "timeout_retirements": {
     "revision": "graph-timeout-retirements-20261011",
     "reason": "User-requested exact-instance retirement after CPU8 observed OuterYan timeouts. This is outcome-conditioned workload curation, not evidence of an optimizer improvement. Other tiers are unchanged.",
@@ -18,22 +18,14 @@
         "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_low.sql",
         "family": "graph",
         "content_sha256": "7e08923ccb8d2160f26070261aa6ee332395b3245d31ff0bad2c11c36c587759",
-        "sql_fingerprint": "9db6e5b9c3664811e8ca8085749cdd6b56d544a6112cd4d1e1e3d298a4b67e6b",
-        "duckdb_median_seconds": 510.7651601,
-        "duckdb_status": "measured",
-        "outeryan_status": "timeout",
-        "outeryan_timeout_stage": "profile"
+        "sql_fingerprint": "9db6e5b9c3664811e8ca8085749cdd6b56d544a6112cd4d1e1e3d298a4b67e6b"
       },
       {
         "query_id": "graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low",
         "path": "graph/graph__graph__epinions__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_low.sql",
         "family": "graph",
         "content_sha256": "07cc4a4b21ae775872497d48dc5f09d7f0874c5454c9261e0a96a4ca03cb7081",
-        "sql_fingerprint": "591296ddd5410d1d21d29f882cb3e8ced29fd4875474c2ea5b0a3eab806b13b6",
-        "duckdb_median_seconds": 527.059898653,
-        "duckdb_status": "measured",
-        "outeryan_status": "timeout",
-        "outeryan_timeout_stage": "kernel"
+        "sql_fingerprint": "591296ddd5410d1d21d29f882cb3e8ced29fd4875474c2ea5b0a3eab806b13b6"
       }
     ]
   },

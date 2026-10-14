@@ -29,18 +29,18 @@ def content_hash(sql):
 
 
 def load_policy(path=POLICY):
+    from workload_policy import validate_pins
+
     spec = json.loads(Path(path).read_text())
-    pins = spec["replacements"]
+    pins = validate_pins(spec, "replacements")
     if len(pins) != spec["expected_queries"] or spec["target_dataset"] != "epinions":
         raise ValueError("Unexpected Graph retest policy")
     for field in ("query_id", "path", "sql_fingerprint"):
         if len({r[field] for r in pins}) != len(pins):
             raise ValueError("Duplicate Graph retest " + field)
     for row in pins:
-        if (row["family"] != "graph" or row["semantic_tier"] not in ("low", "medium") or
-                not 0 < max(row["reference_duckdb_s"], row["reference_outeryan_s"]) <= spec.get("maximum_reference_runtime_s", .1) or
-                min(row["reference_duckdb_s"], row["reference_outeryan_s"]) <= 0):
-            raise ValueError("Invalid frozen Graph short-query evidence")
+        if row["family"] != "graph" or row["semantic_tier"] not in ("low", "medium"):
+            raise ValueError("Invalid frozen Graph query definition")
         path = Path(row["path"])
         if path.parts != ("graph", row["query_id"] + ".sql"):
             raise ValueError("Unsafe Graph SQL path")

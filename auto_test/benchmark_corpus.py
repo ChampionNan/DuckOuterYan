@@ -87,7 +87,7 @@ def historical_manifests(root=ROOT):
                      "retired_tpcds_extension_20261008_r1", "retired_aggregate_count_20261008",
                      "retired_speedup_le06_20261008", "retired_queries_20261009",
                      "replaced_graph_bitcoin_20261010", "replaced_graph_bitcoin_extension_20261010",
-                     "replaced_tpch_tuning_20261013"):
+                     "replaced_tpch_tuning_20261013", "pre_plan_cohort_20261014"):
         path = root / "revisions" / revision / "benchmark/manifest.csv"
         if path.is_file():
             yield None, path
@@ -108,6 +108,7 @@ def resolve_sql_path(category, relative, root=ROOT):
         candidates.append(root / scope / path)
     else:
         candidates = [root / "benchmark" / path]
+        candidates.append(root / "revisions/pre_plan_cohort_20261014/benchmark" / path)
         candidates.append(root / "revisions/unique_semantic_20260929/benchmark" / path)
         candidates.append(root / "revisions/retired_tpcds_20261005/benchmark" / path)
         candidates.append(root / "revisions/retired_speedup_20261005/benchmark" / path)

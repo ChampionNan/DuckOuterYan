@@ -1096,7 +1096,7 @@
       "default_tier": "medium",
       "source_location": "benchmark/imdb_plan_cost/queries/17a.sql",
       "source_sha256": "a52d479958ec18149f197df005f183f8cee35712398524f344b9751c9dce9fe2",
-      "adaptation": "Retain JOB 17a name LIKE prefix search; broaden the source B prefix to an explicit A\u2013M prefix set and narrow it to Ba."
+      "adaptation": "Retain JOB 17a name LIKE prefix search; broaden the source B prefix to an explicit A–M prefix set and narrow it to Ba."
     },
     "sqlstorm_tpch_19222": {
       "profile": "tpch_stock_available",

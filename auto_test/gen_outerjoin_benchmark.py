@@ -101,9 +101,9 @@ V3_STRESS_BASE_COUNT = (
 )
 V3_STRESS_QUERY_COUNT = V3_STRESS_BASE_COUNT * len(SELECTIVITY_STRESS_TIERS)
 V3_STRESS_SELECTION_SALT = "outeryan-v3-semantic-selectivity-v1"
-V2_JOB_REGRESSIONS: tuple[tuple[str, str, str], ...] = (
-    ("ojb_sqlstorm_job_11914_bdmx", "1af32617cb10164c5f999a0f99f196b23232059a40dd8f0f2ff5e1eb81af7836", "0.772"),
-    ("oy_jb_jb_bushy4a_v2", "6dca40cd9267b67ea297a5245c6cd0d9b0fe7bf8653d1d6c6a643f89e9a82103", "0.857"),
+V2_JOB_REGRESSIONS: tuple[tuple[str, str], ...] = (
+    ("ojb_sqlstorm_job_11914_bdmx", "1af32617cb10164c5f999a0f99f196b23232059a40dd8f0f2ff5e1eb81af7836"),
+    ("oy_jb_jb_bushy4a_v2", "6dca40cd9267b67ea297a5245c6cd0d9b0fe7bf8653d1d6c6a643f89e9a82103"),
 )
 V2_JOB_REGRESSION_COUNT = len(V2_JOB_REGRESSIONS)
 V3_VARIANTS_PER_SEED = 3
@@ -1838,7 +1838,7 @@ def generate_supplemental(root: Path) -> int:
     supplemental = root / "supplemental"
     reset_generated_dir(supplemental)
     rows: list[dict[str, str]] = []
-    for family, filename, speedup in LEGACY_OUTERYAN_WINS:
+    for family, filename in LEGACY_OUTERYAN_WINS:
         source = LEGACY_ROOT / family / filename
         if not source.is_file():
             raise FileNotFoundError(f"legacy stress query not found: {source}")
@@ -1854,7 +1854,6 @@ def generate_supplemental(root: Path) -> int:
                 "provenance": "DuckOuterYan legacy generator",
                 "industry_status": "not_industry_derived",
                 "selection_policy": LEGACY_WIN_SELECTION_POLICY,
-                "observed_tm_speedup": speedup,
                 "content_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
             }
         )
@@ -1910,8 +1909,8 @@ def generate_industry_inspired(root: Path) -> int:
         return metadata + mixed, "".join(vector), edge_count, filter_metadata
 
     wins = {
-        (family, filename): speedup
-        for family, filename, speedup in LEGACY_OUTERYAN_WINS
+        (family, filename): True
+        for family, filename in LEGACY_OUTERYAN_WINS
     }
     pattern_keys = {
         (family, filename)
@@ -1951,7 +1950,6 @@ def generate_industry_inspired(root: Path) -> int:
                 "selection_policy": (
                     ACTIVE_LEGACY_SOURCE_SELECTION_POLICY if observed_speedup else ""
                 ),
-                "historical_full_join_tm_speedup": observed_speedup,
                 "measurement_status": "requires_v1_mixed_rerun",
                 "provenance_class": "industry_synthetic_control",
                 "topology": "",
@@ -1965,7 +1963,7 @@ def generate_industry_inspired(root: Path) -> int:
             }
         )
 
-    for family, filename, speedup in LEGACY_OUTERYAN_WINS:
+    for family, filename in LEGACY_OUTERYAN_WINS:
         if (family, filename) in pattern_keys or family == "graph":
             continue
         source = LEGACY_ROOT / family / filename
@@ -1996,7 +1994,6 @@ def generate_industry_inspired(root: Path) -> int:
                 "industry_status": "not_industry_derived",
                 "production_source_id": "none",
                 "selection_policy": ACTIVE_LEGACY_SOURCE_SELECTION_POLICY,
-                "historical_full_join_tm_speedup": speedup,
                 "measurement_status": "requires_v1_mixed_rerun",
                 "provenance_class": "schema_synthetic_control",
                 "topology": "",
@@ -2041,7 +2038,6 @@ def generate_industry_inspired(root: Path) -> int:
                 "industry_status": "not_industry_derived",
                 "production_source_id": "none",
                 "selection_policy": GRAPH_CONTROL_SELECTION_POLICY,
-                "historical_full_join_tm_speedup": wins.get((family, filename), ""),
                 "measurement_status": "requires_v1_mixed_rerun",
                 "provenance_class": "graph_synthetic_control",
                 "topology": topology,
@@ -2277,7 +2273,7 @@ def generate_timeout_manifest(root: Path) -> int:
 
 
 def classify_legacy(root: Path) -> int:
-    retained = {f"{family}/{filename}" for family, filename, _ in LEGACY_OUTERYAN_WINS}
+    retained = {f"{family}/{filename}" for family, filename in LEGACY_OUTERYAN_WINS}
     industry_inspired = {
         f"{family}/{filename}"
         for family, filename, _, _ in INDUSTRY_INSPIRED_PATTERNS
@@ -3115,7 +3111,7 @@ def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int
     ) as handle:
         benchmark_rows = list(csv.DictReader(handle))
     rows: list[dict[str, str]] = []
-    for base_query_id, expected_hash, observed_speedup in V2_JOB_REGRESSIONS:
+    for base_query_id, expected_hash in V2_JOB_REGRESSIONS:
         expected_base_id = (
             base_query_id
             if base_query_id.startswith("ojb_")
@@ -3154,7 +3150,6 @@ def generate_v2_job_regressions(root: Path, v1_root: Path = DEFAULT_ROOT) -> int
                 "headline_eligible": "false",
                 "selection_reference": V2_0916_REFERENCE_RUN,
                 "historical_v1_content_sha256": expected_hash,
-                "historical_v1_observed_tm_speedup": observed_speedup,
                 "selection_policy": (
                     "mixed v2 counterpart of an all-FULL v1 query with "
                     "selected_plan=OUTERYAN and tm_speedup<0.95 in the 0916 run"

@@ -2,8 +2,8 @@
 
 These pins reproduce the checked-in legacy_classification.csv and supplemental
 manifest. The August 10 run is provenance only: neither generator reads results/.
-Only the 28 retained legacy wins carry historical speedups; these are not
-measurements of the current, applicability-normalized benchmark queries.
+Only the identities of the 28 historically selected queries are retained.
+Timing observations belong in ignored experiment output directories.
 """
 
 from dataclasses import dataclass
@@ -16,7 +16,7 @@ REFERENCE_RUN = "experiment_onoff_20260810_084908.csv"
 class LegacyQuery:
     path: str
     timed_out: bool = False
-    outeryan_win_speedup: str = ""
+    supplemental_member: bool = False
 
 
 # Preserve the historical order so regenerated audit manifests remain stable.
@@ -29,8 +29,8 @@ LEGACY_QUERIES = (
     LegacyQuery("graph/bushyBal_N4_mixB_s10.sql"),
     LegacyQuery("graph/bushyBal_N4_mixB_s20.sql"),
     LegacyQuery("graph/bushyBal_N4_mixB_s33.sql"),
-    LegacyQuery("graph/bushy_N5_mixA_s01.sql", outeryan_win_speedup="1.733"),
-    LegacyQuery("graph/bushy_N5_mixC_s01.sql", outeryan_win_speedup="1.633"),
+    LegacyQuery("graph/bushy_N5_mixA_s01.sql", supplemental_member=True),
+    LegacyQuery("graph/bushy_N5_mixC_s01.sql", supplemental_member=True),
     LegacyQuery("graph/line_N3_mixB_s67.sql"),
     LegacyQuery("graph/line_N3_mixB_s80.sql"),
     LegacyQuery("graph/line_N3_mixB_s95.sql"),
@@ -41,11 +41,11 @@ LEGACY_QUERIES = (
     LegacyQuery("graph/rdeep_N3_mixC_s67.sql"),
     LegacyQuery("graph/rdeep_N3_mixC_s80.sql"),
     LegacyQuery("graph/rdeep_N3_mixC_s95.sql"),
-    LegacyQuery("graph/rdeep_N4_mixB_s01.sql", outeryan_win_speedup="144.995"),
-    LegacyQuery("graph/rdeep_N4_mixB_s05.sql", outeryan_win_speedup="22.200"),
-    LegacyQuery("graph/rdeep_N4_mixB_s10.sql", outeryan_win_speedup="11.844"),
-    LegacyQuery("graph/rdeep_N4_mixB_s20.sql", outeryan_win_speedup="7.849"),
-    LegacyQuery("graph/rdeep_N4_mixB_s33.sql", outeryan_win_speedup="5.802"),
+    LegacyQuery("graph/rdeep_N4_mixB_s01.sql", supplemental_member=True),
+    LegacyQuery("graph/rdeep_N4_mixB_s05.sql", supplemental_member=True),
+    LegacyQuery("graph/rdeep_N4_mixB_s10.sql", supplemental_member=True),
+    LegacyQuery("graph/rdeep_N4_mixB_s20.sql", supplemental_member=True),
+    LegacyQuery("graph/rdeep_N4_mixB_s33.sql", supplemental_member=True),
     LegacyQuery("tpch/oy_th_real_custdist.sql"),
     LegacyQuery("tpch/oy_th_real_cust_order_line.sql"),
     LegacyQuery("tpch/oy_th_real_region_branch.sql", timed_out=True),
@@ -82,8 +82,8 @@ LEGACY_QUERIES = (
     LegacyQuery("tpch/oy_th_th_bushy4a_v3.sql"),
     LegacyQuery("tpch/oy_th_th_bushy4a_v4.sql"),
     LegacyQuery("tpch/oy_th_th_bushy4a_v5.sql"),
-    LegacyQuery("tpch/oy_th_th_bushy4b_v0.sql", outeryan_win_speedup="1.046"),
-    LegacyQuery("tpch/oy_th_th_bushy4b_v1.sql", outeryan_win_speedup="1.082"),
+    LegacyQuery("tpch/oy_th_th_bushy4b_v0.sql", supplemental_member=True),
+    LegacyQuery("tpch/oy_th_th_bushy4b_v1.sql", supplemental_member=True),
     LegacyQuery("tpch/oy_th_th_bushy4b_v2.sql"),
     LegacyQuery("tpch/oy_th_th_bushy4b_v3.sql"),
     LegacyQuery("tpch/oy_th_th_bushy4b_v4.sql"),
@@ -101,15 +101,15 @@ LEGACY_QUERIES = (
     LegacyQuery("tpch/oy_th_th_bushy6_v5.sql", timed_out=True),
     LegacyQuery("tpch/oy_th_th_line3a_rd_v0.sql"),
     LegacyQuery("tpch/oy_th_th_line3b_rd_v0.sql"),
-    LegacyQuery("tpch/oy_th_th_line3b_rd_v1.sql", outeryan_win_speedup="4.833"),
+    LegacyQuery("tpch/oy_th_th_line3b_rd_v1.sql", supplemental_member=True),
     LegacyQuery("tpch/oy_th_th_line3b_v0.sql", timed_out=True),
     LegacyQuery("tpch/oy_th_th_line4a_rd_v0.sql"),
-    LegacyQuery("tpch/oy_th_th_line4a_rd_v1.sql", outeryan_win_speedup="2.645"),
+    LegacyQuery("tpch/oy_th_th_line4a_rd_v1.sql", supplemental_member=True),
     LegacyQuery("tpch/oy_th_th_line4a_v0.sql"),
     LegacyQuery("tpch/oy_th_th_line4b_rd_v0.sql"),
     LegacyQuery("tpch/oy_th_th_line4b_rd_v1.sql"),
     LegacyQuery("tpch/oy_th_th_line4b_v0.sql"),
-    LegacyQuery("tpch/oy_th_th_line5_rd_v0.sql", outeryan_win_speedup="1.661"),
+    LegacyQuery("tpch/oy_th_th_line5_rd_v0.sql", supplemental_member=True),
     LegacyQuery("tpch/oy_th_th_line5_rd_v1.sql", timed_out=True),
     LegacyQuery("tpch/oy_th_th_line5_v0.sql"),
     LegacyQuery("tpch/oy_th_th_line6_rd_v0.sql"),
@@ -197,21 +197,21 @@ LEGACY_QUERIES = (
     LegacyQuery("tpcds/oy_ds_ds_line3b_rd_v0.sql"),
     LegacyQuery("tpcds/oy_ds_ds_line3b_v0.sql"),
     LegacyQuery("tpcds/oy_ds_ds_line3c_v0.sql"),
-    LegacyQuery("tpcds/oy_ds_ds_line4a_v0.sql", outeryan_win_speedup="1.444"),
-    LegacyQuery("tpcds/oy_ds_ds_line4b_v0.sql", outeryan_win_speedup="2.564"),
+    LegacyQuery("tpcds/oy_ds_ds_line4a_v0.sql", supplemental_member=True),
+    LegacyQuery("tpcds/oy_ds_ds_line4b_v0.sql", supplemental_member=True),
     LegacyQuery("tpcds/oy_ds_ds_line5a_v0.sql"),
-    LegacyQuery("tpcds/oy_ds_ds_line5b_v0.sql", outeryan_win_speedup="7.474"),
+    LegacyQuery("tpcds/oy_ds_ds_line5b_v0.sql", supplemental_member=True),
     LegacyQuery("tpcds/oy_ds_ds_line6_v0.sql", timed_out=True),
     LegacyQuery("tpcds/oy_ds_ds_line7_v0.sql", timed_out=True),
     LegacyQuery("tpcds/oy_ds_ds_line8_v0.sql", timed_out=True),
     LegacyQuery("tpcds/oy_ds_real_catalog_demo.sql"),
     LegacyQuery("tpcds/oy_ds_real_channel_full.sql", timed_out=True),
     LegacyQuery("tpcds/oy_ds_real_store_agg.sql"),
-    LegacyQuery("tpcds/oy_ds_real_store_demo.sql", outeryan_win_speedup="1.029"),
+    LegacyQuery("tpcds/oy_ds_real_store_demo.sql", supplemental_member=True),
     LegacyQuery("tpcds/oy_ds_real_store_dims.sql"),
     LegacyQuery("tpcds/oy_ds_real_web_geo.sql"),
-    LegacyQuery("job/oy_jb_jb_bushy4a_v1.sql", outeryan_win_speedup="1.499"),
-    LegacyQuery("job/oy_jb_jb_bushy4a_v2.sql", outeryan_win_speedup="1.017"),
+    LegacyQuery("job/oy_jb_jb_bushy4a_v1.sql", supplemental_member=True),
+    LegacyQuery("job/oy_jb_jb_bushy4a_v2.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_bushy4a_v4.sql"),
     LegacyQuery("job/oy_jb_jb_bushy4a_v5.sql"),
     LegacyQuery("job/oy_jb_jb_bushy4b_v1.sql"),
@@ -219,9 +219,9 @@ LEGACY_QUERIES = (
     LegacyQuery("job/oy_jb_jb_bushy4b_v3.sql"),
     LegacyQuery("job/oy_jb_jb_bushy4b_v5.sql"),
     LegacyQuery("job/oy_jb_jb_bushy5a_v0.sql"),
-    LegacyQuery("job/oy_jb_jb_bushy5a_v1.sql", outeryan_win_speedup="7.978"),
+    LegacyQuery("job/oy_jb_jb_bushy5a_v1.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_bushy5a_v2.sql"),
-    LegacyQuery("job/oy_jb_jb_bushy5a_v3.sql", outeryan_win_speedup="1.008"),
+    LegacyQuery("job/oy_jb_jb_bushy5a_v3.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_bushy5a_v4.sql"),
     LegacyQuery("job/oy_jb_jb_bushy5a_v5.sql"),
     LegacyQuery("job/oy_jb_jb_bushy5b_v0.sql"),
@@ -232,12 +232,12 @@ LEGACY_QUERIES = (
     LegacyQuery("job/oy_jb_jb_bushy6a_v0.sql"),
     LegacyQuery("job/oy_jb_jb_bushy6a_v1.sql"),
     LegacyQuery("job/oy_jb_jb_bushy6a_v2.sql"),
-    LegacyQuery("job/oy_jb_jb_bushy6a_v3.sql", outeryan_win_speedup="1.142"),
+    LegacyQuery("job/oy_jb_jb_bushy6a_v3.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_bushy6a_v4.sql"),
     LegacyQuery("job/oy_jb_jb_bushy6a_v5.sql"),
-    LegacyQuery("job/oy_jb_jb_bushy6b_v0.sql", outeryan_win_speedup="3.108"),
-    LegacyQuery("job/oy_jb_jb_bushy6b_v1.sql", outeryan_win_speedup="4.095"),
-    LegacyQuery("job/oy_jb_jb_bushy6b_v4.sql", outeryan_win_speedup="2.758"),
+    LegacyQuery("job/oy_jb_jb_bushy6b_v0.sql", supplemental_member=True),
+    LegacyQuery("job/oy_jb_jb_bushy6b_v1.sql", supplemental_member=True),
+    LegacyQuery("job/oy_jb_jb_bushy6b_v4.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_bushy6b_v5.sql"),
     LegacyQuery("job/oy_jb_jb_bushy7_v0.sql"),
     LegacyQuery("job/oy_jb_jb_bushy7_v1.sql"),
@@ -254,15 +254,15 @@ LEGACY_QUERIES = (
     LegacyQuery("job/oy_jb_jb_line3_000_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line3_001_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line3_006_v0.sql"),
-    LegacyQuery("job/oy_jb_jb_line4_007_v0.sql", outeryan_win_speedup="1.311"),
+    LegacyQuery("job/oy_jb_jb_line4_007_v0.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_line4_008_v0.sql", timed_out=True),
     LegacyQuery("job/oy_jb_jb_line4_009_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line4_010_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line4_011_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line5_012_v0.sql", timed_out=True),
-    LegacyQuery("job/oy_jb_jb_line5_013_v0.sql", outeryan_win_speedup="4.727"),
-    LegacyQuery("job/oy_jb_jb_line5_014_v0.sql", outeryan_win_speedup="4.425"),
-    LegacyQuery("job/oy_jb_jb_line5_015_v0.sql", outeryan_win_speedup="1.242"),
+    LegacyQuery("job/oy_jb_jb_line5_013_v0.sql", supplemental_member=True),
+    LegacyQuery("job/oy_jb_jb_line5_014_v0.sql", supplemental_member=True),
+    LegacyQuery("job/oy_jb_jb_line5_015_v0.sql", supplemental_member=True),
     LegacyQuery("job/oy_jb_jb_line6_017_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line7_020_v0.sql"),
     LegacyQuery("job/oy_jb_jb_line7_021_v0.sql", timed_out=True),
@@ -280,7 +280,7 @@ LEGACY_QUERIES = (
 TIMEOUT_QUERY_PATHS = frozenset(query.path for query in LEGACY_QUERIES if query.timed_out)
 COMPLETED_QUERY_PATHS = frozenset(query.path for query in LEGACY_QUERIES if not query.timed_out)
 LEGACY_OUTERYAN_WINS = tuple(
-    (query.path.split("/", 1)[0], query.path.split("/", 1)[1], query.outeryan_win_speedup)
+    (query.path.split("/", 1)[0], query.path.split("/", 1)[1])
     for query in LEGACY_QUERIES
-    if query.outeryan_win_speedup
+    if query.supplemental_member
 )

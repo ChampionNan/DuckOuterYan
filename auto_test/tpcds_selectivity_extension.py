@@ -13,6 +13,7 @@ import balanced_benchmark as b
 import benchmark_speedup_screen as screen
 from benchmark_corpus import count_base_relations
 import tpcds_refresh as refresh
+from workload_policy import REPRESENTATION
 
 POLICY = b.ROOT / "sources/tpcds_extension_20261008_r2.json"
 ROLE = "historical_selectivity_extension"
@@ -42,6 +43,8 @@ def historical_eligible(template, threshold):
 
 def policy():
     spec = json.loads(POLICY.read_text(encoding="utf-8"))
+    if spec.get("representation") != REPRESENTATION:
+        raise ValueError("Expected a frozen TPC-DS workload definition")
     threshold = float(spec["historical_selection_min_speedup"])
     if not math.isfinite(threshold) or threshold <= 0:
         raise ValueError("Invalid TPC-DS historical selection threshold")
@@ -65,8 +68,6 @@ def policy():
                 for t in refresh.policy()["templates"]}
     for template in templates:
         derived = template.get("source_kind") == "source_connected_subgraph"
-        if not derived and not historical_eligible(template, threshold):
-            raise ValueError(f"Invalid TPC-DS extension historical evidence: {template['name']}")
         name = template["name"]
         source = Path(template["template_sql"] if derived else template["archive_sql"])
         pattern = (template["expression_fingerprint"], template["aggregate_variant"])

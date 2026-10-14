@@ -1,6 +1,6 @@
 {
   "revision": "tpcds-recovery-20261005",
-  "policy_sha256": "65a230b07b06a41f91eb953151f7d183c131b31efff8b7077826b154e2d525f0",
+  "policy_sha256": "2d62a96448703afd1c943f97bf0c8fbe8e96b406a361151f6b196999263fa3c3",
   "target_complete_pairs": 50,
   "retained_previous_measured_pairs": 7,
   "new_candidates": 54,

@@ -1,6 +1,6 @@
 {
   "revision": "tpcds-selectivity-extension-20261008-r2",
-  "policy_sha256": "93305dac184c80ec1a491260a56ef87b62fd6ba85a9c47aae7cf751f43dcce7f",
+  "policy_sha256": "b1258f8a146d8c4dd325ac6b54c6a0dd509a601978b0039d8a5eb843f709d262",
   "target_complete_pairs": 50,
   "new_candidates": 15,
   "status": "PENDING_CPU9_MEASUREMENT",

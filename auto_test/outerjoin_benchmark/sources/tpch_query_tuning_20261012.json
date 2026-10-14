@@ -303,7 +303,6 @@
         "content_sha256": "0c14c5c3d847a2a7ff6583da4e7bac34ae3d3f708a18afd0e035e97b6e7d684a"
       },
       "short_query": "G-H-LD-03",
-      "historical_speedup": 0.6159471788724473,
       "rule": "custdist_r_l_f",
       "high_days": 1008
     },
@@ -313,7 +312,6 @@
         "content_sha256": "cc7466a2b19cda7d13ba5e15dc35f441efe8b468f27e9a2283c861ba4f4b6ff8"
       },
       "short_query": "A-H-B-07",
-      "historical_speedup": 0.6234287658122483,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -323,7 +321,6 @@
         "content_sha256": "98c18ce6d4ac1f86653abfc224ea7ed4ca1f5128c2df84df588459150589c235"
       },
       "short_query": "G-H-LD-05",
-      "historical_speedup": 0.6237238607275032,
       "rule": "custdist_r_l_f",
       "high_days": 1008
     },
@@ -333,7 +330,6 @@
         "content_sha256": "c8557f258bf0e2fc04f4bdf7aeb864bbd7310726bee8ce2f368bbf3ebe0455bd"
       },
       "short_query": "Q-H-LD-02",
-      "historical_speedup": 0.7422160792783021,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -343,7 +339,6 @@
         "content_sha256": "92e19185e0b40d6e9288aa825df058e631d2af0fa452fecc8597a05bc75705cf"
       },
       "short_query": "A-H-RD-08",
-      "historical_speedup": 0.753730280455262,
       "rule": "q8_right_donor",
       "high_days": 1008
     },
@@ -353,7 +348,6 @@
         "content_sha256": "b34967958990a0462e849a2cc1bb37a42d792a2247b945c4841559bf42cb0a7b"
       },
       "short_query": "A-H-B-04",
-      "historical_speedup": 0.7578849987885794,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -363,7 +357,6 @@
         "content_sha256": "ac772953f4e7420bb1ce9a0ae034794c2f34745dc270b0dba65fd6fc3efb61e4"
       },
       "short_query": "Q-H-LD-05",
-      "historical_speedup": 0.76502519334404,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -373,7 +366,6 @@
         "content_sha256": "50fdfc86d43cb9378b26abb0cfaddd8e1219266bf0cf2f52b6d48f02e232cd1e"
       },
       "short_query": "A-H-RD-03",
-      "historical_speedup": 0.7650888369511178,
       "rule": "q8_right_donor",
       "high_days": 1008
     },
@@ -383,7 +375,6 @@
         "content_sha256": "b9ab48bb1075ecb98a866a030d3968aff6c90fdbacef91a3d700d8c90d521b55"
       },
       "short_query": "A-H-RD-04",
-      "historical_speedup": 0.7782748088469219,
       "rule": "q8_right_donor",
       "high_days": 1008
     },
@@ -393,7 +384,6 @@
         "content_sha256": "c7a2235e694fadd22f64b0cd2267bf20efbe1be11b678d4587d8140458b8a42c"
       },
       "short_query": "Q-H-RD-04",
-      "historical_speedup": 0.8179647837250617,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -403,7 +393,6 @@
         "content_sha256": "f93c5013be16c09cd439f9cadca01527f380fd89c01c0e973d35f6baca2fd72b"
       },
       "short_query": "A-H-RD-07",
-      "historical_speedup": 0.8190179089419668,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -413,7 +402,6 @@
         "content_sha256": "82a44a83c5537afebf2499cf35437290b5d62dce778508e613179432712b4d36"
       },
       "short_query": "Q-H-RD-14",
-      "historical_speedup": 0.8595409011932327,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -423,7 +411,6 @@
         "content_sha256": "f979b7f7f6f870dec85cefb8fcaa7f58ea05e3af03015d8e0c28a12210c4d518"
       },
       "short_query": "A-H-LD-02",
-      "historical_speedup": 0.8643069787728571,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -433,7 +420,6 @@
         "content_sha256": "d37a2d022701c353d0deec335cf64b4f04b7994c83e28788c6ac6201651417a2"
       },
       "short_query": "Q-H-RD-03",
-      "historical_speedup": 0.8732865034636448,
       "rule": "q5_alternate_right",
       "high_days": 1008
     },
@@ -443,7 +429,6 @@
         "content_sha256": "5193b3ea39a9cdd3b3fbba63bbf1dd8f4c8c784f988a9671394d83c37ba123ee"
       },
       "short_query": "Q-H-B-07",
-      "historical_speedup": 0.8991754788352451,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -453,7 +438,6 @@
         "content_sha256": "1260121b8ab0499ca7288ddaebab33ccb720a32068394c263a5e5ea2d58ecaba"
       },
       "short_query": "Q-H-RD-01",
-      "historical_speedup": 0.9119813767618284,
       "rule": "q3_full_right",
       "high_days": 1008
     },
@@ -463,7 +447,6 @@
         "content_sha256": "d4747fcf48d2471aa9e2a0fff2cf9358fd85b8f469aea7e9f98f0c4e2823c543"
       },
       "short_query": "Q-H-B-05",
-      "historical_speedup": 0.9278911206833946,
       "rule": "q5_bushy_donor",
       "high_days": 1008
     },
@@ -473,7 +456,6 @@
         "content_sha256": "ac35dada0112b89f3291c84f9ad8cd6d78843d4bd14b898672f0510ee0ecf317"
       },
       "short_query": "A-H-B-01",
-      "historical_speedup": 0.9297110548736048,
       "rule": "storm17751_bushy_donor",
       "high_days": 1008
     },
@@ -483,7 +465,6 @@
         "content_sha256": "992bdbcce49e918bef23764addc2783abb23020f62716b79eed7aa239ac809fc"
       },
       "short_query": "A-H-RD-01",
-      "historical_speedup": 0.9357611653038701,
       "rule": "selectivity_only",
       "high_days": 1056
     },
@@ -493,7 +474,6 @@
         "content_sha256": "aec7d3cfdc478a6bc2ed120502ce15ac98c3ae5d7a2f14868e86a2c46c9fb09b"
       },
       "short_query": "Q-H-RD-10",
-      "historical_speedup": 0.9367545704253802,
       "rule": "q3_full_right",
       "high_days": 1008
     },
@@ -503,7 +483,6 @@
         "content_sha256": "71145c228478898b01d15f2991e1f1a11832dc5b26ba7dd0494c32f1e4bbf70c"
       },
       "short_query": "Q-H-RD-02",
-      "historical_speedup": 0.9391349739833813,
       "rule": "q5_alternate_right",
       "high_days": 1008
     },
@@ -513,7 +492,6 @@
         "content_sha256": "644e798a4cae26811428a6f1eb83fc98e747c9d78685dbe4d9ac2fbb2770bb5c"
       },
       "short_query": "Q-H-B-18",
-      "historical_speedup": 0.9434116820784181,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -523,7 +501,6 @@
         "content_sha256": "fde7567fd46559ff9b273cf3da657de474b2572dd21006ffca6c07ea662af7df"
       },
       "short_query": "Q-H-RD-07",
-      "historical_speedup": 0.9482867360413808,
       "rule": "q5_alternate_right",
       "high_days": 1008
     },
@@ -533,7 +510,6 @@
         "content_sha256": "520c6ca9577f39da22632342275c400dccc104885a9315d27baa2c9e7dea33b5"
       },
       "short_query": "Q-H-B-03",
-      "historical_speedup": 0.953783172515219,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -543,7 +519,6 @@
         "content_sha256": "00a3887abe841ada262fcf303b84b53c154654e16802c0705701da2720f65bf3"
       },
       "short_query": "A-H-B-05",
-      "historical_speedup": 0.954649312784813,
       "rule": "storm17751_bushy_donor",
       "high_days": 1008
     },
@@ -553,7 +528,6 @@
         "content_sha256": "33221114f7e21f7cdc03e4dab8a6d631cf579c12dbccef0339db8f2596c3686e"
       },
       "short_query": "A-H-B-08",
-      "historical_speedup": 0.9547968833788184,
       "rule": "storm17751_bushy_donor",
       "high_days": 1008
     },
@@ -563,7 +537,6 @@
         "content_sha256": "ad77955a353ff58e79b65b445b28601dfd548c0240458eb140693e5ff8de1380"
       },
       "short_query": "Q-H-B-12",
-      "historical_speedup": 0.9563238987538468,
       "rule": "q5_bushy_donor",
       "high_days": 1008
     },
@@ -573,7 +546,6 @@
         "content_sha256": "1fcff99795d16f9e68b9e5f785304d63efcb8c81a7439a1ed713f04c882cc30e"
       },
       "short_query": "Q-H-B-16",
-      "historical_speedup": 0.9627045281107617,
       "rule": "selectivity_only",
       "high_days": 1008
     },
@@ -583,7 +555,6 @@
         "content_sha256": "13b102c2b9f90552aa839f22de1c373c42f2671d85c2fbb5209654e45aee0edf"
       },
       "short_query": "Q-H-RD-15",
-      "historical_speedup": 0.9656162640801778,
       "rule": "q3_full_right",
       "high_days": 1008
     },
@@ -593,7 +564,6 @@
         "content_sha256": "ca37ea4b7b21adf4c53dc30340ff63c67f36332f35205e967b4c293da232e9c8"
       },
       "short_query": "Q-H-B-04",
-      "historical_speedup": 0.9787953525960867,
       "rule": "q5_bushy_donor",
       "high_days": 1008
     },
@@ -603,7 +573,6 @@
         "content_sha256": "967f3d3eee12230818fea84469d920826db079dd81afe6783476803ad320e284"
       },
       "short_query": "Q-H-B-01",
-      "historical_speedup": 0.9924664098656076,
       "rule": "selectivity_only",
       "high_days": 1008
     }

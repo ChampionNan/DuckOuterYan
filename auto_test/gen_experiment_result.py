@@ -1194,6 +1194,13 @@ TOPOLOGY_ORDER = ["left-deep", "right-deep", "bushy", "star", "aggregate", "indu
 CLASS_ORDER = ["join", "graph", "derived", "industry", "aggregation", "selectivity stress", "JOB regression", "custom", "legacy"]
 QUERY_TYPE_CODES = {"join": "Q", "graph": "G", "control": "G", "aggregate": "A"}
 FAMILY_CODES = {"graph": "G", "TPC-H": "H", "TPC-DS": "D", "JOB": "J"}
+
+
+def figure_family_label(family: str) -> str:
+    """Keep source/statistics family keys stable while naming the plotted workload."""
+    return "SGPB" if family.lower() == "graph" else family
+
+
 TOPOLOGY_CODES = {
     "left-deep": "LD",
     "right-deep": "RD",
@@ -1208,7 +1215,7 @@ PHASE_GROUP_GAP = 0.62
 QUERY_POINT_SIZE = 28
 QUERY_POINT_ALPHA = 0.52
 QUERY_CODE_KEY = (
-    "G=graph, H=TPC-H, D=TPC-DS, J=JOB; LD=left-deep, RD=right-deep, "
+    "G=SGPB, H=TPC-H, D=TPC-DS, J=JOB; LD=left-deep, RD=right-deep, "
     "B=bushy, S=star, I=industry, O=other; type prefix: Q=join, G=graph, A=aggregation"
 )
 RUNTIME_SERIES = [
@@ -1218,10 +1225,10 @@ RUNTIME_SERIES = [
     ("Multi-thread: OuterYan (ON)", "tm_on", "#E59C6D"),
 ]
 PHASES = [
-    ("Round 1 semi-joins", "profile_round1_operator_s", "profile_round1_ratio", "#3B6FB6"),
-    ("Round 2 semi-joins", "profile_round2_operator_s", "profile_round2_ratio", "#5AAE61"),
-    ("Round 3 real joins", "profile_round3_operator_s", "profile_round3_ratio", "#E08245"),
-    ("Other operators", "profile_other_elapsed_s", "profile_other_ratio", "#A0A0A0"),
+    ("Round 1", "profile_round1_operator_s", "profile_round1_ratio", "#3B6FB6"),
+    ("Round 2", "profile_round2_operator_s", "profile_round2_ratio", "#5AAE61"),
+    ("Round 3", "profile_round3_operator_s", "profile_round3_ratio", "#E08245"),
+    ("Other OP", "profile_other_elapsed_s", "profile_other_ratio", "#A0A0A0"),
 ]
 PROFILE_CPU_TOTAL_LABEL = "Profile CPU total"
 
@@ -2157,7 +2164,7 @@ def speedup_distribution(ax: plt.Axes, frame: pd.DataFrame, families: list[str])
     visible = (ticks >= lower) & (ticks <= upper)
     ax.set_xlim(lower, upper)
     ax.set_xticks(ticks[visible], [f"{value:g}×" for value in candidates[visible]])
-    ax.set_yticks(positions, ["Graph" if family == "graph" else family for family in families])
+    ax.set_yticks(positions, [figure_family_label(family) for family in families])
     ax.invert_yaxis()
     ax.axvline(0.0, color="0.45", linewidth=0.8, zorder=1)
     # Soft warm/cool hues meet at white for 1x. The background and arrow share the
@@ -2254,7 +2261,7 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     ])
         for family in families
     ]
-    legend_labels = ["Graph" if family == "graph" else family for family in families]
+    legend_labels = [figure_family_label(family) for family in families]
     legend_handles.extend([
         Line2D([], [], color="0.28", marker="o", linestyle="none", markeredgecolor="white",
                markeredgewidth=0.25, markersize=6),
@@ -2437,16 +2444,24 @@ def phase_group_layout(
     return np.asarray(positions, dtype=float), centers, separators
 
 
-def diverse_phase_samples(frame: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
-    """Farthest-point sampling of CPU shares among measured speed-ups >= 1.
+def diverse_phase_samples(
+    frame: pd.DataFrame, limit: int = 4, max_other_share: float = 0.5,
+) -> pd.DataFrame:
+    """Sample distinct phase compositions among measured speed-ups >= 1.
 
+    Prefer Other OP <= max_other_share. If a family cannot fill its quota,
+    restrict it to the lowest-Other OP candidates needed to fill that quota.
     Start at the composition nearest the family centroid, then maximize the
     distance to the closest selected composition. Query identity breaks ties;
-    speed-up magnitude is not a ranking criterion.
+    speed-up magnitude is not a ranking criterion. This display filter must
+    never be used to compute cohort statistics.
     """
     if limit < 1:
         raise ValueError("Phase sample size must be positive")
-    rows = phase_baseline_rows(add_short_query_labels(frame))
+    if not np.isfinite(max_other_share) or not 0 <= max_other_share <= 1:
+        raise ValueError("Other OP share limit must be between zero and one")
+    labeled = frame if "short_query" in frame else add_short_query_labels(frame)
+    rows = phase_baseline_rows(labeled)
     rows = complete_runtime_rows(rows)
     if rows.empty:
         return rows
@@ -2459,6 +2474,16 @@ def diverse_phase_samples(frame: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
         candidates = rows.loc[rows.family.eq(family)].sort_values(query_identity_columns(rows), kind="stable")
         if candidates.empty:
             continue
+        available = len(candidates)
+        other = candidates["profile_other_elapsed_s"] / candidates["_profile_cpu_time"]
+        eligible = candidates.loc[other.le(max_other_share)]
+        relaxed = len(eligible) < min(limit, available)
+        if relaxed:
+            # Stable sort keeps identity tie-breaking independent of input order.
+            candidates = candidates.loc[other.sort_values(kind="stable").index[:limit]]
+            candidates = candidates.sort_values(query_identity_columns(rows), kind="stable")
+        else:
+            candidates = eligible
         shares = candidates[columns].to_numpy(float) / candidates["_profile_cpu_time"].to_numpy(float)[:, None]
         selected = [int(np.argmin(np.sum((shares - shares.mean(axis=0)) ** 2, axis=1)))]
         while len(selected) < min(limit, len(candidates)):
@@ -2467,6 +2492,9 @@ def diverse_phase_samples(frame: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
             selected.append(int(np.argmax(distances)))
         sample = candidates.iloc[selected].copy()
         sample["_family_available"] = len(candidates)
+        sample["_family_speedups"] = available
+        sample["_phase_other_limit"] = max_other_share
+        sample["_phase_other_limit_relaxed"] = relaxed
         chosen.append(sample)
     return pd.concat(chosen) if chosen else rows.iloc[:0].copy()
 
@@ -2504,7 +2532,7 @@ def page_phase(
         baseline_runtime, outeryan_runtime,
         out=np.full_like(baseline_runtime, np.nan), where=runtime_valid,
     )
-    height = max(6.2, 1.45 + 0.225 * len(sub) + 0.10 * max(len(families) - 1, 0))
+    height = max(4.8, 1.45 + 0.225 * len(sub) + 0.10 * max(len(families) - 1, 0))
     if has_runtime_comparison:
         figure, (axis, runtime_axis) = plt.subplots(
             1, 2, sharey=True, figsize=(15.6, height),
@@ -2545,7 +2573,7 @@ def page_phase(
     for family in families:
         axis.text(
             -0.110 if versioned_labels else -0.074,
-            family_centers[family], "Graph" if family == "graph" else family,
+            family_centers[family], figure_family_label(family),
             transform=axis.get_yaxis_transform(), rotation=90,
             ha="center", va="center", fontsize=9.5, fontweight="semibold", clip_on=False,
         )
@@ -2630,7 +2658,7 @@ def page_phase(
             columnspacing=0.8, handletextpad=0.35,
         )
     figure.text(
-        0.52, 0.018, QUERY_CODE_KEY,
+        0.52, 0.000, QUERY_CODE_KEY,
         ha="center", va="bottom", fontsize=8.7,
     )
     figure.subplots_adjust(left=0.135 if versioned_labels else 0.116,
@@ -2721,13 +2749,14 @@ def write_standalone_runtime_figures(
             "profile_other_elapsed_s", "profile_wall_time_s", "profile_total_time_s",
             "profile_cpu_time_s",
             "_phase_sum_s", "_phase_sum_error_s", "baseline_time_s", "tm_on", "baseline_threads",
-            "_family_available",
+            "_family_available", "_family_speedups", "_phase_other_limit", "_phase_other_limit_relaxed",
         ) if column in phases]
         (output_directory / "phase_queries.json").write_text(json.dumps({
             "placeholder": notice is not None,
             "notice": notice,
             "runtime_filter": runtime_filter_description(),
-            "selection": ("phase-share farthest-point sample; speed-up >= 1"
+            "selection": ("phase-share farthest-point sample; speed-up >= 1; Other OP <= 50%; "
+                          "if insufficient, use the lowest-Other OP queries needed to fill the family quota"
                           if phase_sample_per_family is not None else "shape and baseline-runtime ranks"),
             "queries": json.loads(phases[columns].to_json(orient="records", double_precision=15)),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -3369,7 +3398,7 @@ def write_result_figures(output_dir: Path, population: pd.DataFrame, run: str,
     with PdfPages(output_dir / "overview.pdf") as pdf:
         pdf.infodict().update({"Title": "OuterYan benchmark results",
                               "Subject": "ON/OFF speed-up and phase breakdown",
-                              "Author": "DuckYanOuter auto_test"})
+                              "Author": "Anonymous"})
         page_summary(pdf, measured, run)
         page_shape_relations(pdf, measured, run)
         page_speedup_scatter(pdf, population, run, "tm")

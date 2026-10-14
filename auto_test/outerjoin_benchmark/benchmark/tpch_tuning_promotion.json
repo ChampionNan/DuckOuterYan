@@ -1,6 +1,6 @@
 {
   "revision": "tpch-tuning-promotion-20261013",
-  "policy_sha256": "c57b4b1dca516a50c543b7a4b5fdbf7a0602be6330e13731eae33b11bfa55c21",
+  "policy_sha256": "d6f7c154e575f78a93e9c05cea5eed904c6e44f0075523116913e6c578bca00f",
   "replaced_queries": 20,
   "selected_slots": [
     "A-H-B-04",

@@ -176,8 +176,7 @@ def stage(binary, database, output, explain=False, threads=4):
                             proposed_query=query, change=pin["rule"], tier=old["semantic_tier"],
                             old_fraction=old["calibration_fraction"], new_fraction=fraction,
                             old_join_vector=old["join_vector"], new_join_vector=row["join_vector"],
-                            old_speedup_reference_only=pin["historical_speedup"],
-                            new_speedup="PENDING", new_selected="PENDING_CPU9", new_predicate=predicate))
+                            new_predicate=predicate))
         if explain:
             decision = plan_decision(binary, database, sql, threads)
             decisions.append(dict(query=query, **decision))

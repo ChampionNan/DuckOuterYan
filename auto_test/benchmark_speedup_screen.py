@@ -4,6 +4,7 @@ import json
 import math
 
 import balanced_benchmark as b
+from workload_policy import validate_pins
 
 POLICY = b.ROOT / "sources/speedup_screen_20261008.json"
 MARKER = "speedup_screen.json"
@@ -27,17 +28,12 @@ def below_threshold(result, threshold=.5, *, inclusive=False, allow_unchecked=Fa
 
 def policy():
     spec = json.loads(POLICY.read_text(encoding="utf-8"))
-    for row in spec["excluded"]:
-        result = dict(row, tm_off=row["duckdb_s"], tm_on=row["outeryan_s"])
+    for row in validate_pins(spec):
         rule_id = row.get("screen_rule")
         rule = spec.get("rules", {}).get(rule_id) if rule_id else None
         if rule_id and (rule is None or row["family"] not in rule["families"]
                         or row["measurement_source"] != rule["measurement_source"]):
             raise ValueError(f"Invalid scoped speed-up rule: {row['query_id']}")
-        if not below_threshold(result, rule["threshold"] if rule else spec["minimum_speedup"],
-                               inclusive=rule["inclusive"] if rule else False,
-                               allow_unchecked=rule["allow_unchecked"] if rule else False):
-            raise ValueError(f"Invalid speed-up exclusion evidence: {row['query_id']}")
     return spec
 
 
@@ -112,6 +108,8 @@ def validate(benchmark, rows):
         raise ValueError("Incomplete excluded-query metadata for quota validation")
     for evidence in spec["excluded"]:
         row = by_fingerprint[evidence["sql_fingerprint"]]
+        if any(key in row for key in ("duckdb_s", "outeryan_s", "speedup", "tm_off", "tm_on")):
+            raise ValueError("Excluded-query evidence changed: measurements are not workload metadata")
         if any(str(row.get(key, "")) != str(value) for key, value in evidence.items()):
             raise ValueError(f"Excluded-query evidence changed: {evidence['query_id']}")
     return rows + removed

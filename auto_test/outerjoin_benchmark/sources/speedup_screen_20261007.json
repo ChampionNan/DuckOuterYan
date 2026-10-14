@@ -40,11 +40,6 @@
       "semantic_tier": "low",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.007285934",
-      "outeryan_s": "0.017271657",
-      "speedup": 0.42184337032630975,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
       "measurement_source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
@@ -59,11 +54,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "join",
-      "duckdb_s": "0.637581396",
-      "outeryan_s": "1.349442982",
-      "speedup": 0.47247746255647277,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
       "measurement_source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
@@ -78,11 +68,6 @@
       "semantic_tier": "medium",
       "relation_count": "5",
       "query_class": "join",
-      "duckdb_s": "0.389470300",
-      "outeryan_s": "0.868665777",
-      "speedup": 0.44835460347599254,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
       "measurement_source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
@@ -97,11 +82,6 @@
       "semantic_tier": "high",
       "relation_count": "4",
       "query_class": "join",
-      "duckdb_s": "0.297296160",
-      "outeryan_s": "0.607696218",
-      "speedup": 0.4892183811484573,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
       "measurement_source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
@@ -116,11 +96,6 @@
       "semantic_tier": "low",
       "relation_count": "4",
       "query_class": "graph",
-      "duckdb_s": "11.489172960",
-      "outeryan_s": "25.763386175",
-      "speedup": 0.4459496466015302,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
       "measurement_source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
@@ -135,11 +110,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.437438119",
-      "outeryan_s": "1.916563513",
-      "speedup": 0.22824086759080445,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -154,11 +124,6 @@
       "semantic_tier": "medium",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.397676613",
-      "outeryan_s": "1.130557099",
-      "speedup": 0.35175278926801024,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -173,11 +138,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.417000058",
-      "outeryan_s": "2.797634459",
-      "speedup": 0.14905451877692932,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -192,11 +152,6 @@
       "semantic_tier": "medium",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.394128761",
-      "outeryan_s": "1.601287464",
-      "speedup": 0.24613242148006972,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -211,11 +166,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.499886473",
-      "outeryan_s": "1.868515687",
-      "speedup": 0.26753132257754497,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -230,11 +180,6 @@
       "semantic_tier": "medium",
       "relation_count": "5",
       "query_class": "aggregate",
-      "duckdb_s": "0.492871830",
-      "outeryan_s": "1.137521709",
-      "speedup": 0.4332856472983585,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -249,11 +194,6 @@
       "semantic_tier": "high",
       "relation_count": "5",
       "query_class": "join",
-      "duckdb_s": "1.283354335",
-      "outeryan_s": "2.607038008",
-      "speedup": 0.49226529535122915,
-      "correct": "TRUE",
-      "timing_status": "measured",
       "reason": "measured_speedup_below_0.5",
       "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
       "measurement_source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
@@ -261,7 +201,7 @@
   ],
   "selection": "Performance-conditioned exact-SQL screening, not an unbiased overall workload. The 20261007 revision adds seven verified TPC-DS regressions to the five 20261005 exclusions. Raw measurements remain unchanged; the generator does not certify retained queries as fast or timeout-free.",
   "previous_policy": "sources/speedup_screen_20261005.json",
-  "previous_policy_sha256": "555a1e107081d6037c056e9f869c7701f97ec0f2c120f92cf8924e05bbf0543f",
+  "previous_policy_sha256": "9748ffa2096f6f0aaab48a76c0da03a518f7cc547daf4f3facba8df404465b15",
   "evidence_sources": [
     {
       "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
@@ -272,5 +212,6 @@
       "source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
     }
   ],
-  "retirement_input_manifest_sha256": "b4356f860082568a7a0c0d88571b4aae01220e80f7ff82145a72050cfb071de3"
+  "retirement_input_manifest_sha256": "b4356f860082568a7a0c0d88571b4aae01220e80f7ff82145a72050cfb071de3",
+  "representation": "frozen_workload_definition"
 }
