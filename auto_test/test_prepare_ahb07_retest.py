@@ -1,0 +1,35 @@
+"""A-H-B-07 candidates must preserve the entire query except its date predicate."""
+from datetime import date
+import unittest
+from unittest import mock
+
+import prepare_ahb07_retest as pilot
+
+
+class Ahb07RetestTest(unittest.TestCase):
+    def test_frozen_shape_and_only_date_windows(self):
+        entries = pilot.assemble()
+        original, source = entries[0]
+        self.assertEqual(len(entries), 7)
+        self.assertEqual(len({r["sql_fingerprint"] for r, _ in entries}), 7)
+        for row, sql in entries:
+            self.assertEqual(sql.replace(row["selectivity_predicate"], original["selectivity_predicate"], 1), source)
+            self.assertEqual(row["semantic_tier"], "high")
+            for key in ("source_seed", "tree_shape", "join_vector", "relation_count", "aggregate_variant"):
+                self.assertEqual(row[key], original[key])
+        for _, start, _ in pilot.WINDOWS:
+            self.assertLessEqual(date.fromisoformat(start), date(1994, 1, 1))
+
+    def test_stale_sql_is_rejected(self):
+        with mock.patch.object(pilot.common, "digest", return_value="changed"):
+            with self.assertRaisesRegex(ValueError, "source changed"):
+                pilot.assemble()
+
+    def test_scale_mismatch_fails_before_calibration(self):
+        with mock.patch.object(pilot.common, "query_json", return_value={"orders": 1500000, "customer": 150000}):
+            with self.assertRaisesRegex(ValueError, "scale mismatch"):
+                pilot.calibrate(None, None, pilot.assemble(), 50)
+
+
+if __name__ == "__main__":
+    unittest.main()
