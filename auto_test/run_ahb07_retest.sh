@@ -28,7 +28,7 @@ echo "COMMIT=$(git rev-parse HEAD)"
 echo "RUN_LOG=${BASE}.run.log"
 "$PYTHON_BIN" "$SCRIPT_DIR/prepare_ahb07_retest.py" --out "$OY_CORPUS" \
     --bin "$DUCKDB_BIN" --tpch-db "$TPCH_DB" --tpch-sf 50 --threads 32
-bash "$SCRIPT_DIR/experiment_onoff.sh" --only tpch --query-list "$OY_CORPUS/queries.txt" \
+bash "$SCRIPT_DIR/experiment_onoff.sh" --only all --query-list "$OY_CORPUS/queries.txt" \
     --threads 32 --runs 5 --timeout 600 --profile --no-check-correctness \
     --capture-plans --out "${BASE}.txt"
 echo 'CPU9_AHB07_EXIT=0'
