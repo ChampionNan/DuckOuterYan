@@ -19,11 +19,11 @@ The CLI is `build/release/duckdb`. For assertions and focused C++ tests, use
 
 ## Benchmark inputs
 
-The current workload contains **350 SQL queries**: SGPB 67, TPC-H 87,
-TPC-DS 87, and JOB 109. SGPB uses the internal family key `graph` (61 Bitcoin
-and 6 Epinions queries). The workload contains 244 non-aggregate result queries
-and 106 aggregation queries; input shapes are 121 left-deep, 124 right-deep,
-and 105 bushy expressions. Queries and their manifest are in
+The current workload contains **321 SQL queries**: SGPB 67, TPC-H 86,
+TPC-DS 61, and JOB 107. SGPB uses the internal family key `graph` (61 Bitcoin
+and 6 Epinions queries). The workload contains 227 non-aggregate result queries
+and 94 aggregation queries; input shapes are 112 left-deep, 115 right-deep,
+and 94 bushy expressions. Queries and their manifest are in
 [`auto_test/outerjoin_benchmark/benchmark/`](auto_test/outerjoin_benchmark/benchmark/).
 Source queries, historical query definitions, and declarative generation policies
 are retained because the generator uses them to reproduce the workload.
@@ -56,11 +56,30 @@ paths. Dataset generation, downloads, and a complete experiment can be expensive
 
 ## One-command experiment
 
-Install Python 3.10+ and the report dependencies with
+From a clean clone on Linux (Git, Bash, curl, tar, CMake, Ninja, Make and a C++11
+compiler supporting C++17 must be available), the complete opt-in reconstruction command is:
+
+```bash
+bash auto_test/run_all.sh --bootstrap --generate-queries
+```
+
+`--bootstrap` downloads checksum-verified uv 0.8.22 and installs CPython 3.11.13
+with pinned reporting packages under ignored `auto_test/results/environment/`.
+It needs no sudo and does not change system Python. The runner then checks exact
+query reproduction, builds release, prepares both Bitcoin and Epinions plus
+TPC-H SF50, TPC-DS SF50 and JOB, runs all 321 queries, and publishes statistics
+and PDF/PNG figures. Build parallelism defaults to 8 (`JOBS` overrides it).
+
+Alternatively, install Python 3.10+ and the report dependencies with
 `python3 -m pip install -r auto_test/report_requirements.txt`. Dataset preparation
 downloads public SNAP graph files and JOB Parquet tables when absent, and generates
 TPC-H/TPC-DS through the built-in extensions. Network access and sufficient disk
-space are required; existing configured databases are reused.
+space are required. Downloads are pinned by SHA256. Database creation is staged
+and publishes only complete databases; `.reproduction.json` sidecars record
+scale, generator binary, input-checksum manifest, row counts and primary keys.
+Existing databases with matching sidecars are validated and reused. For legacy
+databases without sidecars, choose new paths or explicitly use `--skip-data`
+after independently verifying their identity; no existing database is deleted.
 
 For an intentional complete run (potentially many hours):
 

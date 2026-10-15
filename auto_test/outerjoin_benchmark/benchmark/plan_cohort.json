@@ -1,15 +1,35 @@
 {
   "revision": "selected-plus-cost-controls-20261014",
-  "policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90",
+  "policy_sha256": "076665c5fc43a0c2d69851d15f498d669435774a75523d25fbb72b0537add9ed",
   "counts": {
     "graph": 67,
-    "job": 109,
-    "tpcds": 87,
-    "tpch": 87
+    "job": 107,
+    "tpcds": 61,
+    "tpch": 86
   },
-  "selected": 285,
-  "cost_controls": 65,
-  "removed": 370,
+  "selected": 282,
+  "cost_controls": 39,
+  "removed": 399,
+  "control_deduplication": {
+    "revision": "tpcds-control-pattern-shape-20261015",
+    "group_by": [
+      "source_seed",
+      "tree_shape"
+    ],
+    "before": 42,
+    "retained": 16,
+    "removed": 26,
+    "rule": "Smaller groups first; balance semantic tiers; stable SHA256(revision + query_id) tie-break. No timing or speedup ranking.",
+    "prior_policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90"
+  },
+  "query_updates": {
+    "revision": "cohort-selectivity-20261015",
+    "policy_sha256": "224927fdcd578a9bd4712328a83fe7ba22f30168e7cf607b450bc325991f1723",
+    "query_ids": [
+      "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+      "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count"
+    ]
+  },
   "retired_both_timeouts": 21,
   "reporting_rule": {
     "fallback_speedup": 1.0,

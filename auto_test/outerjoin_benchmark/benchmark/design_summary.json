@@ -4,22 +4,22 @@
   "batch": 0,
   "counts": {
     "graph": 67,
-    "job": 109,
-    "tpcds": 87,
-    "tpch": 87
+    "job": 107,
+    "tpcds": 61,
+    "tpch": 86
   },
   "balanced_counts": {
     "graph": 67,
-    "job": 109,
-    "tpcds": 41,
-    "tpch": 87
+    "job": 107,
+    "tpcds": 21,
+    "tpch": 86
   },
   "base_matrix_complete": false,
   "recovery_counts": {
-    "tpcds": 38
+    "tpcds": 34
   },
   "extension_counts": {
-    "tpcds": 8
+    "tpcds": 6
   },
   "supplementary_counts": {},
   "family_tiers": {
@@ -29,19 +29,19 @@
       "low": 14
     },
     "tpch": {
-      "high": 29,
+      "high": 27,
       "low": 29,
-      "medium": 29
+      "medium": 30
     },
     "tpcds": {
-      "high": 27,
-      "low": 32,
-      "medium": 28
+      "high": 18,
+      "low": 23,
+      "medium": 20
     },
     "job": {
-      "medium": 39,
-      "high": 37,
-      "low": 33
+      "high": 36,
+      "low": 33,
+      "medium": 38
     }
   },
   "family_shapes": {
@@ -53,16 +53,16 @@
     "tpch": {
       "bushy": 32,
       "right_deep": 29,
-      "left_deep": 26
+      "left_deep": 25
     },
     "tpcds": {
-      "left_deep": 37,
-      "right_deep": 36,
-      "bushy": 14
+      "left_deep": 29,
+      "right_deep": 28,
+      "bushy": 4
     },
     "job": {
-      "right_deep": 38,
-      "bushy": 39,
+      "bushy": 38,
+      "right_deep": 37,
       "left_deep": 32
     }
   },
@@ -547,16 +547,36 @@
   },
   "plan_cohort": {
     "revision": "selected-plus-cost-controls-20261014",
-    "policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90",
+    "policy_sha256": "076665c5fc43a0c2d69851d15f498d669435774a75523d25fbb72b0537add9ed",
     "counts": {
       "graph": 67,
-      "job": 109,
-      "tpcds": 87,
-      "tpch": 87
+      "job": 107,
+      "tpcds": 61,
+      "tpch": 86
     },
-    "selected": 285,
-    "cost_controls": 65,
-    "removed": 370,
+    "selected": 282,
+    "cost_controls": 39,
+    "removed": 399,
+    "control_deduplication": {
+      "revision": "tpcds-control-pattern-shape-20261015",
+      "group_by": [
+        "source_seed",
+        "tree_shape"
+      ],
+      "before": 42,
+      "retained": 16,
+      "removed": 26,
+      "rule": "Smaller groups first; balance semantic tiers; stable SHA256(revision + query_id) tie-break. No timing or speedup ranking.",
+      "prior_policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90"
+    },
+    "query_updates": {
+      "revision": "cohort-selectivity-20261015",
+      "policy_sha256": "224927fdcd578a9bd4712328a83fe7ba22f30168e7cf607b450bc325991f1723",
+      "query_ids": [
+        "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+        "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count"
+      ]
+    },
     "retired_both_timeouts": 21,
     "reporting_rule": {
       "fallback_speedup": 1.0,

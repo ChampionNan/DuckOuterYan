@@ -44,6 +44,10 @@ want() { local t; for t in "${TARGETS[@]}"; do [[ "$t" == "$1" || "$t" == "all" 
 # --- helper: download a single SNAP graph if not cached ----------------------
 _download_snap_graph() {
     local name="$1" dir="$2"
+    if [[ "$name" == bitcoin || "$name" == epinions ]]; then
+        "$PYTHON_BIN" "$SCRIPT_DIR/fetch_benchmark_data.py" "$dir/${name}.txt"
+        return
+    fi
     mkdir -p "$dir"
     [ -s "$dir/${name}.txt" ] && return 0
     echo "  [get ] $name"
@@ -109,6 +113,7 @@ _add_pk() {
         echo "  [pk  ] $tbl ($cols)"
     else
         echo "  [warn] could not add PK to $tbl ($cols) — duplicate/NULL keys or table absent"
+        [ "${OY_STRICT_DATA_BUILD:-0}" != 1 ] || return 1
     fi
 }
 
@@ -247,11 +252,7 @@ if want job; then
         mkdir -p "$JOB_DATA_DIR"
         for tbl in $JOB_TABLES; do
             local_file="$JOB_DATA_DIR/job_${tbl}.parquet"
-            if [ ! -f "$local_file" ]; then
-                curl -sL --retry 3 -o "$local_file" \
-                    "https://github.com/duckdb/duckdb-data/releases/download/v1.0/job_${tbl}.parquet" \
-                    || { echo "ERROR: failed to download job_${tbl}.parquet" >&2; exit 1; }
-            fi
+            "$PYTHON_BIN" "$SCRIPT_DIR/fetch_benchmark_data.py" "$local_file"
         done
         echo "[job_db] Loading parquet into DuckDB ..."
         rm -f "$JOB_DB" "$JOB_DB.wal"

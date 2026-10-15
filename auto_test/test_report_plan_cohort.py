@@ -50,20 +50,42 @@ class ReportPlanCohortTest(unittest.TestCase):
 
     def test_complete_current_cohort(self):
         if not all((report.ROOT / item["path"]).is_file()
-                   for item in report.cohort.policy()["source_files"]):
+                   for item in report.cohort.policy()["source_files"] + report.cohort.query_updates.source_files()):
             self.skipTest("Historical measurement CSVs are optional local artifacts")
         details, retired, stats, summary = report.build()
-        self.assertEqual(len(details), 350)
+        self.assertEqual(len(details), 321)
         self.assertEqual(len(retired), 21)
         all_queries = next(r for r in stats if r["scope"] == "all_queries" and r["family"] == "All")
         self.assertEqual((all_queries["measured_n"], all_queries["capped_n"], all_queries["fallback_n"]),
-                         (281, 4, 65))
+                         (278, 4, 39))
         self.assertEqual(all_queries["excluded_n"], 0)
-        self.assertAlmostEqual(all_queries["geomean"], math.prod(r["speedup"] ** (1 / 350) for r in details))
+        self.assertAlmostEqual(all_queries["geomean"], math.prod(r["speedup"] ** (1 / 321) for r in details))
         self.assertEqual(all_queries["max"], max(r["speedup"] for r in details))
         self.assertEqual(all_queries["measured_max"],
                          max(r["speedup"] for r in details if r["speedup_source"] == "measured"))
-        self.assertEqual(summary["benchmark_queries"], 350)
+        self.assertEqual(summary["benchmark_queries"], 321)
+
+    def test_promoted_candidates_use_exact_latest_observations(self):
+        sources = report.cohort.policy()["source_files"] + report.cohort.query_updates.source_files()
+        if not all((report.ROOT / r["path"]).exists() for r in sources):
+            self.skipTest("Pinned historical measurements are optional local artifacts")
+        details, _, _, _ = report.build()
+        by_id = {row["query"]: row for row in details}
+        self.assertTrue(report.cohort.RETIRED_FAMILY_MINIMA.isdisjoint(by_id))
+        for entry in report.cohort.query_updates.policy()["replacements"]:
+            if entry["original_query"] in report.cohort.RETIRED_FAMILY_MINIMA:
+                continue
+            row = by_id[entry["query_id"]]
+            self.assertEqual(row["source_query"], entry["measurement_query"])
+            self.assertEqual(row["source_csv"], entry["measurement_csv"])
+            self.assertEqual(row["source_sql_content_sha256"], entry["measurement_content_sha256"])
+            self.assertEqual(row["speedup_source"], "measured")
+            self.assertEqual(row["selected_plan"], "OUTERYAN")
+            self.assertGreaterEqual(row["speedup"], .7)
+        # The explicitly retired JOB slot must not become a synthetic 1x result.
+        self.assertNotIn(report.cohort.RETIRED_JOB_QUERY, by_id)
+        remaining = [r for r in details if r["speedup"] is not None and r["speedup"] < .7]
+        self.assertEqual(remaining, [])
 
 
 if __name__ == "__main__":

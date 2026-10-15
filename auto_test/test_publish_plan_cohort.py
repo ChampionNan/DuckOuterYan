@@ -13,23 +13,32 @@ from test_gen_outerjoin_benchmark import forbid_result_access
 
 
 class CohortPublicationTest(unittest.TestCase):
+    def test_snapshot_ignores_only_finder_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".DS_Store").write_bytes(b"Finder metadata")
+            (root / "query.sql").write_text("SELECT 1;\n")
+            (root / ".unexpected").write_text("Still verify this file.\n")
+            self.assertEqual(set(reproduce.snapshot(root)), {"query.sql", ".unexpected"})
+
     def test_generation_is_result_free_and_byte_identical(self):
         with forbid_result_access():
             result = reproduce.verify()
-        self.assertEqual(result["query_count"], 350)
+        self.assertEqual(result["query_count"], 321)
         self.assertTrue(result["byte_identical"])
 
     def test_current_publication(self):
-        if not all((report.ROOT / r["path"]).exists() for r in report.cohort.policy()["source_files"]):
+        if not all((report.ROOT / r["path"]).exists() for r in
+                   report.cohort.policy()["source_files"] + report.cohort.query_updates.source_files()):
             self.skipTest("Pinned historical measurements are optional local artifacts")
         with tempfile.TemporaryDirectory() as temporary, patch.object(
                 publish.plot, "query_attributes", side_effect=FileNotFoundError("No catalog in unit test")):
             out = Path(temporary)
             (out / "existing_manuscript.tex").write_text("Keep this manuscript unchanged.\n")
             result = publish.publish(out, figures=False)
-            self.assertEqual(result["figure_points"], dict(runtime_pairs=285, ratio_points=350))
-            self.assertEqual(result["phase_profiles"], 281)
-            self.assertEqual(sum(r["n"] for r in result["workload"][:-1]), 350)
+            self.assertEqual(result["figure_points"], dict(runtime_pairs=282, ratio_points=321))
+            self.assertEqual(result["phase_profiles"], 278)
+            self.assertEqual(sum(r["n"] for r in result["workload"][:-1]), 321)
             ids = result["optimization_representatives"]
             self.assertEqual((len(ids["main"]), len(ids["appendix"])), (3, 9))
             self.assertFalse(set(ids["main"]) & set(ids["appendix"]))
@@ -39,7 +48,7 @@ class CohortPublicationTest(unittest.TestCase):
             for r in report.b.read_manifest(out / "phase_summary.csv"):
                 self.assertAlmostEqual(sum(float(r[k + "_pct"]) for k in publish.PHASE_KEYS), 100)
             details = report.b.read_manifest(out / "current_results.csv")
-            self.assertEqual(len(details), 350)
+            self.assertEqual(len(details), 321)
             for r in details:
                 if r["speedup_source"] == "duckdb_timeout_600s":
                     self.assertEqual(r["duckdb_status"], "timeout")
@@ -53,7 +62,7 @@ class CohortPublicationTest(unittest.TestCase):
         self.assertEqual(error.exception.code, 2)
 
     def test_default_validation_never_generates(self):
-        with patch.object(reproduce.benchmark, "validate", return_value=[{}] * 350), \
+        with patch.object(reproduce.benchmark, "validate", return_value=[{}] * 321), \
              patch.object(reproduce, "verify") as verify:
             reproduce.main(["--validate-only"])
             verify.assert_not_called()
@@ -83,7 +92,8 @@ class CohortPublicationTest(unittest.TestCase):
             publish.plot.plt.close(figure)
 
     def test_fresh_run_never_reads_historical_csvs(self):
-        if not all((report.ROOT / r["path"]).exists() for r in report.cohort.policy()["source_files"]):
+        if not all((report.ROOT / r["path"]).exists() for r in
+                   report.cohort.policy()["source_files"] + report.cohort.query_updates.source_files()):
             self.skipTest("Pinned historical measurements are optional local artifacts")
         _, _, records, _ = report.load_observations()
         with tempfile.TemporaryDirectory() as temporary:
@@ -93,9 +103,16 @@ class CohortPublicationTest(unittest.TestCase):
             spec["source_files"] = [dict(path="missing-historical.csv", sha256="invalid")]
             with patch.object(report.cohort, "policy", return_value=spec):
                 details, retired, _, summary = report.build([path])
-            self.assertEqual(len(details), 350)
+            self.assertEqual(len(details), 321)
             self.assertEqual(retired, [])
             self.assertEqual(summary["measurement_mode"], "new_run")
+            updated = report.cohort.query_updates.policy()["replacements"][0]
+            record = next(row for row in records if row["query"] == updated["query_id"])
+            record["sql_content_sha256"] = updated["original_sha256"]
+            report.b.write_csv(path, records)
+            with self.assertRaisesRegex(ValueError, "SQL hash mismatch"):
+                report.build([path])
+            record["sql_content_sha256"] = updated["content_sha256"]
             records.pop()
             report.b.write_csv(path, records)
             with self.assertRaisesRegex(ValueError, "cover exactly"):
@@ -109,6 +126,29 @@ class CohortPublicationTest(unittest.TestCase):
         record = report.observation(fixture.member("selected"), raw)
         self.assertEqual(record["speedup"], 1)
         self.assertIsNone(record["effective_duckdb_s"])
+
+    def test_cold_checkout_can_publish_new_results_without_history(self):
+        # Synthetic fixtures exercise reporting only, never published measurements.
+        rows = []
+        for index, meta in enumerate(report.b.validate(report.b.ROOT / "benchmark")):
+            rows.append(dict(query=meta["query_id"], sql_content_sha256=meta["content_sha256"],
+                selected_plan="OUTERYAN", correct="NOT-CHECKED", timing_status="measured",
+                duckdb_status="measured", outeryan_status="measured", tm_off=str(2 + index / 100),
+                tm_on="1", optimizer_profile_status="not-run", profile_status="not-run",
+                duckdb_timeout_seconds="600", timing_samples="5", timing_threads="32"))
+        spec = report.cohort.policy()
+        spec["source_files"] = [dict(path="unavailable-history.csv", sha256="invalid")]
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "synthetic-test-only.csv"
+            report.b.write_csv(source, rows)
+            with patch.object(report.cohort, "policy", return_value=spec):
+                result = publish.publish(Path(temp) / "report", [source], figures=True)
+            self.assertEqual(result["benchmark_queries"], 321)
+            self.assertEqual(result["measurement_mode"], "new_run")
+            self.assertEqual(result["phase_profiles"], 0)
+            self.assertEqual(result["figure_points"]["ratio_points"], 321)
+            self.assertTrue((Path(temp) / "report/speedup_all_queries.pdf").is_file())
+            self.assertFalse(list((Path(temp) / "report").glob("*.tex")))
 
 
 if __name__ == "__main__":

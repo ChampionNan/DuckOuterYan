@@ -30,11 +30,13 @@ def positive(value):
 
 def observation(member, raw):
     """Retain original values and derive the user-requested reporting values."""
-    if raw.get("sql_content_sha256") != member["content_sha256"]:
+    expected_hash = member.get("measurement_content_sha256") or member["content_sha256"]
+    if raw.get("sql_content_sha256") != expected_hash:
         raise ValueError("SQL hash mismatch: " + member["query_id"])
     row = dict(query=member["query_id"], family=member["family"], role=member["role"],
                source_csv=member["decision_source"], source_query=member["decision_query"],
                sql_content_sha256=member["content_sha256"],
+               source_sql_content_sha256=raw["sql_content_sha256"],
                selected_plan=raw.get("selected_plan", ""),
                recorded_timing_status=raw.get("timing_status", ""),
                recorded_duckdb_s=raw.get("tm_off", ""), recorded_outeryan_s=raw.get("tm_on", ""),
@@ -102,7 +104,7 @@ def load_observations(csv_paths=None):
     spec = cohort.policy()
     active = {r["query_id"]: r for r in b.validate(b.ROOT / "benchmark")}
     sources = {}
-    source_files = spec["source_files"] if not csv_paths else [
+    source_files = spec["source_files"] + cohort.query_updates.source_files() if not csv_paths else [
         dict(path=str(Path(p).resolve()), sha256=b.digest(Path(p))) for p in csv_paths]
     fresh = {}
     for source in source_files:
@@ -128,14 +130,15 @@ def load_observations(csv_paths=None):
             if len(values) > 1:
                 raise ValueError("New-run CSVs have incompatible settings for " + key)
     details, retired, observations = [], [], []
-    for member in spec["members"]:
+    for member in cohort.active_members(spec):
         if member["role"] == "removed" and member["removal_reason"] != "both_engines_timeout":
             continue
         if csv_paths:
             if member["role"] == "removed":
                 continue
             path, raw = fresh[member["query_id"]]
-            member = dict(member, decision_source=path, decision_query=raw["query"])
+            member = dict(member, decision_source=path, decision_query=raw["query"],
+                          measurement_content_sha256="")
         else:
             raw = sources[member["decision_source"]][member["decision_query"]]
         row = observation(member, raw)
@@ -148,7 +151,9 @@ def load_observations(csv_paths=None):
                 raise ValueError("Report references an inactive query")
             details.append(row)
             observations.append(dict(raw, query=member["query_id"], source_query=raw["query"],
-                                     source_csv=member["decision_source"]))
+                                     source_csv=member["decision_source"],
+                                     sql_content_sha256=member["content_sha256"],
+                                     source_sql_content_sha256=raw["sql_content_sha256"]))
     return details, retired, observations, source_files
 
 
@@ -162,7 +167,7 @@ def build(csv_paths=None):
         reporting_rule=spec["reporting_rule"], benchmark_queries=len(details),
         retired_both_timeout_queries=len(retired),
         active_manifest_sha256=b.digest(b.ROOT / "benchmark/manifest.csv"),
-        policy_sha256=b.digest(cohort.POLICY), sources=source_files,
+        policy_sha256=b.digest(cohort.POLICY), query_updates=cohort.query_updates.marker(), sources=source_files,
         measurement_mode="new_run" if csv_paths else "pinned_historical_observations",
         total_definition="Effective sums cover measured and capped pairs only, never fallback placeholders.",
         timeout_interpretation="600 s is an assigned timeout-limit proxy. A warmup timeout does not prove "

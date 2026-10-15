@@ -1,0 +1,41 @@
+{
+  "revision": "cohort-selectivity-20261015",
+  "representation": "frozen_workload_definition",
+  "selection": "Two user-approved predicate-only updates with CPU9 pilot ratios >= 0.7. Performance-conditioned curation, not an optimizer improvement or a guarantee for future runs. The remaining JOB right-deep slot has no qualifying candidate and is unchanged.",
+  "replacements": [
+    {
+      "original_query": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count",
+      "original_sha256": "4fc59a70f9c04bb95fd2fd6546b7dd68d97c84635fa048222007f35d46994761",
+      "query_id": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+      "predicate": "o.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1992-08-27'",
+      "semantic_tier": "medium",
+      "calibration": {
+        "rows": 75000000,
+        "qualified_rows": 7479153
+      },
+      "content_sha256": "2f2778afb4b18c37cd716b4ac3f302cb169c81e6d11045819f290aca8d9891a5",
+      "measurement_content_sha256": "2f2778afb4b18c37cd716b4ac3f302cb169c81e6d11045819f290aca8d9891a5",
+      "measurement_csv": "auto_test/results/experiment_onoff_slow_three_selectivity_20261014_173749_t32.csv",
+      "measurement_csv_sha256": "fee273b27e42d2872ea87d8561a82e5da655d22ba69c35427788f0da349ebe61",
+      "measurement_query": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count__slow3_20261014_d240_early",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+      "original_sha256": "fdc5e84e3ff9e082bbd32a8b65362b848c02173e0283547bec3dc4994e52288a",
+      "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+      "predicate": "t.production_year BETWEEN 2003 AND 2011",
+      "semantic_tier": "high",
+      "calibration": {
+        "rows": 2528312,
+        "qualified_rows": 1028646
+      },
+      "content_sha256": "75b5a0e67a0322702120a806d192be27497bcb51f05ff0c52b7b192f2b86e1d6",
+      "measurement_content_sha256": "75b5a0e67a0322702120a806d192be27497bcb51f05ff0c52b7b192f2b86e1d6",
+      "measurement_csv": "auto_test/results/experiment_onoff_slow_three_selectivity_20261014_173749_t32.csv",
+      "measurement_csv_sha256": "fee273b27e42d2872ea87d8561a82e5da655d22ba69c35427788f0da349ebe61",
+      "measurement_query": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count__slow3_20261014_y2003_2011",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    }
+  ]
+}

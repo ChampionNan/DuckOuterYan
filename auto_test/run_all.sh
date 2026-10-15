@@ -28,7 +28,7 @@
 #   OY_DUCKDB_TIMEOUT_SECS / OY_OUTERYAN_TIMEOUT_SECS  Independent engine limits
 #   --timeout S      Set both limits; 0 disables the timeout
 #   --duckdb-timeout S / --outeryan-timeout S  Per-engine overrides
-#   JOBS             Make parallelism (default: nproc)
+#   JOBS             Bounded build parallelism (default: 8)
 #   PYTHON_BIN       Python 3.10+ interpreter (default: python3; may be repo-local)
 #   SKIP_BUILD       Set to 1 to skip compilation (use existing binary)
 #   SKIP_DATA        Set to 1 to skip target DuckDB database generation
@@ -67,6 +67,7 @@ usage() {
     printf '%s\n' \
         'Usage: bash auto_test/run_all.sh [OPTIONS] [experiment_onoff.sh options]' \
         'Default: build release, reuse/build data, test committed queries, publish statistics + PDF/PNG.' \
+        '  --bootstrap            Install isolated pinned Python/report dependencies (no sudo)' \
         '  --generate-queries     Regenerate the frozen SQL/manifests and verify byte identity before testing' \
         '  --prepare-only         Generate and verify only; no build, data downloads, or query execution' \
         '  --report-only          Reprocess results only; no build, generation, downloads, or query execution' \
@@ -85,14 +86,6 @@ usage() {
         'Subset/custom runs retain harness statistics; full-cohort plots require the complete active manifest.'
 }
 
-if [[ "$PYTHON_BIN" == */* ]]; then
-    [ -x "$PYTHON_BIN" ] || err "Python binary is not executable: $PYTHON_BIN"
-else
-    command -v "$PYTHON_BIN" >/dev/null 2>&1 || err "Python binary was not found: $PYTHON_BIN"
-fi
-"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || \
-    err "Python 3.10 or newer is required: $PYTHON_BIN"
-
 # Fail early for retired workflow requests instead of running a different comparison.
 if [ "${RUN_PGPLAN:-${RUN_PG_REPLAY:-0}}" != 0 ]; then
     err "PGPlan workflow has been removed; unset RUN_PGPLAN/RUN_PG_REPLAY to run Original/OuterYan"
@@ -106,6 +99,7 @@ RUN_STATUS=0
 CUSTOM_CORPUS="$CALLER_OY_CORPUS"
 THREAD_COUNTS="${OY_THREAD_COUNTS:-$OY_THREADS}"
 GENERATE_QUERIES=0
+BOOTSTRAP=0
 PREPARE_ONLY=0
 REPORT_ONLY=0
 NO_FIGURES=0
@@ -123,6 +117,7 @@ while [ "$argument_index" -lt "${#RAW_EXPERIMENT_ARGS[@]}" ]; do
     argument="${RAW_EXPERIMENT_ARGS[$argument_index]}"
     case "$argument" in
         -h|--help) usage; exit 0;;
+        --bootstrap) BOOTSTRAP=1; argument_index=$((argument_index + 1));;
         --generate-queries) GENERATE_QUERIES=1; argument_index=$((argument_index + 1));;
         --prepare-only) PREPARE_ONLY=1; GENERATE_QUERIES=1; argument_index=$((argument_index + 1));;
         --report-only) REPORT_ONLY=1; argument_index=$((argument_index + 1));;
@@ -170,6 +165,7 @@ PUBLISH_ARGS=(--output-dir "$OUTPUT_DIR")
 [ "$NO_FIGURES" -eq 0 ] || PUBLISH_ARGS+=(--no-figures)
 
 if [ "$DRY_RUN" -eq 1 ]; then
+    [ "$BOOTSTRAP" -eq 0 ] || echo 'Prepare isolated pinned Python/report dependencies (no sudo).'
     if [ "$REPORT_ONLY" -eq 1 ]; then
         printf '%q ' "$PYTHON_BIN" "$SCRIPT_DIR/publish_plan_cohort.py" "${PUBLISH_ARGS[@]}"
         if [ "${#REPORT_INPUTS[@]}" -gt 0 ]; then printf '%q ' "${REPORT_INPUTS[@]}"; fi
@@ -190,6 +186,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
     fi
     exit 0
 fi
+
+if [ "$BOOTSTRAP" -eq 1 ]; then
+    . "$SCRIPT_DIR/bootstrap_environment.sh"
+elif [ -x "$SCRIPT_DIR/results/environment/venv/bin/python" ] && [ "$PYTHON_BIN" = python3 ]; then
+    export PYTHON_BIN="$SCRIPT_DIR/results/environment/venv/bin/python"
+fi
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || err "Python binary not found: $PYTHON_BIN; use --bootstrap"
+"$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || \
+    err "Python 3.10+ required; use --bootstrap or set PYTHON_BIN"
 
 if [ "$PREPARE_ONLY" -eq 0 ] && { [ "$FULL_COHORT" -eq 1 ] || [ "$REPORT_ONLY" -eq 1 ]; }; then
     "$PYTHON_BIN" -c 'import numpy, pandas' || err "Install auto_test/report_requirements.txt before starting"
@@ -229,8 +234,10 @@ fi
 # --- Step 1: Compile ---------------------------------------------------------
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
     log "Step 1/4: Building DuckDB release (BUILD_TPCH=1 BUILD_TPCDS=1)"
-    JOBS="${JOBS:-$(nproc 2>/dev/null || echo 8)}"
-    BUILD_TPCH=1 BUILD_TPCDS=1 make release -j"$JOBS" 2>&1 | tee -a "$RUN_LOG"
+    JOBS="${JOBS:-8}"
+    [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || err "JOBS must be a positive integer"
+    CMAKE_BUILD_PARALLEL_LEVEL="$JOBS" BUILD_TPCH=1 BUILD_TPCDS=1 \
+        make release -j"$JOBS" PYTHON="$PYTHON_BIN" 2>&1 | tee -a "$RUN_LOG"
     log "Build complete ($(elapsed $((SECONDS - START_TIME))))"
 else
     log "Step 1/4: Skipping build (SKIP_BUILD=1)"
@@ -250,13 +257,15 @@ export DUCKDB_BIN
 if [ "${SKIP_DATA:-0}" != "1" ]; then
     log "Step 2/4: Building required databases"
     STEP2_START=$SECONDS
-    bash "$SCRIPT_DIR/build_db.sh" all 2>&1 | tee -a "$RUN_LOG"
+    "$PYTHON_BIN" "$SCRIPT_DIR/prepare_reproduction_data.py" 2>&1 | tee -a "$RUN_LOG"
     log "Databases ready ($(elapsed $((SECONDS - STEP2_START))))"
 else
     log "Step 2/4: Skipping data build (SKIP_DATA=1)"
 fi
 
 log "Step 3/4: Using the validated active queries (regeneration requested=$GENERATE_QUERIES)"
+"$PYTHON_BIN" "$SCRIPT_DIR/record_reproduction_run.py" \
+    --output "${RUN_LOG%.log}.environment.json" -- "${RAW_EXPERIMENT_ARGS[@]}" 2>&1 | tee -a "$RUN_LOG"
 
 # --- Step 4: Run corpus experiments -----------------------------------------
 run_experiment() {

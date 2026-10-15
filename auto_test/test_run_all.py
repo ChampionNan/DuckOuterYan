@@ -57,6 +57,9 @@ class RunAllSelectionTest(unittest.TestCase):
                 "if '--output-dir' in args:\n"
                 "    pathlib.Path(args[args.index('--output-dir') + 1]).mkdir(parents=True, exist_ok=True)\n",
                 encoding="utf-8")
+        (self.scripts / "record_reproduction_run.py").write_text("# Stub: no fake binary hashing.\n")
+        (self.scripts / "prepare_reproduction_data.py").write_text(
+            "import os\nassert os.environ.get('DUCKDB_BIN')\n")
         (self.scripts / "record_experiment.py").write_text(
             textwrap.dedent(
                 """

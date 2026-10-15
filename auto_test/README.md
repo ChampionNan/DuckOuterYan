@@ -6,8 +6,8 @@ artifacts and are never part of the published source tree.
 
 ## Workload and reproducibility
 
-`outerjoin_benchmark/benchmark/` contains 350 queries: SGPB/Graph 67, TPC-H 87,
-TPC-DS 87, and JOB 109. `manifest.csv` records query identity, content hashes,
+`outerjoin_benchmark/benchmark/` contains 321 queries: SGPB/Graph 67, TPC-H 86,
+TPC-DS 61, and JOB 107. `manifest.csv` records query identity, content hashes,
 dataset routing, join structure, and predicate parameters. Query lists and
 `aliases.csv` support explicit subsets and historical name resolution.
 
@@ -17,14 +17,23 @@ they do not contain historical timing observations. Their membership is an input
 to generation, not evidence of current performance. All new measurements must
 identify the exact query content and execution settings.
 
-The current cohort retains 285 of the 306 historically OuterYan-selected queries:
-21 queries with both engines timed out have been removed. The retained set
+The current cohort retains 282 of the 306 historically OuterYan-selected queries:
+21 queries with both engines timed out and the user-specified JOB 10a right-deep
+COUNT query with measured speedup below 0.7x have been removed. The user also
+requested removal of the minimum-speedup TPC-H and JOB queries on 2026-10-15:
+TPC-H `th_real_custdist` left-deep high and JOB SQLStorm 11914 bushy high COUNT.
+These are outcome-conditioned exclusions, not optimizer improvements. The retained set
 includes 6 three-relation queries and 4 DuckDB-only timeouts.
-It also keeps 65 non-three-relation `COST_DUCKDB_BETTER` controls (Graph 16,
-TPC-H 7, TPC-DS 42). Controls were chosen by family-count balancing in the initial
+It also keeps 39 non-three-relation `COST_DUCKDB_BETTER` controls (Graph 16,
+TPC-H 7, TPC-DS 16). The original 65 controls were chosen by family-count balancing in the initial
 371-query cohort, then selectivity tier, tree shape, source, relation count, and
-query type, without ranking runtime or speedup. They are not rebalanced after
-removing the 21 both-timeout queries. JOB already has 109 selected queries, so receives no
+query type, without ranking runtime or speedup. On 2026-10-15, TPC-DS controls
+were reduced from 42 to 16, retaining one per `source_seed` and `tree_shape`.
+Smaller groups are considered first, semantic tiers are balanced, and SHA256
+of the fixed revision plus query ID breaks ties. This grouping deliberately
+ignores selectivity and join-type variations; it does not assert identical
+optimized join trees or SQL semantics. No measured runtime or speedup is used.
+This control deduplication leaves selected membership and non-TPC-DS controls unchanged. JOB now has 107 selected queries and no
 additional controls. Other fallbacks are archived, including all `DUCKDB_PLAN`,
 `INAPPLICABLE`, and uncertainty-guard cases. `plan_cohort.csv` records the
 historical selection category, not a guarantee about a future optimizer run.
@@ -32,8 +41,18 @@ historical selection category, not a guarantee about a future optimizer run.
 All 720 predecessor definitions remain in
 `outerjoin_benchmark/revisions/pre_plan_cohort_20261014/benchmark/`.
 `sources/plan_cohort_20261014.json` pins the exact retained membership.
+`sources/cohort_selectivity_20261015.json` additionally pins two predicate-only
+replacements measured in the CPU9 slow-three pilot: TPC-H SQLStorm 25509 bushy
+COUNT uses the medium-tier 1992-01-01 through 1992-08-27 order-date window;
+JOB SQLStorm 11914 high-tier bushy COUNT uses production years 2003 through 2011.
+Their historical measurements exceed 0.7x; the JOB SQLStorm 11914 update is now
+retired, but its definition and measured-candidate identity are preserved.
+The JOB 10a right-deep COUNT slot
+was subsequently retired by explicit user request because no measured candidate reached that threshold.
+The old SQL stays in the archive, source measurement hashes remain recorded,
+and regeneration does not read result CSVs. Future speedups are not guaranteed.
 The harness still skips timing verified DuckDB fallbacks. For this cohort's
-summary, those 65 queries contribute a policy-default speedup of 1x, not a timing
+summary, those 39 queries contribute a policy-default speedup of 1x, not a timing
 measurement. DuckDB-only timeouts contribute 600 seconds on the DuckDB side only
 when OuterYan has a completed measurement and the recorded DuckDB limit is 600 s.
 This is a timeout-limit proxy, not a measured pair or a proven post-warmup bound.
@@ -108,6 +127,9 @@ headline statistics with the current cohort report. TeX templates contain placeh
 ## One-command workflow
 
 ```bash
+# Clean Linux clone: isolated Python + query generation + build + data + full experiment/report.
+bash auto_test/run_all.sh --bootstrap --generate-queries
+# Optional manual environment instead of --bootstrap:
 python3 -m pip install -r auto_test/report_requirements.txt
 # Expensive: the complete active workload, release build and data preparation.
 bash auto_test/run_all.sh
@@ -120,6 +142,32 @@ bash auto_test/run_all.sh --prepare-only
 # No writes or executions: display the planned commands.
 bash auto_test/run_all.sh --dry-run
 ```
+
+Cold-start prerequisites: Git, Bash, curl, tar, SHA256 tooling, CMake, Ninja,
+Make and a C++17 compiler. No Python 3.10+ installation or sudo is needed with
+`--bootstrap`: uv 0.8.22 (archive checksum verified) installs CPython 3.11.13 and
+the exact versions in `reproduction_requirements.txt` into ignored
+`results/environment/`. Subsequent invocations automatically reuse this Python.
+Build concurrency defaults to 8; set `JOBS=N` to bound both Make and CMake/Ninja.
+The bootstrap and data downloads use HTTPS and stop on download/hash errors.
+
+`prepare_reproduction_data.py` prepares **five** independent database files:
+Bitcoin, Epinions, TPC-H SF50, TPC-DS SF50 and JOB. `data_checksums.json` pins the
+normalized SNAP inputs and the 21 JOB Parquet inputs used by this workload.
+Existing mismatching cache files are preserved and rejected, never silently
+overwritten. A fresh database is built in a temporary directory on its target
+filesystem, checked for required tables/primary keys and positive row counts,
+then published with a `.reproduction.json` sidecar. Matching existing sidecars
+are validated on reuse. Legacy databases without a sidecar are not silently
+adopted: use new database paths for verified preparation, or `--skip-data` only
+after an independent data/scale check. No foreign keys are invented.
+
+Each run records `results/run_all_<timestamp>.environment.json` with the commit,
+tracked changes, binary/SQL-manifest hashes, dataset sidecars, Python/package
+versions, host and CLI settings. SQL and metadata must reproduce byte-for-byte;
+timings and optimizer choices are remeasured, not forced to historical values.
+Generation and fresh-run reporting require no prior results, plots or databases.
+This verifies the fixed curated workload, not an independently sampled workload.
 
 By default the runner reads and validates the committed queries without generating
 or replacing SQL. `--generate-queries` calls `gen_outerjoin_benchmark.py` (the query

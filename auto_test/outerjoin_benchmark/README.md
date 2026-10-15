@@ -1,7 +1,7 @@
 # Frozen outer-join workload
 
-The active `benchmark/` directory contains 350 SQL definitions: SGPB/Graph 67,
-TPC-H 87, TPC-DS 87, and JOB 109. The manifest specifies identities, hashes,
+The active `benchmark/` directory contains 321 SQL definitions: SGPB/Graph 67,
+TPC-H 86, TPC-DS 61, and JOB 107. The manifest specifies identities, hashes,
 join structures, predicates, datasets, and configuration thresholds.
 
 This workload was curated using historical performance observations. The source
@@ -10,15 +10,29 @@ underlying experimental outputs. Membership must not be represented as an
 independently selected evaluation sample. Regeneration applies frozen decisions;
 it neither reads timing results nor searches for a target performance number.
 
-The current membership keeps 285 historically selected OuterYan queries and
-65 non-three-relation cost-rejected controls. Twenty-one cases with both engines
+The current membership keeps 282 historically selected OuterYan queries and
+39 non-three-relation cost-rejected controls. TPC-DS controls were reduced from
+42 to 16 on 2026-10-15, retaining one per source pattern and tree shape, balancing
+tiers with a deterministic query-ID tie-break and no runtime ranking. This is
+workload-level deduplication, not proof of equal optimized join groupings.
+This control deduplication leaves selected membership and other families unchanged. Twenty-one cases with both engines
 timed out are removed; four DuckDB-only timeout cases are retained. The six selected three-relation
 queries are retained. The 720-query predecessor is recoverable under
 `revisions/pre_plan_cohort_20261014/benchmark/`; the frozen policy is
 `sources/plan_cohort_20261014.json`. `benchmark/plan_cohort.csv` distinguishes
 selected queries from cost controls using historical decisions, not new timings.
+`sources/cohort_selectivity_20261015.json` pins two further predicate-only
+updates (TPC-H SQLStorm 25509 bushy COUNT and JOB SQLStorm 11914 bushy COUNT),
+with exact CPU9 observation identities. The TPC-H update changes its tier from
+high to medium. Those updates preserve counts; the JOB 10a right-deep COUNT
+query was subsequently retired by explicit user request after its measured
+speedup remained below 0.7x. The minimum-speedup TPC-H and JOB queries were also
+retired on 2026-10-15 by explicit request: `th_real_custdist` left-deep high and
+SQLStorm 11914 bushy high COUNT. The latter's predicate update remains recoverable
+from the pinned definition but is not generated into the active workload.
+These outcome-conditioned choices do not guarantee a future 0.7x lower bound.
 Same-grouping alternatives in `candidates/grouping_20261014/` are independent,
-unpromoted queries with changed join-type assignments. They are not part of 350.
+unpromoted queries with changed join-type assignments. They are not part of 321.
 
 The cohort reporting rule uses a 1x policy default for unexecuted DuckDB fallbacks
 and a 600-second DuckDB timeout proxy when OuterYan completed. It does not replace

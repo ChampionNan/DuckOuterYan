@@ -14,7 +14,9 @@ import balanced_benchmark as benchmark
 
 
 def snapshot(path):
-    return {str(p.relative_to(path)): benchmark.digest(p) for p in sorted(path.rglob("*")) if p.is_file()}
+    # Finder metadata is not a published benchmark input.
+    return {str(p.relative_to(path)): benchmark.digest(p) for p in sorted(path.rglob("*"))
+            if p.is_file() and p.name != ".DS_Store"}
 
 
 def verify():

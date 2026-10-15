@@ -27,6 +27,8 @@ def labeled_frame(details, observations):
     identities = plot.pd.DataFrame([dict(query=r["query_id"], family=PLOT_FAMILY[r["family"]],
         topology=r["tree_shape"].replace("_", "-"), workload_category=r["query_class"]) for r in prior])
     labels = plot.add_short_query_labels(identities).set_index("query").short_query.to_dict()
+    for replacement in report.cohort.query_updates.policy()["replacements"]:
+        labels[replacement["query_id"]] = labels[replacement["original_query"]]
     derived = {r["query"]: r for r in details}
     records = []
     for original in observations:
