@@ -1,0 +1,19 @@
+{
+  "revision": "tpch-sub075-predicate-20261015",
+  "source_queries": [
+    "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_high",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count"
+  ],
+  "target_speedup": 0.75,
+  "active_benchmark_modified": false,
+  "optimizer_modified": false,
+  "equivalent_rewrites": "Duplicate the original unary predicate at its table input; retain the outer WHERE",
+  "new_workload_variants": "Calendar ranges with explicit tier labels and measured base-table selectivity; the SQLStorm slot narrows to medium, Q8 slots stay within their low/medium bands",
+  "definitions": 21,
+  "sf50_trials": 12,
+  "shortlist": "Three original controls plus nine WHERE date-window variants; input-subquery probes remain local diagnostics",
+  "protocol": "CPU9 SF50, 32 threads, normal gate, five timed runs per side, median, 600 seconds per statement",
+  "correctness": "Bare-query ON/OFF and input-rewrite equivalence on a tiny adversarial fixture; no full SF50 comparison",
+  "promotion": "Require an actual OuterYan selection and complete median timings >=0.75x; preserve all observations"
+}
