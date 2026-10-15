@@ -49,6 +49,9 @@ class Sub075Test(unittest.TestCase):
         for option in ('--threads 32 --runs 5 --timeout 600', '--no-check-correctness', '--sf 50'):
             self.assertIn(option, shell)
         self.assertIn('pgrep -x duckdb', shell)
+        self.assertIn('--input-followup', shell)
+        self.assertIn("r['short_query'] == 'A-H-RD-11'", shell)
+        self.assertIn("r['variant'] in ('input_d480', 'input_d240')", shell)
 
 
 if __name__ == "__main__":

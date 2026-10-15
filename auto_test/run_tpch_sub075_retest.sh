@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Three original controls and nine predicate-only candidates. No promotion.
+# Initial WHERE pilots, or two input-filter follow-ups for A-H-RD-11. No promotion.
 set -euo pipefail
-if [[ "$#" != 1 || "$1" != --run ]]; then
-    echo 'Usage: bash auto_test/run_tpch_sub075_retest.sh --run'
+if [[ "$#" != 1 || ( "$1" != --run && "$1" != --input-followup ) ]]; then
+    echo 'Usage: bash auto_test/run_tpch_sub075_retest.sh --run|--input-followup'
     exit 2
 fi
+PILOT_MODE="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
@@ -25,11 +26,17 @@ unset OY_CONFIG_LOADED OY_CORPUS_VERSION
 export OY_REPO_ROOT="$REPO_ROOT" OY_CORPUS_SCOPE=benchmark FORCE=0
 export OY_CHECK_CORRECTNESS=0 OY_PROFILE=1 OY_CAPTURE_PLANS=1
 RUN_TS="$(date '+%Y%m%d_%H%M%S')"
-BASE="$SCRIPT_DIR/results/experiment_onoff_tpch_sub075_${RUN_TS}_t32"
+RUN_NAME=tpch_sub075
+[[ "$PILOT_MODE" != --input-followup ]] || RUN_NAME=tpch_sub075_input_followup
+BASE="$SCRIPT_DIR/results/experiment_onoff_${RUN_NAME}_${RUN_TS}_t32"
 export OY_CORPUS="$SCRIPT_DIR/outerjoin_benchmark/candidates/tpch_sub075_20261015"
 mkdir -p "$SCRIPT_DIR/results"
 exec > >(tee "${BASE}.run.log") 2>&1
-echo 'Q-H-LD-36, A-H-RD-10, A-H-RD-11: original controls and predicate candidates'
+if [[ "$PILOT_MODE" == --input-followup ]]; then
+    echo 'A-H-RD-11: input_d480 and input_d240 follow-ups after the WHERE-only pilot'
+else
+    echo 'Q-H-LD-36, A-H-RD-10, A-H-RD-11: original controls and predicate candidates'
+fi
 echo 'SF50; normal cost gate; 32 threads; five timed executions (median)'
 echo '600 seconds per execution per engine; warmup/profiles separate; no full SF50 correctness timing'
 echo 'Tiny-fixture correctness before timing; no active benchmark, optimizer or binary changes'
@@ -38,7 +45,7 @@ echo "RUN_LOG=${BASE}.run.log"
 echo "RESULT_CSV=${BASE}.csv"
 "$PYTHON_BIN" "$SCRIPT_DIR/prepare_tpch_sub075_retest.py" --corpus "$OY_CORPUS" \
     --bin "$DUCKDB_BIN" --db "$TPCH_DB" --sf 50 --threads 32 --audit "${BASE}.validation.json"
-"$PYTHON_BIN" - "${BASE}.validation.json" "$OY_CORPUS/manifest.csv" "${BASE}.queries.txt" <<'PY'
+"$PYTHON_BIN" - "${BASE}.validation.json" "$OY_CORPUS/manifest.csv" "${BASE}.queries.txt" "$PILOT_MODE" <<'PY'
 import csv
 import json
 import sys
@@ -53,11 +60,17 @@ with open(sys.argv[2]) as handle:
     rows = {r['query_id']: r for r in csv.DictReader(handle)}
 if len(audit['candidates']) != 21 or set(rows) != {r['query'] for r in audit['candidates']}:
     raise SystemExit('Expected exactly twenty-one verified definitions')
-shortlist = [r for r in audit['candidates'] if rows[r['query']]['pilot_run_group'] == 'sf50_shortlist']
-if len(shortlist) != 12:
-    raise SystemExit('Expected twelve predeclared SF50 trials')
+if sys.argv[4] == '--input-followup':
+    shortlist = [r for r in audit['candidates'] if r['short_query'] == 'A-H-RD-11'
+                 and r['variant'] in ('input_d480', 'input_d240')]
+    expected, required_queries = 2, ('A-H-RD-11',)
+else:
+    shortlist = [r for r in audit['candidates'] if rows[r['query']]['pilot_run_group'] == 'sf50_shortlist']
+    expected, required_queries = 12, ('Q-H-LD-36', 'A-H-RD-10', 'A-H-RD-11')
+if len(shortlist) != expected:
+    raise SystemExit('Unexpected number of SF50 trials')
 selected = [r for r in shortlist if r['decision']['selected_plan'] == 'OUTERYAN']
-for short in ('Q-H-LD-36', 'A-H-RD-10', 'A-H-RD-11'):
+for short in required_queries:
     if not any(r['short_query'] == short and r['variant'] != 'original' for r in selected):
         raise SystemExit('No normally selected candidate for ' + short)
 with open(sys.argv[3], 'w') as handle:
