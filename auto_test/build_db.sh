@@ -7,14 +7,14 @@
 #   Targets: graph | tpch | tpcds | job | all  (default: all)
 #
 # Databases:
-#   graph_db   — R1..R10 tables from SNAP graph data (default: epinions)
+#   graph_db   — R1..R10 tables from SNAP graph data (default: bitcoin)
 #   tpch_N.duckdb  — TPC-H via CALL dbgen(sf=N)
 #   tpcds_N.duckdb — TPC-DS via CALL dsdgen(sf=N)
 #   job_db     — IMDb/JOB (21 parquet files from duckdb-data release)
 #
 # Environment (all optional):
 #   DUCKDB_BIN       Path to duckdb binary (default build/release/duckdb)
-#   GRAPH_DATASET    SNAP graph to use for graph R1..R10 (default epinions)
+#   GRAPH_DATASET    SNAP graph to use for graph R1..R10 (default bitcoin)
 #                    Options: bitcoin | epinions | google | wiki | dblp
 #   TPCH_SF          TPC-H scale factor (default 50)
 #   TPCDS_SF         TPC-DS scale factor (default 50)

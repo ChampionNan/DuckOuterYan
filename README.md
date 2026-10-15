@@ -56,8 +56,8 @@ paths. Dataset generation, downloads, and a complete experiment can be expensive
 
 ## One-command experiment
 
-From a clean clone on Linux (Git, Bash, curl, tar, CMake, Ninja, Make and a C++11
-compiler supporting C++17 must be available), the complete opt-in reconstruction command is:
+From a clean clone on Linux (Git, Bash, curl, tar, CMake, Ninja, Make and a C++17
+compiler must be available), the complete opt-in reconstruction command is:
 
 ```bash
 bash auto_test/run_all.sh --bootstrap --generate-queries
