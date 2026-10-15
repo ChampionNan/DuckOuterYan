@@ -1,0 +1,13 @@
+{
+  "revision": "custdist-lineitem-pilot-20261015",
+  "source_query": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+  "source_sha256": "e858780681373c09c96763d991d488c822a86646776f28da504f99520532075d",
+  "target_speedup": 0.75,
+  "active_benchmark_modified": false,
+  "optimizer_modified": false,
+  "control": "Previous equivalent orders-input rewrite at 34.90114% orders selectivity",
+  "candidates": "Additional lineitem shipment-date predicates; changes query contents, not engine code",
+  "qualification": "Normal gate must select OuterYan; both engines complete five timed runs; use median runtimes",
+  "correctness": "Bare-query multiset ON/OFF and input/outer-predicate equivalence on adversarial tiny fixture",
+  "performance": "CPU9 SF50, 32 threads, 600 seconds per statement per engine; no full correctness timing"
+}
