@@ -10,12 +10,13 @@ from pathlib import Path
 import balanced_benchmark as b
 import graph_dataset_promotion as promotion
 import graph_dataset_extension as extension
+import benchmark_plan_cohort as cohort
 from benchmark_corpus import resolve_sql_path
 
 
 class GraphPromotionTests(unittest.TestCase):
     def test_active_promotion_and_reversible_sources(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         rows = b.validate(corpus)
         before_extension, _ = extension.validate(corpus, rows)
         restored, paths = promotion.validate(corpus, before_extension)
@@ -40,10 +41,11 @@ class GraphPromotionTests(unittest.TestCase):
         corpus = b.ROOT / "benchmark"
         counts = Counter(promotion.query_dataset(corpus, r["path"])
                          for r in b.read_manifest(corpus / "manifest.csv") if r["family"] == "graph")
-        self.assertEqual(counts, {"bitcoin": 156, "epinions": 16})
+        self.assertEqual(counts, {"bitcoin": 61, "epinions": 6} if cohort.POLICY.exists()
+                         else {"bitcoin": 156, "epinions": 16})
 
     def test_three_extensions_preserve_structure_and_are_pinned(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         rows = b.validate(corpus)
         restored, paths = extension.validate(corpus, rows)
         self.assertEqual(len(paths), 3)
@@ -59,7 +61,7 @@ class GraphPromotionTests(unittest.TestCase):
                          {"bitcoin": 159, "epinions": 15})
 
     def test_timeout_retirements_are_exact_and_remain_excluded_on_regeneration(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         rows = b.validate(corpus)
         retired = extension.retired_queries()
         ids = {r["query_id"] for r in rows}
@@ -85,7 +87,7 @@ class GraphPromotionTests(unittest.TestCase):
                 self.assertEqual((output / row["path"]).exists(), row["query_id"] not in retired)
 
     def test_timeout_retirement_validator_rejects_stale_query_lists(self):
-        corpus = b.ROOT / "benchmark"
+        corpus = cohort.input_corpus()
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "benchmark"
             shutil.copytree(corpus, output)

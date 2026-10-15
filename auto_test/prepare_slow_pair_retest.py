@@ -4,6 +4,7 @@ import argparse
 import csv
 from datetime import date, timedelta
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,7 +17,7 @@ from benchmark_corpus import sql_fingerprint
 ROOT = Path(__file__).resolve().parents[1]
 ACTIVE = ROOT / "auto_test/outerjoin_benchmark/benchmark"
 REVISION = "slow-pair-selectivity-20261014"
-MANIFEST_SHA = "a8813f1c94aa3ad9fab60e7b107bbb8e598d3d134830298b51244a307035d5d4"
+MANIFEST_SHA = "dbecaf5aaf9535105685f8b540913db18c38f50d4d6180d08d6cf3e5048a7b89"
 SPECS = (
     ("A-J-B-04", "job", "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_count",
      "cd908a47ed290e84c73015c1c738dae244764e4538637d8aec0e4e5d57ce1ff8"),
@@ -39,15 +40,30 @@ def variants(family):
         end - timedelta(days=days - 1), end)) for days in (366, 240, 180)]
 
 
-def assemble(active=ACTIVE):
-    if digest(active / "manifest.csv") != MANIFEST_SHA:
-        raise ValueError("Active manifest changed; review/rebase the two-query pilot first")
+def source_snapshot(active=ACTIVE):
+    """Replay the original pilot after its one JOB candidate is promoted."""
     with (active / "manifest.csv").open(newline="") as handle:
-        records = {r["query_id"]: r for r in csv.DictReader(handle)}
+        reader = csv.DictReader(handle)
+        fields, rows = reader.fieldnames, list(reader)
+    archived = {}
+    if digest(active / "manifest.csv") != MANIFEST_SHA:
+        import job_selectivity_update
+        rows, archived = job_selectivity_update.validate(active, rows)
+        restored = io.StringIO()
+        writer = csv.DictWriter(restored, fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        if hashlib.sha256(restored.getvalue().encode()).hexdigest() != MANIFEST_SHA:
+            raise ValueError("Active manifest changed; review/rebase the two-query pilot first")
+    return {r["query_id"]: r for r in rows}, archived
+
+
+def assemble(active=ACTIVE):
+    records, archived = source_snapshot(active)
     result = []
     for short_id, family, original_id, expected_hash in SPECS:
         original = records[original_id]
-        source = active / original["path"]
+        source = archived.get(original["path"], active / original["path"])
         if digest(source) != expected_hash or original["content_sha256"] != expected_hash:
             raise ValueError("Source SQL changed: " + original_id)
         sql = source.read_text()

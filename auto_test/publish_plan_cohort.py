@@ -17,6 +17,7 @@ import report_plan_cohort as report
 FAMILIES = ("graph", "tpch", "tpcds", "job")
 PLOT_FAMILY = dict(graph="graph", tpch="TPC-H", tpcds="TPC-DS", job="JOB")
 PHASE_KEYS = ("round1", "round2", "round3", "other")
+PHASE_SELECTION = "First two in display order from each family's four phase-diverse, faster/equal representatives; prefer Other OP <=50%"
 
 
 def labeled_frame(details, observations):
@@ -60,14 +61,17 @@ def runtime_plot(pdf, frame):
         empty_plot(pdf, "No eligible reported speed-ups in this run")
         return
     pairs = valid.loc[valid.effective_duckdb_s.notna()]
-    figure, (left, right) = plt.subplots(1, 2, figsize=(11.0, 4.7),
+    figure, (left, right) = plt.subplots(1, 2, figsize=(11.0, 3.55),
                                        gridspec_kw={"width_ratios": [.66, 1.42]})
-    figure.subplots_adjust(left=.075, right=.99, bottom=.19, top=.86, wspace=.13)
+    figure.subplots_adjust(left=.075, right=.99, bottom=.17, top=.90, wspace=.13)
     values = pairs[["effective_duckdb_s", "effective_outeryan_s"]].to_numpy(float).ravel()
     if len(values):
         low, high = np.log10(values.min()), np.log10(values.max())
         padding = max(.08, .04 * (high - low))
         plot.style_log_runtime_axis(left, 10 ** (low - padding), 10 ** (high + padding))
+    # Shorten both panels together without shrinking the scatter width or
+    # reopening the central gap. Equal-time coordinates remain unchanged.
+    left.set_aspect("auto")
     for family in plot.FAMILY_ORDER:
         rows = valid.loc[valid.family.eq(family)].sort_values("query")
         for treatment, marker in (("measured", "o"), ("duckdb_timeout_600s", "^")):
@@ -106,28 +110,41 @@ def runtime_plot(pdf, frame):
         right.scatter(med, position, marker="D", s=25, facecolor="white", edgecolor=color, zorder=5)
     right.axvline(0, color=".45", linewidth=.8)
     right.set_xlim(lower, upper)
-    ticks = np.array([.5, 1, 2, 5, 10, 50, 100, 1000, 10000], dtype=float)
+    ticks = np.array([.8, 1, 2, 3, 4, 5, 10, 100, 1000, 10000], dtype=float)
     ticks = ticks[(np.log10(ticks) >= lower) & (np.log10(ticks) <= upper)]
-    right.set_xticks(np.log10(ticks), [f"{v:g}×" for v in ticks])
+    right.set_xticks(np.log10(ticks), [f"{v:g}" for v in ticks])
+    for value, label in zip(ticks, right.get_xticklabels()):
+        if value == .8:
+            # Leave room for the nearby 1 tick without moving either tick.
+            label.set_horizontalalignment("right")
     right.set_yticks(range(4), ["SGPB", "TPC-H", "TPC-DS", "JOB"])
     right.set_ylim(3.6, -.6)
     right.set_xlabel("DuckDB vs. OuterYan (log scale)")
     right.set_axisbelow(True)
     right.grid(axis="x", color=".91", linewidth=.5)
     right.tick_params(direction="in", top=True, right=True)
+    # Tighten the horizontal gap without changing the coordinate limits.
+    right_box = right.get_position()
+    right.set_position([right_box.x0 - .0035, right_box.y0, right_box.width, right_box.height])
     handles = [plot.Patch(facecolor=plot.FAMILY_COLORS[f], label=plot.figure_family_label(f))
                for f in plot.FAMILY_ORDER]
-    legend = figure.legend(handles=handles, loc="upper center", ncol=4, frameon=False,
-                           bbox_to_anchor=(.53, 1.0))
-    figure.add_artist(legend)
-    markers = [("o", "Measured, faster/equal (a)"), ("X", "Measured, slower (a)"),
+    markers = [("o", "Measured, faster/equal"), ("X", "Measured, slower"),
                ("^", "DuckDB timeout = 600 s")]
-    figure.legend(handles=[plot.Line2D([], [], marker=m, linestyle="none", color=".3",
-                  markerfacecolor=".3", label=label, markersize=5)
-                  for m, label in markers], loc="upper center", ncol=3, frameon=False,
-                  bbox_to_anchor=(.53, .935), fontsize=8.5)
+    handles += [plot.Line2D([], [], marker=m, linestyle="none", color=".3",
+                           markerfacecolor=".3", label=label, markersize=5)
+                for m, label in markers]
+    figure.legend(handles=handles, loc="upper center", ncol=len(handles), frameon=False,
+                  bbox_to_anchor=(.53, .98), fontsize=8.5, borderaxespad=.1,
+                  handlelength=1.3, handletextpad=.45, columnspacing=1.15)
+    # Keep both captions aligned, with a small point-sized gap below x labels.
+    figure.canvas.draw()
+    renderer = figure.canvas.get_renderer()
+    label_bottom = min(axis.xaxis.label.get_window_extent(renderer).y0 for axis in (left, right))
+    title_y = (label_bottom - 4 * figure.dpi / 72) / figure.bbox.height
     for axis, title in ((left, "(a) Running Time Comparison"), (right, "(b) Speed-up Comparison")):
-        axis.text(.5, -.23, title, transform=axis.transAxes, ha="center", fontsize=11, fontweight="semibold")
+        box = axis.get_position()
+        figure.text(box.x0 + box.width / 2, title_y, title, ha="center", va="top",
+                    fontsize=9.5, fontweight="semibold")
     plot.save_page(pdf, figure)
 
 
@@ -140,8 +157,10 @@ def empty_plot(pdf, message):
 
 
 def phase_summary(frame):
-    measured = frame.loc[frame.speedup_source.eq("measured") & frame.selected_plan.eq("OUTERYAN")]
-    complete, rejected = plot.complete_phase_rows(measured)
+    # This is an ON-only metric: a baseline timeout does not invalidate a
+    # completed OuterYan profile. Keep runtime-pair and phase cohorts separate.
+    selected = frame.loc[frame.selected_plan.eq("OUTERYAN")]
+    complete, rejected = plot.complete_phase_rows(selected, include_duckdb_timeouts=True)
     if "profile_status" in complete:
         complete = complete.loc[complete.profile_status.eq("OK")]
     rows = []
@@ -240,6 +259,22 @@ def split_optimizer_representatives(reps):
     return main, [r for r in reps if r["query"] not in main_ids]
 
 
+def phase_figure_samples(frame):
+    """Keep the first two displayed rows of the existing four-query sample."""
+    samples = plot.diverse_phase_samples(frame, 4, .5)
+    if samples.empty:
+        return samples
+    ranks = {
+        "family": {name: i for i, name in enumerate(plot.FAMILY_ORDER)},
+        "topology": {name: i for i, name in enumerate(plot.TOPOLOGY_ORDER + ["other"])},
+    }
+    ordered = samples.sort_values(
+        ["family", "topology", "short_query"], kind="stable",
+        key=lambda column: column.map(ranks[column.name]).fillna(99) if column.name in ranks else column,
+    )
+    return ordered.groupby("family", sort=False).head(2).copy()
+
+
 def publish(out, csv_paths=None, figures=True):
     plot.MIN_RUNTIME_SECONDS = 0
     details, stats, summary = report.write_outputs(out, csv_paths)
@@ -268,7 +303,7 @@ def publish(out, csv_paths=None, figures=True):
         (out / "optimization_representatives.csv").write_text("query,short_query,attribute_count\n")
     main, appendix = split_optimizer_representatives(reps)
     selection = dict(main=[r["short_query"] for r in main], appendix=[r["short_query"] for r in appendix])
-    samples = plot.diverse_phase_samples(frame, 4, .5)
+    samples = phase_figure_samples(frame)
     samples.to_csv(out / "phase_representative_queries.csv", index=False)
     if figures:
         plot.write_figure_pair(out, "speedup_all_queries", lambda pdf: runtime_plot(pdf, frame))
@@ -290,9 +325,11 @@ def publish(out, csv_paths=None, figures=True):
                                   lambda pdf: empty_plot(pdf, "No eligible representative phase profiles in this run"))
     # The old selected-only snapshots remain historical; these named outputs are current.
     summary.update(phase_profiles=len(complete), phase_rejected=rejected, figures_refreshed=figures,
+                   phase_profile_policy="Complete OuterYan-selected operator profiles, including DuckDB-only timeouts; no substituted phase times",
+                   phase_duckdb_timeout_profiles=int(complete.duckdb_status.eq("timeout").sum()),
                    optimization_representatives=selection, workload=workload,
                    phase_sample_queries=samples["query"].tolist(),
-                   phase_selection="Up to four per family, speed-up >=1, phase diversity, prefer Other OP <=50%",
+                   phase_selection=PHASE_SELECTION,
                    figure_points=dict(runtime_pairs=int(frame.effective_duckdb_s.notna().sum()),
                                       ratio_points=int(frame.speedup.notna().sum())),
                    attribute_warnings=[r["query"] for r in reps if r["attribute_status"] != "OK"])

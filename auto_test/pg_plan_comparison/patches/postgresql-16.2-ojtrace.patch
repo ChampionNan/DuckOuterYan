@@ -1,0 +1,801 @@
+--- a/src/backend/optimizer/plan/initsplan.c
++++ b/src/backend/optimizer/plan/initsplan.c
+@@ -38,6 +38,48 @@
+ /* These parameters are set by GUC */
+ int			from_collapse_limit;
+ int			join_collapse_limit;
++
++/*
++ * Research-only outer-join trace.  Keeping this behind a postmaster
++ * environment variable makes the normal planner behavior and output
++ * unchanged.  Set PG_OJ_TRACE=1 before starting the server to enable it.
++ */
++static bool
++ojtrace_enabled(void)
++{
++	static int	enabled = -1;
++
++	if (enabled < 0)
++	{
++		const char *value = getenv("PG_OJ_TRACE");
++
++		enabled = (value != NULL && value[0] != '\0' && strcmp(value, "0") != 0);
++	}
++	return enabled != 0;
++}
++
++static const char *
++ojtrace_jointype_name(JoinType jointype)
++{
++	switch (jointype)
++	{
++		case JOIN_INNER:
++			return "INNER";
++		case JOIN_LEFT:
++			return "LEFT";
++		case JOIN_FULL:
++			return "FULL";
++		case JOIN_SEMI:
++			return "SEMI";
++		case JOIN_ANTI:
++			return "ANTI";
++		default:
++			return "OTHER";
++	}
++}
++
++#define OJTRACE(...) \
++	do { if (ojtrace_enabled()) elog(NOTICE, __VA_ARGS__); } while (0)
+ 
+ 
+ /*
+@@ -1071,6 +1113,10 @@
+ 		if (j->jointype == JOIN_FULL)
+ 		{
+ 			/* force the join order exactly at this node */
++			OJTRACE("PGOJ FULL_BARRIER oj=%u left=%s right=%s action=MAKE_NESTED_SUBPROBLEM",
++					j->rtindex,
++					bmsToString(jtitem->left_rels),
++					bmsToString(jtitem->right_rels));
+ 			joinlist = list_make1(list_make2(leftjoinlist, rightjoinlist));
+ 		}
+ 		else if (list_length(leftjoinlist) + list_length(rightjoinlist) <=
+@@ -1247,7 +1293,18 @@
+ 
+ 		/* And add the SpecialJoinInfo to join_info_list */
+ 		if (sjinfo)
++		{
+ 			root->join_info_list = lappend(root->join_info_list, sjinfo);
++			OJTRACE("PGOJ SJI_APPEND position=%d oj=%u type=%s minL=%s minR=%s belowL=%s belowR=%s aboveL=%s aboveR=%s",
++					list_length(root->join_info_list), sjinfo->ojrelid,
++					ojtrace_jointype_name(sjinfo->jointype),
++					bmsToString(sjinfo->min_lefthand),
++					bmsToString(sjinfo->min_righthand),
++					bmsToString(sjinfo->commute_below_l),
++					bmsToString(sjinfo->commute_below_r),
++					bmsToString(sjinfo->commute_above_l),
++					bmsToString(sjinfo->commute_above_r));
++		}
+ 	}
+ 	else
+ 	{
+@@ -1418,6 +1475,10 @@
+ 	sjinfo->commute_above_r = NULL;
+ 	sjinfo->commute_below_l = NULL;
+ 	sjinfo->commute_below_r = NULL;
++	OJTRACE("PGOJ SJI_BEGIN oj=%u type=%s synL=%s synR=%s innerBelow=%s previous_sji_count=%d",
++			ojrelid, ojtrace_jointype_name(jointype),
++			bmsToString(left_rels), bmsToString(right_rels),
++			bmsToString(inner_join_rels), list_length(root->join_info_list));
+ 
+ 	compute_semijoin_info(root, sjinfo, clause);
+ 
+@@ -1427,6 +1488,9 @@
+ 		sjinfo->min_lefthand = bms_copy(left_rels);
+ 		sjinfo->min_righthand = bms_copy(right_rels);
+ 		sjinfo->lhs_strict = false; /* don't care about this */
++		OJTRACE("PGOJ SJI_FULL_EXACT oj=%u rule=MIN_EQUALS_SYN minL=%s minR=%s commute=EMPTY",
++				ojrelid, bmsToString(sjinfo->min_lefthand),
++				bmsToString(sjinfo->min_righthand));
+ 		return sjinfo;
+ 	}
+ 
+@@ -1456,6 +1520,10 @@
+ 	 */
+ 	min_righthand = bms_int_members(bms_union(clause_relids, inner_join_rels),
+ 									right_rels);
++	OJTRACE("PGOJ MIN_INIT oj=%u clause=%s strict=%s lhs_strict=%d minL=%s minR=%s formula=CLAUSE_INTERSECT_L_AND_CLAUSE_UNION_INNER_INTERSECT_R",
++			ojrelid, bmsToString(clause_relids), bmsToString(strict_relids),
++			sjinfo->lhs_strict, bmsToString(min_lefthand),
++			bmsToString(min_righthand));
+ 
+ 	/*
+ 	 * Now check previous outer joins for ordering restrictions.
+@@ -1471,6 +1539,13 @@
+ 	{
+ 		SpecialJoinInfo *otherinfo = (SpecialJoinInfo *) lfirst(l);
+ 		bool		have_unsafe_phvs;
++
++		OJTRACE("PGOJ MIN_SCAN current_oj=%u lower_oj=%u lower_type=%s lower_synL=%s lower_synR=%s current_minL=%s current_minR=%s",
++				ojrelid, otherinfo->ojrelid,
++				ojtrace_jointype_name(otherinfo->jointype),
++				bmsToString(otherinfo->syn_lefthand),
++				bmsToString(otherinfo->syn_righthand),
++				bmsToString(min_lefthand), bmsToString(min_righthand));
+ 
+ 		/*
+ 		 * A full join is an optimization barrier: we can't associate into or
+@@ -1488,7 +1563,10 @@
+ 				min_lefthand = bms_add_members(min_lefthand,
+ 											   otherinfo->syn_righthand);
+ 				min_lefthand = bms_add_member(min_lefthand,
+-											  otherinfo->ojrelid);
++										  otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=LOWER_FULL_BARRIER side=L lower_oj=%u result=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(min_lefthand));
+ 			}
+ 			if (bms_overlap(right_rels, otherinfo->syn_lefthand) ||
+ 				bms_overlap(right_rels, otherinfo->syn_righthand))
+@@ -1498,7 +1576,10 @@
+ 				min_righthand = bms_add_members(min_righthand,
+ 												otherinfo->syn_righthand);
+ 				min_righthand = bms_add_member(min_righthand,
+-											   otherinfo->ojrelid);
++										   otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=LOWER_FULL_BARRIER side=R lower_oj=%u result=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(min_righthand));
+ 			}
+ 			/* Needn't do anything else with the full join */
+ 			continue;
+@@ -1549,6 +1630,9 @@
+ 				if (otherinfo->ojrelid != 0)
+ 					min_lefthand = bms_add_member(min_lefthand,
+ 												  otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=PRESERVE_LOWER_OJ_IN_LHS lower_oj=%u unsafe_phv=%d result=%s",
++						ojrelid, otherinfo->ojrelid, have_unsafe_phvs,
++						bmsToString(min_lefthand));
+ 			}
+ 			else if (jointype == JOIN_LEFT &&
+ 					 otherinfo->jointype == JOIN_LEFT &&
+@@ -1560,6 +1644,10 @@
+ 				/* Record the (still tentative) commutability relationship */
+ 				commute_below_l =
+ 					bms_add_member(commute_below_l, otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=IDENTITY3_COMMUTE side=L lower_oj=%u minL=%s tentative_belowL=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(min_lefthand),
++						bmsToString(commute_below_l));
+ 			}
+ 		}
+ 
+@@ -1600,6 +1688,9 @@
+ 				if (otherinfo->ojrelid != 0)
+ 					min_righthand = bms_add_member(min_righthand,
+ 												   otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=PRESERVE_LOWER_OJ_IN_RHS lower_oj=%u unsafe_phv=%d result=%s",
++						ojrelid, otherinfo->ojrelid, have_unsafe_phvs,
++						bmsToString(min_righthand));
+ 			}
+ 			else if (jointype == JOIN_LEFT &&
+ 					 otherinfo->jointype == JOIN_LEFT &&
+@@ -1611,6 +1702,10 @@
+ 				/* Record the (still tentative) commutability relationship */
+ 				commute_below_r =
+ 					bms_add_member(commute_below_r, otherinfo->ojrelid);
++				OJTRACE("PGOJ MIN_RULE current_oj=%u rule=IDENTITY3_COMMUTE side=R lower_oj=%u minR=%s tentative_belowR=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(min_righthand),
++						bmsToString(commute_below_r));
+ 			}
+ 		}
+ 	}
+@@ -1634,6 +1729,10 @@
+ 
+ 		/* Else, prevent join from being formed before we eval the PHV */
+ 		min_righthand = bms_add_members(min_righthand, phinfo->ph_eval_at);
++		OJTRACE("PGOJ MIN_RULE current_oj=%u rule=RHS_PHV_EVAL_AT phid=%u eval_at=%s result=%s",
++				ojrelid, phinfo->ph_var->phid,
++				bmsToString(phinfo->ph_eval_at),
++				bmsToString(min_righthand));
+ 	}
+ 
+ 	/*
+@@ -1643,9 +1742,17 @@
+ 	 * Likewise for min_righthand.
+ 	 */
+ 	if (bms_is_empty(min_lefthand))
++	{
+ 		min_lefthand = bms_copy(left_rels);
++		OJTRACE("PGOJ MIN_RULE current_oj=%u rule=EMPTY_FALLBACK side=L result=%s",
++				ojrelid, bmsToString(min_lefthand));
++	}
+ 	if (bms_is_empty(min_righthand))
++	{
+ 		min_righthand = bms_copy(right_rels);
++		OJTRACE("PGOJ MIN_RULE current_oj=%u rule=EMPTY_FALLBACK side=R result=%s",
++				ojrelid, bmsToString(min_righthand));
++	}
+ 
+ 	/* Now they'd better be nonempty */
+ 	Assert(!bms_is_empty(min_lefthand));
+@@ -1667,6 +1774,9 @@
+ 	 */
+ 	commute_below_l = bms_del_members(commute_below_l, min_lefthand);
+ 	commute_below_r = bms_del_members(commute_below_r, min_righthand);
++	OJTRACE("PGOJ COMMUTE_PRUNE current_oj=%u minL=%s minR=%s belowL=%s belowR=%s",
++			ojrelid, bmsToString(min_lefthand), bmsToString(min_righthand),
++			bmsToString(commute_below_l), bmsToString(commute_below_r));
+ 
+ 	/* Anything left? */
+ 	if (commute_below_l || commute_below_r)
+@@ -1679,13 +1789,30 @@
+ 			SpecialJoinInfo *otherinfo = (SpecialJoinInfo *) lfirst(l);
+ 
+ 			if (bms_is_member(otherinfo->ojrelid, commute_below_l))
++			{
+ 				otherinfo->commute_above_l =
+ 					bms_add_member(otherinfo->commute_above_l, ojrelid);
++				OJTRACE("PGOJ COMMUTE_BACKPATCH current_oj=%u lower_oj=%u side=L lower_aboveL=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(otherinfo->commute_above_l));
++			}
+ 			else if (bms_is_member(otherinfo->ojrelid, commute_below_r))
++			{
+ 				otherinfo->commute_above_r =
+ 					bms_add_member(otherinfo->commute_above_r, ojrelid);
+-		}
+-	}
++				OJTRACE("PGOJ COMMUTE_BACKPATCH current_oj=%u lower_oj=%u side=R lower_aboveR=%s",
++						ojrelid, otherinfo->ojrelid,
++						bmsToString(otherinfo->commute_above_r));
++			}
++		}
++	}
++
++	OJTRACE("PGOJ SJI_FINAL oj=%u type=%s minL=%s minR=%s belowL=%s belowR=%s lhs_strict=%d",
++			ojrelid, ojtrace_jointype_name(jointype),
++			bmsToString(sjinfo->min_lefthand),
++			bmsToString(sjinfo->min_righthand),
++			bmsToString(sjinfo->commute_below_l),
++			bmsToString(sjinfo->commute_below_r), sjinfo->lhs_strict);
+ 
+ 	return sjinfo;
+ }
+--- a/src/backend/optimizer/path/joinrels.c
++++ b/src/backend/optimizer/path/joinrels.c
+@@ -21,6 +21,45 @@
+ #include "optimizer/paths.h"
+ #include "partitioning/partbounds.h"
+ #include "utils/memutils.h"
++
++
++/* See the matching research-only trace in optimizer/plan/initsplan.c. */
++static bool
++ojtrace_enabled(void)
++{
++	static int	enabled = -1;
++
++	if (enabled < 0)
++	{
++		const char *value = getenv("PG_OJ_TRACE");
++
++		enabled = (value != NULL && value[0] != '\0' && strcmp(value, "0") != 0);
++	}
++	return enabled != 0;
++}
++
++static const char *
++ojtrace_jointype_name(JoinType jointype)
++{
++	switch (jointype)
++	{
++		case JOIN_INNER:
++			return "INNER";
++		case JOIN_LEFT:
++			return "LEFT";
++		case JOIN_FULL:
++			return "FULL";
++		case JOIN_SEMI:
++			return "SEMI";
++		case JOIN_ANTI:
++			return "ANTI";
++		default:
++			return "OTHER";
++	}
++}
++
++#define OJTRACE(...) \
++	do { if (ojtrace_enabled()) elog(NOTICE, __VA_ARGS__); } while (0)
+ 
+ 
+ static void make_rels_by_clause_joins(PlannerInfo *root,
+@@ -78,6 +117,21 @@
+ 
+ 	/* Set join_cur_level so that new joinrels are added to proper list */
+ 	root->join_cur_level = level;
++	if (ojtrace_enabled())
++	{
++		ListCell   *trace_lc;
++		int			trace_slot = 0;
++
++		elog(NOTICE, "PGOJ DP_LEVEL_BEGIN level=%d initial_count=%d previous_level_count=%d",
++			 level, list_length(joinrels[1]), list_length(joinrels[level - 1]));
++		foreach(trace_lc, joinrels[1])
++		{
++			RelOptInfo *trace_rel = (RelOptInfo *) lfirst(trace_lc);
++
++			elog(NOTICE, "PGOJ DP_INITIAL level=%d slot=%d relids=%s",
++				 level, ++trace_slot, bmsToString(trace_rel->relids));
++		}
++	}
+ 
+ 	/*
+ 	 * First, consider left-sided and right-sided plans, in which rels of
+@@ -195,19 +249,34 @@
+ 			for_each_cell(r2, other_rels_list, other_rels)
+ 			{
+ 				RelOptInfo *new_rel = (RelOptInfo *) lfirst(r2);
+-
+-				if (!bms_overlap(old_rel->relids, new_rel->relids))
++				bool		overlaps;
++				bool		has_clause = false;
++				bool		has_restriction = false;
++
++				overlaps = bms_overlap(old_rel->relids, new_rel->relids);
++				if (!overlaps)
+ 				{
+ 					/*
+ 					 * OK, we can build a rel of the right level from this
+ 					 * pair of rels.  Do so if there is at least one relevant
+ 					 * join clause or join order restriction.
+ 					 */
+-					if (have_relevant_joinclause(root, old_rel, new_rel) ||
+-						have_join_order_restriction(root, old_rel, new_rel))
+-					{
+-						(void) make_join_rel(root, old_rel, new_rel);
+-					}
++					has_clause = have_relevant_joinclause(root, old_rel, new_rel);
++					if (!has_clause)
++						has_restriction = have_join_order_restriction(root,
++																 old_rel, new_rel);
++				}
++
++				OJTRACE("PGOJ PAIR_GATE level=%d source=BUSHY rel1=%s rel2=%s overlap=%d clause=%d restriction=%d action=%s",
++						root->join_cur_level, bmsToString(old_rel->relids),
++						bmsToString(new_rel->relids), overlaps, has_clause,
++						has_restriction,
++						(!overlaps && (has_clause || has_restriction)) ?
++						"PROPOSE" : "SKIP");
++
++				if (!overlaps && (has_clause || has_restriction))
++				{
++					(void) make_join_rel(root, old_rel, new_rel);
+ 				}
+ 			}
+ 		}
+@@ -270,6 +339,21 @@
+ 			!root->hasLateralRTEs)
+ 			elog(ERROR, "failed to build any %d-way joins", level);
+ 	}
++
++	if (ojtrace_enabled())
++	{
++		ListCell   *trace_lc;
++
++		foreach(trace_lc, joinrels[level])
++		{
++			RelOptInfo *trace_rel = (RelOptInfo *) lfirst(trace_lc);
++
++			elog(NOTICE, "PGOJ DP_LEVEL_RESULT level=%d relids=%s",
++				 level, bmsToString(trace_rel->relids));
++		}
++		elog(NOTICE, "PGOJ DP_LEVEL_END level=%d result_count=%d",
++			 level, list_length(joinrels[level]));
++	}
+ }
+ 
+ /*
+@@ -304,10 +388,27 @@
+ 	for_each_cell(l, other_rels_list, other_rels)
+ 	{
+ 		RelOptInfo *other_rel = (RelOptInfo *) lfirst(l);
+-
+-		if (!bms_overlap(old_rel->relids, other_rel->relids) &&
+-			(have_relevant_joinclause(root, old_rel, other_rel) ||
+-			 have_join_order_restriction(root, old_rel, other_rel)))
++		bool		overlaps;
++		bool		has_clause = false;
++		bool		has_restriction = false;
++
++		overlaps = bms_overlap(old_rel->relids, other_rel->relids);
++		if (!overlaps)
++		{
++			has_clause = have_relevant_joinclause(root, old_rel, other_rel);
++			if (!has_clause)
++				has_restriction = have_join_order_restriction(root,
++														 old_rel, other_rel);
++		}
++
++		OJTRACE("PGOJ PAIR_GATE level=%d source=LEFT_RIGHT rel1=%s rel2=%s overlap=%d clause=%d restriction=%d action=%s",
++				root->join_cur_level, bmsToString(old_rel->relids),
++				bmsToString(other_rel->relids), overlaps, has_clause,
++				has_restriction,
++				(!overlaps && (has_clause || has_restriction)) ?
++				"PROPOSE" : "SKIP");
++
++		if (!overlaps && (has_clause || has_restriction))
+ 		{
+ 			(void) make_join_rel(root, old_rel, other_rel);
+ 		}
+@@ -337,8 +438,15 @@
+ 	foreach(l, other_rels)
+ 	{
+ 		RelOptInfo *other_rel = (RelOptInfo *) lfirst(l);
+-
+-		if (!bms_overlap(other_rel->relids, old_rel->relids))
++		bool		overlaps;
++
++		overlaps = bms_overlap(other_rel->relids, old_rel->relids);
++		OJTRACE("PGOJ PAIR_GATE level=%d source=CARTESIAN rel1=%s rel2=%s overlap=%d clause=NA restriction=NA action=%s",
++				root->join_cur_level, bmsToString(old_rel->relids),
++				bmsToString(other_rel->relids), overlaps,
++				overlaps ? "SKIP" : "PROPOSE");
++
++		if (!overlaps)
+ 		{
+ 			(void) make_join_rel(root, old_rel, other_rel);
+ 		}
+@@ -390,10 +498,20 @@
+ 	reversed = false;
+ 	unique_ified = false;
+ 	must_be_leftjoin = false;
++	OJTRACE("PGOJ LEGAL_BEGIN rel1=%s rel2=%s union=%s match=NONE reversed=0 uniqueified=0 must_left=0 sji_count=%d",
++			bmsToString(rel1->relids), bmsToString(rel2->relids),
++			bmsToString(joinrelids), list_length(root->join_info_list));
+ 
+ 	foreach(l, root->join_info_list)
+ 	{
+ 		SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);
++
++		OJTRACE("PGOJ LEGAL_SCAN candidate=%s oj=%u type=%s minL=%s minR=%s match=%s reversed=%d must_left=%d",
++				bmsToString(joinrelids), sjinfo->ojrelid,
++				ojtrace_jointype_name(sjinfo->jointype),
++				bmsToString(sjinfo->min_lefthand),
++				bmsToString(sjinfo->min_righthand),
++				match_sjinfo ? "SET" : "NONE", reversed, must_be_leftjoin);
+ 
+ 		/*
+ 		 * This special join is not relevant unless its RHS overlaps the
+@@ -401,24 +519,40 @@
+ 		 * most irrelevant SJs quickly.)
+ 		 */
+ 		if (!bms_overlap(sjinfo->min_righthand, joinrelids))
++		{
++			OJTRACE("PGOJ LEGAL_SKIP candidate=%s oj=%u reason=NO_RHS_OVERLAP",
++					bmsToString(joinrelids), sjinfo->ojrelid);
+ 			continue;
++		}
+ 
+ 		/*
+ 		 * Also, not relevant if proposed join is fully contained within RHS
+ 		 * (ie, we're still building up the RHS).
+ 		 */
+ 		if (bms_is_subset(joinrelids, sjinfo->min_righthand))
++		{
++			OJTRACE("PGOJ LEGAL_SKIP candidate=%s oj=%u reason=STILL_BUILDING_RHS",
++					bmsToString(joinrelids), sjinfo->ojrelid);
+ 			continue;
++		}
+ 
+ 		/*
+ 		 * Also, not relevant if SJ is already done within either input.
+ 		 */
+ 		if (bms_is_subset(sjinfo->min_lefthand, rel1->relids) &&
+ 			bms_is_subset(sjinfo->min_righthand, rel1->relids))
++		{
++			OJTRACE("PGOJ LEGAL_SKIP candidate=%s oj=%u reason=ALREADY_DONE_IN_REL1",
++					bmsToString(joinrelids), sjinfo->ojrelid);
+ 			continue;
++		}
+ 		if (bms_is_subset(sjinfo->min_lefthand, rel2->relids) &&
+ 			bms_is_subset(sjinfo->min_righthand, rel2->relids))
++		{
++			OJTRACE("PGOJ LEGAL_SKIP candidate=%s oj=%u reason=ALREADY_DONE_IN_REL2",
++					bmsToString(joinrelids), sjinfo->ojrelid);
+ 			continue;
++		}
+ 
+ 		/*
+ 		 * If it's a semijoin and we already joined the RHS to any other rels
+@@ -447,17 +581,31 @@
+ 			bms_is_subset(sjinfo->min_righthand, rel2->relids))
+ 		{
+ 			if (match_sjinfo)
++			{
++				OJTRACE("PGOJ LEGAL_REJECT candidate=%s oj=%u reason=MULTIPLE_SJI_MATCH",
++						bmsToString(joinrelids), sjinfo->ojrelid);
+ 				return false;	/* invalid join path */
++			}
+ 			match_sjinfo = sjinfo;
+ 			reversed = false;
++			OJTRACE("PGOJ LEGAL_MATCH candidate=%s oj=%u orientation=NORMAL type=%s",
++					bmsToString(joinrelids), sjinfo->ojrelid,
++					ojtrace_jointype_name(sjinfo->jointype));
+ 		}
+ 		else if (bms_is_subset(sjinfo->min_lefthand, rel2->relids) &&
+ 				 bms_is_subset(sjinfo->min_righthand, rel1->relids))
+ 		{
+ 			if (match_sjinfo)
++			{
++				OJTRACE("PGOJ LEGAL_REJECT candidate=%s oj=%u reason=MULTIPLE_SJI_MATCH_REVERSED",
++						bmsToString(joinrelids), sjinfo->ojrelid);
+ 				return false;	/* invalid join path */
++			}
+ 			match_sjinfo = sjinfo;
+ 			reversed = true;
++			OJTRACE("PGOJ LEGAL_MATCH candidate=%s oj=%u orientation=REVERSED type=%s",
++					bmsToString(joinrelids), sjinfo->ojrelid,
++					ojtrace_jointype_name(sjinfo->jointype));
+ 		}
+ 		else if (sjinfo->jointype == JOIN_SEMI &&
+ 				 bms_equal(sjinfo->syn_righthand, rel2->relids) &&
+@@ -525,7 +673,11 @@
+ 			 */
+ 			if (bms_overlap(rel1->relids, sjinfo->min_righthand) &&
+ 				bms_overlap(rel2->relids, sjinfo->min_righthand))
++			{
++				OJTRACE("PGOJ LEGAL_SKIP candidate=%s oj=%u reason=BOTH_INPUTS_ALREADY_CROSS_RHS",
++						bmsToString(joinrelids), sjinfo->ojrelid);
+ 				continue;		/* assume valid previous violation of RHS */
++			}
+ 
+ 			/*
+ 			 * The proposed join could still be legal, but only if we're
+@@ -535,7 +687,15 @@
+ 			 */
+ 			if (sjinfo->jointype != JOIN_LEFT ||
+ 				bms_overlap(joinrelids, sjinfo->min_lefthand))
++			{
++				OJTRACE("PGOJ LEGAL_REJECT candidate=%s oj=%u reason=RHS_CONFLICT type=%s overlaps_minL=%d required_minL=%s required_minR=%s",
++						bmsToString(joinrelids), sjinfo->ojrelid,
++						ojtrace_jointype_name(sjinfo->jointype),
++						bms_overlap(joinrelids, sjinfo->min_lefthand),
++						bmsToString(sjinfo->min_lefthand),
++						bmsToString(sjinfo->min_righthand));
+ 				return false;	/* invalid join path */
++			}
+ 
+ 			/*
+ 			 * To be valid, the proposed join must be a LEFT join; otherwise
+@@ -544,6 +704,8 @@
+ 			 * can't test that yet.  Remember the requirement for later.
+ 			 */
+ 			must_be_leftjoin = true;
++			OJTRACE("PGOJ LEGAL_STATE candidate=%s oj=%u action=SET_MUST_BE_LEFT",
++					bmsToString(joinrelids), sjinfo->ojrelid);
+ 		}
+ 	}
+ 
+@@ -560,7 +722,15 @@
+ 		(match_sjinfo == NULL ||
+ 		 match_sjinfo->jointype != JOIN_LEFT ||
+ 		 !match_sjinfo->lhs_strict))
++	{
++		OJTRACE("PGOJ LEGAL_REJECT candidate=%s oj=%u reason=MUST_BE_STRICT_LEFT match=%s match_type=%s lhs_strict=%d",
++				bmsToString(joinrelids),
++				match_sjinfo ? match_sjinfo->ojrelid : 0,
++				match_sjinfo ? "SET" : "NONE",
++				match_sjinfo ? ojtrace_jointype_name(match_sjinfo->jointype) : "NONE",
++				match_sjinfo ? match_sjinfo->lhs_strict : 0);
+ 		return false;			/* invalid join path */
++	}
+ 
+ 	/*
+ 	 * We also have to check for constraints imposed by LATERAL references.
+@@ -669,6 +839,10 @@
+ 	/* Otherwise, it's a valid join */
+ 	*sjinfo_p = match_sjinfo;
+ 	*reversed_p = reversed;
++	OJTRACE("PGOJ LEGAL_ACCEPT candidate=%s oj=%u type=%s reversed=%d uniqueified=%d must_left=%d",
++			bmsToString(joinrelids), match_sjinfo ? match_sjinfo->ojrelid : 0,
++			match_sjinfo ? ojtrace_jointype_name(match_sjinfo->jointype) : "INNER",
++			reversed, unique_ified, must_be_leftjoin);
+ 	return true;
+ }
+ 
+@@ -695,18 +869,25 @@
+ 	SpecialJoinInfo sjinfo_data;
+ 	RelOptInfo *joinrel;
+ 	List	   *restrictlist;
++	int			path_count_before;
++	int			partial_path_count_before;
+ 
+ 	/* We should never try to join two overlapping sets of rels. */
+ 	Assert(!bms_overlap(rel1->relids, rel2->relids));
+ 
+ 	/* Construct Relids set that identifies the joinrel (without OJ as yet). */
+ 	joinrelids = bms_union(rel1->relids, rel2->relids);
++	OJTRACE("PGOJ PAIR_PROPOSE level=%d rel1=%s rel2=%s union=%s",
++			root->join_cur_level, bmsToString(rel1->relids),
++			bmsToString(rel2->relids), bmsToString(joinrelids));
+ 
+ 	/* Check validity and determine join type. */
+ 	if (!join_is_legal(root, rel1, rel2, joinrelids,
+ 					   &sjinfo, &reversed))
+ 	{
+ 		/* invalid join path */
++		OJTRACE("PGOJ PAIR_RESULT level=%d union=%s accepted=0",
++				root->join_cur_level, bmsToString(joinrelids));
+ 		bms_free(joinrelids);
+ 		return NULL;
+ 	}
+@@ -717,6 +898,11 @@
+ 	 */
+ 	joinrelids = add_outer_joins_to_relids(root, joinrelids, sjinfo,
+ 										   &pushed_down_joins);
++	OJTRACE("PGOJ PAIR_RESULT level=%d canonical=%s accepted=1 stage=LEGAL_CANONICAL oj=%u type=%s reversed=%d pushed_down_count=%d",
++			root->join_cur_level, bmsToString(joinrelids),
++			sjinfo ? sjinfo->ojrelid : 0,
++			sjinfo ? ojtrace_jointype_name(sjinfo->jointype) : "INNER",
++			reversed, list_length(pushed_down_joins));
+ 
+ 	/* Swap rels if needed to match the join info. */
+ 	if (reversed)
+@@ -768,13 +954,26 @@
+ 	 */
+ 	if (is_dummy_rel(joinrel))
+ 	{
++		OJTRACE("PGOJ PATH_RESULT level=%d canonical=%s rel1=%s rel2=%s action=SKIP_DUMMY pathlist=%d partial_pathlist=%d",
++				root->join_cur_level, bmsToString(joinrelids),
++				bmsToString(rel1->relids), bmsToString(rel2->relids),
++				list_length(joinrel->pathlist),
++				list_length(joinrel->partial_pathlist));
+ 		bms_free(joinrelids);
+ 		return joinrel;
+ 	}
+ 
+ 	/* Add paths to the join relation. */
++	path_count_before = list_length(joinrel->pathlist);
++	partial_path_count_before = list_length(joinrel->partial_pathlist);
+ 	populate_joinrel_with_paths(root, rel1, rel2, joinrel, sjinfo,
+ 								restrictlist);
++	OJTRACE("PGOJ PATH_RESULT level=%d canonical=%s rel1=%s rel2=%s action=POPULATE pathlist_before=%d pathlist_after=%d partial_before=%d partial_after=%d dummy_after=%d",
++			root->join_cur_level, bmsToString(joinrelids),
++			bmsToString(rel1->relids), bmsToString(rel2->relids),
++			path_count_before, list_length(joinrel->pathlist),
++			partial_path_count_before, list_length(joinrel->partial_pathlist),
++			is_dummy_rel(joinrel));
+ 
+ 	bms_free(joinrelids);
+ 
+@@ -803,9 +1002,18 @@
+ 						  SpecialJoinInfo *sjinfo,
+ 						  List **pushed_down_joins)
+ {
++	OJTRACE("PGOJ ADD_OJ_BEGIN input=%s oj=%u type=%s belowL=%s aboveL=%s",
++			bmsToString(input_relids), sjinfo ? sjinfo->ojrelid : 0,
++			sjinfo ? ojtrace_jointype_name(sjinfo->jointype) : "NONE",
++			sjinfo ? bmsToString(sjinfo->commute_below_l) : "(b)",
++			sjinfo ? bmsToString(sjinfo->commute_above_l) : "(b)");
+ 	/* Nothing to do if this isn't an outer join with an assigned relid. */
+ 	if (sjinfo == NULL || sjinfo->ojrelid == 0)
++	{
++		OJTRACE("PGOJ ADD_OJ_END action=NO_OUTER_JOIN result=%s",
++				bmsToString(input_relids));
+ 		return input_relids;
++	}
+ 
+ 	/*
+ 	 * If it's not a left join, we have no rules that would permit executing
+@@ -814,7 +1022,12 @@
+ 	 * since its commute_below_l and commute_above_l sets must be empty.)
+ 	 */
+ 	if (sjinfo->jointype != JOIN_LEFT)
+-		return bms_add_member(input_relids, sjinfo->ojrelid);
++	{
++		input_relids = bms_add_member(input_relids, sjinfo->ojrelid);
++		OJTRACE("PGOJ ADD_OJ_END action=ADD_NONLEFT_OWN_OJ oj=%u result=%s",
++				sjinfo->ojrelid, bmsToString(input_relids));
++		return input_relids;
++	}
+ 
+ 	/*
+ 	 * We cannot add the OJ relid if this join has been pushed into the RHS of
+@@ -824,10 +1037,17 @@
+ 	 * done.
+ 	 */
+ 	if (!bms_is_subset(sjinfo->commute_below_l, input_relids))
++	{
++		OJTRACE("PGOJ ADD_OJ_END action=WITHHOLD_PUSHED_DOWN_OJ oj=%u required_belowL=%s result=%s",
++				sjinfo->ojrelid, bmsToString(sjinfo->commute_below_l),
++				bmsToString(input_relids));
+ 		return input_relids;
++	}
+ 
+ 	/* OK to add OJ's own relid */
+ 	input_relids = bms_add_member(input_relids, sjinfo->ojrelid);
++	OJTRACE("PGOJ ADD_OJ_STEP action=ADD_OWN_OJ oj=%u result=%s",
++			sjinfo->ojrelid, bmsToString(input_relids));
+ 
+ 	/*
+ 	 * Contrariwise, if we are now forming the final result of such a commuted
+@@ -849,21 +1069,60 @@
+ 		foreach(lc, root->join_info_list)
+ 		{
+ 			SpecialJoinInfo *othersj = (SpecialJoinInfo *) lfirst(lc);
+-
+-			if (othersj == sjinfo ||
+-				othersj->ojrelid == 0 || othersj->jointype != JOIN_LEFT)
+-				continue;		/* definitely not interesting */
++			bool		already_present;
++			bool		min_l_ready;
++			bool		min_r_ready;
++			bool		below_l_ready;
++
++			OJTRACE("PGOJ ADD_OJ_SCAN current_oj=%u target_oj=%u work=%s result=%s",
++					sjinfo->ojrelid, othersj->ojrelid,
++					bmsToString(commute_above_rels),
++					bmsToString(input_relids));
++
++			if (othersj == sjinfo)
++			{
++				OJTRACE("PGOJ ADD_OJ_DECISION current_oj=%u target_oj=%u action=SKIP reason=SELF",
++						sjinfo->ojrelid, othersj->ojrelid);
++				continue;
++			}
++			if (othersj->ojrelid == 0)
++			{
++				OJTRACE("PGOJ ADD_OJ_DECISION current_oj=%u target_oj=%u action=SKIP reason=NO_OJ_RELID",
++						sjinfo->ojrelid, othersj->ojrelid);
++				continue;
++			}
++			if (othersj->jointype != JOIN_LEFT)
++			{
++				OJTRACE("PGOJ ADD_OJ_DECISION current_oj=%u target_oj=%u action=SKIP reason=NOT_LEFT type=%s",
++						sjinfo->ojrelid, othersj->ojrelid,
++						ojtrace_jointype_name(othersj->jointype));
++				continue;
++			}
+ 
+ 			if (!bms_is_member(othersj->ojrelid, commute_above_rels))
++			{
++				OJTRACE("PGOJ ADD_OJ_DECISION current_oj=%u target_oj=%u action=SKIP reason=NOT_IN_COMMUTE_WORKSET",
++						sjinfo->ojrelid, othersj->ojrelid);
+ 				continue;
++			}
++
++			already_present = bms_is_member(othersj->ojrelid, input_relids);
++			min_l_ready = bms_is_subset(othersj->min_lefthand, input_relids);
++			min_r_ready = bms_is_subset(othersj->min_righthand, input_relids);
++			below_l_ready = bms_is_subset(othersj->commute_below_l,
++										  input_relids);
++			OJTRACE("PGOJ ADD_OJ_DECISION current_oj=%u target_oj=%u action=%s already_present=%d minL_ready=%d minR_ready=%d belowL_ready=%d",
++					sjinfo->ojrelid, othersj->ojrelid,
++					(!already_present && min_l_ready && min_r_ready &&
++					 below_l_ready) ? "CASCADE" : "WAIT",
++					already_present, min_l_ready, min_r_ready, below_l_ready);
+ 
+ 			/* Add it if not already present but conditions now satisfied */
+-			if (!bms_is_member(othersj->ojrelid, input_relids) &&
+-				bms_is_subset(othersj->min_lefthand, input_relids) &&
+-				bms_is_subset(othersj->min_righthand, input_relids) &&
+-				bms_is_subset(othersj->commute_below_l, input_relids))
++			if (!already_present && min_l_ready && min_r_ready && below_l_ready)
+ 			{
+ 				input_relids = bms_add_member(input_relids, othersj->ojrelid);
++				OJTRACE("PGOJ ADD_OJ_STEP action=CASCADE_COMPLETED_OJ oj=%u result=%s",
++						othersj->ojrelid, bmsToString(input_relids));
+ 				/* report such pushed down outer joins, if asked */
+ 				if (pushed_down_joins != NULL)
+ 					*pushed_down_joins = lappend(*pushed_down_joins, othersj);
+@@ -880,6 +1139,8 @@
+ 		}
+ 	}
+ 
++	OJTRACE("PGOJ ADD_OJ_END action=COMPLETE result=%s",
++			bmsToString(input_relids));
+ 	return input_relids;
+ }
+ 

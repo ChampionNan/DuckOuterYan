@@ -67,6 +67,14 @@ def active_performance_screens(manifest_path: Path) -> list[dict]:
         rules.append(dict(rule_id=spec["revision"], threshold=spec["threshold"], inclusive=spec["inclusive"],
                           removed_by_family=dict(Counter(r["family"] for r in spec["excluded"])),
                           selection=spec.get("selection", "Frozen exact-SQL removals")))
+    extension_path = manifest_path.parent / "graph_dataset_extension.json"
+    if extension_path.exists():
+        spec = json.loads(extension_path.read_text()).get("timeout_retirements")
+        if spec:
+            rules.append(dict(rule_id=spec["revision"], kind="timeout_retirement",
+                              removed_by_family={"graph": len(spec["retired_queries"])},
+                              selection=spec["reason"], evidence_csv=spec["evidence_csv"],
+                              evidence_csv_sha256=spec["evidence_csv_sha256"]))
     return rules
 
 
@@ -81,6 +89,10 @@ def screening_disclosure_tex(screens: list[dict]) -> str:
         items = [plot.number(counts[family], 0) + " " + plot.normalize_family(family)
                  for family in families]
         scope = " and ".join(items) if len(items) <= 2 else ", ".join(items[:-1]) + ", and " + items[-1]
+        if rule.get("kind") == "timeout_retirement":
+            sentences.append("A frozen exact-instance rule retires " + scope +
+                             " queries following OuterYan profiling/kernel timeouts in a separate CPU8 reproduction.")
+            continue
         comparison = "at most " if rule.get("inclusive") else "below "
         threshold = rf"\fix{{${rule['threshold']:g}\times$}}"
         sentences.append("A frozen performance-screening rule excludes " + scope +
@@ -427,40 +439,32 @@ def query_distribution(manifest: pd.DataFrame, measured: pd.DataFrame) -> tuple[
 
 def query_distribution_tex(rows: list[dict]) -> str:
     lines = [r"\begin{table}[t]", r"\centering\small\setlength{\tabcolsep}{4pt}",
-             r"\caption{Query distribution by workload family, query type, and input tree shape.}",
+             r"\caption{Valid measured OuterYan-selected queries by workload family, query type, and input tree shape.}",
              r"\label{tab:query-distribution}", r"\begin{tabular}{lrrrrrr}", r"\toprule",
              r" & & \multicolumn{2}{c}{Query type} & \multicolumn{3}{c}{Tree shape} \\",
              r"\cmidrule(lr){3-4}\cmidrule(lr){5-7}",
              r"Family & $n$ & Full & Agg. & LD & RD & Bushy \\", r"\midrule"]
     fields = ("total", "full_queries", "aggregation_queries", "left_deep", "right_deep", "bushy")
-    for index, (cohort, title) in enumerate((("active_benchmark", "All benchmark queries"),
-                                             ("measured_outeryan", "Valid measured OuterYan-selected queries"))):
-        if index:
-            lines.append(r"\midrule")
-        lines.append(r"\multicolumn{7}{l}{\textit{" + title + r"}} \\")
-        for row in rows:
-            if row["cohort"] == cohort:
-                lines.append(row["family"] + " & " + " & ".join(plot.number(row[key], 0) for key in fields) + r" \\")
+    for row in rows:
+        if row["cohort"] == "measured_outeryan":
+            lines.append(row["family"] + " & " + " & ".join(plot.number(row[key], 0) for key in fields) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
     return "\n".join(lines) + "\n"
 
 
 def query_distribution_discussion_tex(rows: list[dict]) -> str:
     totals = {row["cohort"]: row for row in rows if row["family"] == "All"}
-    active, measured = totals["active_benchmark"], totals["measured_outeryan"]
+    measured = totals["measured_outeryan"]
     def count(row, key):
         return plot.number(row[key], 0)
     def share(row, key):
         return plot.number(100 * row[key] / row["total"], 2, r"\%") if row["total"] else plot.number(None)
     text = (
-        r"Table~\ref{tab:query-distribution} reports the query distribution. "
+        r"Table~\ref{tab:query-distribution} reports only the valid measured OuterYan-selected cohort, "
+        "using the same queries as the performance table. Queries with a timeout on either engine are excluded. "
         "Full denotes non-aggregation queries, not queries composed exclusively of FULL OUTER JOINs; "
         "Agg. denotes aggregation queries regardless of whether aggregation is pushed down. "
         "LD and RD denote left-deep and right-deep input join expressions. "
-        "The benchmark contains " + count(active, "full_queries") + " full queries (" + share(active, "full_queries") +
-        ") and " + count(active, "aggregation_queries") + " aggregation queries (" + share(active, "aggregation_queries") +
-        "). Its left-deep, right-deep, and bushy expressions number " + count(active, "left_deep") + ", " +
-        count(active, "right_deep") + ", and " + count(active, "bushy") + ", respectively.\n\n"
         "The valid measured OuterYan-selected subset contains " + count(measured, "full_queries") + " full queries and " +
         count(measured, "aggregation_queries") + " aggregation queries; its corresponding shape counts are " +
         count(measured, "left_deep") + ", " + count(measured, "right_deep") + ", and " + count(measured, "bushy") +
@@ -474,14 +478,6 @@ def query_distribution_discussion_tex(rows: list[dict]) -> str:
         text += ("\n" + largest["family"] + " has the largest aggregation share among the measured workload families: " +
                  count(largest, "aggregation_queries") + " of " + count(largest, "total") + " queries (" +
                  share(largest, "aggregation_queries") + "). ")
-        active_families = {row["family"]: row for row in rows if row["cohort"] == "active_benchmark"}
-        for row in families:
-            for shape in ("left_deep", "right_deep", "bushy"):
-                available = active_families[row["family"]]
-                if available[shape] and not row[shape]:
-                    text += (row["family"] + " contains " + count(available, shape) + " " +
-                             shape.replace("_", "-") + " queries in the full benchmark, but none in the "
-                             "valid measured OuterYan-selected subset. ")
         text = text.rstrip() + "\n"
     return text
 
@@ -741,6 +737,15 @@ def fill_fragment(paper: dict, intro_n: int, pg: list[dict], corpus: dict | None
             "base-input selectivity bands. Old Bitcoin times are not reused. Graph statistics "
             "therefore describe a mixed-dataset workload, not a uniform dataset scaling experiment."
         )
+        retired = sum(sum(rule.get("removed_by_family", {}).values())
+                      for rule in audit.get("active_performance_screens", [])
+                      if rule.get("kind") == "timeout_retirement")
+        if retired:
+            values["dataset_note"] += (
+                " Of the additional Epinions replacements, " + plot.number(retired, 0)
+                + " were subsequently retired following OuterYan profiling/kernel timeouts in a separate "
+                "CPU8 reproduction. Those CPU8 measurements are not merged into CPU9 performance statistics."
+            )
     values["cohort_note"] = ""
     if audit:
         values["cohort_note"] = (
@@ -810,8 +815,8 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path,
                         help="Override results/plots/YYYYMMDD (latest contributing experiment date)")
     parser.add_argument("--samples-per-family", type=int, default=3)
-    parser.add_argument("--phase-samples-per-family", type=int, choices=range(4, 7), default=5,
-                        help="Phase-share-diverse figure sample, restricted to speed-up >= 1")
+    parser.add_argument("--phase-samples-per-family", type=int, choices=range(4, 7), default=4,
+                        help="Phase-share-diverse figure sample (default: 4), speed-up >= 1, preferring Other OP <= 50%")
     parser.add_argument("--no-figures", action="store_true", help="Statistics/template validation only")
     parser.add_argument("--replace-tpcds", type=Path,
                         help="Full TPC-DS snapshot: discard older family rows, then apply later partial updates")
@@ -1048,7 +1053,8 @@ See selected_but_untimed.csv. Their trace flags are preserved rather than relabe
 Figures and representative selection
 All reporting-cohort rows are plotted, including sub-second pairs and slowdowns. No timeout query is plotted.
 Phase figure uses up to {args.phase_samples_per_family} queries per family with speed-up >= 1,
-selected by farthest-point sampling of normalized CPU shares, starting nearest the family centroid.
+Prefer Other OP <= 50%; if too few qualify, use the lowest-Other OP queries needed to fill the family quota.
+Within that pool, use farthest-point sampling of normalized operator-time shares, starting nearest its centroid.
 Optimization table uses up to {args.samples_per_family} queries per family:
 shape quotas, then evenly spaced DuckDB-runtime ranks, without speed-up ranking.
 Phase-summary table uses ALL valid complete selected profiles, not only the figure's sample.

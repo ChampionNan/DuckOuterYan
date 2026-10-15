@@ -65,7 +65,9 @@ void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree)
 	//                              `tree.top_down_pairs`. The local OJT goes
 	//                              out of scope at the end of this block, so
 	//                              subsequent Desimplification mutations
-	//                              never reach the recorded pairs.
+	//                              never reach the recorded pairs. Prune the
+	//                              outer-over-inner pattern's optional pairs
+	//                              before DP costing and SJ insertion.
 	//   5. Desimplify           -- six Galindo-Legaria / Rosenthal associativity
 	//                              rules to fixpoint; mutates only
 	//                              `OTNode::join_kind`.
@@ -96,6 +98,7 @@ void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree)
 		BottomUpPass(tree, post_simp_ojt->Root());
 		TopDownPass(tree, post_simp_ojt->Root());
 	}
+	PruneThreeRelationOuterInnerPairs(tree);
 	tree.phase_timings.semijoin_pair_planning +=
 	    std::chrono::duration<double>(Clock::now() - phase_start).count();
 	if (OuterYanTrace::Enabled()) {
@@ -170,6 +173,60 @@ void OuterYanPre::TopDownPass(OuterYanTree &tree, OJTNode &node) {
 		}
 		TopDownPass(tree, *edge.child);
 	}
+}
+
+void OuterYanPre::PruneThreeRelationOuterInnerPairs(OuterYanTree &tree) {
+	if (tree.ot_relations_by_id.size() != 3 || tree.ot_joins_by_order.size() != 2) {
+		return;
+	}
+	const auto &root = tree.OT().Root();
+	if (root.kind != OTNode::Kind::JOIN || !root.info) {
+		return;
+	}
+	const auto kind = root.info->join_kind;
+	if ((kind != JoinType::LEFT && kind != JoinType::RIGHT) || root.info->original_join_kind != kind) {
+		return;
+	}
+	const idx_t preserved_side = kind == JoinType::LEFT ? 0 : 1;
+	const auto &preserved = *root.children[preserved_side];
+	const auto &inner = *root.children[1 - preserved_side];
+	if (preserved.kind != OTNode::Kind::RELATION || inner.kind != OTNode::Kind::JOIN || !inner.info ||
+	    inner.info->join_kind != JoinType::INNER || inner.info->original_join_kind != JoinType::INNER ||
+	    inner.children[0]->kind != OTNode::Kind::RELATION || inner.children[1]->kind != OTNode::Kind::RELATION) {
+		return;
+	}
+	// The identity below assumes filters have already been applied to the
+	// leaves. Keep the general reducer for intermediate multi-relation or
+	// scope-sensitive filters; a retained root filter stays above the result.
+	for (const auto &record : tree.filter_records) {
+		if (record && !record->retained_at_original_scope &&
+		    (record->referenced_relations.size() != 1 || record->requires_original_scope)) {
+			return;
+		}
+	}
+	const auto middle = preserved_side == 0 ? root.info->cond_right_relation_id
+	                                      : root.info->cond_left_relation_id;
+	const auto leaf = inner.children[0]->relation_id == middle ? inner.children[1]->relation_id
+	                                                        : inner.children[0]->relation_id;
+	// Retain the existence check B := B semi-join C. It prevents a B row
+	// without any C match from leaking through the desimplified LEFT join.
+	// If an enforced total FK already eliminated this check, leave that case
+	// to the existing constraint-based elimination rules.
+	if (tree.bottom_up_pairs.size() != 1 || tree.bottom_up_pairs[0].build != leaf ||
+	    tree.bottom_up_pairs[0].probe != middle) {
+		return;
+	}
+	for (const auto &pair : tree.top_down_pairs) {
+		if (!((pair.build == preserved.relation_id && pair.probe == middle) ||
+		      (pair.build == middle && pair.probe == leaf))) {
+			return;
+		}
+	}
+	// A LEFT (B INNER C) = (A LEFT (B semi-join C)) LEFT C under
+	// null-rejecting equality, including duplicate and orphan keys. B rows
+	// without A and C rows without B cannot contribute to either grouping,
+	// so B semi-join A and C semi-join B are optional reductions here.
+	tree.top_down_pairs.clear();
 }
 
 void OuterYanPre::ExtractSemiKeys(OuterYanTree &tree, RelationId build_rel,

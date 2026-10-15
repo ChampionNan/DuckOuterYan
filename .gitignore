@@ -17,7 +17,7 @@
 #==============================================================================#
 
 # outer join data
-*_db
+/*_db
 rstk_data/*
 outerjoin_test/*/*.txt
 
@@ -190,7 +190,7 @@ local.properties
 .recommenders
 
 # Clang language server (C/C++ tooling)
-/.cache/clangd
+/.cache/
 .ccls-cache
 
 # Eclipse Core
@@ -285,7 +285,7 @@ venv/
 
 # Visual Studio
 .vs
-settings.json
+/settings.json
 .vscode
 
 # QtCreator files
@@ -306,7 +306,6 @@ build
 .build_release/*
 distribute/*
 *.testbin
-*.bin
 cmake_build
 .cmake_build
 cmake-build-debug
@@ -360,8 +359,10 @@ zig-out/*gs
 zig-cache/*
 *.zig
 
-# .db files
-*.db
+# Local databases (checked-in test fixtures under data/ and test/ are inputs).
+/*.db
+/*.duckdb
+/*.duckdb.wal
 
 # local cmake extension config
 extension/extension_config_local.cmake
@@ -377,18 +378,19 @@ extension_external
 test/sql/pragma/output.json
 tools/pythonpkg/duckdb_build/
 
-# own
-*_db*
-
-# Approved SQL fingerprints may start with "db"; these are queries, not databases.
-!/auto_test/outerjoin_benchmark/benchmark/tpch/join__tpch__tuning_20261012_q_h_b_*__tpch_q05_region_sales__bushy__irfl__db73eb5f__sel_*.sql
-
-lsqb*
-*_data
+# Local benchmark datasets, never source directories such as parsed_data/.
+/*_db.wal
+/job_data/
+/graph_data/
+/rstk_data/
+/lsqb*/
 
 # project-local agent instructions (kept untracked)
 CLAUDE.md
-test/optimizer/outer_yan/*.md
+/AGENTS.md
+/.claude/
+/.codex/
+/.agents/
 
 # OuterYan test/bench artifacts (auto_test/)
 graph_db
@@ -417,3 +419,46 @@ test/sql/optimizer/outer_yan/data/*.csv
 /auto_test/outerjoin_benchmark/graph_dataset_retest/*/dataset_audit.json
 /postgres/
 OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md
+
+# All experiment outputs are local artifacts, without publication exceptions.
+# Keep SQL, manifests, query lists, and declarative generation policies tracked.
+__pycache__/
+*.trace
+*.trace.json
+*.trace.txt
+*.profile.json
+*.explain.json
+*.stdout
+*.stderr
+*.stdout.txt
+*.stderr.txt
+*.log.*
+/results/
+/server-work/
+/auto_test/**/results/
+/auto_test/**/recorded_results/
+/auto_test/**/profiles/
+/auto_test/**/traces/
+/auto_test/**/plots/
+/auto_test/**/reports/
+/auto_test/**/*.plans/
+/auto_test/**/dataset_audit.json
+/auto_test/**/pilot_provenance.json
+/auto_test/**/local_explain_decisions.csv
+/auto_test/**/local_pilot_comparison.csv
+/auto_test/**/local_validation.json
+/auto_test/**/proposal.json
+/auto_test/outerjoin_benchmark/sources/*_local_smoke.json
+/auto_test/outerjoin_benchmark/sources/*_pilot.json
+
+# Experiment narratives, manuscript drafts and rendered figures are outputs.
+/auto_test/outerjoin_benchmark/design.tex
+/auto_test/paper_examples/PAPER_EXAMPLE.md
+/auto_test/paper_examples/figures/
+/auto_test/pg_plan_comparison/paper/
+/auto_test/pg_plan_comparison/ADDITIONAL_CASES.md
+/auto_test/pg_plan_comparison/BENCHMARK_EXAMPLES.md
+/auto_test/pg_plan_comparison/LOCAL_VALIDATION.md
+/auto_test/pg_plan_comparison/NO_ORDER_LIMIT.md
+/auto_test/pg_plan_comparison/SEARCH_RESULTS_*.md
+/auto_test/pg_oj_trace/README.md

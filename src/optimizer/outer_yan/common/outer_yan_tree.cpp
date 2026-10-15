@@ -307,7 +307,7 @@ private:
 
 	//! Record the root aggregate's type tag and per-expression column info on
 	//! `tree.root_aggregation`. Classification is by aggregate function name
-	//! only -- mirrors `DuckDBYanPlus::DetectQueryType` (optimizer.cpp:533) and
+	//! only -- mirrors `the earlier DetectQueryType implementation` (optimizer.cpp:533) and
 	//! `aggregation_pushdown.cpp:102`.
 	void ClassifyRootAggregate(LogicalAggregate &agg) {
 		auto &info = tree.root_aggregation;

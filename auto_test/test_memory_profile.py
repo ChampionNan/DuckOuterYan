@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import memory_profile as m
 
@@ -116,11 +117,15 @@ class MemoryTests(unittest.TestCase):
                 self.assertEqual(result["stage"], "warmup")
 
     def test_cohort_is_pinned(self):
+        from benchmark_test_fixtures import historical_corpus
         cohort = json.loads(m.DEFAULT_COHORT.read_text())
-        m.validate(cohort)
-        cohort["queries"][0]["sql_sha256"] = "invalid"
-        with self.assertRaisesRegex(ValueError, "SQL changed"):
+        with self.assertRaisesRegex(ValueError, "Active benchmark changed"):
             m.validate(cohort)
+        with mock.patch.object(m, "CORPUS", historical_corpus(self, "before_tpch_selectivity")):
+            m.validate(cohort)
+            cohort["queries"][0]["sql_sha256"] = "invalid"
+            with self.assertRaisesRegex(ValueError, "SQL changed"):
+                m.validate(cohort)
 
 
 if __name__ == "__main__":

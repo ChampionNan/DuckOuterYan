@@ -4,12 +4,15 @@ import contextlib
 import io
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 import balanced_benchmark as b
 import benchmark_plan_cohort as c
 from benchmark_corpus import resolve_sql_path
 import prepare_grouping_candidates as grouping
+from verify_benchmark_reproduction import snapshot
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
@@ -86,7 +89,7 @@ class PlanCohortTest(unittest.TestCase):
                     self.assertEqual((root / "benchmark" / row["path"]).read_bytes(),
                                      (c.ARCHIVE / row["path"]).read_bytes())
                     unchanged += 1
-            self.assertEqual(unchanged, 320)
+            self.assertEqual(unchanged, 316)
             before = (root / "benchmark/manifest.csv").read_bytes()
             b.generate(root)
             self.assertEqual(before, (root / "benchmark/manifest.csv").read_bytes())
@@ -102,13 +105,55 @@ class PlanCohortTest(unittest.TestCase):
                 old = original[entry["original_query"]]
                 row, sql = c.query_updates.definition(old, entry)
                 source = (c.ARCHIVE / old["path"]).read_text()
-                self.assertEqual(sql.replace(row["selectivity_predicate"], "PREDICATE"),
-                                 source.replace(old["selectivity_predicate"], "PREDICATE"))
+                if entry.get("rewrite") == "duplicate_orders_date_input":
+                    scan = "(SELECT * FROM orders WHERE {}) AS orders".format(
+                        old["selectivity_predicate"].replace("orders.", ""))
+                    self.assertEqual(sql.replace("LEFT OUTER JOIN " + scan + " ON",
+                                                 "LEFT OUTER JOIN orders   ON"), source)
+                    self.assertEqual(sql.count("WHERE " + old["selectivity_predicate"]), 1)
+                    self.assertEqual(row["selectivity_predicate"], old["selectivity_predicate"])
+                    self.assertEqual(row["input_filter_placement"], "orders input plus unchanged outer WHERE")
+                else:
+                    self.assertEqual(sql.replace(row["selectivity_predicate"], "PREDICATE"),
+                                     source.replace(old["selectivity_predicate"], "PREDICATE"))
                 self.assertEqual(row["replaces_content_sha256"], old["content_sha256"])
                 self.assertEqual(row["semantic_tier"], entry["semantic_tier"])
                 for key in ("relation_count", "tree_shape", "join_vector", "source_seed"):
                     self.assertEqual(row[key], old[key])
                 self.assertEqual(row["content_sha256"], entry["measurement_content_sha256"])
+
+    def test_terminal_selectivity_suffix_is_renamed(self):
+        entries = c.query_updates.policy()["replacements"]
+        entry = next(e for e in entries if "where_d180" in e["measurement_query"])
+        old = next(r for r in c.archived_rows(c.policy()) if r["query_id"] == entry["original_query"])
+        row, _ = c.query_updates.definition(old, entry)
+        self.assertTrue(old["query_id"].endswith("__sel_high"))
+        self.assertTrue(row["query_id"].endswith("__sel_medium"))
+        self.assertEqual(row["calibration_qualified_rows"], "22439342")
+        with self.assertRaisesRegex(ValueError, "name does not match its tier"):
+            c.query_updates.definition(old, dict(entry, query_id=old["query_id"]))
+
+    def test_cli_rebuild_keeps_approved_tpch_predicates(self):
+        approved = {
+            "__sub075_20261015_where_d180": "ad7b9b33d02875d26c3de5aa42b6278c8b1bfe8ff5e3f68b977a6846b645013a",
+            "__sub075_20261015_where_d110_1995": "7a06d04ae49bf5296516535a31de34a260e3a6eb89efac6621aeec952420750f",
+            "__sub075_20261015_where_d930_1992": "ad2a706d6ad222847a11fb46cbe7cb20288aefecd5042d4b6ba64c23f1f7afba",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(
+                [sys.executable, str(Path(b.__file__).with_name("gen_outerjoin_benchmark.py")),
+                 "--root", temp], text=True, capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = Path(temp) / "benchmark"
+            rows = {r["query_id"]: r for r in b.validate(output)}
+            self.assertEqual(len(rows), 321)
+            self.assertEqual(snapshot(output), snapshot(b.ROOT / "benchmark"))
+            for suffix, sha in approved.items():
+                entry = next(e for e in c.query_updates.policy()["replacements"]
+                             if e["measurement_query"].endswith(suffix))
+                self.assertEqual(b.digest(output / rows[entry["query_id"]]["path"]), sha)
+                if entry["original_query"] != entry["query_id"]:
+                    self.assertNotIn(entry["original_query"], rows)
 
     def test_candidates_are_new_semantics_not_members(self):
         with forbid_result_access():

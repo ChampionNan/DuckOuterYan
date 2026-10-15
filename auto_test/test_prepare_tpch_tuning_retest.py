@@ -2,11 +2,18 @@
 import tempfile
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import prepare_tpch_tuning_retest as pilot
+from benchmark_test_fixtures import historical_corpus
 
 
 class FullTpchPilotTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(pilot, "ACTIVE", historical_corpus(self, "before_job"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_complete_tpch_snapshot_without_promotion(self):
         before = pilot.digest(pilot.ACTIVE / "manifest.csv")
         spec, candidates, inputs = pilot.validate_inputs()

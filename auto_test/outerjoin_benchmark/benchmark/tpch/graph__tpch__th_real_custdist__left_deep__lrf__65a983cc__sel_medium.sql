@@ -4,7 +4,7 @@
 -- policy: historically screened; not an unbiased overall-performance sample
 SELECT *
 FROM customer
-    LEFT OUTER JOIN orders   ON c_custkey = o_custkey
+    LEFT OUTER JOIN (SELECT * FROM orders WHERE o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1994-04-19') AS orders ON c_custkey = o_custkey
     RIGHT OUTER JOIN lineitem ON o_orderkey = l_orderkey
     FULL OUTER JOIN nation   ON c_nationkey = n_nationkey
 WHERE orders.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1994-04-19';

@@ -95,7 +95,7 @@ struct OJTEdge {
 	//! constraint. This legacy uniqueness marker is used by aggregate pushdown;
 	//! on its own it does not prove FK coverage and must not justify semi-join
 	//! elimination. See
-	//! `AggregationPushdown::CheckPKFK` in DuckDBYanPlus
+	//! `AggregationPushdown::CheckPKFK` in the earlier aggregate-pushdown implementation
 	//! (src/optimizer/aggregation_pushdown.cpp ~L547) for the reference
 	//! implementation: bindings → `LogicalGet::GetColumnIds()` →
 	//! `TableCatalogEntry::GetConstraints()` → `ConstraintType::UNIQUE`.

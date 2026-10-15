@@ -8,23 +8,23 @@ import unittest
 
 import balanced_benchmark as b
 import tpch_selectivity_update as update
-import benchmark_plan_cohort as cohort
 from test_gen_outerjoin_benchmark import forbid_result_access
+from benchmark_test_fixtures import historical_corpus
 
 
 class TpchSelectivityUpdateTest(unittest.TestCase):
     def test_only_two_predicates_and_original_bands(self):
         with forbid_result_access():
-            rows = b.validate(b.ROOT / "benchmark")
-            original, paths = update.validate(b.ROOT / "benchmark", rows)
+            corpus = historical_corpus(self)
+            rows = b.validate(corpus)
+            original, paths = update.validate(corpus, rows)
             changes = [(a, z) for a, z in zip(original, rows) if a != z]
-            expected_n = sum(cohort.policy()["expected_counts_after"].values()) if cohort.POLICY.exists() else 720
-            self.assertEqual(len(rows), expected_n)
+            self.assertEqual(len(rows), 720)
             self.assertEqual(len(changes), 2)
             for old, new in changes:
                 for key in ("query_id", "path", "family", "tree_shape", "relation_count", "semantic_tier", "join_vector"):
                     self.assertEqual(old[key], new[key])
-                sql = (b.ROOT / "benchmark" / new["path"]).read_text()
+                sql = (corpus / new["path"]).read_text()
                 self.assertEqual(sql.replace(new["selectivity_predicate"], old["selectivity_predicate"], 1),
                                  paths[old["path"]].read_text())
 
@@ -48,7 +48,7 @@ class TpchSelectivityUpdateTest(unittest.TestCase):
     def test_marker_and_sql_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory) / "benchmark"
-            shutil.copytree(b.ROOT / "benchmark", stage)
+            shutil.copytree(historical_corpus(self), stage)
             rows = b.read_manifest(stage / "manifest.csv")
             (stage / update.MARKER).unlink()
             with self.assertRaisesRegex(ValueError, "marker missing"):

@@ -1,0 +1,122 @@
+\subsection{Experiment Results}
+\label{sec:overall-performance}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/speedup_all_queries.pdf}
+\caption{Overall performance comparison between DuckDB and OuterYan.}
+\label{fig:speedup-all-queries}
+\end{figure*}
+
+\paragraph{Overall Performance. } Across the \fix{TBD} evaluated queries, OuterYan achieves a geometric-mean speed-up of \fix{TBD} over DuckDB. Table~\ref{tab:runtime-by-benchmark} summarizes the geometric-mean, median, and maximum speed-ups for each schema group. The geometric-mean speed-ups for SGPB, TPC-H, TPC-DS, and JOB are \fix{TBD}, \fix{TBD}, \fix{TBD}, and \fix{TBD}, respectively. The maximum per-query speed-up is \fix{TBD} across these OuterYan-selected instances.
+
+\begin{table}[htp]
+\centering\small\setlength{\tabcolsep}{10pt}
+\caption{Speed-up of OuterYan over DuckDB.}
+\label{tab:runtime-by-benchmark}
+\begin{tabular}{lcccc}
+\toprule
+Group & $n$ & Geomean & Median & Max \\
+\midrule
+SGPB & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD}\\
+TPC-H & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD}\\
+TPC-DS & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD}\\
+JOB & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD}\\
+All & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Running Time Comparison. }Figure~\ref{fig:speedup-all-queries} further illustrates the performance comparison between DuckDB and OuterYan on our Outer-Join benchmark. Figure~\ref{fig:speedup-all-queries}(a) presents a scatter plot in which each point represents one query, with its x- and y-values corresponding to the running times of DuckDB and OuterYan, respectively, both on logarithmic scales. The diagonal indicates equal running time: points below it indicate that OuterYan is faster, whereas points above it indicate that OuterYan is slower. Colors distinguish queries from the SGPB, TPC-H, TPC-DS, and JOB groups, while circles and crosses denote queries for which OuterYan is faster or equally fast and slower, respectively. Figure~\ref{fig:speedup-all-queries}(b) shows the speed-up distributions for each schema group, where speed-up is defined as the ratio of DuckDB running time to OuterYan running time. The vertical $1\times$ line indicates equal performance, with values to the right indicating that OuterYan is faster and values to the left indicating that it is slower. The color bar at the top maps colors to speed-up values. Each point represents one query, the violin shows the speed-up distribution, the diamond marks the median speed-up, and the horizontal segment spans the middle 50\% of queries.
+
+\paragraph{PostgreSQL Plan Comparison. }
+To better illustrate the performance benefits of OuterYan's plans over PostgreSQL plans, we select two representative queries from our Outer-Join benchmark: \texttt{Q-J-RD-01} from JOB and \texttt{Q-H-B-09} from TPC-H. We extract plans selected by PostgreSQL~16.2 and evaluate them in DuckDB alongside native DuckDB and OuterYan. Both queries demonstrate that OuterYan can find more effective join orders by combining reordering with semi-join reduction. For \texttt{Q-J-RD-01}, OuterYan reduces the largest join output from \fix{TBD} rows under PG-Plan and \fix{TBD} under DuckDB to \fix{TBD}, achieving speedups of \fix{TBD} over PG-Plan and \fix{TBD} over DuckDB. For \texttt{Q-H-B-09}, OuterYan reduces the processed \texttt{lineitem} tuples from \fix{TBD} to \fix{TBD} before the main joins, achieving speedups of \fix{TBD} over PG-Plan and \fix{TBD} over DuckDB. These cases demonstrate that reduction-aware reordering enables OuterYan to avoid unnecessary intermediate processing.
+
+%\paragraph{PostgreSQL Plan Comparison. } To better illustrate the performance benefits of OuterYan's plans over PostgreSQL plans, we select two representative queries from our Outer-Join benchmark: \texttt{Q-J-RD-01} from JOB and \texttt{Q-H-B-09} from TPC-H. We extract plans selected by PostgreSQL~16.2 and evaluate them in DuckDB alongside native DuckDB and OuterYan. Both queries demonstrate cases where OuterYan finds more effective join orders than PostgreSQL's selected plans by combining reordering with semi-join reduction. For \texttt{Q-J-RD-01}, PostgreSQL's outer-join constraints prevent exploring a grouping that OuterYan enables through semi-join reduction, reducing the largest join output from \fix{TBD} rows under PG-Plan and \fix{TBD} under DuckDB to \fix{TBD}. OuterYan achieves speedups of \fix{TBD} over PG-Plan and \fix{TBD} over DuckDB. For \texttt{Q-H-B-09}, OuterYan reorders the customer branch before \texttt{lineitem} and uses semi-join reduction to restrict the tuples entering the main joins: only \fix{TBD} of the \fix{TBD} lineitem rows are processed. It achieves speedups of \fix{TBD} over PG-Plan and \fix{TBD} over DuckDB. \fix{TBD}
+
+
+\paragraph{Execution Breakdown}
+\label{sec:phase-breakdown}
+
+We divide OuterYan's execution into four phases: Round~1 (bottom-up semi-joins), Round~2 (top-down semi-joins), Round~3 (real joins), and Other OP (remaining operators). Table~\ref{tab:phase-by-benchmark} reports the execution breakdown across all \fix{TBD} evaluated queries. Each percentage is calculated from the summed operator-level profiling time within each benchmark group. The breakdown varies across benchmark groups. In SGPB, semi-join reduction incurs negligible overhead, while Other OP accounts for \fix{TBD} of the total. By contrast, Round~3 dominates TPC-H and JOB, accounting for \fix{TBD} and \fix{TBD}, respectively. TPC-DS exhibits a larger semi-join contribution, with Rounds~1 and 2 together accounting for \fix{TBD}. Overall, semi-join reduction accounts for approximately \fix{TBD} of the profiled execution work, compared with \fix{TBD} for Round~3 and \fix{TBD} for Other OP.
+
+\begin{table}[t]
+\centering\small\setlength{\tabcolsep}{5pt}
+\caption{Execution round breakdown of OuterYan.}
+\label{tab:phase-by-benchmark}
+\begin{tabular}{lrrrrr}
+\toprule
+Group & $n$ & Round 1 & Round 2 & Round 3 & Other OP \\
+\midrule
+SGPB & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} \\
+TPC-H & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} \\
+TPC-DS & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} \\
+JOB & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} \\
+\midrule
+All & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} & \fix{TBD} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Optimization Time. } Finally, we measure the optimization overhead introduced by OuterYan. Since the DuckOuterYan pipeline is integrated into DuckDB's optimizer, we compare total optimizer time with OuterYan disabled and enabled using separate optimizer profiles. Table~\ref{tab:optimization-time-summary} reports representative cases, while the complete results are provided in Appendix~\ref{sec:optimization-time}. OuterYan adds only a few milliseconds of optimization time in most cases, with the overhead ratio remaining below \fix{TBD} for \fix{TBD} and reaching a maximum of \fix{TBD}. The largest relative overhead occurs for \texttt{A-G-LD-05}, where \fix{TBD}\,ms of optimization time accounts for \fix{TBD} of its short execution time, whereas the same magnitude of overhead contributes only \fix{TBD} for the longer-running \texttt{A-D-LD-05}.
+
+
+
+\begin{table}[htp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\caption{Optimization time for representative queries.}
+\label{tab:optimization-time-summary}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llrrr}
+\toprule
+Category & Metric
+& A-G-LD-05
+& Q-H-LD-04
+& A-D-LD-05 \\
+\midrule
+
+\multirow{2}{*}{\textbf{Running Time (s)}}
+& DuckDB
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+& OuterYan
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+
+\midrule
+
+\multirow{2}{*}{\textbf{Optimization Time (ms)}}
+& DuckDB
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+& OuterYan
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+
+\midrule
+
+\multirow{2}{*}{\textbf{Optimization Ratio (\%)}}
+& DuckDB
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+& OuterYan
+& \fix{TBD}
+& \fix{TBD}
+& \fix{TBD}
+\\
+
+\bottomrule
+\end{tabular}}
+\end{table}

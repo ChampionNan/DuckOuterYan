@@ -5,5 +5,5 @@
 -- policy: historically screened; not an unbiased overall-performance sample
 SELECT p.p_partkey AS group_key, COUNT(*) AS row_count
 FROM (region r FULL OUTER JOIN (nation n LEFT OUTER JOIN (customer c RIGHT OUTER JOIN (orders o INNER JOIN (lineitem l FULL OUTER JOIN part p ON p.p_partkey = l.l_partkey) ON l.l_orderkey = o.o_orderkey) ON o.o_custkey = c.c_custkey) ON c.c_nationkey = n.n_nationkey) ON n.n_regionkey = r.r_regionkey)
-WHERE o.o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1995-03-15'
+WHERE o.o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1995-04-20'
 GROUP BY p.p_partkey;

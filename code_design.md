@@ -7,8 +7,7 @@ correctness argument, and which claims still need qualification.
 
 Snapshot used for this document:
 
-- repository: `DuckYanOuter`
-- inspected commit: `0761017e77c8db585d52608a8ed1fab2d1dc4d1f`
+- repository: anonymous OuterYan research fork
 - inspection date: 2026-09-03
 - active selection formula: `OUTER_YAN_COST_V6`
 

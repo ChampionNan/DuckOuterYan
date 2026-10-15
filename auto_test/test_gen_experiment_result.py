@@ -754,6 +754,25 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
     def test_short_phase_seconds_are_not_rounded_to_zero(self):
         self.assertEqual(PLOT.format_seconds_label(0.004174538), "0.0042s")
 
+    def test_eight_phase_rows_keep_footer_clear_of_axis_labels(self):
+        frame = pd.DataFrame([
+            self.phase_row(f"q_{family}_{i}", family, 2, 3)
+            for family in PLOT.FAMILY_ORDER for i in range(2)
+        ])
+        with mock.patch.object(PLOT, "save_page") as save:
+            PLOT.page_phase(object(), frame, "test")
+        figure = save.call_args.args[1]
+        try:
+            self.assertLess(figure.get_figheight(), 4.8)
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            footer = next(text for text in figure.texts if text.get_text() == PLOT.QUERY_CODE_KEY)
+            for axis in figure.axes:
+                self.assertGreater(axis.xaxis.label.get_window_extent(renderer).y0,
+                                   footer.get_window_extent(renderer).y1)
+        finally:
+            plt.close(figure)
+
     @staticmethod
     def phase_row(query, family, total, baseline):
         return {
@@ -887,6 +906,30 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
                 self.assertTrue(rows.empty)
             else:
                 self.assertEqual(rows.iloc[0]["baseline_time_s"], expected)
+
+    def test_phase_summary_can_include_completed_on_profile_after_off_timeout(self):
+        base = dict(self.phase_row("baseline_timeout", "graph", 2, 3),
+                    correct="NOT-CHECKED", correctness_check="disabled", timing_status="timeout",
+                    duckdb_status="timeout", outeryan_status="measured", profile_status="OK",
+                    duckdb_timeout_stage="warmup", outeryan_timeout_stage="-", tm_off=math.nan,
+                    note="TIMEOUT-OFF-WARMUP")
+        frame = pd.DataFrame([base])
+        self.assertTrue(PLOT.complete_phase_rows(frame)[0].empty)
+        complete, rejected = PLOT.complete_phase_rows(frame, include_duckdb_timeouts=True)
+        self.assertEqual((len(complete), rejected), (1, 0))
+        self.assertAlmostEqual(complete.iloc[0]["_phase_sum_s"], 10)
+        self.assertTrue(pd.isna(complete.iloc[0]["tm_off"]))
+        # The paired figure must not turn the baseline limit into a measurement.
+        self.assertTrue(PLOT.phase_baseline_rows(frame).empty)
+        for changes in (
+            dict(outeryan_status="timeout"), dict(outeryan_timeout_stage="timing"),
+            dict(profile_status="timeout"), dict(correct="FALSE"), dict(correctness_check="enabled"),
+            dict(outeryan_correctness_status="NOT-EQUIV"), dict(tm_on=math.nan),
+            dict(selected_plan="DUCKDB"), dict(profile_round1_operator_s=999),
+        ):
+            with self.subTest(changes=changes):
+                bad = pd.DataFrame([dict(base, **changes)])
+                self.assertTrue(PLOT.complete_phase_rows(bad, include_duckdb_timeouts=True)[0].empty)
 
     def test_runtime_and_phase_use_one_sample_and_short_name_mapping(self):
         current = pd.DataFrame([
@@ -1583,15 +1626,15 @@ class PaperStatisticsTest(unittest.TestCase):
         # Historical definitions remain resolvable after retirement/replacement;
         # composition counts must use active identities rather than that union.
         active = pd.read_csv(PLOT.SCRIPT_DIR / "outerjoin_benchmark/benchmark/manifest.csv")
-        self.assertEqual(len(active), 350)
+        self.assertEqual(len(active), 321)
         provenance = provenance[provenance["query_id"].isin(active["query_id"])]
         self.assertEqual(len(provenance), len(active))
         provenance = provenance[provenance["filter_design_revision"].isin(
             ["balanced-screened-20261002", "balanced-screened-20261002/inputcap1",
-             "tpch-query-tuning-20261012"])]
+             "tpch-query-tuning-20261012", "cohort-selectivity-20261015"])]
         counts = provenance["workload_component"].value_counts().to_dict()
-        # Frozen 350-query cohort; the revision filter above covers 301 identities.
-        self.assertEqual(counts, {"structural": 219, "evaluation": 82})
+        # Frozen 321-query cohort; the revision filter above covers 280 identities.
+        self.assertEqual(counts, {"structural": 201, "evaluation": 79})
         capped = provenance[provenance["graph_filter_revision"].eq("inputcap1")]
         self.assertEqual(len(capped), 67)
         self.assertTrue(capped["input_filter_placement"].eq("base_relation_subquery").all())

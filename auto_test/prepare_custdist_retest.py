@@ -16,16 +16,17 @@ from pathlib import Path
 from benchmark_corpus import count_base_relations, sql_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTIVE = ROOT / "auto_test/outerjoin_benchmark/benchmark"
+# Keep historical pilots reproducible after a candidate is promoted to the active corpus.
+SOURCE_DIR = ROOT / "auto_test/outerjoin_benchmark/revisions/pre_plan_cohort_20261014/benchmark"
 QUERY = "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium"
 SOURCE_SHA = "e858780681373c09c96763d991d488c822a86646776f28da504f99520532075d"
 REVISION = "custdist-predicate-pilot-20261015"
 
 
 def prepare():
-    with (ACTIVE / "manifest.csv").open(newline="") as handle:
+    with (SOURCE_DIR / "manifest.csv").open(newline="") as handle:
         source = next(row for row in csv.DictReader(handle) if row["query_id"] == QUERY)
-    sql = (ACTIVE / source["path"]).read_text()
+    sql = (SOURCE_DIR / source["path"]).read_text()
     assert hashlib.sha256(sql.encode()).hexdigest() == SOURCE_SHA
     old = source["selectivity_predicate"]
     assert sql.count(old) == 1

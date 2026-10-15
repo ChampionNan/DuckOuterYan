@@ -10,6 +10,7 @@ import balanced_benchmark as b
 from benchmark_corpus import count_base_relations, historical_manifests, resolve_sql_path
 import tpcds_refresh as refresh
 from test_gen_outerjoin_benchmark import forbid_result_access
+from benchmark_test_fixtures import historical_corpus
 
 
 class TPCDSRefreshTest(unittest.TestCase):
@@ -48,13 +49,18 @@ class TPCDSRefreshTest(unittest.TestCase):
         spec = refresh.policy()
         self.assertEqual(Counter(r["reason"] for r in spec["excluded"]),
                          {"timeout": 28, "measured_speedup_below_0.5": 8})
-        active = b.read_manifest(b.ROOT / "benchmark/manifest.csv")
+        active = b.read_manifest(historical_corpus(self) / "manifest.csv")
         self.assertTrue({r["sql_fingerprint"] for r in spec["excluded"]}.isdisjoint(
             r["sql_fingerprint"] for r in active))
         self.assertTrue(any("left_deep__ifilr__b21fdfc2__sel_low" in r["query_id"] for r in active))
         self.assertFalse(any("left_deep__ifilr__b21fdfc2__sel_high" in r["query_id"] for r in active))
         recovery = [r for r in active if r.get("recovery_template") == "storm10809_rdul"]
-        self.assertEqual({r["semantic_tier"] for r in recovery}, set(b.TIERS))
+        # Later exact-query retirements remove the high-tier sibling; generation
+        # still covers all tiers before those separately pinned policies apply.
+        self.assertEqual({r["semantic_tier"] for r in recovery}, {"low", "medium"})
+        generated = [r for r, _ in refresh.recovery_queries()
+                     if r.get("recovery_template") == "storm10809_rdul"]
+        self.assertEqual({r["semantic_tier"] for r in generated}, set(b.TIERS))
 
     def test_removed_sql_is_recoverable(self):
         archive = b.ROOT / "revisions/retired_tpcds_20261005/benchmark"

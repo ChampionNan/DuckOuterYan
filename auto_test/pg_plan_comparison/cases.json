@@ -1,0 +1,26 @@
+{
+  "A": {
+    "family": "job",
+    "query": "queries/case_a.sql",
+    "source": "benchmark/imdb_plan_cost/queries/03c.sql",
+    "source_benchmark": "JOB 3c",
+    "derivation": "Retain title/movie_info/movie_keyword and original equality edges; remove keyword, MIN and text/year filters; change outer edge to LEFT; add title.id % 1000 = 0.",
+    "tables": ["title", "movie_info", "movie_keyword"],
+    "aliases": {"t": "title", "mi": "movie_info", "mk": "movie_keyword"},
+    "pg_base_relids": {"1": "title", "2": "movie_info", "3": "movie_keyword"},
+    "result_columns": 4,
+    "controls": ["queries/case_a_right_control.sql", "queries/case_a_left_chain_control.sql"]
+  },
+  "B": {
+    "family": "tpch",
+    "query": "queries/case_b.sql",
+    "source": "extension/tpch/dbgen/queries/q03.sql",
+    "source_benchmark": "TPC-H Q3",
+    "derivation": "Retain customer/orders/lineitem and Q3 equality edges; replace joins with FULL; remove aggregation, filters, ordering and LIMIT; project row keys.",
+    "tables": ["lineitem", "orders", "customer"],
+    "aliases": {"l": "lineitem", "o": "orders", "c": "customer"},
+    "pg_base_relids": {"1": "lineitem", "2": "orders", "4": "customer"},
+    "result_columns": 4,
+    "controls": []
+  }
+}

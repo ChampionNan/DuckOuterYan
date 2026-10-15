@@ -204,9 +204,12 @@ class OutputDirectoryTests(unittest.TestCase):
         tex = refresh.query_distribution_tex(rows)
         self.assertIn(r"\label{tab:query-distribution}", tex)
         self.assertIn("Full & Agg. & LD & RD & Bushy", tex)
-        self.assertEqual(tex.count(r"\multicolumn{7}{l}"), 2)
+        self.assertNotIn("All benchmark queries", tex)
+        self.assertIn(r"All & \fix{2} & \fix{1} & \fix{1} & \fix{0} & \fix{1} & \fix{1}", tex)
+        self.assertNotIn(r"All & \fix{3}", tex)
         analysis = refresh.query_distribution_discussion_tex(rows)
-        self.assertIn(r"\fix{66.67\%}", analysis)
+        self.assertIn(r"\fix{50.00\%}", analysis)
+        self.assertNotIn("The benchmark contains", analysis)
         self.assertIn("regardless of whether aggregation is pushed down", analysis)
         for altered in (manifest.assign(tree_shape="unknown"),
                         pd.concat([manifest, manifest.iloc[:1]]),
@@ -226,6 +229,16 @@ class OutputDirectoryTests(unittest.TestCase):
         self.assertNotIn("TPC-DS", text)
         self.assertIn("rather than the optimizer's performance", text)
         self.assertEqual(refresh.screening_disclosure_tex([]), "")
+
+    def test_timeout_retirements_are_disclosed_without_a_speedup_threshold(self):
+        rules = refresh.active_performance_screens(refresh.DEFAULT_MANIFEST)
+        timeout_rules = [r for r in rules if r.get("kind") == "timeout_retirement"]
+        self.assertEqual(len(timeout_rules), 1)
+        self.assertEqual(timeout_rules[0]["removed_by_family"], {"graph": 2})
+        text = refresh.screening_disclosure_tex(timeout_rules)
+        self.assertIn(r"\fix{2} Graph", text)
+        self.assertIn("profiling/kernel timeouts", text)
+        self.assertNotIn("speed-ups were", text)
 
     def test_latest_contributing_date_uses_existing_plots_root(self):
         frame = pd.DataFrame({"source_run": ["20261005_201226_t32", "20261002_213551_t32"]})

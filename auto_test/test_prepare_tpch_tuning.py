@@ -1,14 +1,19 @@
 """Structural guards for SQL-only, count-preserving TPC-H tuning proposals."""
 import json
 import unittest
+from unittest import mock
 
 import balanced_benchmark as b
 import prepare_tpch_tuning as tuning
+from benchmark_test_fixtures import historical_corpus
 
 
 class TpchQueryTuningTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        patcher = mock.patch.object(tuning, "ACTIVE", historical_corpus(cls, "before_tuning"))
+        patcher.start()
+        cls.addClassCleanup(patcher.stop)
         cls.spec = json.loads(tuning.POLICY.read_text())
         cls.rows = b.read_manifest(tuning.ACTIVE / "manifest.csv")
         cls.by_id = {r["query_id"]: r for r in cls.rows}

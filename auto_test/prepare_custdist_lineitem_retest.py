@@ -14,7 +14,7 @@ from pathlib import Path
 import tempfile
 
 from benchmark_corpus import count_base_relations, sql_fingerprint
-from prepare_custdist_retest import ACTIVE, QUERY, SOURCE_SHA, prepare as previous_entries
+from prepare_custdist_retest import SOURCE_DIR, QUERY, SOURCE_SHA, prepare as previous_entries
 from prepare_slow_five_retest import explain, local_timing, query_json
 from verify_custdist_retest import multiset, run
 
@@ -110,7 +110,7 @@ def validate(args):
                  binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), scale=args.sf,
                  threads=args.threads, active_benchmark_modified=False, cpu9_performance_claim=False,
                  orders_selectivity_fraction=order_counts["matched"] / order_counts["n"], candidates=[])
-    original = (ACTIVE / "tpch" / (QUERY + ".sql")).read_text()
+    original = (SOURCE_DIR / "tpch" / (QUERY + ".sql")).read_text()
     with tempfile.TemporaryDirectory(prefix="custdist-line-correctness-") as directory:
         fixture = Path(directory) / "tpch_tiny.duckdb"
         extension = binary.parent / "extension/tpch/tpch.duckdb_extension"

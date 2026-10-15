@@ -1,9 +1,24 @@
-# OuterYan
+# DuckOuterYan
 
-Anonymous research artifact based on DuckDB. OuterYan explores join reordering,
-two-round semi-join reduction, aggregate pushdown, and bitmap/hash filter kernels
-for queries containing inner and outer joins. Applicability and plan selection
-are determined by the current optimizer source.
+## Reproduce the benchmark
+
+From the repository root on Linux, with Git, Bash, curl, tar, CMake, Ninja, Make
+and a C++17 compiler installed:
+
+```bash
+bash auto_test/run_all.sh --bootstrap --generate-queries
+```
+
+This installs an isolated Python environment, regenerates and verifies the
+321-query benchmark, builds DuckOuterYan, downloads/generates the datasets,
+runs the comparisons, and produces statistics and PDF/PNG figures. Defaults are
+TPC-H/TPC-DS SF50, 32 threads, five timed executions per configuration (median),
+and a 600-second limit per execution per engine. No LaTeX is generated.
+
+Results go to `auto_test/results/`; statistics and figures go to
+`auto_test/results/plots/YYYYMMDD/`. To use the checked-in queries unchanged,
+omit `--generate-queries`. This entry point covers the main benchmark;
+the separate memory and PostgreSQL diagnostics are not run automatically.
 
 ## Build
 
@@ -40,6 +55,15 @@ and verify the workload without running experiments:
 ```bash
 bash auto_test/run_all.sh --prepare-only
 ```
+
+The frozen generation policy includes the current TPC-H replacements, including
+the approved Q-H-LD-36, A-H-RD-10, and A-H-RD-11 predicates. Regeneration preserves
+all 321 SQL identities and their current content hashes; it does not restore the
+older predicates. Definitions are pinned in
+[`cohort_selectivity_20261015.json`](auto_test/outerjoin_benchmark/sources/cohort_selectivity_20261015.json).
+The verification report is written to
+`auto_test/results/plots/YYYYMMDD/query_reproduction.json` and compares every
+published benchmark file against two independent regenerations.
 
 The generator does not read experiment outputs. Start validation with a small
 sample before running the complete corpus:

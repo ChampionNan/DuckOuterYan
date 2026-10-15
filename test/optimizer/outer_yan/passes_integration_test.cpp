@@ -575,6 +575,100 @@ TEST_CASE("outer_yan semi-join elimination: NOT NULL enforced FK makes PK build 
 	AssertOuterYanPreservesResults(con, sql);
 }
 
+TEST_CASE("outer_yan semi-join elimination: outer over inner needs only the existence reducer",
+          "[outer_yan][passes][semi][elimination][single_reducer]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	// No constraints: duplicate keys, NULLs, orphans, and filtered-out matches
+	// must all work without assuming TPC-H foreign-key coverage.
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE a(k INTEGER, label VARCHAR)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE b(id INTEGER, version INTEGER, customer INTEGER, active BOOLEAN)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE c(order_id INTEGER, version INTEGER, value INTEGER, active BOOLEAN)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO a VALUES (1,'A'),(1,'A'),(2,'B'),(3,'C'),(NULL,'N')"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO b VALUES (10,1,1,true),(10,1,1,true),(10,2,1,true),"
+	                          "(20,1,2,true),(30,1,3,false),(40,1,999,true),(50,1,NULL,true),"
+	                          "(NULL,1,3,true),(60,NULL,3,true),(70,1,3,true)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO c VALUES (10,1,100,true),(10,1,100,true),(10,1,101,true),"
+	                          "(20,1,200,false),(30,1,300,true),(40,1,400,true),(50,1,500,true),"
+	                          "(NULL,1,600,true),(60,NULL,700,true),(70,2,800,true),(999,1,900,true)"));
+	const string columns = "SELECT a.k,a.label,b.id,b.version,c.value FROM ";
+	const string inner_condition = "b.id=c.order_id AND b.version=c.version AND b.active AND c.active";
+	const vector<string> queries {
+	    columns + "a LEFT JOIN (b INNER JOIN c ON " + inner_condition + ") ON a.k=b.customer",
+	    columns + "a LEFT JOIN (c INNER JOIN b ON " + inner_condition + ") ON b.customer=a.k",
+	    columns + "(b INNER JOIN c ON " + inner_condition + ") RIGHT JOIN a ON b.customer=a.k",
+	};
+	bool empty_matches = false;
+	SECTION("duplicates, null keys, orphan keys, and unary filters") {
+	}
+	SECTION("empty filtered inner relation") {
+		REQUIRE_NO_FAIL(con.Query("UPDATE c SET active=false"));
+		empty_matches = true;
+	}
+	for (const auto &sql : queries) {
+		INFO(sql);
+		auto tree = BuildPreIRFor(con, sql);
+		REQUIRE(tree->HasOT());
+		const auto b = RelationForTable(*tree, "b");
+		const auto c = RelationForTable(*tree, "c");
+		REQUIRE(tree->bottom_up_pairs.size() == 1);
+		REQUIRE(HasSemiPair(tree->bottom_up_pairs, c, b));
+		REQUIRE(tree->bottom_up_pairs[0].keys.size() == 2);
+		REQUIRE(tree->top_down_pairs.empty());
+
+		auto &ctx = *con.context;
+		ctx.transaction.BeginTransaction();
+		const auto cost = OuterYanDP(ctx).Optimize(*tree);
+		ctx.transaction.Commit();
+		REQUIRE(cost.has_complete_plan);
+		REQUIRE(cost.semijoin_steps.size() == 1);
+		REQUIRE(cost.semijoin_steps[0].build_relation == c);
+		REQUIRE(cost.semijoin_steps[0].probe_relation == b);
+		REQUIRE(cost.semijoin_steps[0].round == 1);
+		REQUIRE(cost.round2_build_cost == 0);
+		REQUIRE(cost.round2_probe_cost == 0);
+		AssertOuterYanPreservesResults(con, sql);
+		if (!empty_matches) {
+			ScopedOuterYanCandidateForce force_candidate;
+			auto plan = con.ExtractPlan(sql, /*resolve_column_bindings=*/false);
+			idx_t builds = 0, probes = 0;
+			std::function<void(const LogicalOperator &)> count = [&](const LogicalOperator &op) {
+				builds += op.type == LogicalOperatorType::LOGICAL_SJ_BUILD;
+				probes += op.type == LogicalOperatorType::LOGICAL_SJ_PROBE;
+				for (const auto &child : op.children) {
+					count(*child);
+				}
+			};
+			count(*plan);
+			REQUIRE(builds == 1);
+			REQUIRE(probes == 1);
+			auto result = con.Query(sql);
+			REQUIRE_NO_FAIL(*result);
+			REQUIRE(result->RowCount() == 15);
+		}
+	}
+}
+
+TEST_CASE("outer_yan semi-join elimination: outer-inner pruning stays within the three-relation pattern",
+          "[outer_yan][passes][semi][elimination][single_reducer]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedPasses(con);
+	for (const auto &sql : {
+	         "SELECT * FROM a FULL JOIN (b INNER JOIN c ON b.id=c.id) ON a.id=b.id",
+	         "SELECT * FROM a LEFT JOIN b ON a.id=b.id LEFT JOIN c ON b.id=c.id",
+	         "SELECT * FROM a LEFT JOIN b ON a.id=b.id INNER JOIN c ON a.id=c.id",
+	         "SELECT * FROM a LEFT JOIN (b INNER JOIN c ON b.id=c.id INNER JOIN d ON c.id=d.id) ON a.id=b.id"}) {
+		INFO(sql);
+		auto tree = BuildPreIRFor(con, sql);
+		REQUIRE(tree->HasOT());
+		// The OJT may orient an all-outer chain in either direction. It must
+		// retain the general schedule, not reduce these shapes to one pair.
+		REQUIRE(tree->bottom_up_pairs.size() + tree->top_down_pairs.size() >= 2);
+		AssertOuterYanPreservesResults(con, sql);
+	}
+}
+
 TEST_CASE("outer_yan semi-join elimination: nullable FK retains PK-to-FK reduction",
           "[outer_yan][passes][semi][elimination]") {
 	DuckDB db(nullptr);
@@ -620,6 +714,109 @@ TEST_CASE("outer_yan semi-join elimination: NOT NULL without FK retains orphan r
 	// dim's key. The orphan 999 makes fact ⋉ dim a strict reduction.
 	REQUIRE(HasSemiPair(tree->bottom_up_pairs, dim, fact));
 	AssertOuterYanPreservesResults(con, sql);
+}
+
+TEST_CASE("outer_yan semi-join elimination: top-down FK coverage requires NOT NULL",
+          "[outer_yan][passes][semi][elimination][fk_nullability]") {
+	bool not_null = false;
+	SECTION("nullable FK") {
+	}
+	SECTION("NOT NULL FK") {
+		not_null = true;
+	}
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k INTEGER PRIMARY KEY)"));
+	REQUIRE_NO_FAIL(con.Query(string("CREATE TABLE fact(id INTEGER PRIMARY KEY, dim_k INTEGER ") +
+	                          (not_null ? "NOT NULL " : "") + "REFERENCES dim(k))"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1), (2), (3)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1), (11, 1), (20, 2)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (10), (30)"));
+	if (!not_null) {
+		REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (30, NULL)"));
+	}
+
+	const string sql = "SELECT dim.k, fact.id, fact.dim_k, opt.fact_id "
+	                   "FROM dim LEFT JOIN (fact LEFT JOIN opt ON fact.id=opt.fact_id) "
+	                   "ON dim.k=fact.dim_k";
+	auto tree = BuildPreIRFor(con, sql);
+	REQUIRE(tree->HasOT());
+	const auto fact = RelationForTable(*tree, "fact");
+	const auto dim = RelationForTable(*tree, "dim");
+	REQUIRE(HasSemiPair(tree->top_down_pairs, dim, fact) == !not_null);
+
+	// Exercise both runtime kernels, including an outer join that preserves the
+	// nullable FK row and the unreferenced dimension row in the query above.
+	for (const auto budget : {1048576, 0}) {
+		INFO("bitmap budget: " << budget);
+		REQUIRE_NO_FAIL(con.Query("SET VARIABLE outer_yan_bitmap_max_bytes = " + to_string(budget)));
+		AssertOuterYanPreservesResults(con, sql);
+		AssertOuterYanPreservesResults(con, "SELECT fact.id, fact.dim_k, dim.k, opt.fact_id "
+		                                   "FROM fact LEFT JOIN dim ON fact.dim_k=dim.k "
+		                                   "LEFT JOIN opt ON fact.id=opt.fact_id");
+	}
+}
+
+TEST_CASE("outer_yan semi-join elimination: composite FK requires every component NOT NULL",
+          "[outer_yan][passes][semi][elimination][fk_nullability]") {
+	bool first_not_null = true;
+	bool second_not_null = true;
+	SECTION("both components NOT NULL") {
+	}
+	SECTION("first component nullable") {
+		first_not_null = false;
+	}
+	SECTION("second component nullable") {
+		second_not_null = false;
+	}
+	SECTION("both components nullable") {
+		first_not_null = false;
+		second_not_null = false;
+	}
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE dim(k1 INTEGER, k2 INTEGER, PRIMARY KEY(k1, k2))"));
+	REQUIRE_NO_FAIL(con.Query(string("CREATE TABLE fact(id INTEGER PRIMARY KEY, k1 INTEGER ") +
+	                          (first_not_null ? "NOT NULL" : "") + ", k2 INTEGER " +
+	                          (second_not_null ? "NOT NULL" : "") +
+	                          ", FOREIGN KEY(k1, k2) REFERENCES dim(k1, k2))"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE opt(fact_id INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO dim VALUES (1, 11), (2, 22), (3, 33)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (10, 1, 11), (11, 1, 11), (20, 2, 22)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO opt VALUES (10), (30), (40), (50)"));
+	// A NULL in either FK component exempts the whole tuple from the FK check:
+	// even the non-NULL component may be absent from the referenced relation.
+	if (!first_not_null) {
+		REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (30, NULL, 999)"));
+	}
+	if (!second_not_null) {
+		REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (40, 999, NULL)"));
+	}
+	if (!first_not_null && !second_not_null) {
+		REQUIRE_NO_FAIL(con.Query("INSERT INTO fact VALUES (50, NULL, NULL)"));
+	}
+
+	const bool total_coverage = first_not_null && second_not_null;
+	const vector<string> queries {
+	    "SELECT * FROM fact INNER JOIN dim ON fact.k1=dim.k1 AND fact.k2=dim.k2 "
+	    "LEFT JOIN opt ON fact.id=opt.fact_id",
+	    "SELECT * FROM dim LEFT JOIN (fact LEFT JOIN opt ON fact.id=opt.fact_id) "
+	    "ON fact.k2=dim.k2 AND dim.k1=fact.k1",
+	};
+	for (idx_t i = 0; i < queries.size(); i++) {
+		INFO(queries[i]);
+		auto tree = BuildPreIRFor(con, queries[i]);
+		REQUIRE(tree->HasOT());
+		const auto fact = RelationForTable(*tree, "fact");
+		const auto dim = RelationForTable(*tree, "dim");
+		const auto &pairs = i == 0 ? tree->bottom_up_pairs : tree->top_down_pairs;
+		REQUIRE(HasSemiPair(pairs, dim, fact) == !total_coverage);
+		AssertOuterYanPreservesResults(con, queries[i]);
+	}
+	AssertOuterYanPreservesResults(con, "SELECT * FROM fact "
+	                                   "LEFT JOIN dim ON fact.k1=dim.k1 AND fact.k2=dim.k2 "
+	                                   "LEFT JOIN opt ON fact.id=opt.fact_id");
 }
 
 TEST_CASE("outer_yan semi-join elimination: nullable probe key survives RIGHT-FULL desimplification",

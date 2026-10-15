@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from benchmark_corpus import read_manifest, count_base_relations
 import prepare_graph_dataset_retest as retest
+from benchmark_test_fixtures import historical_corpus
 
 
 def audit_fixture(spec):
@@ -97,9 +98,9 @@ class GraphDatasetRetestTest(unittest.TestCase):
                 retest.prepare(self.corpus, output, "unused", "unused")
         self.assertEqual(before, {p: retest.digest(p) for p in before})
 
-    def test_active_corpus_can_rebuild_both_frozen_retest_batches(self):
+    def test_pre_cohort_corpus_can_rebuild_both_frozen_retest_batches(self):
         import graph_dataset_extension as extension
-        active = retest.ROOT / "benchmark"
+        active = historical_corpus(self)
         before = retest.digest(active / "manifest.csv")
         for policy, count in ((retest.POLICY, 16), (extension.POLICY, 3)):
             with tempfile.TemporaryDirectory(prefix="graph-retest-") as tmp, \

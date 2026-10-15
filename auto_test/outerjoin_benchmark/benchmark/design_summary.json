@@ -29,9 +29,9 @@
       "low": 14
     },
     "tpch": {
-      "high": 27,
+      "high": 26,
       "low": 29,
-      "medium": 30
+      "medium": 31
     },
     "tpcds": {
       "high": 18,
@@ -571,10 +571,14 @@
     },
     "query_updates": {
       "revision": "cohort-selectivity-20261015",
-      "policy_sha256": "224927fdcd578a9bd4712328a83fe7ba22f30168e7cf607b450bc325991f1723",
+      "policy_sha256": "ed0b26933da378fb3c9bb70d93a6f240c66e3e28d27ddb06e3e44bfcdc9f3e3a",
       "query_ids": [
         "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
-        "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count"
+        "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+        "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+        "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium",
+        "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+        "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count"
       ]
     },
     "retired_both_timeouts": 21,

@@ -60,8 +60,7 @@ def prepare(stats_path, output):
         if row["sql_fingerprint"] != q["sql_identity"]:
             raise ValueError("Statistics refer to a different SQL identity: " + q["query"])
         records.append(dict(query=row["query_id"], family=row["family"], sql_path=row["path"],
-                            sql_sha256=row["content_sha256"], graph_dataset=q.get("graph_dataset", ""),
-                            reference_off_s=q["off_s"], reference_on_s=q["on_s"]))
+                            sql_sha256=row["content_sha256"], graph_dataset=q.get("graph_dataset", "")))
     cohort = dict(protocol=PROTOCOL, statistics_sha256=digest(stats_path),
                   manifest_sha256=digest(CORPUS / "manifest.csv"), active_query_count=len(manifest),
                   family_counts=dict(Counter(r["family"] for r in records)), queries=records)

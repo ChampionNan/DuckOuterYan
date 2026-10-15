@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Generate the provenance-backed OuterJoin benchmark corpus.
 
-The generated workloads are independent of OuterYan performance results.  Each seed
-records an upstream benchmark query and retains a connected subgraph of its
+Generation reads frozen source definitions and approved policies, never local
+timing results. The active workload is historically performance-conditioned;
+deterministic regeneration does not make it an independently selected sample.
+Each seed records an upstream benchmark query and retains a connected subgraph of its
 relation instances and join predicates.  The SQL is normalized to a flat
 projection/filter/join skeleton so that it remains inside the optimizer's
 current applicability envelope. V3 deliberately replaces only that projection

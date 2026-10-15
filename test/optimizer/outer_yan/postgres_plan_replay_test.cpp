@@ -260,6 +260,36 @@ TEST_CASE("PGPlan: accepts sampled-plan provenance and rejects inconsistent meta
 	}
 }
 
+TEST_CASE("PGPlan: full DuckDB data provenance retains strict schema and settings validation", "[outer_yan][pgplan]") {
+	DuckDB database(nullptr);
+	Connection connection(database);
+	SeedAB(connection);
+	const string query = "SELECT a.id, b.bv FROM a LEFT JOIN b ON a.id = b.id";
+	const auto tree = Join("left", Scan("a"), Scan("b"));
+	for (const auto &family : {"tpch", "tpcds", "job"}) {
+		const string schema = string("pgplan_") + family;
+		const string settings = "{\"max_parallel_workers_per_gather\":\"0\",\"search_path\":\"" +
+		                        schema + ", pg_catalog\"}";
+		const string label = string(family) + "-duckdb-full";
+		auto path = WriteArtifact(string("pgplan_full_") + family + ".json",
+		                          Artifact(query, tree, string(), settings, label, schema));
+		ActivatePGPlan(connection, path);
+		auto result = connection.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(CHECK_COLUMN(result, 0, {1}));
+		REQUIRE(CHECK_COLUMN(result, 1, {Value()}));
+		path = WriteArtifact("pgplan_full_wrong_schema.json",
+		                     Artifact(query, tree, string(), settings, label, "pgplan_graph"));
+		ActivatePGPlan(connection, path);
+		RequirePGPlanError(connection, query, "postgres.plan_schema");
+		path = WriteArtifact("pgplan_full_missing_search_path.json",
+		                     Artifact(query, tree, string(), "{\"max_parallel_workers_per_gather\":\"0\"}",
+		                              label, schema));
+		ActivatePGPlan(connection, path);
+		RequirePGPlanError(connection, query, "postgres.settings");
+	}
+}
+
 TEST_CASE("PGPlan: retains a root aggregate above the imported join tree", "[outer_yan][pgplan]") {
 	DuckDB database(nullptr);
 	Connection connection(database);

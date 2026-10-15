@@ -4,7 +4,7 @@ import hashlib
 import unittest
 
 from benchmark_corpus import count_base_relations
-from prepare_custdist_retest import ACTIVE, QUERY, SOURCE_SHA, prepare
+from prepare_custdist_retest import SOURCE_DIR, QUERY, SOURCE_SHA, prepare
 
 
 class CustdistPilotTest(unittest.TestCase):
@@ -12,7 +12,7 @@ class CustdistPilotTest(unittest.TestCase):
         entries = prepare()
         self.assertEqual(entries, prepare())
         self.assertEqual(len(entries), 6)
-        source = (ACTIVE / "tpch" / (QUERY + ".sql")).read_text()
+        source = (SOURCE_DIR / "tpch" / (QUERY + ".sql")).read_text()
         self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), SOURCE_SHA)
         for row, sql in entries:
             self.assertEqual(count_base_relations(sql), 4)

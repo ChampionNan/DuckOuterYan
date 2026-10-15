@@ -2287,7 +2287,15 @@ def page_speedup_scatter(pdf: PdfPages, frame: pd.DataFrame, run: str, metric: s
     save_page(pdf, figure)
 
 
-def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+def complete_phase_rows(
+    frame: pd.DataFrame, *, include_duckdb_timeouts: bool = False,
+) -> tuple[pd.DataFrame, int]:
+    """Validate OuterYan profiles, optionally independent of baseline timeouts.
+
+    Legacy paired reports retain their complete-pair policy by default. An
+    OuterYan-only phase summary may include an OFF timeout only with explicit
+    evidence of completed ON timing and profiling, never imputed phase times.
+    """
     seconds_columns = [seconds for _, seconds, _, _ in PHASES]
     ratio_columns = [ratio for _, _, ratio, _ in PHASES]
     wall_column = "profile_wall_time_s" if "profile_wall_time_s" in frame else "profile_total_time_s"
@@ -2296,8 +2304,25 @@ def complete_phase_rows(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
         return frame.iloc[0:0].copy(), 0
     plans = frame.get("selected_plan", pd.Series("", index=frame.index)).astype(str).str.upper()
     correct = correctness_eligible(frame)
-    selected = frame.loc[plans.eq("OUTERYAN") & correct & ~below_runtime_threshold(frame)
-                         & ~timeout_mask(frame)].copy()
+    eligible = correct & ~timeout_mask(frame)
+    if include_duckdb_timeouts:
+        def status(column):
+            return frame.get(column, pd.Series("", index=frame.index)).fillna("").astype(str).str.upper()
+
+        on_time = pd.to_numeric(frame.get("tm_on", pd.Series(np.nan, index=frame.index)), errors="coerce")
+        on_stage = status("outeryan_timeout_stage").str.strip()
+        unchecked = status("correct").eq("NOT-CHECKED") & status("correctness_check").eq("DISABLED")
+        baseline_only = (
+            status("duckdb_status").eq("TIMEOUT")
+            & status("outeryan_status").eq("MEASURED")
+            & status("profile_status").eq("OK")
+            & (status("correct").eq("TRUE") | unchecked)
+            & on_stage.isin(("", "-", "NA", "N/A", "NAN", "NONE", "NULL", "NOT-RUN"))
+            & ~status("outeryan_correctness_status").isin(("FALSE", "ERROR", "NOT-EQUIV", "TIMEOUT"))
+            & np.isfinite(on_time) & on_time.gt(0)
+        )
+        eligible |= baseline_only
+    selected = frame.loc[plans.eq("OUTERYAN") & eligible & ~below_runtime_threshold(frame)].copy()
     if selected.empty:
         return selected, 0
     for column in list(dict.fromkeys(
@@ -2532,7 +2557,7 @@ def page_phase(
         baseline_runtime, outeryan_runtime,
         out=np.full_like(baseline_runtime, np.nan), where=runtime_valid,
     )
-    height = max(4.8, 1.45 + 0.225 * len(sub) + 0.10 * max(len(families) - 1, 0))
+    height = max(3.4, 1.45 + 0.225 * len(sub) + 0.10 * max(len(families) - 1, 0))
     if has_runtime_comparison:
         figure, (axis, runtime_axis) = plt.subplots(
             1, 2, sharey=True, figsize=(15.6, height),
@@ -2662,7 +2687,8 @@ def page_phase(
         ha="center", va="bottom", fontsize=8.7,
     )
     figure.subplots_adjust(left=0.135 if versioned_labels else 0.116,
-                           right=0.932, bottom=0.105, top=0.865 if notice else 0.910)
+                           right=0.932, bottom=max(0.105, 0.56 / height),
+                           top=0.865 if notice else 0.910)
     save_page(pdf, figure)
 
 

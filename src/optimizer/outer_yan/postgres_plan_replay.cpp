@@ -589,6 +589,15 @@ static string SamplePlanFamily(const string &plan_data) {
 	return string();
 }
 
+static string FullPlanFamily(const string &plan_data) {
+	for (const auto &family : {"tpch", "tpcds", "job"}) {
+		if (plan_data == string(family) + "-duckdb-full") {
+			return family;
+		}
+	}
+	return string();
+}
+
 static void ValidateArtifactOccurrences(ReplayArtifact &artifact) {
 	unordered_map<string, idx_t> counts;
 	for (const auto scan : artifact.scans) {
@@ -640,10 +649,12 @@ static ReplayArtifact ReadArtifact(ClientContext &context, const string &path) {
 	}
 	artifact.plan_data = RequireStringField(postgres, "plan_data", path);
 	const auto sample_family = SamplePlanFamily(artifact.plan_data);
+	const auto full_family = FullPlanFamily(artifact.plan_data);
+	const auto data_family = full_family.empty() ? sample_family : full_family;
 	auto plan_schema_value = yyjson_obj_get(postgres, "plan_schema");
 	if (!plan_schema_value) {
 		if (artifact.plan_data != "tpch-sf0.01") {
-			ReplayError(path, "postgres.plan_schema is required for sampled corpus artifacts");
+			ReplayError(path, "postgres.plan_schema is required for DuckDB-derived corpus artifacts");
 		}
 		artifact.plan_schema = "public";
 	} else {
@@ -656,15 +667,16 @@ static ReplayArtifact ReadArtifact(ClientContext &context, const string &path) {
 		if (artifact.plan_schema != "public") {
 			ReplayError(path, "postgres.plan_data tpch-sf0.01 requires postgres.plan_schema public");
 		}
-	} else if (!sample_family.empty()) {
-		const auto expected_schema = "pgplan_" + sample_family;
+	} else if (!data_family.empty()) {
+		const auto expected_schema = "pgplan_" + data_family;
 		if (artifact.plan_schema != expected_schema) {
 			ReplayError(path, StringUtil::Format("postgres.plan_data %s requires postgres.plan_schema %s",
 			                                     artifact.plan_data, expected_schema));
 		}
 	} else {
 		ReplayError(path,
-		            "postgres.plan_data must be tpch-sf0.01 or <graph|tpcds|job>-duckdb-sample-<positive>");
+		            "postgres.plan_data must be tpch-sf0.01, <graph|tpcds|job>-duckdb-sample-<positive>, "
+		            "or <tpch|tpcds|job>-duckdb-full");
 	}
 	auto settings = RequireObjectField(postgres, "settings", path);
 	auto parallel_workers = yyjson_obj_get(settings, "max_parallel_workers_per_gather");

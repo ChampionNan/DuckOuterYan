@@ -37,7 +37,13 @@ class CohortPublicationTest(unittest.TestCase):
             (out / "existing_manuscript.tex").write_text("Keep this manuscript unchanged.\n")
             result = publish.publish(out, figures=False)
             self.assertEqual(result["figure_points"], dict(runtime_pairs=282, ratio_points=321))
-            self.assertEqual(result["phase_profiles"], 278)
+            self.assertEqual(result["phase_profiles"], 282)
+            self.assertEqual(result["phase_duckdb_timeout_profiles"], 4)
+            samples = report.b.read_manifest(out / "phase_representative_queries.csv")
+            self.assertEqual([row["short_query"] for row in samples], [
+                "G-G-LD-06", "G-G-RD-06", "A-H-LD-10", "Q-H-LD-24",
+                "A-D-LD-05", "Q-D-LD-13", "Q-J-LD-01", "A-J-RD-08",
+            ])
             self.assertEqual(sum(r["n"] for r in result["workload"][:-1]), 321)
             ids = result["optimization_representatives"]
             self.assertEqual((len(ids["main"]), len(ids["appendix"])), (3, 9))
@@ -61,6 +67,20 @@ class CohortPublicationTest(unittest.TestCase):
             publish.main(["--latex"])
         self.assertEqual(error.exception.code, 2)
 
+    def test_phase_samples_keep_display_order_not_selection_order(self):
+        frame = publish.plot.pd.DataFrame([
+            dict(query=f"{family}_{suffix}", family=family, topology=shape, short_query=suffix)
+            for family in reversed(publish.plot.FAMILY_ORDER)
+            for shape, suffix in [("bushy", "B-01"), ("right-deep", "RD-01"),
+                                  ("left-deep", "LD-02"), ("left-deep", "LD-01")]
+        ])
+        with patch.object(publish.plot, "diverse_phase_samples", return_value=frame) as select:
+            result = publish.phase_figure_samples(frame)
+        select.assert_called_once_with(frame, 4, .5)
+        self.assertEqual(result["query"].tolist(), [
+            f"{family}_{suffix}" for family in publish.plot.FAMILY_ORDER for suffix in ("LD-01", "LD-02")
+        ])
+
     def test_default_validation_never_generates(self):
         with patch.object(reproduce.benchmark, "validate", return_value=[{}] * 321), \
              patch.object(reproduce, "verify") as verify:
@@ -75,13 +95,53 @@ class CohortPublicationTest(unittest.TestCase):
                  effective_duckdb_s=off, effective_outeryan_s=on)
             for i, (source, speedup, off, on) in enumerate([
                 ("measured", .8, .8, 1.), ("measured", 1.2, 1.2, 1.),
-                ("fallback_default_1x", 1., None, None), ("duckdb_timeout_600s", 600., 600., 1.)])])
+                ("fallback_default_1x", 1., None, None), ("duckdb_timeout_600s", 20000., 600., .03)])])
         with patch.object(publish.plot, "save_page") as save:
             publish.runtime_plot(None, frame)
         figure = save.call_args.args[1]
         try:
             self.assertAlmostEqual(figure.subplotpars.wspace, .13)
-            self.assertAlmostEqual(figure.subplotpars.top, .86)
+            self.assertAlmostEqual(figure.subplotpars.top, .90)
+            publish.plot.np.testing.assert_allclose(figure.get_size_inches(), [11, 3.55])
+            left, right = figure.axes[:2]
+            self.assertEqual(left.get_aspect(), "auto")
+            self.assertEqual(left.get_xlim(), left.get_ylim())
+            self.assertAlmostEqual(left.get_position().width,
+                                   left.get_subplotspec().get_position(figure).width)
+            self.assertAlmostEqual(left.get_position().height, right.get_position().height)
+            original = right.get_subplotspec().get_position(figure)
+            self.assertAlmostEqual(right.get_position().x0, original.x0 - .0035)
+            self.assertAlmostEqual(right.get_position().width, original.width)
+            self.assertAlmostEqual(right.get_position().height, original.height)
+            self.assertEqual([title.get_fontsize() for title in figure.texts], [9.5, 9.5])
+            self.assertEqual(figure.texts[0].get_position()[1], figure.texts[1].get_position()[1])
+            self.assertEqual(left.xaxis.label.get_fontsize(), 10)
+            self.assertEqual(right.get_yticklabels()[0].get_fontsize(), 9)
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            ticks = [.8, 1, 2, 3, 4, 5, 10, 100, 1000, 10000]
+            publish.plot.np.testing.assert_allclose(right.get_xticks(), publish.plot.np.log10(ticks))
+            self.assertEqual([label.get_text() for label in right.get_xticklabels()],
+                             [f"{value:g}" for value in ticks])
+            tick_boxes = [label.get_window_extent(renderer) for label in right.get_xticklabels()]
+            for first, second in zip(tick_boxes, tick_boxes[1:]):
+                self.assertGreater(second.x0 - first.x1, 2 * figure.dpi / 72)
+            label_left = min(label.get_window_extent(renderer).x0 for label in right.get_yticklabels())
+            self.assertGreater(label_left - left.get_window_extent(renderer).x1, 2 * figure.dpi / 72)
+            self.assertEqual(len(figure.legends), 1)
+            legend = figure.legends[0]
+            self.assertEqual(len(legend.get_texts()), 7)
+            self.assertEqual([text.get_text() for text in legend.get_texts()][4:6],
+                             ["Measured, faster/equal", "Measured, slower"])
+            legend_rows = [text.get_window_extent(renderer).y0 for text in legend.get_texts()]
+            self.assertAlmostEqual(max(legend_rows), min(legend_rows))
+            legend_box = legend.get_window_extent(renderer)
+            self.assertGreater(legend_box.y0, max(axis.get_window_extent(renderer).y1 for axis in (left, right)))
+            self.assertGreaterEqual(legend_box.x0, 0)
+            self.assertLessEqual(legend_box.x1, figure.bbox.width)
+            for axis, title in zip((left, right), figure.texts):
+                self.assertGreaterEqual(axis.xaxis.label.get_window_extent(renderer).y0
+                                        - title.get_window_extent(renderer).y1, 3.9 * figure.dpi / 72)
             points = [c for c in figure.axes[1].collections if isinstance(c, PathCollection)]
             measured, timeout, fallback = points[:3]
             publish.plot.np.testing.assert_array_equal(measured.get_paths()[0].vertices,

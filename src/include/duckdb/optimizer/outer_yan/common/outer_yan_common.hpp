@@ -150,7 +150,7 @@ public:
 };
 
 //! Classification of a root LogicalAggregate sitting above the OuterYan join
-//! skeleton. Mirrors the categories used by `DuckDBYanPlus::DetectQueryType`:
+//! skeleton. Mirrors the categories used by `the earlier DetectQueryType implementation`:
 //! purely a function-name dispatch over the aggregate's bound function
 //! (`count`, `count_star`, `min`, `max`, `sum`); no `IsDistributive` /
 //! `IsHolistic` helper is involved.

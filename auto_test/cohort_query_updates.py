@@ -1,4 +1,4 @@
-"""Pinned predicate-only replacements after workload membership selection.
+"""Pinned predicate replacements and equivalent input-filter rewrites.
 
 Generation reads definitions, never measurements. Historical reports explicitly
 map source observations to the promoted SQL; only comments may differ between
@@ -6,6 +6,7 @@ the measured candidate and its promoted SQL text.
 """
 import hashlib
 import json
+import re
 
 import balanced_benchmark as b
 
@@ -20,10 +21,10 @@ BANDS = {"low": (0, .05, "false", "false"),
 
 def policy():
     spec = json.loads(POLICY.read_text())
-    if spec["revision"] != REVISION or len(spec["replacements"]) != 2:
-        raise ValueError("Expected the two approved predicate replacements")
+    if spec["revision"] != REVISION or len(spec["replacements"]) != 6:
+        raise ValueError("Expected the six approved query replacements")
     for field in ("original_query", "query_id"):
-        if len({entry[field] for entry in spec["replacements"]}) != 2:
+        if len({entry[field] for entry in spec["replacements"]}) != 6:
             raise ValueError("Duplicate predicate replacement")
     return spec
 
@@ -38,8 +39,22 @@ def definition(old, entry):
     if sql.count(old["selectivity_predicate"]) != 1:
         raise ValueError("Expected exactly one source predicate")
     measured = sql.replace(old["selectivity_predicate"], entry["predicate"], 1)
+    rewrite = entry.get("rewrite", "predicate_only")
+    if rewrite == "duplicate_orders_date_input":
+        # Retain the null-rejecting outer WHERE: moving it would change outer-join semantics.
+        if entry["predicate"] != old["selectivity_predicate"] or not entry["predicate"].startswith("orders.o_orderdate BETWEEN "):
+            raise ValueError("Orders-input rewrite must retain the original date range")
+        source_join = "LEFT OUTER JOIN orders   ON"
+        if measured.count(source_join) != 1:
+            raise ValueError("Expected the pinned orders join")
+        scan = "(SELECT * FROM orders WHERE {}) AS orders".format(entry["predicate"].replace("orders.", ""))
+        measured = measured.replace(source_join, "LEFT OUTER JOIN " + scan + " ON", 1)
+        if measured.count("WHERE " + entry["predicate"]) != 1:
+            raise ValueError("Orders-input rewrite lost the outer WHERE")
+    elif rewrite != "predicate_only":
+        raise ValueError("Unknown pinned query rewrite")
     if hashlib.sha256(measured.encode()).hexdigest() != entry["measurement_content_sha256"]:
-        raise ValueError("Measured predicate-only candidate identity changed")
+        raise ValueError("Measured candidate identity changed")
     tier = entry["semantic_tier"]
     sql = measured.replace("-- selectivity: " + old["semantic_tier"] + ";",
                            "-- selectivity: " + tier + ";", 1)
@@ -55,7 +70,10 @@ def definition(old, entry):
     if not lower or not upper:
         raise ValueError("Replacement selectivity does not match its tier")
     query = entry["query_id"]
-    if query != old["query_id"].replace("__sel_" + old["semantic_tier"] + "__", "__sel_" + tier + "__"):
+    expected_query, replacements = re.subn(
+        r"__sel_" + re.escape(old["semantic_tier"]) + r"(?=__|$)",
+        "__sel_" + tier, old["query_id"])
+    if replacements != 1 or query != expected_query:
         raise ValueError("Replacement query name does not match its tier")
     row = dict(old, query_id=query, path=old["family"] + "/" + query + ".sql",
                content_sha256=sha, sql_fingerprint=fingerprint,
@@ -69,6 +87,11 @@ def definition(old, entry):
                replaces_query_id=old["query_id"], replaces_content_sha256=old["content_sha256"],
                parameter_policy="Frozen predicate-only replacement selected after CPU9 pilot; "
                                 "generation never reads timings; no future speedup guarantee.")
+    if rewrite == "duplicate_orders_date_input":
+        row.update(input_filter_placement="orders input plus unchanged outer WHERE",
+                   parameter_policy="Frozen equivalent orders-input rewrite selected after CPU9 pilot; "
+                                    "original outer WHERE and date range retained; "
+                                    "generation never reads timings; no future speedup guarantee.")
     return row, sql
 
 

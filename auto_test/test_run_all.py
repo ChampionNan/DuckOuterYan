@@ -59,7 +59,9 @@ class RunAllSelectionTest(unittest.TestCase):
                 encoding="utf-8")
         (self.scripts / "record_reproduction_run.py").write_text("# Stub: no fake binary hashing.\n")
         (self.scripts / "prepare_reproduction_data.py").write_text(
-            "import os\nassert os.environ.get('DUCKDB_BIN')\n")
+            "import json, os\nassert os.environ.get('DUCKDB_BIN')\n"
+            "with open(os.environ['RUN_ALL_TEST_LOG'], 'a') as handle:\n"
+            "    handle.write(json.dumps(dict(kind='data')) + '\\n')\n")
         (self.scripts / "record_experiment.py").write_text(
             textwrap.dedent(
                 """
@@ -235,6 +237,26 @@ class RunAllSelectionTest(unittest.TestCase):
         result = self.run_driver("--prepare-only")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([c["kind"] for c in self.calls()], ["generate", "verify"])
+
+    def test_complete_workflow_stage_order(self):
+        # Keep costly stages stubbed, but exercise the actual shell orchestration.
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        build = self.scripts / "record_build.py"
+        build.write_text(
+            "import json, os, sys\n"
+            "assert os.environ['BUILD_TPCH'] == os.environ['BUILD_TPCDS'] == '1'\n"
+            "assert 'release' in sys.argv[1:]\n"
+            "with open(os.environ['RUN_ALL_TEST_LOG'], 'a') as handle:\n"
+            "    handle.write(json.dumps(dict(kind='build')) + '\\n')\n")
+        make = bin_dir / "make"
+        make.write_text('#!/usr/bin/env bash\nexec "$PYTHON_BIN" "' + str(build) + '" "$@"\n')
+        make.chmod(0o755)
+        result = self.run_driver("--generate-queries", SKIP_BUILD="0", SKIP_DATA="0",
+                                 PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c["kind"] for c in self.calls()],
+                         ["generate", "verify", "build", "data", "experiment", "publish"])
 
     def test_report_only_does_not_generate_or_execute(self):
         source = self.root / "new.csv"

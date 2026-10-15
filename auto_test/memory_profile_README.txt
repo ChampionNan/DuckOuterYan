@@ -1,8 +1,8 @@
-CPU9 memory experiment (2026-10-13)
+Memory observation experiment
 =================================
 
-Scope: the 281 valid measured OuterYan-selected SQL identities in the frozen
-20261013 paper results. Family counts: SGPB 47, TPC-H 80, TPC-DS 45, JOB 109.
+Scope: 281 frozen query identities selected using historical performance.
+SQL hashes are updated to the current workload; all queries require new memory measurements. Family counts: SGPB 47, TPC-H 80, TPC-DS 45, JOB 109.
 This is a fixed cohort; a new timeout or selection change is reported, not hidden.
 The active benchmark still has 720 SQL queries. SQL SHA256 and manifest SHA256
 are checked before running; this tool neither regenerates SQL nor builds data.
@@ -64,7 +64,7 @@ python3 auto_test/memory_profile.py validate
 bash auto_test/run_memory_profile.sh --run
 
 The shell script does NOT compile or rebuild databases. Compile first after pull.
-Python 3.7+ is supported; on CPU9 set PYTHON_BIN=/usr/local/bin/python3 if needed.
+Set PYTHON_BIN to the interpreter installed on the target machine.
 
 Output: auto_test/results/memory_benchmark_YYYYMMDD_HHMMSS_t32/
   cohort.json: exact SQL identities and reference dataset routing

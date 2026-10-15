@@ -37,6 +37,8 @@ namespace duckdb {
 //!                             here so the recorded join kinds reflect the
 //!                             user-intended outer/inner semantics, before
 //!                             Desimplification's synthetic relabels.
+//!                             Prune optional reducers for the proven
+//!                             three-relation outer-over-inner pattern.
 //!   5. Desimplify           — drive into associative-query state.
 //!   6. AllPairsSatisfy      — post-condition assertion: every (P, D) pair
 //!                             now sits in an OK cell of the associativity
@@ -64,6 +66,11 @@ private:
 	//! append an entry to `tree.top_down_pairs` with `build = R_p` and
 	//! `probe = R_i`. Pseudocode: R_i := R_i ⋉ R_p.
 	void TopDownPass(OuterYanTree &tree, OJTNode &node);
+
+	//! For A LEFT (B INNER C), only B := B semi-join C is needed to
+	//! evaluate either legal grouping. Prune the optional top-down reducers
+	//! before DP estimates their cost and reduced relation cardinalities.
+	void PruneThreeRelationOuterInnerPairs(OuterYanTree &tree);
 
 	//! Resolve a `LogicalComparisonJoin`'s conditions into per-key
 	//! build/probe `ColumnBinding`s using `tree.table_to_relation`. Each

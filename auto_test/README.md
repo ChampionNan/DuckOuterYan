@@ -1,4 +1,4 @@
-# OuterYan benchmark tools
+# DuckOuterYan benchmark tools
 
 Run commands from the repository root. This directory contains reusable scripts,
 benchmark SQL, input manifests, and configuration. Experimental outputs are local
@@ -41,14 +41,27 @@ historical selection category, not a guarantee about a future optimizer run.
 All 720 predecessor definitions remain in
 `outerjoin_benchmark/revisions/pre_plan_cohort_20261014/benchmark/`.
 `sources/plan_cohort_20261014.json` pins the exact retained membership.
-`sources/cohort_selectivity_20261015.json` additionally pins two predicate-only
-replacements measured in the CPU9 slow-three pilot: TPC-H SQLStorm 25509 bushy
-COUNT uses the medium-tier 1992-01-01 through 1992-08-27 order-date window;
-JOB SQLStorm 11914 high-tier bushy COUNT uses production years 2003 through 2011.
-Their historical measurements exceed 0.7x; the JOB SQLStorm 11914 update is now
-retired, but its definition and measured-candidate identity are preserved.
+`sources/cohort_selectivity_20261015.json`, applied by `cohort_query_updates.py`,
+pins six approved definitions: five active TPC-H updates and one retired JOB
+update retained for provenance. Regeneration applies these definitions, rather
+than restoring the predecessor predicates:
+
+| Active short ID | Frozen definition |
+| --- | --- |
+| A-H-B-12 (pilot A-H-B-07) | SQLStorm 25509 bushy COUNT: order dates 1992-01-01 through 1992-08-27 (medium) |
+| G-H-LD-05 | `th_real_custdist`: duplicate the 1992-01-01 through 1994-04-19 order-date filter on the orders input, retaining the outer WHERE (medium) |
+| Q-H-LD-36 | SQLStorm 17751 left-deep: ship dates 1996-07-05 through 1996-12-31; renamed from `sel_high` to `sel_medium` |
+| A-H-RD-10 | TPC-H Q8 right-deep grouped COUNT: order dates 1995-01-01 through 1995-04-20 (low) |
+| A-H-RD-11 | TPC-H Q8 right-deep grouped COUNT: order dates 1992-01-01 through 1994-07-18 (medium) |
+
+The archived JOB SQLStorm 11914 high-tier bushy COUNT definition uses production
+years 2003 through 2011. That query is retired, not regenerated into the active set.
+Content hashes, full query IDs, predicate bands, and candidate provenance are pinned
+in the policy; short IDs are only display labels. The active workload remains 321
+queries. SQL generation is independent of the availability of measurement CSVs,
+and does not guarantee a minimum speed-up in subsequent measurements.
 The JOB 10a right-deep COUNT slot
-was subsequently retired by explicit user request because no measured candidate reached that threshold.
+was subsequently retired by explicit user request because no measured candidate reached 0.7x.
 The old SQL stays in the archive, source measurement hashes remain recorded,
 and regeneration does not read result CSVs. Future speedups are not guaranteed.
 The harness still skips timing verified DuckDB fallbacks. For this cohort's
@@ -143,6 +156,11 @@ bash auto_test/run_all.sh --prepare-only
 bash auto_test/run_all.sh --dry-run
 ```
 
+This is the complete **main benchmark** workflow. It includes the phase and
+optimizer profiles collected by the timing harness, followed by summary tables
+and both performance figures. Standalone memory profiling and PostgreSQL plan
+comparison are separate diagnostics and are not launched by this command.
+
 Cold-start prerequisites: Git, Bash, curl, tar, SHA256 tooling, CMake, Ninja,
 Make and a C++17 compiler. No Python 3.10+ installation or sudo is needed with
 `--bootstrap`: uv 0.8.22 (archive checksum verified) installs CPython 3.11.13 and
@@ -177,6 +195,12 @@ and query lists byte-for-byte. `--prepare-only` performs only that generation an
 verification. Neither mode reads timing outputs to select query definitions. The
 frozen policy, rather than arbitrary per-family/batch parameters, defines this workload.
 Engine code generation is handled by the normal release build; `--skip-build` skips it.
+The verification artifact is `results/plots/YYYYMMDD/query_reproduction.json`
+(or the explicit `--output-dir`). It records the active manifest hash, all 345
+benchmark-file hashes, and the result of two independent regenerations. The
+file set includes all 321 SQLs plus their manifests and query lists. A successful
+`--prepare-only` verifies query reproduction only: it does not claim that downloads,
+compilation or the full timed workload have run on that machine.
 
 The default one-command performance protocol uses 32 threads, five post-warmup
 timings per configuration (median), one separate profile per side, independent
@@ -216,6 +240,14 @@ artifact checkout. `--no-figures` writes statistics only. The experiment and cur
 cohort report pipeline has no LaTeX export option and never writes manuscript files.
 Existing manuscript fragments from earlier runs are left untouched, not refreshed.
 
+The dated report directory contains `plan_cohort_statistics.csv` (all-query and
+selected-query summaries), `current_results.csv` (per-query observations),
+`benchmark_composition.csv`, `benchmark_dimensions.csv`, `shape_statistics.csv`,
+`phase_summary.csv`, `phase_query_details.csv`, `optimization_representatives.csv`,
+and `paper_statistics.json` (machine-readable reporting metadata, not LaTeX).
+The two figures are `speedup_all_queries.pdf` and `phase_breakdown_outeryan.pdf`,
+with PNG copies. `--no-figures` skips figure rendering without skipping statistics.
+
 Full runs automatically publish only their own complete CSV under the current
 cohort policy. Explicit subset/custom-corpus runs retain the harness's existing
 batch statistics (legacy complete-pair policy), without mislabeling an incomplete
@@ -232,7 +264,7 @@ All publication outputs use `auto_test/results/plots/YYYYMMDD/`:
 | `plan_cohort_statistics.csv` | All-query and selected-only statistics; measured/capped/default counts |
 | `selected_measured_results.csv` | Complete measured selected pairs only |
 | `speedup_all_queries.pdf`, `.png` | Runtime pairs and reported ratios; timeout proxies use triangles, fallback ratios ordinary circles |
-| `phase_breakdown_outeryan.pdf`, `.png` | Up to four phase-diverse, faster/equal representatives per family |
+| `phase_breakdown_outeryan.pdf`, `.png` | First two displayed queries per family from the four-query phase-diverse, faster/equal sample |
 | `phase_summary.csv`, `phase_query_details.csv` | Operator-time sums, percentages and per-query evidence |
 | `benchmark_composition.csv`, `benchmark_dimensions.csv` | Full/aggregate, tree-shape, source, size and selectivity counts |
 | `shape_statistics.csv` | Input-expression shape comparison |
@@ -240,8 +272,11 @@ All publication outputs use `auto_test/results/plots/YYYYMMDD/`:
 | `query_id_map.csv`, `paper_statistics.json` | Stable labels, SQL identities, source hashes, selection rules, warnings |
 | `query_reproduction.json` | Query-generation verification, only when generation is explicitly requested |
 
-The main runtime table includes all reportable queries. Phase and optimization
-tables use complete measured selected queries only. The runtime scatter cannot
+The main runtime table includes all reportable queries. Phase tables use valid
+OuterYan-selected operator profiles, including DuckDB-only timeouts when OuterYan
+timing and profiling completed. Their percentages use actual summed operator
+times, never the 600-second baseline substitute. Optimization tables and the
+paired representative phase figure still require complete measured pairs. The runtime scatter cannot
 plot fallback defaults because they have no absolute times; the ratio panel
 includes them at 1x. The 600-second substitution does not erase the timeout flag
 and is not a proven steady-state lower bound when warm-up timed out. Legacy
