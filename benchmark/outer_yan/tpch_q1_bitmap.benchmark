@@ -1,0 +1,27 @@
+# name: benchmark/outer_yan/tpch_q1_bitmap.benchmark
+# description: OuterYan SJ prefilter — TH-Q1 customer→orders→lineitem, BITMAP path.
+#              SJBuild materialises integer key ranges; SJProbe narrows dim-side
+#              hash-table entries before the outer join executes.
+#              Run this file in isolation; SET commands in `load` persist for
+#              the session and should not bleed into unrelated benchmarks.
+# group: [outer_yan_perf]
+
+name TH-Q1 LEFT-LEFT chain [Bitmap]
+group outer_yan_perf
+
+require tpch
+
+load
+CALL dbgen(sf=1);
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+SET disabled_optimizers TO '';
+
+run
+SELECT c_custkey,
+       COUNT(o_orderkey)    AS order_count,
+       COUNT(l_linenumber)  AS line_count,
+       SUM(l_extendedprice) AS revenue
+FROM customer
+LEFT JOIN orders   ON c_custkey  = o_custkey
+LEFT JOIN lineitem ON o_orderkey = l_orderkey
+GROUP BY c_custkey

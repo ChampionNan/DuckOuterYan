@@ -1,0 +1,46 @@
+{
+  "revision": "selected-plus-cost-controls-20261014",
+  "policy_sha256": "076665c5fc43a0c2d69851d15f498d669435774a75523d25fbb72b0537add9ed",
+  "counts": {
+    "graph": 67,
+    "job": 107,
+    "tpcds": 61,
+    "tpch": 86
+  },
+  "selected": 282,
+  "cost_controls": 39,
+  "removed": 399,
+  "control_deduplication": {
+    "revision": "tpcds-control-pattern-shape-20261015",
+    "group_by": [
+      "source_seed",
+      "tree_shape"
+    ],
+    "before": 42,
+    "retained": 16,
+    "removed": 26,
+    "rule": "Smaller groups first; balance semantic tiers; stable SHA256(revision + query_id) tie-break. No timing or speedup ranking.",
+    "prior_policy_sha256": "28a1d7a182d8ad23693d14b2b3e956bb17ccde28a53be7952b1e95306d850f90"
+  },
+  "query_updates": {
+    "revision": "cohort-selectivity-20261015",
+    "policy_sha256": "ed0b26933da378fb3c9bb70d93a6f240c66e3e28d27ddb06e3e44bfcdc9f3e3a",
+    "query_ids": [
+      "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+      "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+      "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+      "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium",
+      "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+      "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count"
+    ]
+  },
+  "retired_both_timeouts": 21,
+  "reporting_rule": {
+    "fallback_speedup": 1.0,
+    "duckdb_only_timeout_seconds": 600,
+    "outeryan_timeout": "exclude",
+    "both_timeout": "remove_from_benchmark",
+    "raw_measurements": "preserve",
+    "capped_speedup": "timeout_limit_proxy_not_measured"
+  }
+}

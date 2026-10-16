@@ -1,0 +1,27 @@
+# name: benchmark/outer_yan/tpch_q1_baseline.benchmark
+# description: OuterYan SJ prefilter — TH-Q1 customer→orders→lineitem, DuckDB baseline.
+#              OuterYan disabled; DuckDB's own hash-join executes the outer join
+#              without any SJBuild/SJProbe pre-filtering.
+#              Compare timing against tpch_q1_bitmap and tpch_q1_hash to measure
+#              the speedup contributed by the SJ pre-filter.
+# group: [outer_yan_perf]
+
+name TH-Q1 LEFT-LEFT chain [DuckDB baseline]
+group outer_yan_perf
+
+require tpch
+
+load
+CALL dbgen(sf=1);
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+run
+SELECT c_custkey,
+       COUNT(o_orderkey)    AS order_count,
+       COUNT(l_linenumber)  AS line_count,
+       SUM(l_extendedprice) AS revenue
+FROM customer
+LEFT JOIN orders   ON c_custkey  = o_custkey
+LEFT JOIN lineitem ON o_orderkey = l_orderkey
+GROUP BY c_custkey

@@ -1,0 +1,13 @@
+-- source: TPC-H Q5
+-- transformation: connected join-subgraph adaptation; balanced INNER/LEFT/RIGHT/FULL left-deep source-derived form
+-- business_semantics: TPC-H Q5 order reporting period
+-- corpus_version: v3
+-- derived_from_corpus_version: v2
+-- workload_role: metadata-selected balanced selectivity ablation
+-- selectivity_stress: stress_high; 40–80% of the calibration population
+-- semantic_filter: tpch_q05_period; tier=high; TPC-H Q5 order reporting period
+-- predicate: o.o_orderdate >= DATE '1992-01-01' AND o.o_orderdate < DATE '1996-01-01'
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT r.r_name, n.n_name, c.c_custkey, o.o_orderkey, l.l_linenumber, l.l_extendedprice
+FROM ((((region r INNER JOIN nation n ON r.r_regionkey = n.n_regionkey) LEFT OUTER JOIN customer c ON n.n_nationkey = c.c_nationkey) RIGHT OUTER JOIN orders o ON c.c_custkey = o.o_custkey) FULL OUTER JOIN lineitem l ON o.o_orderkey = l.l_orderkey)
+WHERE o.o_orderdate >= DATE '1992-01-01' AND o.o_orderdate < DATE '1996-01-01';

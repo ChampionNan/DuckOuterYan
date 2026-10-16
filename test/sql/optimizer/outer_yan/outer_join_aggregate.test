@@ -1,0 +1,256 @@
+# name: test/sql/optimizer/outer_yan/outer_join_aggregate.test
+# description: Aggregate-policy regression over outer-join chains. Each variant
+#              runs the SAME query twice — once with OuterYan disabled and once
+#              enabled — and asserts the two row multisets are identical
+#              (symmetric difference = 0). Aggregate queries must remain on
+#              DuckDB's normal optimizer path in both configurations. This
+#              self-validating
+#              form needs no hand-computed expected values (the previous version
+#              hard-coded results that ignored the c-table fan-out and were
+#              wrong on several rows); the engine's own baseline is the oracle.
+#              Covers every OuterYanAggregationType: COUNT_STAR / COUNT / SUM /
+#              MIN-MAX / DISTINCT, plus HAVING and FULL OUTER.
+# group: [outer_yan]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+CREATE TABLE d(id INTEGER, dx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (1, 110), (2, 200), (3, 300), (6, 600);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (3, 3100), (4, 4000);
+
+statement ok
+INSERT INTO d VALUES (2, 20000), (3, 30000), (5, 50000), (7, 70000);
+
+# ============================================================================
+# Comparison helper: a SQL macro that returns the size of the symmetric
+# multiset difference between two tables created from the baseline and the
+# OuterYan-optimized run of one query. 0 ⇔ the two results are identical.
+# ============================================================================
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# Variant 1 — COUNT_STAR over a 3-way LEFT chain (root, no GROUP BY).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 2 — GROUP BY a.id with COUNT(b.bx).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, COUNT(b.bx) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, COUNT(b.bx) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 3 — SUM with NULLs from outer joins, GROUP BY a.id.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 4 — MIN/MAX over outer-joined columns, GROUP BY a.id.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, MIN(b.bx) AS lo, MAX(c.cx) AS hi FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, MIN(b.bx) AS lo, MAX(c.cx) AS hi FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 5 — SELECT DISTINCT.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT DISTINCT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT DISTINCT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 6 — SUM with HAVING.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id HAVING SUM(c.cx) > 2000;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT a.id, SUM(c.cx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id GROUP BY a.id HAVING SUM(c.cx) > 2000;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 7 — COUNT_STAR on a 4-way chain.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COUNT(*) AS n FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 8 — Aggregation with mixed FULL OUTER / LEFT.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT COALESCE(a.id, b.id) AS k, COUNT(*) AS n
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON COALESCE(a.id, b.id) = c.id
+GROUP BY COALESCE(a.id, b.id);
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT COALESCE(a.id, b.id) AS k, COUNT(*) AS n
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON COALESCE(a.id, b.id) = c.id
+GROUP BY COALESCE(a.id, b.id);
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# Variant 9 — SUM from the deepest outer-joined relation of a 4-way chain.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE r_off AS
+SELECT SUM(d.dx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE r_on AS
+SELECT SUM(d.dx) AS s FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id LEFT JOIN d ON a.id = d.id;
+
+query I
+SELECT * FROM sym_diff('r_off', 'r_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''

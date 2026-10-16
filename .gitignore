@@ -1,0 +1,500 @@
+#==============================================================================#
+# This file specifies intentionally untracked files that git should ignore.
+#==============================================================================#
+
+#==============================================================================#
+# iCloud Drive conflict copies. When the repo lives under an iCloud-synced
+# folder (e.g. ~/Desktop), iCloud creates duplicate files like "name 2.sql"
+# whenever a file is edited in two places. These must never be committed or
+# they pollute the query corpus (the experiment globs *.sql). Best fix is to
+# move the repo OFF ~/Desktop / disable iCloud Desktop sync; this is a guard.
+#==============================================================================#
+* [0-9].*
+* [0-9][0-9].*
+
+#==============================================================================#
+# File extensions to be ignored anywhere in the tree.
+#==============================================================================#
+
+# outer join data
+/*_db
+rstk_data/*
+outerjoin_test/*/*.txt
+
+# Temp files created by most text editors.
+*~
+# Merge files created by git.
+*.orig
+# Java bytecode
+*.class
+# Byte compiled python modules.
+*.pyc
+# vim swap files
+.*.sw?
+.sw?
+#OS X specific files.
+.DS_store
+# Core files
+#core
+
+# Runtime and experiment logs.
+*.log
+
+#==============================================================================#
+# Explicit files to ignore (only matches one).
+#==============================================================================#
+# Various tag programs
+/tags
+/TAGS
+/GPATH
+/GRTAGS
+/GSYMS
+/GTAGS
+.gitusers
+autom4te.cache
+cscope.files
+cscope.out
+autoconf/aclocal.m4
+autoconf/autom4te.cache
+/compile_commands.json
+/.wasm
+
+#==============================================================================#
+# Directories to ignore (do not add trailing '/'s, they skip symlinks).
+#==============================================================================#
+# External projects that are tracked independently.
+projects/*
+!projects/*.*
+!projects/Makefile
+
+
+#==============================================================================#
+# Autotools artifacts
+#==============================================================================#
+configure
+config-h.in
+autom4te.cache
+*Makefile.in
+third_party/*/Makefile
+libtool
+aclocal.m4
+config.log
+config.status
+stamp-h1
+m4/libtool.m4
+m4/ltoptions.m4
+m4/ltsugar.m4
+m4/ltversion.m4
+m4/lt~obsolete.m4
+
+#==============================================================================#
+# Build artifacts
+#==============================================================================#
+#m4/
+build/
+/output/
+duckdb_benchmark_data/
+#*.m4
+*.o
+*.lo
+*.la
+*~
+*.pdf
+*.swp
+a.out
+
+#==============================================================================#
+# Kate Swap Files
+#==============================================================================#
+*.kate-swp
+.#kate-*
+
+#==============================================================================#
+# Backup artifacts
+#==============================================================================#
+~*
+*~
+tmp/
+
+#==============================================================================#
+# KDevelop files
+#==============================================================================#
+.kdev4
+*.kdev4
+.dirstamp
+.deps
+.libs
+
+#==============================================================================#
+# Eclipse files
+#==============================================================================#
+.wtpmodules
+.classpath
+.project
+.cproject
+.pydevproject
+.settings
+.autotools
+.csettings
+
+/Debug/
+/misc/
+
+#==============================================================================#
+# Intellij files
+#==============================================================================#
+.idea
+*.iml
+
+#==============================================================================#
+# Code Coverage files
+#==============================================================================#
+*.gcno
+*.gcda
+
+#==============================================================================#
+# Scripts
+#==============================================================================#
+*.jar
+scripts/PelotonTest/out
+scripts/PelotonTest/lib
+
+#==============================================================================#
+# Protobuf
+#==============================================================================#
+*.pb-c.c
+*.pb-c.h
+*.pb.go
+
+#==============================================================================#
+# Third party
+#==============================================================================#
+third_party/nanomsg/
+third_party/nvml/
+third_party/logcabin/
+
+#==============================================================================#
+# Eclipse
+#==============================================================================#
+
+.metadata
+bin/
+tmp/
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.recommenders
+
+# Clang language server (C/C++ tooling)
+/.cache/
+.ccls-cache
+
+# Eclipse Core
+.project
+
+# External tool builders
+.externalToolBuilders/
+
+# Locally stored "Eclipse launch configurations"
+*.launch
+
+# PyDev specific (Python IDE for Eclipse)
+*.pydevproject
+
+# CDT-specific (C/C++ Development Tooling)
+.cproject
+
+# JDT-specific (Eclipse Java Development Tools)
+.classpath
+
+# RStudio specific
+.Rproj.user
+
+# Java annotation processor (APT)
+.factorypath
+
+# PDT-specific (PHP Development Tools)
+.buildpath
+
+# sbteclipse plugin
+.target
+
+# Tern plugin
+.tern-project
+
+# TeXlipse plugin
+.texlipse
+
+# STS (Spring Tool Suite)
+.springBeans
+
+# Code Recommenders
+.recommenders/
+io_file
+
+## General
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.cuo
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Compiled protocol buffers
+*_pb2.py
+
+# Compiled python
+*.pyc
+
+# Compiled MATLAB
+*.mex*
+
+# IPython notebook checkpoints
+.ipynb_checkpoints
+
+# Python virtual env
+venv/
+
+# Editor temporaries
+*.swp
+*~
+
+# Sublime Text settings
+*.sublime-workspace
+*.sublime-project
+
+# Eclipse Project settings
+*.*project
+.settings
+.csettings
+
+# Visual Studio
+.vs
+/settings.json
+.vscode
+
+# QtCreator files
+*.user
+
+# PyCharm files
+.idea
+
+# OSX dir files
+.DS_Store
+
+# User's build configuration
+Makefile.config
+
+# build, distribute, and bins (+ python proto bindings)
+build
+.build_debug/*
+.build_release/*
+distribute/*
+*.testbin
+cmake_build
+.cmake_build
+cmake-build-debug
+cmake-build-release
+cmake-build-relwithdebinfo
+CMakeUserPresets.json
+
+# Generated documentation
+docs
+
+# tests
+test/test.sql
+duckdb_benchmark_data/
+
+# SQLite logic tests
+test/evidence/
+third_party/sqllogictest
+
+#imdb dataset
+third_party/imdb/data
+#taxi dataset
+benchmark/taxi/data/
+
+# Format timer
+.last_format
+# Benchmarks
+.last_benchmarked_commit
+benchmark_results/
+duckdb_unittest_tempdir/
+grammar.y.tmp
+# single file compile
+amalgamation.cache
+dependencies.d
+deps.s
+duckdb.cpp.tmp
+duckdb.hpp.tmp
+# .Rcheck
+tools/duckdb.Rcheck/
+tools/*.tar.gz
+.Rhistory
+ub_*.cpp
+
+# node tests
+__nvm
+
+*.vcxproj*
+*.sln
+
+# Zig files
+zig-out/*gs
+zig-cache/*
+*.zig
+
+# Local databases (checked-in test fixtures under data/ and test/ are inputs).
+/*.db
+/*.duckdb
+/*.duckdb.wal
+
+# local cmake extension config
+extension/extension_config_local.cmake
+
+# extension_external dir
+extension/external/
+extension_external
+
+# pyodide (emscripten python) build and test environment
+.pyodide-xbuildenv
+.venv-pyodide
+
+test/sql/pragma/output.json
+tools/pythonpkg/duckdb_build/
+
+# Local benchmark datasets, never source directories such as parsed_data/.
+/*_db.wal
+/job_data/
+/graph_data/
+/rstk_data/
+/lsqb*/
+
+# Local LLM instructions, conversations, and settings are not publication sources.
+# Match nested workspaces too; retain normal source and regression-test files.
+AGENTS.md
+AGENTS.override.md
+CLAUDE.md
+CLAUDE.local.md
+CODEX.md
+GEMINI.md
+llms.txt
+llms-full.txt
+.claude/
+.codex/
+.agents/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.aider.conf.yml
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.*/
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/agents/
+.github/skills/
+
+# OuterYan test/bench artifacts (auto_test/)
+graph_db
+graph_db.wal
+/graph_*.duckdb
+/graph_*.duckdb.wal
+tpch_db
+tpch_db.wal
+tpcds_db
+tpcds_db.wal
+/tpch_*.duckdb
+/tpch_*.duckdb.wal
+/tpcds_*.duckdb
+/tpcds_*.duckdb.wal
+job_db
+job_db.wal
+graph_data/
+oy_traces/
+oy_traces_fail/
+oy_traces_full/
+run_perf_chain.log
+run_all_chain.log
+watchdog.log
+test/sql/optimizer/outer_yan/data/*.csv
+/auto_test/results/
+/auto_test/outerjoin_benchmark/graph_dataset_retest/*/dataset_audit.json
+/postgres/
+OUTER_YAN_PERFORMANCE_FIX_IMPLEMENTATION_PLAN.md
+
+# All experiment outputs are local artifacts, without publication exceptions.
+# Keep SQL, manifests, query lists, and declarative generation policies tracked.
+__pycache__/
+*.trace
+*.trace.json
+*.trace.txt
+*.trace.csv
+*.profile.json
+*.profile.txt
+*.explain.json
+*.explain.txt
+*.plan.txt
+*.stdout
+*.stderr
+*.stdout.txt
+*.stderr.txt
+*.log.*
+/results/
+/profiles/
+/traces/
+/plots/
+/reports/
+/debug_output/
+/debug_dumps/
+/server-work/
+/auto_test/**/results/
+/auto_test/**/recorded_results/
+/auto_test/**/profiles/
+/auto_test/**/traces/
+/auto_test/**/plots/
+/auto_test/**/reports/
+/auto_test/**/debug_output/
+/auto_test/**/debug_dumps/
+/auto_test/**/*.plans/
+/auto_test/**/*.profiles/
+/auto_test/**/*.optimizer/
+/auto_test/**/*_statistics/
+/auto_test/**/dataset_audit.json
+/auto_test/**/pilot_provenance.json
+/auto_test/**/local_explain_decisions.csv
+/auto_test/**/local_pilot_comparison.csv
+/auto_test/**/local_validation.json
+/auto_test/**/proposal.json
+/auto_test/outerjoin_benchmark/sources/*_local_smoke.json
+/auto_test/outerjoin_benchmark/sources/*_pilot.json
+
+# Experiment narratives, manuscript drafts and rendered figures are outputs.
+*.tex
+/auto_test/paper_examples/
+/auto_test/pg_plan_comparison/paper/
+/auto_test/pg_plan_comparison/ADDITIONAL_CASES.md
+/auto_test/pg_plan_comparison/BENCHMARK_EXAMPLES.md
+/auto_test/pg_plan_comparison/LOCAL_VALIDATION.md
+/auto_test/pg_plan_comparison/NO_ORDER_LIMIT.md
+/auto_test/pg_plan_comparison/SEARCH_RESULTS_*.md
+/auto_test/pg_oj_trace/
+/auto_test/diagnostics/
+/auto_test/outerjoin_query_old/

@@ -1,0 +1,580 @@
+{
+  "revision": "tpch-query-tuning-20261012",
+  "status": "CANDIDATES_ONLY_NOT_MEASURED",
+  "source_run": "20261010_150834_t32",
+  "source_csv_sha256": "b0ede9db5203dc0b760887ce65836535a37e7b05d47fd6b33120087984f9c46b",
+  "active_manifest_sha256": "47c1c1053951974d76ca422d14fb1e12ea8cfbcf59798f5691d5da003e0ba412",
+  "expected_counts": {
+    "graph": 172,
+    "job": 166,
+    "tpcds": 206,
+    "tpch": 176
+  },
+  "target_complete_selected_total": 281,
+  "target_complete_selected_tpch": 80,
+  "selection_policy": "User-requested performance-conditioned TPC-H workload tuning. Not an unbiased sample or an optimizer improvement. Changed SQL requires new SF50 CPU9 measurements. No target geometric mean is enforced.",
+  "reference_selected_queries": [
+    "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_medium__grouped_count",
+    "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_medium__grouped_count",
+    "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+    "join__job__job_10a_cast_credits__right_deep__lrif__92d3ab51__sel_low",
+    "join__job__job_10a_cast_credits__bushy__firl__51a3b31f__sel_high",
+    "aggregate__job__job_11a_skeleton__bushy__ilfr__8c507dd3__sel_high__global_count",
+    "join__job__job_10a_cast_credits__bushy__ilrf__a33bba86__sel_medium",
+    "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_medium__grouped_count",
+    "join__job__job_10a_cast_credits__bushy__ilrf__a33bba86__sel_high",
+    "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_high__grouped_count",
+    "join__job__job_06a_skeleton__left_deep__lrfi__dfcf6bfe__sel_high",
+    "join__job__job_06a_skeleton__right_deep__iflr__3cb464aa__sel_high",
+    "join__job__job_06a_skeleton__right_deep__iflr__3cb464aa__sel_medium",
+    "join__job__job_10a_cast_credits__bushy__firl__51a3b31f__sel_medium",
+    "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_low__grouped_count",
+    "join__job__job_17a_movie_annotations__bushy__lfri__d392a368__sel_high",
+    "join__job__job_06a_skeleton__left_deep__lrfi__dfcf6bfe__sel_medium",
+    "join__job__job_16a_skeleton__bushy__fril__552fec97__sel_medium",
+    "join__job__sqlstorm_job_13193__bushy__ilfr__a0aa4bd3__sel_high",
+    "aggregate__job__sqlstorm_job_18930__right_deep__flr__7da44809__sel_high__global_count",
+    "join__job__sqlstorm_job_13193__bushy__ilfr__a0aa4bd3__sel_medium",
+    "join__job__job_16a_skeleton__bushy__fril__552fec97__sel_low",
+    "join__job__sqlstorm_job_11914__right_deep__lrifl__65b2b3df__sel_low",
+    "aggregate__job__sqlstorm_job_18930__right_deep__flr__7da44809__sel_low__global_count",
+    "aggregate__job__job_11a_skeleton__bushy__ilfr__8c507dd3__sel_low__global_count",
+    "aggregate__job__job_11a_skeleton__bushy__ilfr__8c507dd3__sel_medium__global_count",
+    "join__job__sqlstorm_job_15596__right_deep__lfi__58686693__sel_medium",
+    "join__job__sqlstorm_job_15596__right_deep__lfi__58686693__sel_low",
+    "join__job__sqlstorm_job_11914__bushy__rifll__2399f944__sel_low",
+    "join__job__job_16a_skeleton__bushy__fril__552fec97__sel_high",
+    "join__job__sqlstorm_job_13193__bushy__ilfr__a0aa4bd3__sel_low",
+    "aggregate__job__sqlstorm_job_18930__right_deep__flr__7da44809__sel_medium__global_count",
+    "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_high__grouped_count",
+    "join__job__sqlstorm_job_11914__bushy__rifll__2399f944__sel_high",
+    "join__job__sqlstorm_job_11914__bushy__rifll__2399f944__sel_medium",
+    "join__job__job_01a_skeleton__left_deep__ilfr__01bf30c5__sel_high",
+    "join__job__job_06a_skeleton__left_deep__rlif__ffb732c3__sel_low",
+    "join__job__job_01a_skeleton__bushy__rilf__e3d78e7c__sel_high",
+    "join__job__sqlstorm_job_13193__left_deep__rfli__c79545d6__sel_high",
+    "join__job__job_21a_skeleton__right_deep__ifrl__c9184af4__sel_high",
+    "join__job__job_01a_skeleton__bushy__irlf__95abd1d2__sel_medium",
+    "join__job__job_06a_skeleton__right_deep__frli__9d403a97__sel_medium",
+    "join__job__job_17a_movie_annotations__bushy__lfri__d392a368__sel_medium",
+    "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_medium__grouped_count",
+    "join__job__job_06a_skeleton__right_deep__frli__9d403a97__sel_high",
+    "join__job__job_06a_skeleton__left_deep__rlif__ffb732c3__sel_medium",
+    "join__job__job_06a_skeleton__left_deep__rlif__ffb732c3__sel_high",
+    "join__job__job_01a_skeleton__left_deep__ilfr__01bf30c5__sel_medium",
+    "join__job__job_01a_skeleton__bushy__irlf__95abd1d2__sel_low",
+    "join__job__sqlstorm_job_13193__left_deep__rfli__c79545d6__sel_medium",
+    "join__job__job_21a_skeleton__left_deep__rilf__692e7fce__sel_medium",
+    "aggregate__job__sqlstorm_job_13193__bushy__rfil__1d4f9c88__sel_low__grouped_count",
+    "join__job__job_21a_skeleton__left_deep__rilf__692e7fce__sel_high",
+    "aggregate__job__sqlstorm_job_11914__right_deep__rflir__d7bb59bd__sel_high__global_count",
+    "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_high__grouped_count",
+    "join__job__job_06a_skeleton__right_deep__frli__9d403a97__sel_low",
+    "join__job__job_01a_skeleton__bushy__rilf__e3d78e7c__sel_medium",
+    "join__job__job_01a_skeleton__right_deep__lrif__17f8ad39__sel_medium",
+    "join__job__job_11a_skeleton__left_deep__iflr__cb69a903__sel_high",
+    "join__job__job_01a_skeleton__bushy__irlf__95abd1d2__sel_high",
+    "join__job__job_11a_skeleton__left_deep__iflr__cb69a903__sel_medium",
+    "join__job__job_21a_skeleton__right_deep__ifrl__c9184af4__sel_medium",
+    "join__job__job_21a_skeleton__left_deep__rilf__692e7fce__sel_low",
+    "join__job__job_11a_skeleton__bushy__firl__65da3e17__sel_high",
+    "join__job__sqlstorm_job_13193__right_deep__lfri__421a1671__sel_high",
+    "join__job__job_01a_skeleton__right_deep__lrif__17f8ad39__sel_high",
+    "join__job__sqlstorm_job_11914__right_deep__lrifl__65b2b3df__sel_high",
+    "join__job__job_21a_skeleton__right_deep__ifrl__28d8f760__sel_high",
+    "join__job__job_11a_skeleton__bushy__firl__65da3e17__sel_medium",
+    "join__job__job_17a_movie_annotations__bushy__lfri__d392a368__sel_low",
+    "join__job__sqlstorm_job_11914__right_deep__lrifl__65b2b3df__sel_medium",
+    "join__job__job_17a_movie_annotations__left_deep__irfl__4c344f38__sel_high",
+    "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_medium__grouped_count",
+    "join__job__sqlstorm_job_13193__right_deep__lfri__421a1671__sel_medium",
+    "join__job__job_21a_skeleton__right_deep__ifrl__28d8f760__sel_medium",
+    "join__job__sqlstorm_job_13193__left_deep__rfli__c79545d6__sel_low",
+    "join__job__job_11a_skeleton__bushy__firl__65da3e17__sel_low",
+    "join__job__job_21a_skeleton__right_deep__ifrl__c9184af4__sel_low",
+    "aggregate__job__sqlstorm_job_11914__right_deep__rflir__d7bb59bd__sel_medium__global_count",
+    "join__job__job_16a_skeleton__right_deep__rfli__973dae1e__sel_high",
+    "join__job__job_11a_skeleton__left_deep__iflr__cb69a903__sel_low",
+    "aggregate__job__sqlstorm_job_13193__left_deep__ifrl__4d1792ba__sel_low__grouped_count",
+    "aggregate__job__sqlstorm_job_18930__left_deep__lfi__642866d4__sel_high__global_count",
+    "join__job__job_16a_skeleton__left_deep__lifr__77b823ea__sel_high",
+    "join__job__job_16a_skeleton__left_deep__iflr__8b03335f__sel_high",
+    "aggregate__job__sqlstorm_job_18930__left_deep__lfi__642866d4__sel_medium__global_count",
+    "join__job__job_16a_skeleton__right_deep__lfri__018623e3__sel_high",
+    "join__job__sqlstorm_job_13193__right_deep__lfri__421a1671__sel_low",
+    "join__job__job_16a_skeleton__right_deep__rfli__973dae1e__sel_medium",
+    "join__job__job_16a_skeleton__left_deep__iflr__8b03335f__sel_medium",
+    "join__job__job_01a_skeleton__left_deep__ilfr__01bf30c5__sel_low",
+    "join__job__job_16a_skeleton__left_deep__lifr__77b823ea__sel_medium",
+    "join__job__job_17a_movie_annotations__left_deep__irfl__4c344f38__sel_medium",
+    "join__job__job_16a_skeleton__right_deep__lfri__018623e3__sel_medium",
+    "aggregate__job__sqlstorm_job_18930__left_deep__lfi__642866d4__sel_low__global_count",
+    "join__job__job_16a_skeleton__left_deep__lifr__77b823ea__sel_low",
+    "join__job__job_16a_skeleton__right_deep__rfli__973dae1e__sel_low",
+    "join__job__job_16a_skeleton__left_deep__iflr__8b03335f__sel_low",
+    "join__job__job_17a_movie_annotations__left_deep__irfl__4c344f38__sel_low",
+    "join__job__job_16a_skeleton__right_deep__lfri__018623e3__sel_low",
+    "join__job__job_20a_skeleton__bushy__irlf__5fcbf753__sel_high",
+    "join__job__job_20a_skeleton__right_deep__ilrf__08f4c84c__sel_high",
+    "join__job__job_21a_skeleton__right_deep__ifrl__28d8f760__sel_low",
+    "join__job__job_20a_skeleton__right_deep__ilrf__08f4c84c__sel_medium",
+    "aggregate__job__job_20a_skeleton__bushy__flri__f60cc233__sel_low__grouped_count",
+    "join__job__job_20a_skeleton__bushy__irlf__5fcbf753__sel_medium",
+    "aggregate__job__sqlstorm_job_11914__right_deep__rflir__d7bb59bd__sel_low__global_count",
+    "join__job__job_20a_skeleton__right_deep__ilrf__08f4c84c__sel_low",
+    "join__job__job_20a_skeleton__bushy__irlf__5fcbf753__sel_low",
+    "graph__graph__graph_chain4_forward__bushy__fir__6ab35c4a__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_converging__right_deep__fri__cf59d112__inputcap1__sel_high",
+    "graph__graph__graph_chain4_forward__left_deep__ifr__31f82989__inputcap1__sel_medium",
+    "graph__graph__graph_star4_forward__right_deep__lrf__840c1fd0__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_medium",
+    "graph__graph__graph_star5_converging__left_deep__firl__48b03467__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_forward__bushy__lfr__1170f7ed__inputcap1__sel_high",
+    "graph__graph__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_high",
+    "graph__graph__graph_star5_converging__left_deep__firl__48b03467__inputcap1__sel_high",
+    "graph__graph__graph_star4_forward__right_deep__lrf__840c1fd0__inputcap1__sel_low",
+    "graph__graph__graph_star4_forward__left_deep__lfi__6c250b5e__inputcap1__sel_medium",
+    "graph__graph__graph_chain5_forward__left_deep__flri__a7756989__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_forward__bushy__fir__6ab35c4a__inputcap1__sel_high",
+    "graph__graph__graph_chain5_forward__bushy__lirf__f02b7b87__inputcap1__sel_medium",
+    "graph__graph__graph_chain5_forward__right_deep__lirf__9b7f140a__inputcap1__sel_high",
+    "graph__graph__graph_chain5_forward__left_deep__flri__a7756989__inputcap1__sel_high",
+    "graph__graph__graph_branch5_forward__right_deep__rfil__c08ad633__inputcap1__sel_medium",
+    "graph__graph__graph_star4_forward__left_deep__flr__26c799ce__inputcap1__sel_medium",
+    "graph__graph__graph_chain5_forward__bushy__lirf__f02b7b87__inputcap1__sel_high",
+    "graph__graph__graph_star4_forward__left_deep__flr__26c799ce__inputcap1__sel_low",
+    "graph__graph__graph_chain5_forward__right_deep__lirf__9b7f140a__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_forward__left_deep__ifr__31f82989__inputcap1__sel_high",
+    "graph__graph__graph_star4_forward__right_deep__rfl__c647d452__inputcap1__sel_medium",
+    "graph__graph__graph_branch5_forward__left_deep__lirf__c23c9bae__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_forward__bushy__ifl__2bb39801__inputcap1__sel_medium",
+    "graph__graph__graph_star4_forward__right_deep__rfl__c647d452__inputcap1__sel_low",
+    "graph__graph__graph_branch5_forward__right_deep__rfil__c08ad633__inputcap1__sel_low",
+    "graph__graph__graph_star4_forward__left_deep__lfi__6c250b5e__inputcap1__sel_low",
+    "graph__graph__graph_branch5_forward__left_deep__lirf__c23c9bae__inputcap1__sel_low",
+    "graph__graph__graph_branch5_converging__right_deep__lfir__4152a86c__inputcap1__sel_medium",
+    "graph__graph__graph_chain4_converging__bushy__ifl__573f89ca__inputcap1__sel_high",
+    "graph__graph__graph_chain5_converging__left_deep__rilf__20d56999__inputcap1__sel_medium",
+    "graph__graph__graph_chain5_converging__bushy__rfli__0b18afaa__inputcap1__sel_medium",
+    "graph__graph__graph_chain5_converging__bushy__rfli__0b18afaa__inputcap1__sel_high",
+    "graph__graph__graph_branch5_converging__right_deep__lfir__4152a86c__inputcap1__sel_high",
+    "graph__graph__graph_chain5_converging__left_deep__rilf__20d56999__inputcap1__sel_high",
+    "graph__graph__graph_chain5_converging__right_deep__firl__af9b1e0b__inputcap1__sel_medium",
+    "graph__graph__epinions__graph_chain4_forward__left_deep__ifr__31f82989__inputcap1__sel_low",
+    "graph__graph__graph_chain5_converging__right_deep__firl__af9b1e0b__inputcap1__sel_high",
+    "graph__graph__epinions__graph_chain4_forward__bushy__fir__6ab35c4a__inputcap1__sel_low",
+    "aggregate__graph__graph_branch5_converging__left_deep__filr__6a97852b__inputcap1__sel_medium__global_count",
+    "aggregate__graph__graph_star5_converging__right_deep__rlif__aa6e2644__inputcap1__sel_medium__global_count",
+    "aggregate__graph__graph_chain4_converging__bushy__lif__b3c44a0a__inputcap1__sel_high__global_count",
+    "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_high__grouped_count",
+    "aggregate__graph__graph_star4_converging__left_deep__rfl__9b9e596c__inputcap1__sel_high__grouped_count",
+    "aggregate__graph__graph_star5_converging__right_deep__rlif__aa6e2644__inputcap1__sel_high__global_count",
+    "aggregate__graph__graph_branch5_converging__left_deep__filr__6a97852b__inputcap1__sel_high__global_count",
+    "graph__tpcds__recovery__line4b_control__fil__a3bfbfd6__sel_high",
+    "join__tpcds__extension_20261008_r2__storm14368_chain4_right__rli__761fb00d__sel_high",
+    "graph__tpcds__recovery__line4b_control__fil__a3bfbfd6__sel_medium",
+    "join__tpcds__extension_20261008_r2__storm14368_chain4_right__rli__761fb00d__sel_low",
+    "join__tpcds__recovery__storm14368_rdur__ilrfi__b1da8d66__sel_low",
+    "join__tpcds__recovery__storm14368_rdur__ilrfi__b1da8d66__sel_medium",
+    "join__tpcds__extension_20261008_r2__storm14368_chain4_right__rli__761fb00d__sel_medium",
+    "join__tpcds__recovery__storm14368_rdur__ilrfi__b1da8d66__sel_high",
+    "join__tpcds__recovery__storm14368_left__ilrfi__a9f61abe__sel_high",
+    "aggregate__tpcds__recovery__q40_rdax_count__filr__a8fcb1be__sel_low",
+    "graph__tpcds__recovery__line4b_control__fil__a3bfbfd6__sel_low",
+    "graph__tpcds__ds_real_store_demo__left_deep__rfil__0313c162__sel_high",
+    "graph__tpcds__extension_20261008__line4a_control__rfi__c4ad848b__sel_high",
+    "aggregate__tpcds__recovery__q40_alt_count__rfil__6fd66f8d__sel_low",
+    "join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_low",
+    "join__tpcds__recovery__storm14368_left__ilrfi__a9f61abe__sel_medium",
+    "graph__tpcds__ds_real_store_demo__left_deep__rfil__0313c162__sel_medium",
+    "graph__tpcds__extension_20261008__line4a_control__rfi__c4ad848b__sel_medium",
+    "join__tpcds__recovery__storm10809_rdul__rfil__5fa2ea2c__sel_medium",
+    "join__tpcds__recovery__storm14368_left__ilrfi__a9f61abe__sel_low",
+    "graph__tpcds__ds_real_store_demo__left_deep__rfil__0313c162__sel_low",
+    "join__tpcds__sqlstorm_tpcds_28643__right_deep__lifrf__8c1d8769__sel_high",
+    "aggregate__tpcds__recovery__q40_right_count__lrfi__4fb69227__sel_low",
+    "join__tpcds__sqlstorm_tpcds_28643__right_deep__lifrf__8c1d8769__sel_medium",
+    "aggregate__tpcds__recovery__q05_rdax_count__fil__3b58fd83__sel_medium",
+    "aggregate__tpcds__recovery__q05_rdax_count__fil__3b58fd83__sel_high",
+    "aggregate__tpcds__recovery__q05_rdax_count__fil__3b58fd83__sel_low",
+    "graph__tpcds__extension_20261008__line4a_control__rfi__c4ad848b__sel_low",
+    "join__tpcds__sqlstorm_tpcds_28643__right_deep__lifrf__8c1d8769__sel_low",
+    "join__tpcds__recovery__storm10809_rdul__rfil__5fa2ea2c__sel_low",
+    "aggregate__tpcds__recovery__q05_alt_count__rfi__d09b60e8__sel_medium",
+    "aggregate__tpcds__recovery__q05_alt_count__rfi__d09b60e8__sel_high",
+    "aggregate__tpcds__recovery__q05_alt_count__rfi__d09b60e8__sel_low",
+    "aggregate__tpcds__recovery__q80_rdax_count__rfil__6e4320b2__sel_low",
+    "aggregate__tpcds__recovery__q80_rdax_count__rfil__6e4320b2__sel_medium",
+    "aggregate__tpcds__recovery__q80_rdax_count__rfil__6e4320b2__sel_high",
+    "aggregate__tpcds__recovery__q05_right_count__lrf__e314b93a__sel_low",
+    "aggregate__tpcds__recovery__q05_right_count__lrf__e314b93a__sel_high",
+    "aggregate__tpcds__recovery__q05_right_count__lrf__e314b93a__sel_medium",
+    "aggregate__tpcds__recovery__q80_left_count__filr__1f99434e__sel_high",
+    "aggregate__tpcds__recovery__q80_left_count__filr__1f99434e__sel_medium",
+    "aggregate__tpcds__recovery__q93_count__fi__72f76834__sel_high",
+    "aggregate__tpcds__recovery__q93_count__fi__72f76834__sel_medium",
+    "aggregate__tpcds__recovery__q93_count__fi__72f76834__sel_low",
+    "aggregate__tpcds__recovery__q80_left_count__filr__1f99434e__sel_low",
+    "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+    "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count",
+    "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_high",
+    "join__tpch__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_count",
+    "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+    "join__tpch__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_high",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__e566547b__sel_high",
+    "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_count",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__c590b491__sel_high",
+    "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_count",
+    "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_low",
+    "join__tpch__tpch_q07_trade_flow__bushy__ilfr__cb5a743d__sel_high",
+    "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_low",
+    "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_high",
+    "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_high__global_count",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_count",
+    "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_medium",
+    "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_high",
+    "join__tpch__sqlstorm_tpch_25509__bushy__rfirl__5da22274__sel_high",
+    "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_medium",
+    "join__tpch__sqlstorm_tpch_25509__bushy__rfirl__5da22274__sel_medium",
+    "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_low__global_count",
+    "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_medium__global_count",
+    "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_low",
+    "join__tpch__sqlstorm_tpch_17751__bushy__rfi__4cf6bc5f__sel_high",
+    "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_high",
+    "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_medium",
+    "join__tpch__sqlstorm_tpch_17751__bushy__rfi__4cf6bc5f__sel_low",
+    "join__tpch__sqlstorm_tpch_17751__bushy__rfi__4cf6bc5f__sel_medium",
+    "join__tpch__tpch_q05_region_sales__bushy__irfl__db73eb5f__sel_high",
+    "join__tpch__sqlstorm_tpch_17751__bushy__irf__5b0bbaf5__sel_high",
+    "join__tpch__sqlstorm_tpch_25509__right_deep__irlfi__dbf987a6__sel_high",
+    "join__tpch__tpch_q08_market_share__left_deep__rilff__2af6f06b__sel_high",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__flirf__3a4f9871__sel_high",
+    "join__tpch__tpch_q08_market_share__left_deep__rilff__2af6f06b__sel_medium",
+    "join__tpch__tpch_q08_market_share__left_deep__rilff__2af6f06b__sel_low",
+    "aggregate__tpch__sqlstorm_tpch_25509__right_deep__flifr__f78e470e__sel_low__global_count",
+    "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_low__grouped_count",
+    "aggregate__tpch__sqlstorm_tpch_25509__right_deep__flifr__f78e470e__sel_medium__global_count",
+    "aggregate__tpch__sqlstorm_tpch_25509__right_deep__flifr__f78e470e__sel_high__global_count",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__flirf__3a4f9871__sel_medium",
+    "aggregate__tpch__tpch_q05_region_sales__bushy__lrfi__063f08b2__sel_high__global_count",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_medium__grouped_count",
+    "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_medium__grouped_count",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__flirf__3a4f9871__sel_low",
+    "join__tpch__tpch_q08_market_share__bushy__frifl__dba94a3f__sel_high",
+    "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_medium__grouped_count",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__e566547b__sel_medium",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__rlifl__099ed04f__sel_high",
+    "join__tpch__sqlstorm_tpch_25509__bushy__rfirl__5da22274__sel_low",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__c590b491__sel_medium",
+    "join__tpch__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_low",
+    "graph__tpch__th_real_cust_order_line__left_deep__ilrf__99ea3005__sel_high",
+    "join__tpch__sqlstorm_tpch_17751__bushy__irf__5b0bbaf5__sel_medium",
+    "join__tpch__tpch_q07_trade_flow__bushy__ilfr__cb5a743d__sel_medium",
+    "graph__tpch__th_real_cust_order_line__left_deep__ilrf__99ea3005__sel_medium",
+    "join__tpch__sqlstorm_tpch_25509__right_deep__irlfi__dbf987a6__sel_medium",
+    "graph__tpch__th_real_cust_order_line__left_deep__ilrf__99ea3005__sel_low",
+    "join__tpch__tpch_q07_trade_flow__left_deep__lirf__d640eee6__sel_high",
+    "join__tpch__tpch_q07_trade_flow__left_deep__lirf__d640eee6__sel_medium",
+    "join__tpch__tpch_q08_market_share__bushy__frifl__dba94a3f__sel_medium",
+    "join__tpch__tpch_q05_region_sales__bushy__irfl__db73eb5f__sel_medium",
+    "join__tpch__tpch_q07_trade_flow__left_deep__lirf__d640eee6__sel_low",
+    "aggregate__tpch__tpch_q05_region_sales__bushy__lrfi__063f08b2__sel_medium__global_count",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__rlifl__099ed04f__sel_medium",
+    "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_low__grouped_count",
+    "join__tpch__sqlstorm_tpch_25509__right_deep__irlfi__dbf987a6__sel_low",
+    "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_low__grouped_count",
+    "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_low__grouped_count",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__e566547b__sel_low",
+    "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__c590b491__sel_low",
+    "join__tpch__sqlstorm_tpch_17751__bushy__irf__5b0bbaf5__sel_low",
+    "join__tpch__tpch_q05_region_sales__bushy__irfl__db73eb5f__sel_low",
+    "join__tpch__tpch_q07_trade_flow__bushy__ilfr__cb5a743d__sel_low",
+    "aggregate__tpch__tpch_q05_region_sales__bushy__lrfi__063f08b2__sel_low__global_count",
+    "join__tpch__tpch_q08_market_share__bushy__frifl__dba94a3f__sel_low",
+    "join__tpch__sqlstorm_tpch_25509__left_deep__rlifl__099ed04f__sel_low"
+  ],
+  "replacements": [
+    {
+      "original": {
+        "query_id": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+        "content_sha256": "0c14c5c3d847a2a7ff6583da4e7bac34ae3d3f708a18afd0e035e97b6e7d684a"
+      },
+      "short_query": "G-H-LD-03",
+      "rule": "custdist_r_l_f",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count",
+        "content_sha256": "cc7466a2b19cda7d13ba5e15dc35f441efe8b468f27e9a2283c861ba4f4b6ff8"
+      },
+      "short_query": "A-H-B-07",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_high",
+        "content_sha256": "98c18ce6d4ac1f86653abfc224ea7ed4ca1f5128c2df84df588459150589c235"
+      },
+      "short_query": "G-H-LD-05",
+      "rule": "custdist_r_l_f",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium",
+        "content_sha256": "c8557f258bf0e2fc04f4bdf7aeb864bbd7310726bee8ce2f368bbf3ebe0455bd"
+      },
+      "short_query": "Q-H-LD-02",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_high__grouped_count",
+        "content_sha256": "92e19185e0b40d6e9288aa825df058e631d2af0fa452fecc8597a05bc75705cf"
+      },
+      "short_query": "A-H-RD-08",
+      "rule": "q8_right_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+        "content_sha256": "b34967958990a0462e849a2cc1bb37a42d792a2247b945c4841559bf42cb0a7b"
+      },
+      "short_query": "A-H-B-04",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_high",
+        "content_sha256": "ac772953f4e7420bb1ce9a0ae034794c2f34745dc270b0dba65fd6fc3efb61e4"
+      },
+      "short_query": "Q-H-LD-05",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count",
+        "content_sha256": "50fdfc86d43cb9378b26abb0cfaddd8e1219266bf0cf2f52b6d48f02e232cd1e"
+      },
+      "short_query": "A-H-RD-03",
+      "rule": "q8_right_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+        "content_sha256": "b9ab48bb1075ecb98a866a030d3968aff6c90fdbacef91a3d700d8c90d521b55"
+      },
+      "short_query": "A-H-RD-04",
+      "rule": "q8_right_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__e566547b__sel_high",
+        "content_sha256": "c7a2235e694fadd22f64b0cd2267bf20efbe1be11b678d4587d8140458b8a42c"
+      },
+      "short_query": "Q-H-RD-04",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__right_deep__irfl__06dcfc3b__sel_high__grouped_count",
+        "content_sha256": "f93c5013be16c09cd439f9cadca01527f380fd89c01c0e973d35f6baca2fd72b"
+      },
+      "short_query": "A-H-RD-07",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q07_trade_flow__right_deep__rlfi__c590b491__sel_high",
+        "content_sha256": "82a44a83c5537afebf2499cf35437290b5d62dce778508e613179432712b4d36"
+      },
+      "short_query": "Q-H-RD-14",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q07_trade_flow__left_deep__lrfi__e001d276__sel_high__grouped_count",
+        "content_sha256": "f979b7f7f6f870dec85cefb8fcaa7f58ea05e3af03015d8e0c28a12210c4d518"
+      },
+      "short_query": "A-H-LD-02",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_low",
+        "content_sha256": "d37a2d022701c353d0deec335cf64b4f04b7994c83e28788c6ac6201651417a2"
+      },
+      "short_query": "Q-H-RD-03",
+      "rule": "q5_alternate_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q07_trade_flow__bushy__ilfr__cb5a743d__sel_high",
+        "content_sha256": "5193b3ea39a9cdd3b3fbba63bbf1dd8f4c8c784f988a9671394d83c37ba123ee"
+      },
+      "short_query": "Q-H-B-07",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_low",
+        "content_sha256": "1260121b8ab0499ca7288ddaebab33ccb720a32068394c263a5e5ea2d58ecaba"
+      },
+      "short_query": "Q-H-RD-01",
+      "rule": "q3_full_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_high",
+        "content_sha256": "d4747fcf48d2471aa9e2a0fff2cf9358fd85b8f469aea7e9f98f0c4e2823c543"
+      },
+      "short_query": "Q-H-B-05",
+      "rule": "q5_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_high__global_count",
+        "content_sha256": "ac35dada0112b89f3291c84f9ad8cd6d78843d4bd14b898672f0510ee0ecf317"
+      },
+      "short_query": "A-H-B-01",
+      "rule": "storm17751_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__rrlif__92643cc5__sel_high__grouped_count",
+        "content_sha256": "992bdbcce49e918bef23764addc2783abb23020f62716b79eed7aa239ac809fc"
+      },
+      "short_query": "A-H-RD-01",
+      "rule": "selectivity_only",
+      "high_days": 1056
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_medium",
+        "content_sha256": "aec7d3cfdc478a6bc2ed120502ce15ac98c3ae5d7a2f14868e86a2c46c9fb09b"
+      },
+      "short_query": "Q-H-RD-10",
+      "rule": "q3_full_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_high",
+        "content_sha256": "71145c228478898b01d15f2991e1f1a11832dc5b26ba7dd0494c32f1e4bbf70c"
+      },
+      "short_query": "Q-H-RD-02",
+      "rule": "q5_alternate_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_25509__bushy__rfirl__5da22274__sel_high",
+        "content_sha256": "644e798a4cae26811428a6f1eb83fc98e747c9d78685dbe4d9ac2fbb2770bb5c"
+      },
+      "short_query": "Q-H-B-18",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__right_deep__irlf__82e40ee5__sel_medium",
+        "content_sha256": "fde7567fd46559ff9b273cf3da657de474b2572dd21006ffca6c07ea662af7df"
+      },
+      "short_query": "Q-H-RD-07",
+      "rule": "q5_alternate_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_25509__bushy__rfirl__5da22274__sel_medium",
+        "content_sha256": "520c6ca9577f39da22632342275c400dccc104885a9315d27baa2c9e7dea33b5"
+      },
+      "short_query": "Q-H-B-03",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_low__global_count",
+        "content_sha256": "00a3887abe841ada262fcf303b84b53c154654e16802c0705701da2720f65bf3"
+      },
+      "short_query": "A-H-B-05",
+      "rule": "storm17751_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "aggregate__tpch__sqlstorm_tpch_17751__bushy__lfi__110205d2__sel_medium__global_count",
+        "content_sha256": "33221114f7e21f7cdc03e4dab8a6d631cf579c12dbccef0339db8f2596c3686e"
+      },
+      "short_query": "A-H-B-08",
+      "rule": "storm17751_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_low",
+        "content_sha256": "ad77955a353ff58e79b65b445b28601dfd548c0240458eb140693e5ff8de1380"
+      },
+      "short_query": "Q-H-B-12",
+      "rule": "q5_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_17751__bushy__rfi__4cf6bc5f__sel_high",
+        "content_sha256": "1fcff99795d16f9e68b9e5f785304d63efcb8c81a7439a1ed713f04c882cc30e"
+      },
+      "short_query": "Q-H-B-16",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q03_order_revenue__right_deep__fl__78dde91b__sel_high",
+        "content_sha256": "13b102c2b9f90552aa839f22de1c373c42f2671d85c2fbb5209654e45aee0edf"
+      },
+      "short_query": "Q-H-RD-15",
+      "rule": "q3_full_right",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__tpch_q05_region_sales__bushy__rfil__7700e53e__sel_medium",
+        "content_sha256": "ca37ea4b7b21adf4c53dc30340ff63c67f36332f35205e967b4c293da232e9c8"
+      },
+      "short_query": "Q-H-B-04",
+      "rule": "q5_bushy_donor",
+      "high_days": 1008
+    },
+    {
+      "original": {
+        "query_id": "join__tpch__sqlstorm_tpch_17751__bushy__rfi__4cf6bc5f__sel_low",
+        "content_sha256": "967f3d3eee12230818fea84469d920826db079dd81afe6783476803ad320e284"
+      },
+      "short_query": "Q-H-B-01",
+      "rule": "selectivity_only",
+      "high_days": 1008
+    }
+  ]
+}

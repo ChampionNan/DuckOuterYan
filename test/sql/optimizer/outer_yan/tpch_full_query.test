@@ -1,0 +1,104 @@
+# name: test/sql/optimizer/outer_yan/tpch_full_query.test
+# description: OuterYan optimizer — full-query (SELECT *) outer-join equivalence
+#              over REAL TPC-H data at the minimum scale (sf=0.01). Unlike
+#              tpch_outer.test (sf=0 aggregate smoke), these are wide-projection
+#              SELECT * queries on the small dimension tables (region, nation,
+#              supplier, customer), so the rebuilt output schema and NULL padding
+#              are exercised on real data without large intermediates. Each query
+#              runs OuterYan-disabled vs enabled; the row multisets must match
+#              (symmetric difference = 0). SELECT * (not a narrow projection or an
+#              aggregate) is deliberate: it is the path OuterYan lowers safely.
+# group: [outer_yan]
+
+require tpch
+
+statement ok
+CALL dbgen(sf=0.01);
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# 3-relation LEFT chain: nation ⟕ supplier ⟕ customer (nationkey hub).
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE th_off AS
+SELECT * FROM nation
+  LEFT OUTER JOIN supplier ON n_nationkey = s_nationkey
+  LEFT OUTER JOIN customer ON n_nationkey = c_nationkey;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE th_on AS
+SELECT * FROM nation
+  LEFT OUTER JOIN supplier ON n_nationkey = s_nationkey
+  LEFT OUTER JOIN customer ON n_nationkey = c_nationkey;
+
+query I
+SELECT * FROM sym_diff('th_off', 'th_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# 4-relation mixed kinds: region ⟕ nation ⟖ supplier ⋈ customer.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE th_off AS
+SELECT * FROM region
+  LEFT OUTER JOIN nation    ON r_regionkey = n_regionkey
+  RIGHT OUTER JOIN supplier ON n_nationkey = s_nationkey
+  INNER JOIN customer       ON s_nationkey = c_nationkey;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE th_on AS
+SELECT * FROM region
+  LEFT OUTER JOIN nation    ON r_regionkey = n_regionkey
+  RIGHT OUTER JOIN supplier ON n_nationkey = s_nationkey
+  INNER JOIN customer       ON s_nationkey = c_nationkey;
+
+query I
+SELECT * FROM sym_diff('th_off', 'th_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# FULL OUTER head: nation ⟗ supplier, then ⟕ customer.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE th_off AS
+SELECT * FROM nation
+  FULL OUTER JOIN supplier ON n_nationkey = s_nationkey
+  LEFT OUTER JOIN customer ON n_nationkey = c_nationkey;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE th_on AS
+SELECT * FROM nation
+  FULL OUTER JOIN supplier ON n_nationkey = s_nationkey
+  LEFT OUTER JOIN customer ON n_nationkey = c_nationkey;
+
+query I
+SELECT * FROM sym_diff('th_off', 'th_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''

@@ -1,0 +1,25 @@
+# name: benchmark/outer_yan/syn_sel10_baseline.benchmark
+# description: OuterYan SJ prefilter — synthetic 90%-filter-rate, DuckDB baseline.
+#              OuterYan disabled; DuckDB's standard hash-join builds on all 1M
+#              dim rows without any pre-filtering. Compare against bitmap/hash
+#              variants to measure the speedup from 90% dim-side filtering.
+# group: [outer_yan_perf]
+
+name SYN sel=10% (90% filtered) [DuckDB baseline]
+group outer_yan_perf
+
+load
+CREATE OR REPLACE TABLE fact   AS SELECT i               AS id, (i*7) % 1000000 AS val  FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE dim    AS SELECT (i * 10)        AS id, (i*3)            AS attr FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE anchor AS SELECT i               AS id,  i               AS aid  FROM range(1, 1000001) t(i);
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post';
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+run
+SELECT fact.id,
+       COUNT(dim.attr)    AS attr_count,
+       COUNT(anchor.aid)  AS anchor_count
+FROM fact
+LEFT JOIN dim    ON fact.id = dim.id
+LEFT JOIN anchor ON fact.id = anchor.id
+GROUP BY fact.id

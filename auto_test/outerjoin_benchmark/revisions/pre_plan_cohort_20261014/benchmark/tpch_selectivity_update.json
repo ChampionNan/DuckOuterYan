@@ -1,0 +1,8 @@
+{
+  "revision": "tpch-selectivity-update-20261014",
+  "policy_sha256": "cb5fc1b2de555a0bf522290fc02d631a36093eb307618253ecdb8be1131838cf",
+  "query_ids": [
+    "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+    "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_high"
+  ]
+}

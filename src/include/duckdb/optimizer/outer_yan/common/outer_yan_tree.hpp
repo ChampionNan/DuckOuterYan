@@ -1,0 +1,268 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/optimizer/outer_yan/common/outer_yan_tree.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/optimizer/outer_yan/common/applicability.hpp"
+#include "duckdb/optimizer/outer_yan/common/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_common.hpp"
+#include "duckdb/optimizer/outer_yan/common/outer_yan_trace.hpp"
+#include "duckdb/planner/logical_operator.hpp"
+
+namespace duckdb {
+class ClientContext;
+class JoinRelationSet;
+
+//! Wraps the full OuterYan IR pipeline: applicability → OT → OJT → plan.
+//! Holds the shared metadata that all three stages rely on, so each
+//! conversion no longer recomputes them. `OuterYanOptimizer` owns the
+//! per-candidate instances and threads them through OuterYanPre / DP / Post.
+//!
+//! Lifetimes:
+//!   - `source_plan`           moved in by `BuildOT`, owned through every
+//!                             OT- and OJT-stage transform; consumed (or
+//!                             released) by `OJTToLogicalPlan`.
+//!   - `ot`                    built by `BuildOT`, consumed by `BuildOJT`.
+//!   - `ojt`                   built by `BuildOJT`, consumed by
+//!                             `OJTToLogicalPlan`.
+//!   - `filter_records`        populated by `BuildOT`, consumed by
+//!                             `OJTToLogicalPlan`. Stays on the wrapper
+//!                             through OT- and OJT-stage transforms.
+//!   - `ot_relations_by_id`,
+//!     `ot_joins_by_order`,
+//!     `table_to_relation`     populated by `BuildOT`. OT-stage transforms
+//!                             that restructure the skeleton must keep
+//!                             these in sync (currently a no-op since
+//!                             transforms are TBD).
+class OuterYanTree {
+public:
+	explicit OuterYanTree(optional_ptr<ClientContext> context_p = nullptr) : context(context_p) {
+	}
+
+	//! Optional context for evaluating stable predicates on a NULL-extended row.
+	optional_ptr<ClientContext> context;
+
+	// ----------------------------------------------------------------------
+	// Conversions — each mutates internal state in place.
+	// ----------------------------------------------------------------------
+
+	//! Stage 1: applicability gate. Stores the result internally and
+	//! returns `applicable`.
+	bool CheckApplicability(LogicalOperator &plan, bool require_outer = true,
+	                        bool require_stable_intermediate_filters = false);
+	//! PGPlan-only gate: retains the normal structural restrictions but permits
+	//! stable ON residuals when each join has a safe equality anchor whose two
+	//! expression sides each reference exactly one base relation. This does not
+	//! relax normal OuterYan applicability.
+	bool CheckPGPlanApplicability(LogicalOperator &plan);
+
+	//! Stage 2: lift LogicalPlan into `ot`. Pre-condition: applicable.
+	//! Walks the plan, builds a binary OT skeleton (JOIN + RELATION
+	//! OTNodes), attributes each join's `conditions[0]` to its left/right
+	//! relation ids, records residual filter scope (retaining root filters and
+	//! extracting safe intermediate filters), and assigns per-join `order`
+	//! (deepest = 1, root = N). Takes ownership of `plan` into `source_plan`.
+	void BuildOT(unique_ptr<LogicalOperator> plan);
+
+	//! Stage 3: build `ojt` from `ot`. Pre-condition: `ot` populated.
+	//! Reads `ot_relations_by_id` and `ot_joins_by_order` to drive
+	//! top-down OJT assembly without re-walking the OT.
+	void BuildOJT();
+
+	//! Same construction as `BuildOJT`, but returns the freshly-built OJT
+	//! without persisting it. Used by transient consumers (e.g.,
+	//! `OuterYanPre` recording semi-join pairs against a post-simplification
+	//! OJT snapshot whose lifetime ends with the local `unique_ptr`).
+	unique_ptr<OrderedJoinTree> ConstructOJT();
+
+	//! Stage 4: realise `ojt` back to a LogicalPlan and splice it beneath the
+	//! retained root cap. Pre-condition: `ojt` populated. Releases
+	//! `source_plan` and `ojt` since the rebuilt plan is structurally
+	//! independent (base-relation subtrees are deep-copied via
+	//! `LogicalOperator::Copy`).
+	unique_ptr<LogicalOperator> OJTToLogicalPlan(ClientContext &context);
+
+	//! Replay-only lowering path that rebuilds the logical plan directly from
+	//! the current OT. Unlike OJT lowering, this preserves every JOIN node's
+	//! exact children[0]/children[1] orientation in addition to its grouping and
+	//! join kind. Non-retained filter records are placed at their first covering
+	//! subtree using the same policy as OJTToLogicalPlan, and the retained root
+	//! cap is reattached unchanged.
+	unique_ptr<LogicalOperator> OTToLogicalPlanPreservingShape(ClientContext &context);
+
+	// ----------------------------------------------------------------------
+	// Accessors for passes.
+	// ----------------------------------------------------------------------
+
+	OperatorTree &OT() {
+		return *ot;
+	}
+	OrderedJoinTree &OJT() {
+		return *ojt;
+	}
+	const ApplicabilityResult &Applicability() const {
+		return applicability;
+	}
+	bool HasOT() const {
+		return ot.get() != nullptr;
+	}
+	bool HasOJT() const {
+		return ojt.get() != nullptr;
+	}
+
+	// ----------------------------------------------------------------------
+	// Shared metadata, populated during BuildOT.
+	// ----------------------------------------------------------------------
+
+	//! `LogicalGet::table_index` → OT/OJT relation_id.
+	unordered_map<idx_t, RelationId> table_to_relation;
+	//! OT RELATION nodes indexed by relation_id.
+	vector<OTNode *> ot_relations_by_id;
+	//! OT JOIN nodes sorted by `order` ascending (deepest first).
+	vector<OTNode *> ot_joins_by_order;
+	//! Centralised filter-analysis store. Root predicates remain owned by their
+	//! original LogicalFilters; records carry expression copies through OT/OJT.
+	vector<unique_ptr<OuterYanFilterRecord>> filter_records;
+	//! Root-aggregation classification, populated by `BuildOT` while peeling
+	//! the projection/aggregate chain above the join skeleton. Consumed by
+	//! OuterYanDP's forced-root logic for aggregation queries.
+	OuterYanRootAggregation root_aggregation;
+	//! Relations that must sit at the top of the OJT in the DP's chosen
+	//! ordering. Populated by `BuildOT` from the bindings of GROUP BY
+	//! expressions (for `LogicalAggregate`) and DISTINCT-projected columns
+	//! (for `LogicalDistinct`). Empty iff the query has no aggregation or its
+	//! aggregation does not anchor any specific relation (e.g. COUNT_STAR
+	//! without GROUP BY). Consumed by `OuterYanDP::Optimize`:
+	//!   - Tier 1 (top-prefix): no intermediate DP subset may contain a
+	//!     relation in this set while still missing any relation outside it.
+	//!   - Tier 2 (single pinned root): if Tier 1 admits no plan, DP retries
+	//!     once per candidate root with the weaker constraint that the
+	//!     pinned root must appear only at the final emit; the cheapest plan
+	//!     across candidates wins.
+	unordered_set<RelationId> root_relations;
+	//! Phase 1 (bottom-up) semi-join pairs. Recorded by `OuterYanPre` from
+	//! a post-simplification, pre-desimplification OJT snapshot; consumed
+	//! by `SemijoinInsertion`. Each entry corresponds to an OJT edge with
+	//! `kind ∈ {RIGHT, INNER}`; semantically `parent := parent ⋉ child`,
+	//! so `build = child` and `probe = parent`.
+	vector<OuterYanSemiPair> bottom_up_pairs;
+	//! Phase 2 (top-down) semi-join pairs. Each entry corresponds to an
+	//! OJT edge with `kind ∈ {LEFT, INNER}`; semantically
+	//! `child := child ⋉ parent`, so `build = parent` and `probe = child`.
+	vector<OuterYanSemiPair> top_down_pairs;
+	//! Per-edge aggregate-pushdown decisions, populated by
+	//! `AggPushdownMarker` inside `OuterYanPost` and consumed by
+	//! `AggregatePushdownOuter` while visiting the rebuilt plan. Sorted by
+	//! `OuterYanAggPushdownDecision::order` ascending so the vector is a
+	//! dense, position-indexed mirror of the join post-order seen by
+	//! `LogicalOperatorVisitor::VisitOperator`.
+	vector<OuterYanAggPushdownDecision> agg_pushdown_decisions;
+	//! Non-owning pointer into `source_plan` to the DEEPEST peeled cap operator
+	//! — the operator (projection / aggregate / distinct / retained filter) whose
+	//! `children[0]` held the join-skeleton root. `OJTToLogicalPlan` splices the
+	//! rebuilt skeleton back into that slot, so every cap above it (e.g. a root
+	//! aggregate, or a DISTINCT over a projection) survives the roundtrip. Using
+	//! the deepest cap rather than the outermost projection is what keeps a root
+	//! LogicalAggregate from being dropped for `COUNT(*)` / `SUM ... GROUP BY`
+	//! queries. Null when the plan is a bare join skeleton.
+	LogicalOperator *root_skeleton_parent = nullptr;
+
+	//! Per-stage transformation counters. Each OuterYan pass records here what
+	//! it actually changed, so tests (and `--debug` printing) can assert that a
+	//! stage fired rather than silently no-op'd. Purely observational — no pass
+	//! reads these to drive a decision, so they never affect plan correctness.
+	struct StageStats {
+		//! Simplification: number of JOIN OTNodes whose `join_kind` was lowered
+		//! (OUTER→{INNER,LEFT,RIGHT} or LEFT/RIGHT→INNER) by null-rejection.
+		idx_t simplify_collapses = 0;
+		//! Desimplification: number of committed `join_kind` rewrites across the
+		//! whole fixpoint (a single edge may be counted more than once if it is
+		//! rewritten in successive passes).
+		idx_t desimplify_changes = 0;
+		//! Resimplification: number of OJT edges reverted from their
+		//! de-simplified `kind` back to `original_kind` (4d "such flag").
+		idx_t resimplify_reverts = 0;
+		//! Final, stable-table grouping comparison against the actual normal
+		//! DuckDB candidate. Join kind and SJ wrappers are intentionally ignored.
+		bool outer_reordered = false;
+		//! True only when the numeric candidate-vs-baseline comparison ran.
+		bool cost_gate_applied = false;
+		//! True iff the complete OuterYan candidate was selected for execution.
+		bool outer_yan_selected = false;
+	};
+	StageStats stage_stats;
+	//! Fine-grained workflow timings exported only as diagnostics. No optimizer
+	//! decision reads these values.
+	OuterYanPhaseTimings phase_timings;
+
+private:
+	//! Set only by CheckPGPlanApplicability. It makes BuildOT annotate sensitive
+	//! intermediate filters for exact-scope placement during PGPlan lowering.
+	bool pgplan_filter_scope_mode = false;
+	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can
+	//! reach the static BuildOT helpers below without exposing them.
+	class OTBuilder;
+
+	// BuildOT helpers (called from `OTBuilder`).
+	static void MapTableToRelId(const LogicalOperator &op, idx_t relation_id,
+	                            unordered_map<idx_t, RelationId> &table_to_relation);
+	static void CollectReferencedRelations(const Expression &expr,
+	                                       const unordered_map<idx_t, RelationId> &table_to_relation,
+	                                       unordered_set<idx_t> &out);
+	static optional<idx_t> LookupSingleRelation(const Expression &expr,
+	                                            const unordered_map<idx_t, RelationId> &table_to_relation);
+	// Shared OJT-assembly body. Called by `BuildOJT` (stores into `ojt`) and
+	// `ConstructOJT` (returns without persisting).
+	unique_ptr<OrderedJoinTree> BuildOJTImpl();
+
+	// OJTToLogicalPlan helpers.
+	static void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
+	                           vector<OJTEdge *> &edges);
+	static void PushFiltersAboveLeaf(unique_ptr<LogicalOperator> &subplan,
+	                                 vector<unique_ptr<Expression>> filters);
+	static void TryPushFilter(unique_ptr<LogicalOperator> &subplan,
+	                          unique_ptr<Expression> expr);
+	static unique_ptr<LogicalOperator> BuildJoinFromEdge(const OJTEdge &edge,
+	                                                     const JoinRelationSet &parent_set,
+	                                                     unique_ptr<LogicalOperator> parent_plan,
+	                                                     unique_ptr<LogicalOperator> child_plan);
+
+	//! Original LogicalPlan, owned for the wrapper's lifetime so that raw
+	//! base-relation pointers (`OTNode::origin` on RELATION nodes,
+	//! `OJTNode::base_op`) stay valid through plan rebuild. JOIN-side
+	//! metadata is owned by the IRs themselves (OTJoin), so the source
+	//! plan's join operators are not consulted after BuildOT.
+	unique_ptr<LogicalOperator> source_plan;
+	ApplicabilityResult applicability;
+	unique_ptr<OperatorTree> ot;
+	unique_ptr<OrderedJoinTree> ojt;
+};
+
+// ============================================================================
+// Free-function aliases — same names callers were using before, now thin
+// wrappers over the corresponding `OuterYanTree` methods.
+// ============================================================================
+
+inline void LogicalPlanToOT(unique_ptr<LogicalOperator> plan, OuterYanTree &tree) {
+	tree.BuildOT(std::move(plan));
+}
+
+inline void OTToOJT(OuterYanTree &tree) {
+	tree.BuildOJT();
+}
+
+inline unique_ptr<LogicalOperator> OJTToLogicalPlan(ClientContext &context, OuterYanTree &tree) {
+	return tree.OJTToLogicalPlan(context);
+}
+
+} // namespace duckdb

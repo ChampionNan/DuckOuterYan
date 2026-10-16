@@ -1,0 +1,24 @@
+# name: benchmark/outer_yan/syn_sel10_hash.benchmark
+# description: OuterYan SJ prefilter — synthetic 90%-filter-rate, HASH path.
+#              Same schema as syn_sel10_bitmap; outer_yan_bitmap_max_bytes=0
+#              forces HashFilter regardless of key type.
+# group: [outer_yan_perf]
+
+name SYN sel=10% (90% filtered) [Hash]
+group outer_yan_perf
+
+load
+CREATE OR REPLACE TABLE fact   AS SELECT i               AS id, (i*7) % 1000000 AS val  FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE dim    AS SELECT (i * 10)        AS id, (i*3)            AS attr FROM range(1, 1000001) t(i);
+CREATE OR REPLACE TABLE anchor AS SELECT i               AS id,  i               AS aid  FROM range(1, 1000001) t(i);
+SET VARIABLE outer_yan_bitmap_max_bytes = 0;
+SET disabled_optimizers TO '';
+
+run
+SELECT fact.id,
+       COUNT(dim.attr)    AS attr_count,
+       COUNT(anchor.aid)  AS anchor_count
+FROM fact
+LEFT JOIN dim    ON fact.id = dim.id
+LEFT JOIN anchor ON fact.id = anchor.id
+GROUP BY fact.id

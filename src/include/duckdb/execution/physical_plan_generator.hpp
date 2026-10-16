@@ -1,0 +1,204 @@
+//===----------------------------------------------------------------------===//
+//                         DuckDB
+//
+// duckdb/execution/physical_plan_generator.hpp
+//
+//
+//===----------------------------------------------------------------------===//
+
+#pragma once
+
+#include "duckdb/common/common.hpp"
+#include "duckdb/execution/physical_operator.hpp"
+#include "duckdb/parser/group_by_node.hpp"
+#include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/logical_tokens.hpp"
+#include "duckdb/planner/joinside.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join/semi_join_filter.hpp"
+
+namespace duckdb {
+class ClientContext;
+class ColumnDataCollection;
+class PhysicalSJBuild;
+class PhysicalSJProbe;
+
+class PhysicalPlan {
+public:
+	explicit PhysicalPlan(Allocator &allocator) : arena(allocator) {};
+
+	~PhysicalPlan() {
+		// Call the destructor of each physical operator.
+		for (auto &op : ops) {
+			auto &op_ref = op.get();
+			op_ref.~PhysicalOperator();
+		}
+	}
+
+public:
+	template <class T, class... ARGS>
+	PhysicalOperator &Make(ARGS &&... args) {
+		static_assert(std::is_base_of<PhysicalOperator, T>::value, "T must be a physical operator");
+		auto ptr = arena.Make<T>(*this, std::forward<ARGS>(args)...);
+		ops.push_back(*ptr);
+		return *ptr;
+	}
+
+	PhysicalOperator &Root() {
+		D_ASSERT(root);
+		return *root;
+	}
+	void SetRoot(PhysicalOperator &op) {
+		root = op;
+	}
+	//! Get a reference to the arena.
+	ArenaAllocator &ArenaRef() {
+		return arena;
+	}
+
+private:
+	//! The arena allocator storing the physical operator memory.
+	ArenaAllocator arena;
+	//! References to the physical operators.
+	vector<reference<PhysicalOperator>> ops;
+	//! The root of the physical plan.
+	optional_ptr<PhysicalOperator> root;
+};
+
+//! The physical plan generator generates a physical execution plan from a logical query plan.
+class PhysicalPlanGenerator {
+public:
+	explicit PhysicalPlanGenerator(ClientContext &context);
+	~PhysicalPlanGenerator();
+
+	LogicalDependencyList dependencies;
+	//! Recursive CTEs require at least one ChunkScan, referencing the working_table.
+	//! This data structure is used to establish it.
+	unordered_map<TableIndex, shared_ptr<ColumnDataCollection>> recursive_cte_tables;
+	//! Used to reference the recurring tables
+	unordered_map<TableIndex, shared_ptr<ColumnDataCollection>> recurring_cte_tables;
+	//! Materialized CTE ids must be collected.
+	unordered_map<TableIndex, vector<const_reference<PhysicalOperator>>> materialized_ctes;
+	//! The index for duplicate eliminated joins.
+	idx_t delim_index = 0;
+
+public:
+	//! Creates and returns the physical plan from the logical operator.
+	//! Performs a verification pass.
+	unique_ptr<PhysicalPlan> Plan(unique_ptr<LogicalOperator> logical);
+	PhysicalOperator &CreatePlan(LogicalOperator &op);
+
+	//! Whether or not we can (or should) use a batch-index based operator for executing the given sink
+	static bool UseBatchIndex(ClientContext &context, PhysicalOperator &plan);
+	//! Whether or not we should preserve insertion order for executing the given sink
+	static bool PreserveInsertionOrder(ClientContext &context, PhysicalOperator &plan);
+	//! The order preservation type of the given operator decided by recursively looking at its children
+	static OrderPreservationType OrderPreservationRecursive(PhysicalOperator &op);
+
+	//! Make a physical operator in the physical plan.
+	template <class T, class... ARGS>
+	PhysicalOperator &Make(ARGS &&... args) {
+		return physical_plan->Make<T>(std::forward<ARGS>(args)...);
+	}
+
+	//! Get a reference to the ArenaAllocator of the underlying physical plan.
+	//! Creates a new (empty) physical plan if none exists yet.
+	ArenaAllocator &ArenaRef();
+
+public:
+	PhysicalOperator &ResolveDefaultsProjection(LogicalInsert &op, PhysicalOperator &child);
+
+protected:
+	PhysicalOperator &CreatePlan(LogicalAggregate &op);
+	PhysicalOperator &CreatePlan(LogicalAnyJoin &op);
+	PhysicalOperator &CreatePlan(LogicalColumnDataGet &op);
+	PhysicalOperator &CreatePlan(LogicalComparisonJoin &op);
+	PhysicalOperator &CreatePlan(LogicalCopyDatabase &op);
+	PhysicalOperator &CreatePlan(LogicalCreate &op);
+	PhysicalOperator &CreatePlan(LogicalCreateTable &op);
+	PhysicalOperator &CreatePlan(LogicalCreateIndex &op);
+	PhysicalOperator &CreatePlan(LogicalCreateSecret &op);
+	PhysicalOperator &CreatePlan(LogicalCrossProduct &op);
+	PhysicalOperator &CreatePlan(LogicalDelete &op);
+	PhysicalOperator &CreatePlan(LogicalDelimGet &op);
+	PhysicalOperator &CreatePlan(LogicalDistinct &op);
+	PhysicalOperator &CreatePlan(LogicalDummyScan &expr);
+	PhysicalOperator &CreatePlan(LogicalEmptyResult &op);
+	PhysicalOperator &CreatePlan(LogicalExpressionGet &op);
+	PhysicalOperator &CreatePlan(LogicalExport &op);
+	PhysicalOperator &CreatePlan(LogicalFilter &op);
+	PhysicalOperator &CreatePlan(LogicalGet &op);
+	PhysicalOperator &CreatePlan(LogicalLimit &op);
+	PhysicalOperator &CreatePlan(LogicalMergeInto &op);
+	PhysicalOperator &CreatePlan(LogicalOrder &op);
+	PhysicalOperator &CreatePlan(LogicalTopN &op);
+	PhysicalOperator &CreatePlan(LogicalPositionalJoin &op);
+	PhysicalOperator &CreatePlan(LogicalProjection &op);
+	PhysicalOperator &CreatePlan(LogicalInsert &op);
+	PhysicalOperator &CreatePlan(LogicalCopyToFile &op);
+	PhysicalOperator &CreatePlan(LogicalExplain &op);
+	PhysicalOperator &CreatePlan(LogicalSetOperation &op);
+	PhysicalOperator &CreatePlan(LogicalUpdate &op);
+	PhysicalOperator &CreatePlan(LogicalPrepare &expr);
+	PhysicalOperator &CreatePlan(LogicalWindow &expr);
+	PhysicalOperator &CreatePlan(LogicalExecute &op);
+	PhysicalOperator &CreatePlan(LogicalPragma &op);
+	PhysicalOperator &CreatePlan(LogicalSample &op);
+	PhysicalOperator &CreatePlan(LogicalSet &op);
+	PhysicalOperator &CreatePlan(LogicalReset &op);
+	PhysicalOperator &CreatePlan(LogicalSimple &op);
+	PhysicalOperator &CreatePlan(LogicalVacuum &op);
+	PhysicalOperator &CreatePlan(LogicalUnnest &op);
+	PhysicalOperator &CreatePlan(LogicalRecursiveCTE &op);
+	PhysicalOperator &CreatePlan(LogicalMaterializedCTE &op);
+	PhysicalOperator &CreatePlan(LogicalCTERef &op);
+	PhysicalOperator &CreatePlan(LogicalPivot &op);
+
+	// OuterYan — semi-join build / probe (plan 3). The Build's CreatePlan
+	// caches the produced PhysicalSJBuild on LogicalSJBuild::physical so
+	// multiple Probes referencing the same Build share one physical sink.
+	// `CreatePlanFromRelated` is invoked from the Probe's CreatePlan when
+	// resolving `LogicalSJProbe::related_sj_build` entries — it constructs
+	// the PhysicalSJBuild lazily if it doesn't already exist.
+	PhysicalOperator &CreatePlan(class LogicalSJBuild &op);
+	PhysicalOperator &CreatePlan(class LogicalSJProbe &op);
+	class PhysicalSJBuild *CreatePlanFromRelated(class LogicalSJBuild &op);
+
+	PhysicalOperator &PlanAsOfJoin(LogicalComparisonJoin &op);
+	PhysicalOperator &PlanComparisonJoin(LogicalComparisonJoin &op);
+	PhysicalOperator &PlanDelimJoin(LogicalComparisonJoin &op);
+	PhysicalOperator &ExtractAggregateExpressions(PhysicalOperator &child, vector<unique_ptr<Expression>> &expressions,
+	                                              vector<unique_ptr<Expression>> &groups,
+	                                              optional_ptr<vector<GroupingSet>> grouping_sets);
+
+private:
+	ClientContext &context;
+	unique_ptr<PhysicalPlan> physical_plan;
+
+	//! OuterYan semi-join filter registry (per physical plan). Build and probe
+	//! resolve the SAME runtime SemiJoinFilter by stable filter id, so the
+	//! build↔probe association survives plan Copy/Serialize/Deserialize (e.g.
+	//! statement verification) where raw pointers / shared_ptr identity do not.
+	unordered_map<idx_t, shared_ptr<SemiJoinFilter>> sj_filter_by_id;
+	//! id → the PhysicalSJBuild that produces that filter; populated as builds
+	//! are planned, consumed by LinkSemiJoinProbes().
+	unordered_map<idx_t, PhysicalSJBuild *> sj_build_by_id;
+	//! Probes awaiting related_sj_build re-derivation (builds may be planned
+	//! after the probe in tree order, so linking happens once at the end).
+	vector<PhysicalSJProbe *> sj_probes_to_link;
+
+private:
+	PhysicalOperator &ResolveAndPlan(unique_ptr<LogicalOperator> logical);
+	//! Resolve (creating on first use) the shared runtime filter for `id`.
+	shared_ptr<SemiJoinFilter> &GetOrCreateSJFilter(idx_t id);
+	//! Re-derive related_sj_build for every registered probe from sj_build_by_id.
+	void LinkSemiJoinProbes();
+	unique_ptr<PhysicalPlan> PlanInternal(LogicalOperator &logical);
+	bool PreserveInsertionOrder(PhysicalOperator &plan);
+	bool UseBatchIndex(PhysicalOperator &plan);
+	optional_ptr<PhysicalOperator> PlanAsOfLoopJoin(LogicalComparisonJoin &op, PhysicalOperator &probe,
+	                                                PhysicalOperator &build);
+};
+} // namespace duckdb

@@ -1,0 +1,146 @@
+# name: test/sql/optimizer/outer_yan/semijoin_passes.test
+# description: OuterYan optimizer — strict cost-gate coverage across each
+#              OJTEdgeKind. These tiny fixtures make fixed semi-join work more
+#              expensive than DuckDB, so the selected plans contain no SJ
+#              operators. Forced insertion mechanics are covered by the C++
+#              outer_yan pass integration tests.
+# group: [outer_yan]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300), (5, 500);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+statement ok
+PRAGMA explain_output='optimized_only'
+
+# ============================================================================
+# Applicable LEFT chain is cost-rejected on this tiny input.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_BUILD.*
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# INNER + outer mix — fixed semi-join work is also cost-rejected.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# LEFT OUTER chain — strict gate keeps the cheaper DuckDB plan.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# RIGHT OUTER chain — DP retains this small input shape, so the normal DuckDB
+# fallback must contain no semi-join operators.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# FULL OUTER — strict gate again keeps the cheaper DuckDB plan.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Correctness regression across each kind under normal cost selection.
+# ============================================================================
+
+statement ok
+PRAGMA explain_output='all'
+
+statement ok
+SET disabled_optimizers TO ''
+
+# LEFT OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# RIGHT OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+NULL	NULL	4000
+
+# FULL OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+NULL	500	NULL
+
+# INNER + LEFT mix.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000

@@ -1,0 +1,101 @@
+{
+  "revision": "cohort-selectivity-20261015",
+  "representation": "frozen_workload_definition",
+  "selection": "Five user-approved predicate-only updates and one equivalent orders-input-filter rewrite with CPU9 measurements. Performance-conditioned curation, not an optimizer improvement or a guarantee for future runs. Historical definitions remain pinned even when their workload slots have subsequently been retired.",
+  "replacements": [
+    {
+      "original_query": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_high__grouped_count",
+      "original_sha256": "4fc59a70f9c04bb95fd2fd6546b7dd68d97c84635fa048222007f35d46994761",
+      "query_id": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count",
+      "predicate": "o.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1992-08-27'",
+      "semantic_tier": "medium",
+      "calibration": {
+        "rows": 75000000,
+        "qualified_rows": 7479153
+      },
+      "content_sha256": "2f2778afb4b18c37cd716b4ac3f302cb169c81e6d11045819f290aca8d9891a5",
+      "measurement_content_sha256": "2f2778afb4b18c37cd716b4ac3f302cb169c81e6d11045819f290aca8d9891a5",
+      "measurement_csv": "auto_test/results/experiment_onoff_slow_three_selectivity_20261014_173749_t32.csv",
+      "measurement_csv_sha256": "fee273b27e42d2872ea87d8561a82e5da655d22ba69c35427788f0da349ebe61",
+      "measurement_query": "aggregate__tpch__tuning_20261012_a_h_b_07__sqlstorm_tpch_25509__bushy__lfilr__92747bc0__sel_medium__grouped_count__slow3_20261014_d240_early",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+      "original_sha256": "fdc5e84e3ff9e082bbd32a8b65362b848c02173e0283547bec3dc4994e52288a",
+      "query_id": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count",
+      "predicate": "t.production_year BETWEEN 2003 AND 2011",
+      "semantic_tier": "high",
+      "calibration": {
+        "rows": 2528312,
+        "qualified_rows": 1028646
+      },
+      "content_sha256": "75b5a0e67a0322702120a806d192be27497bcb51f05ff0c52b7b192f2b86e1d6",
+      "measurement_content_sha256": "75b5a0e67a0322702120a806d192be27497bcb51f05ff0c52b7b192f2b86e1d6",
+      "measurement_csv": "auto_test/results/experiment_onoff_slow_three_selectivity_20261014_173749_t32.csv",
+      "measurement_csv_sha256": "fee273b27e42d2872ea87d8561a82e5da655d22ba69c35427788f0da349ebe61",
+      "measurement_query": "aggregate__job__sqlstorm_job_11914__bushy__ilrff__9a0ef4e8__sel_high__grouped_count__slow3_20261014_y2003_2011",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+      "original_sha256": "e858780681373c09c96763d991d488c822a86646776f28da504f99520532075d",
+      "query_id": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium",
+      "rewrite": "duplicate_orders_date_input",
+      "predicate": "orders.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1994-04-19'",
+      "semantic_tier": "medium",
+      "calibration": {
+        "rows": 75000000,
+        "qualified_rows": 26175855
+      },
+      "content_sha256": "22f056daaefb01a91454d8038421e5823d37ca77c976adffe757bfe04898b852",
+      "measurement_content_sha256": "22f056daaefb01a91454d8038421e5823d37ca77c976adffe757bfe04898b852",
+      "measurement_csv": "auto_test/results/experiment_onoff_custdist_lineitem_20261015_201159_t32.csv",
+      "measurement_csv_sha256": "4d9346f42536641eca2190e40f80883ae96239540cb1f82b427724865afbac85",
+      "measurement_query": "graph__tpch__th_real_custdist__left_deep__lrf__65a983cc__sel_medium__custdist_line_20261015_control",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_high",
+      "original_sha256": "103a42b0d9a832a98419f2dfdef09f8bc09a4ebae1d3d1907c473f39b18fe251",
+      "query_id": "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium",
+      "predicate": "l.l_shipdate BETWEEN DATE '1996-07-05' AND DATE '1996-12-31'",
+      "semantic_tier": "medium",
+      "calibration": {"rows": 300005811, "qualified_rows": 22439342},
+      "content_sha256": "ad7b9b33d02875d26c3de5aa42b6278c8b1bfe8ff5e3f68b977a6846b645013a",
+      "measurement_content_sha256": "ad7b9b33d02875d26c3de5aa42b6278c8b1bfe8ff5e3f68b977a6846b645013a",
+      "measurement_csv": "auto_test/results/experiment_onoff_tpch_sub075_20261015_214224_t32.csv",
+      "measurement_csv_sha256": "147412fcf7fb859c7d27e60780f1cfecd224b86704f5bdf547c7ad7f8ee5becb",
+      "measurement_query": "join__tpch__tuning_20261012_q_h_ld_05__sqlstorm_tpch_17751__left_deep__rfi__e00f7290__sel_medium__sub075_20261015_where_d180",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+      "original_sha256": "b9ab48bb1075ecb98a866a030d3968aff6c90fdbacef91a3d700d8c90d521b55",
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count",
+      "predicate": "o.o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1995-04-20'",
+      "semantic_tier": "low",
+      "calibration": {"rows": 75000000, "qualified_rows": 3432332},
+      "content_sha256": "7a06d04ae49bf5296516535a31de34a260e3a6eb89efac6621aeec952420750f",
+      "measurement_content_sha256": "7a06d04ae49bf5296516535a31de34a260e3a6eb89efac6621aeec952420750f",
+      "measurement_csv": "auto_test/results/experiment_onoff_tpch_sub075_20261015_214224_t32.csv",
+      "measurement_csv_sha256": "147412fcf7fb859c7d27e60780f1cfecd224b86704f5bdf547c7ad7f8ee5becb",
+      "measurement_query": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_low__grouped_count__sub075_20261015_where_d110_1995",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    },
+    {
+      "original_query": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count",
+      "original_sha256": "50fdfc86d43cb9378b26abb0cfaddd8e1219266bf0cf2f52b6d48f02e232cd1e",
+      "query_id": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count",
+      "predicate": "o.o_orderdate BETWEEN DATE '1992-01-01' AND DATE '1994-07-18'",
+      "semantic_tier": "medium",
+      "calibration": {"rows": 75000000, "qualified_rows": 28984933},
+      "content_sha256": "ad2a706d6ad222847a11fb46cbe7cb20288aefecd5042d4b6ba64c23f1f7afba",
+      "measurement_content_sha256": "ad2a706d6ad222847a11fb46cbe7cb20288aefecd5042d4b6ba64c23f1f7afba",
+      "measurement_csv": "auto_test/results/experiment_onoff_tpch_sub075_20261015_214224_t32.csv",
+      "measurement_csv_sha256": "147412fcf7fb859c7d27e60780f1cfecd224b86704f5bdf547c7ad7f8ee5becb",
+      "measurement_query": "aggregate__tpch__tpch_q08_market_share__right_deep__flrif__7d16aaba__sel_medium__grouped_count__sub075_20261015_where_d930_1992",
+      "decision_reason": "COST_OUTERYAN_BETTER"
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+# name: test/sql/optimizer/outer_yan/graph_aggregate.test
+# description: Aggregate-policy regression over the generated graph dataset,
+#              incorporating the query shapes from outerjoin_test/{count,
+#              aggregation} (tables R,S,T,K = R1..R4, the R.dst=S.src chain).
+#              COUNT(*) / SUM / GROUP BY over mixed INNER/LEFT/RIGHT/FULL OUTER
+#              joins, compared OuterYan-disabled vs enabled (symmetric difference
+#              = 0). Both configurations must use DuckDB's normal plan. These are
+#              the "complex" aggregate cases, kept separate from
+#              the full-output equivalence in graph_full_query.test. The base
+#              outerjoin_test queries (no nested subqueries) are reused under new
+#              names; their hand-written predicate-transfer rewrites (the *_r.sql
+#              oracles, which DO use EXISTS subqueries) are not embedded here.
+# group: [outer_yan]
+
+statement ok
+CREATE TABLE R AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R1.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE S AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R2.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE T AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R3.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE TABLE K AS SELECT DISTINCT * FROM read_csv('test/sql/optimizer/outer_yan/data/R4.csv', header=false, columns={'src':'BIGINT','dst':'BIGINT'});
+
+statement ok
+CREATE MACRO sym_diff(t1, t2) AS TABLE
+  SELECT (SELECT count(*) FROM (SELECT * FROM query_table(t1) EXCEPT ALL SELECT * FROM query_table(t2)))
+       + (SELECT count(*) FROM (SELECT * FROM query_table(t2) EXCEPT ALL SELECT * FROM query_table(t1)));
+
+# ----------------------------------------------------------------------------
+# count/q1 — INNER/INNER/RIGHT OUTER, COUNT(*) GROUP BY R.src.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE a_off AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src RIGHT OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE a_on AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src RIGHT OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+query I
+SELECT * FROM sym_diff('a_off', 'a_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# count/q3 — LEFT/LEFT/FULL OUTER, COUNT(*) GROUP BY R.src.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE a_off AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE a_on AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+query I
+SELECT * FROM sym_diff('a_off', 'a_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# count/q4 — INNER/FULL OUTER (3-rel), COUNT(*) GROUP BY R.src.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE a_off AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R INNER JOIN S ON R.dst = S.src FULL OUTER JOIN T ON S.dst = T.src GROUP BY R.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE a_on AS
+SELECT R.src AS v1, COUNT(*) AS cnt FROM R INNER JOIN S ON R.dst = S.src FULL OUTER JOIN T ON S.dst = T.src GROUP BY R.src;
+
+query I
+SELECT * FROM sym_diff('a_off', 'a_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# aggregation/q1 — INNER/INNER/RIGHT OUTER, SUM(K.dst) GROUP BY R.src.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE a_off AS
+SELECT R.src AS v1, sum(K.dst) AS total FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src RIGHT OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE a_on AS
+SELECT R.src AS v1, sum(K.dst) AS total FROM R INNER JOIN S ON R.dst = S.src INNER JOIN T ON S.dst = T.src RIGHT OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+query I
+SELECT * FROM sym_diff('a_off', 'a_on');
+----
+0
+
+# ----------------------------------------------------------------------------
+# aggregation/q3 — LEFT/LEFT/FULL OUTER, SUM(K.dst) GROUP BY R.src.
+# ----------------------------------------------------------------------------
+statement ok
+SET disabled_optimizers TO 'outer_yan';
+
+statement ok
+CREATE OR REPLACE TABLE a_off AS
+SELECT R.src AS v1, sum(K.dst) AS total FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+statement ok
+SET disabled_optimizers TO '';
+
+statement ok
+CREATE OR REPLACE TABLE a_on AS
+SELECT R.src AS v1, sum(K.dst) AS total FROM R LEFT OUTER JOIN S ON R.dst = S.src LEFT OUTER JOIN T ON S.dst = T.src FULL OUTER JOIN K ON T.dst = K.src GROUP BY R.src;
+
+query I
+SELECT * FROM sym_diff('a_off', 'a_on');
+----
+0
+
+statement ok
+SET disabled_optimizers TO ''

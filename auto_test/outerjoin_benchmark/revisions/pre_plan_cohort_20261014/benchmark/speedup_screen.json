@@ -1,0 +1,50 @@
+{
+  "revision": "graph-job-speedup-screen-20261008",
+  "policy_sha256": "d18b70219c0b7fc9566c96eee4ea87ac1cc6c66129a8c5430d35916c81d22e4d",
+  "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
+  "source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74",
+  "evidence_sources": [
+    {
+      "source": "auto_test/results/experiment_onoff_benchmark_20261002_213551_t32.csv",
+      "source_sha256": "1569a96c654dce5709c9d6774effe8cf233470de000dc77b958c465c01969f74"
+    },
+    {
+      "source": "auto_test/results/experiment_onoff_benchmark_20261005_201226_t32.csv",
+      "source_sha256": "500de2d1e0e98abbba9d68894d79d631c6654010e67df4b5c67ed2a43237f3f4"
+    },
+    {
+      "source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
+      "source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564"
+    }
+  ],
+  "rules": {
+    "graph-job-le-0.7-20261008": {
+      "families": [
+        "graph",
+        "job"
+      ],
+      "threshold": 0.7,
+      "inclusive": true,
+      "allow_unchecked": true,
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261007_161108_t32.csv",
+      "measurement_source_sha256": "11b2066209f9cbc098fa5faeaf477bc8a9a2d4dc50983ce5b51a37f1ed4d5564",
+      "frozen_query_count": 11
+    }
+  },
+  "rule_removed_counts": {
+    "graph-job-le-0.7-20261008": {
+      "graph": 2,
+      "job": 9
+    }
+  },
+  "removed_queries": 23,
+  "previously_retired_tpcds_queries": 8,
+  "counts": {
+    "graph": 177,
+    "tpch": 179,
+    "tpcds": 194,
+    "job": 168
+  },
+  "minimum_speedup": 0.5,
+  "note": "Frozen exact-SQL exclusions, not dynamic screening of new results. New Graph/JOB evidence has correctness checks disabled. No extra timeout/fallback removal; pending candidates are not measured results."
+}

@@ -1,0 +1,8 @@
+-- query_type: join; family: tpcds
+-- source: TPC-DS Q80
+-- semantic_filter: tpcds_store_date; tier=medium; store sales reporting period
+-- predicate: d.d_date BETWEEN DATE '1999-11-09' AND DATE '2001-06-21'
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT *
+FROM (store_returns sr FULL OUTER JOIN (date_dim d INNER JOIN (store s LEFT OUTER JOIN (store_sales ss RIGHT OUTER JOIN item i ON ss.ss_item_sk = i.i_item_sk) ON ss.ss_store_sk = s.s_store_sk) ON ss.ss_sold_date_sk = d.d_date_sk) ON ss.ss_item_sk = sr.sr_item_sk)
+WHERE d.d_date BETWEEN DATE '1999-11-09' AND DATE '2001-06-21';

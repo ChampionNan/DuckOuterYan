@@ -1,0 +1,116 @@
+{
+  "revision": "exact-query-retirements-20261009",
+  "archive_revision": "retired_queries_20261009",
+  "threshold": 0.6,
+  "inclusive": true,
+  "allow_unchecked": true,
+  "expected_counts_before": {
+    "graph": 177,
+    "job": 168,
+    "tpcds": 209,
+    "tpch": 179
+  },
+  "expected_counts_after": {
+    "graph": 175,
+    "job": 166,
+    "tpcds": 206,
+    "tpch": 176
+  },
+  "excluded": [
+    {
+      "query_id": "aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_low__global_count",
+      "family": "tpcds",
+      "path": "tpcds/aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_low__global_count.sql",
+      "sql_fingerprint": "ee84e011935df61b6dfa0cd4a6fb4a45bcb83f33f41f2ad660ffc7cf1ceac237",
+      "content_sha256": "2972faaa95d95014d87dc686095d9c9bfade20d6cdfcfbe9ea1a0b002c4ac091",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_163520_t32.csv",
+      "measurement_source_sha256": "70dfaa8f24dc77c7233bda91c5d267612a8ffcb4eb8178a0482ef3c02126a4a5"
+    },
+    {
+      "query_id": "aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_medium__global_count",
+      "family": "tpcds",
+      "path": "tpcds/aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_medium__global_count.sql",
+      "sql_fingerprint": "7a24aba85bd802e21e1dec9f3310155c8ccdbf768844f61b571d91a52132b82b",
+      "content_sha256": "e38df9a05bb570a351c4f6a4c49d92d01f18e8d8b2a8ae2391b49ad4f3189430",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_163520_t32.csv",
+      "measurement_source_sha256": "70dfaa8f24dc77c7233bda91c5d267612a8ffcb4eb8178a0482ef3c02126a4a5"
+    },
+    {
+      "query_id": "aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_high__global_count",
+      "family": "tpcds",
+      "path": "tpcds/aggregate__tpcds__sqlstorm_tpcds_28643__bushy__rifli__e3f69df3__sel_high__global_count.sql",
+      "sql_fingerprint": "6af4b662a506d5db7d2c5d2f26a6eb6a7fca594482fa9d0ee2e31df372ffaeb0",
+      "content_sha256": "2795a90cc498e6b641d4dad96868e40b962edf649d1c61a2861f901ab13ced85",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_163520_t32.csv",
+      "measurement_source_sha256": "70dfaa8f24dc77c7233bda91c5d267612a8ffcb4eb8178a0482ef3c02126a4a5"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_count",
+      "family": "graph",
+      "path": "graph/aggregate__graph__graph_star4_converging__left_deep__fil__91685ddc__inputcap1__sel_low__grouped_count.sql",
+      "sql_fingerprint": "0f26c3ab1e1f6b825f3ec0fa7e08b709d66321cca329a08932751539d74e4338",
+      "content_sha256": "dfa0d8023f70e1a696270589c350ee0fad8bfefe42262a37b1323d008bf1588c",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_count",
+      "family": "job",
+      "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_high__grouped_count.sql",
+      "sql_fingerprint": "fde79f170a719a2d0777ec217506831774c4fdef46f09469971852759054b71b",
+      "content_sha256": "d97a42c6969425bad19b6a05d5309265c5b1455fe57d944b84bc5c8484e6ccd2",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_count",
+      "family": "job",
+      "path": "job/aggregate__job__job_10a_cast_credits__right_deep__rlif__87f83502__sel_low__grouped_count.sql",
+      "sql_fingerprint": "6b05cefae87285cde9b9d3a1d692b8d82c41c87bdceb0ec365dc4a2fd44c1da9",
+      "content_sha256": "b7ac83320ee499b7a073a729457a35f2ef12a2b2c2464e01b311f09038e70581",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_count",
+      "family": "tpch",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_high__grouped_count.sql",
+      "sql_fingerprint": "833609eec860c39d1d04cd2fd069319acd5a2992312087aafd1747c15874bf17",
+      "content_sha256": "6834e5cfd2166e11a1a1f05817f963a46869c37e33b4bf8d1377db3ccfe4d134",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_count",
+      "family": "tpch",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_low__grouped_count.sql",
+      "sql_fingerprint": "ddce274781f8b2461d1da6aaf2fe1fe42b2c39aff68ceb954cba522c6a6a77fa",
+      "content_sha256": "8a9473698465498d0b6f52f657f3cdb52f74b5967235bbb2012cd2fccd84cecb",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_count",
+      "family": "tpch",
+      "path": "tpch/aggregate__tpch__tpch_q05_region_sales__bushy__rlif__776f0b3d__sel_medium__grouped_count.sql",
+      "sql_fingerprint": "6bc53193cd03f82061c61d7dbaf5c6b5eb1f6383ab2b3b9782f0a3849f138663",
+      "content_sha256": "c0fdb76a276ba9f780a530f9e3502af4f424d3592821b98bf847c56675c64e59",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_172442_t32.csv",
+      "measurement_source_sha256": "43cdc714431bfea8f002061b35deb24d386e20f2fc88726872035032ab740755"
+    },
+    {
+      "query_id": "aggregate__graph__graph_star5_converging__right_deep__rlif__aa6e2644__inputcap1__sel_low__global_count",
+      "family": "graph",
+      "path": "graph/aggregate__graph__graph_star5_converging__right_deep__rlif__aa6e2644__inputcap1__sel_low__global_count.sql",
+      "sql_fingerprint": "3f1c1b96dd98faf8db8577b8e01b2dbcacbe06857d1486dc84b081edc5a74ffb",
+      "content_sha256": "092f6d988a466e89e9e7238ee8db70c7136ccb2b75c8450da30dd0dc51e4d0f5",
+      "measurement_source": "auto_test/results/experiment_onoff_benchmark_20261008_201332_t32.csv",
+      "measurement_source_sha256": "96a4e2a2b1feafd6d5814dcffc45f3d91d40f5451f47ae2df2112bded84f45c1",
+      "retirement_reason": "user_requested_exact_short_query_removal",
+      "retirement_date": "20261009"
+    }
+  ],
+  "previous_policy": "sources/retirements_20261008.json",
+  "selection": "Preserve the nine frozen 20261008 removals and additionally retire exactly the Graph star5/right-deep/low/global COUNT query at user request after reviewing its 8.52 ms versus 17.44 ms five-run medians. No dynamic threshold is applied to other new measurements. Short duration and historical timing changes motivate the request; no within-run variance estimate is available.",
+  "representation": "frozen_workload_definition"
+}

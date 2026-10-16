@@ -1,0 +1,8 @@
+-- query_type: join; family: job
+-- source: SQLStorm v1.0/job/queries/18930.sql
+-- semantic_filter: job_release_year; tier=medium; films and episodes released since a given year
+-- predicate: m.production_year >= 2008
+-- selectivity_scope: base-entity calibration; not a joined-output percentage
+SELECT *
+FROM ((title m FULL OUTER JOIN aka_title t ON t.movie_id = m.id) RIGHT OUTER JOIN (cast_info c LEFT OUTER JOIN aka_name a ON a.person_id = c.person_id) ON c.movie_id = t.movie_id)
+WHERE m.production_year >= 2008;

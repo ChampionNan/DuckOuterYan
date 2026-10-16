@@ -1,0 +1,1358 @@
+{
+  "revision": "balanced-screened-20261002",
+  "calibration_policy": "Three base-entity bands (0,5%), [5,40%), [40,60%]; frozen local counts, mandatory target-server audit. This is a historically screened candidate corpus.",
+  "source_adaptations": {
+    "sqlstorm_tpcds": "The source examples use year 2023, outside this TPC-DS sales population. Calendar windows are anchored in the generated sales period (2000), rather than preserving an empty out-of-domain year.",
+    "graph": "Vertex intervals are synthetic graph cohorts, not business filters. R1 retains the three primary bands; all other graph inputs have stricter tier-paired source-vertex caps applied before the join. Audit marginal fractions per input, not an independence-based product or joined-output fraction.",
+    "job_10a": "Use the source title/cast_info/role_type/movie_companies/company_name connected subgraph. Never replace char_name.id = cast_info.person_role_id with the unrelated role_id; the local inferred DOUBLE person_role_id would otherwise require a join-key cast outside the current DP envelope."
+  },
+  "tiers": [
+    {
+      "name": "low",
+      "lower_bound": 0,
+      "upper_bound": 0.05,
+      "include_lower": false,
+      "include_upper": false,
+      "target_fraction": 0.03
+    },
+    {
+      "name": "medium",
+      "lower_bound": 0.05,
+      "upper_bound": 0.4,
+      "include_lower": true,
+      "include_upper": false,
+      "target_fraction": 0.3
+    },
+    {
+      "name": "high",
+      "lower_bound": 0.4,
+      "upper_bound": 0.6,
+      "include_lower": true,
+      "include_upper": true,
+      "target_fraction": 0.55
+    }
+  ],
+  "profiles": {
+    "tpch_order_date": {
+      "family": "tpch",
+      "calibration_from": "orders o",
+      "column": "o.o_orderdate",
+      "kind": "date_window",
+      "meaning": "order booking period",
+      "pivot": "1995-03-15",
+      "bounds": [
+        35.0,
+        360.0,
+        660.0
+      ],
+      "calibration": {
+        "n": 1500000,
+        "nn": 1500000,
+        "min_value": "1992-01-01",
+        "max_value": "1998-08-02",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          44494,
+          450391,
+          824795
+        ],
+        "observed_fractions": [
+          0.029662666666666667,
+          0.3002606666666667,
+          0.5498633333333334
+        ]
+      }
+    },
+    "tpch_ship_date": {
+      "family": "tpch",
+      "calibration_from": "lineitem l",
+      "column": "l.l_shipdate",
+      "kind": "date_window",
+      "meaning": "shipment period",
+      "pivot": "1995-07-01",
+      "bounds": [
+        35.0,
+        360.0,
+        660.0
+      ],
+      "calibration": {
+        "n": 6001215,
+        "nn": 6001215,
+        "min_value": "1992-01-02",
+        "max_value": "1998-12-01",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          177569,
+          1800498,
+          3300313
+        ],
+        "observed_fractions": [
+          0.02958884159291077,
+          0.3000222454952872,
+          0.5499408036539267
+        ]
+      }
+    },
+    "tpch_product_price": {
+      "family": "tpch",
+      "calibration_from": "part p",
+      "column": "p.p_retailprice",
+      "kind": "upper",
+      "meaning": "product retail-price budget",
+      "pivot": null,
+      "bounds": [
+        1009.0,
+        1299.29,
+        1549.54
+      ],
+      "calibration": {
+        "n": 200000,
+        "nn": 200000,
+        "min_value": "901.00",
+        "max_value": "2098.99",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          6004,
+          60000,
+          110000
+        ],
+        "observed_fractions": [
+          0.03002,
+          0.3,
+          0.55
+        ]
+      }
+    },
+    "tpch_supply_cost": {
+      "family": "tpch",
+      "calibration_from": "partsupp ps",
+      "column": "ps.ps_supplycost",
+      "kind": "upper",
+      "meaning": "supplier procurement-cost budget",
+      "pivot": null,
+      "bounds": [
+        31.21,
+        300.97,
+        550.19
+      ],
+      "calibration": {
+        "n": 800000,
+        "nn": 800000,
+        "min_value": "1.00",
+        "max_value": "1000.00",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          24004,
+          240001,
+          440001
+        ],
+        "observed_fractions": [
+          0.030005,
+          0.30000125,
+          0.55000125
+        ]
+      }
+    },
+    "tpch_stock_quantity": {
+      "family": "tpch",
+      "calibration_from": "partsupp ps",
+      "column": "ps.ps_availqty",
+      "kind": "upper",
+      "meaning": "available-stock replenishment threshold",
+      "pivot": null,
+      "bounds": [
+        301.0,
+        3011.0,
+        5501.0
+      ],
+      "calibration": {
+        "n": 800000,
+        "nn": 800000,
+        "min_value": 1,
+        "max_value": 9999,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          23965,
+          240019,
+          439976
+        ],
+        "observed_fractions": [
+          0.02995625,
+          0.30002375,
+          0.54997
+        ]
+      }
+    },
+    "tpch_customer_balance": {
+      "family": "tpch",
+      "calibration_from": "customer c",
+      "column": "c.c_acctbal",
+      "kind": "upper",
+      "meaning": "customer account-balance ceiling",
+      "pivot": null,
+      "bounds": [
+        -673.51,
+        2292.68,
+        5033.57
+      ],
+      "calibration": {
+        "n": 150000,
+        "nn": 150000,
+        "min_value": "-999.99",
+        "max_value": "9999.99",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          4500,
+          45000,
+          82500
+        ],
+        "observed_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ]
+      }
+    },
+    "tpch_supplier_balance": {
+      "family": "tpch",
+      "calibration_from": "supplier s",
+      "column": "s.s_acctbal",
+      "kind": "upper",
+      "meaning": "supplier account-balance ceiling",
+      "pivot": null,
+      "bounds": [
+        -686.32,
+        2326.92,
+        5091.3
+      ],
+      "calibration": {
+        "n": 10000,
+        "nn": 10000,
+        "min_value": "-998.22",
+        "max_value": "9999.72",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          300,
+          3000,
+          5500
+        ],
+        "observed_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ]
+      }
+    },
+    "tpcds_web_date": {
+      "family": "tpcds",
+      "calibration_from": "web_sales ws LEFT JOIN date_dim d ON ws.ws_sold_date_sk = d.d_date_sk",
+      "column": "d.d_date",
+      "kind": "date_window",
+      "meaning": "web sales reporting period",
+      "pivot": "2000-08-30",
+      "bounds": [
+        20.0,
+        286.0,
+        480.0
+      ],
+      "calibration": {
+        "n": 719384,
+        "nn": 719199,
+        "min_value": "1998-01-02",
+        "max_value": "2003-01-02",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          21132,
+          216036,
+          396056
+        ],
+        "observed_fractions": [
+          0.02937513205742691,
+          0.30030692926170166,
+          0.5505488028646731
+        ]
+      }
+    },
+    "tpcds_web_quantity": {
+      "family": "tpcds",
+      "calibration_from": "web_sales ws",
+      "column": "ws.ws_quantity",
+      "kind": "upper",
+      "meaning": "web sales order-quantity ceiling",
+      "pivot": null,
+      "bounds": [
+        3.0,
+        30.0,
+        55.0
+      ],
+      "calibration": {
+        "n": 719384,
+        "nn": 719211,
+        "min_value": 1,
+        "max_value": 100,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          21868,
+          216066,
+          395967
+        ],
+        "observed_fractions": [
+          0.030398229596432503,
+          0.30034863160704156,
+          0.5504250859068314
+        ]
+      }
+    },
+    "tpcds_store_date": {
+      "family": "tpcds",
+      "calibration_from": "store_sales ss LEFT JOIN date_dim d ON ss.ss_sold_date_sk = d.d_date_sk",
+      "column": "d.d_date",
+      "kind": "date_window",
+      "meaning": "store sales reporting period",
+      "pivot": "2000-08-30",
+      "bounds": [
+        21.0,
+        295.0,
+        512.0
+      ],
+      "calibration": {
+        "n": 2880404,
+        "nn": 2750554,
+        "min_value": "1998-01-02",
+        "max_value": "2003-01-02",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          85963,
+          862424,
+          1583801
+        ],
+        "observed_fractions": [
+          0.029844077428027457,
+          0.29941077709932357,
+          0.5498537705127475
+        ]
+      }
+    },
+    "tpcds_store_quantity": {
+      "family": "tpcds",
+      "calibration_from": "store_sales ss",
+      "column": "ss.ss_quantity",
+      "kind": "upper",
+      "meaning": "store sales order-quantity ceiling",
+      "pivot": null,
+      "bounds": [
+        3.0,
+        31.0,
+        58.0
+      ],
+      "calibration": {
+        "n": 2880404,
+        "nn": 2750566,
+        "min_value": 1,
+        "max_value": 100,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          82763,
+          851989,
+          1594250
+        ],
+        "observed_fractions": [
+          0.02873312215925266,
+          0.2957880214025533,
+          0.5534813866388187
+        ]
+      }
+    },
+    "tpcds_catalog_date": {
+      "family": "tpcds",
+      "calibration_from": "catalog_sales cs LEFT JOIN date_dim d ON cs.cs_sold_date_sk = d.d_date_sk",
+      "column": "d.d_date",
+      "kind": "date_window",
+      "meaning": "catalog sales reporting period",
+      "pivot": "2000-03-11",
+      "bounds": [
+        46.0,
+        257.0,
+        515.0
+      ],
+      "calibration": {
+        "n": 1441548,
+        "nn": 1434357,
+        "min_value": "1998-01-01",
+        "max_value": "2003-01-08",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          42920,
+          432931,
+          792235
+        ],
+        "observed_fractions": [
+          0.029773548990390884,
+          0.30032367982196917,
+          0.5495724041100262
+        ]
+      }
+    },
+    "tpcds_catalog_quantity": {
+      "family": "tpcds",
+      "calibration_from": "catalog_sales cs",
+      "column": "cs.cs_quantity",
+      "kind": "upper",
+      "meaning": "catalog sales order-quantity ceiling",
+      "pivot": null,
+      "bounds": [
+        3.0,
+        30.0,
+        55.0
+      ],
+      "calibration": {
+        "n": 1441548,
+        "nn": 1434466,
+        "min_value": 1,
+        "max_value": 100,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          42472,
+          430572,
+          789472
+        ],
+        "observed_fractions": [
+          0.029462771964582517,
+          0.298687244545447,
+          0.5476557145513018
+        ]
+      }
+    },
+    "tpcds_inventory_stock": {
+      "family": "tpcds",
+      "calibration_from": "inventory inv",
+      "column": "inv.inv_quantity_on_hand",
+      "kind": "upper",
+      "meaning": "warehouse on-hand stock threshold",
+      "pivot": null,
+      "bounds": [
+        31.0,
+        315.0,
+        579.0
+      ],
+      "calibration": {
+        "n": 11745000,
+        "nn": 11158087,
+        "min_value": 0,
+        "max_value": 1000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          356175,
+          3522255,
+          6463518
+        ],
+        "observed_fractions": [
+          0.03032567049808429,
+          0.2998939974457216,
+          0.5503208173690932
+        ]
+      }
+    },
+    "tpcds_return_quantity": {
+      "family": "tpcds",
+      "calibration_from": "store_returns sr",
+      "column": "sr.sr_return_quantity",
+      "kind": "lower",
+      "meaning": "minimum number of returned units",
+      "pivot": null,
+      "bounds": [
+        -78.0,
+        -34.0,
+        -16.0
+      ],
+      "calibration": {
+        "n": 287867,
+        "nn": 277672,
+        "min_value": 1,
+        "max_value": 100,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          8269,
+          85843,
+          158407
+        ],
+        "observed_fractions": [
+          0.028725070952905336,
+          0.2982036843403377,
+          0.5502784271903344
+        ]
+      }
+    },
+    "tpcds_item_price": {
+      "family": "tpcds",
+      "calibration_from": "item i",
+      "column": "i.i_current_price",
+      "kind": "upper",
+      "meaning": "item current-price budget",
+      "pivot": null,
+      "bounds": [
+        0.35,
+        2.57,
+        4.65
+      ],
+      "calibration": {
+        "n": 18000,
+        "nn": 17955,
+        "min_value": "0.09",
+        "max_value": "99.99",
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          541,
+          5414,
+          9900
+        ],
+        "observed_fractions": [
+          0.030055555555555554,
+          0.30077777777777776,
+          0.55
+        ]
+      }
+    },
+    "job_release_year": {
+      "family": "job",
+      "calibration_from": "title t",
+      "column": "t.production_year",
+      "kind": "lower",
+      "meaning": "films and episodes released since a given year",
+      "pivot": null,
+      "bounds": [
+        -2013.0,
+        -2008.0,
+        -2001.0
+      ],
+      "calibration": {
+        "n": 2528312,
+        "nn": 2456218,
+        "min_value": 1880.0,
+        "max_value": 2019.0,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          67342,
+          784926,
+          1381453
+        ],
+        "observed_fractions": [
+          0.026635162116067954,
+          0.31045456415189265,
+          0.5463934039786229
+        ]
+      }
+    },
+    "graph_source_range": {
+      "family": "graph",
+      "calibration_from": "R1",
+      "column": "R1.src",
+      "kind": "upper",
+      "meaning": "contiguous source-vertex interval",
+      "pivot": null,
+      "bounds": [
+        2.0,
+        83.0,
+        306.0
+      ],
+      "calibration": {
+        "n": 24186,
+        "nn": 24186,
+        "min_value": 1,
+        "max_value": 7604,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          685,
+          7256,
+          13299
+        ],
+        "observed_fractions": [
+          0.028322169850326637,
+          0.3000082692466716,
+          0.5498635574299181
+        ]
+      }
+    },
+    "graph_aux_source_range": {
+      "family": "graph",
+      "calibration_from": "R2",
+      "column": "R2.src",
+      "kind": "upper",
+      "meaning": "additional pre-join source-vertex cap on every non-anchor graph relation",
+      "bounds": [
+        10,
+        20,
+        40
+      ],
+      "tiers": [
+        {
+          "name": "low",
+          "lower_bound": 0.05,
+          "upper_bound": 0.1,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.09
+        },
+        {
+          "name": "medium",
+          "lower_bound": 0.1,
+          "upper_bound": 0.2,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.15
+        },
+        {
+          "name": "high",
+          "lower_bound": 0.2,
+          "upper_bound": 0.3,
+          "include_lower": true,
+          "include_upper": false,
+          "target_fraction": 0.21
+        }
+      ],
+      "calibration": {
+        "dataset": "Bitcoin Alpha; independently verify every R2..R5 copy on cpu9",
+        "n": 24186,
+        "qualified_rows": [
+          2256,
+          3471,
+          5126
+        ],
+        "observed_fractions": [
+          0.09327710245596627,
+          0.14351277598610768,
+          0.21194079219383113
+        ]
+      }
+    },
+    "tpch_part_color": {
+      "family": "tpch",
+      "calibration_from": "part p",
+      "column": "p.p_name",
+      "kind": "predicates",
+      "meaning": "TPC-H Q9 product-name color search, expanded from a shade to a color palette",
+      "predicates": [
+        "{column} LIKE '%forest green%'",
+        "{column} LIKE '%green%'",
+        "({column} LIKE '%green%' OR {column} LIKE '%blue%' OR {column} LIKE '%red%' OR {column} LIKE '%yellow%' OR {column} LIKE '%orange%' OR {column} LIKE '%purple%' OR {column} LIKE '%white%' OR {column} LIKE '%black%' OR {column} LIKE '%pink%' OR {column} LIKE '%brown%' OR {column} LIKE '%gray%')"
+      ],
+      "calibration": {
+        "n": 200000,
+        "nn": 200000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          89,
+          10664,
+          89330
+        ],
+        "observed_fractions": [
+          0.000445,
+          0.05332,
+          0.44665
+        ]
+      }
+    },
+    "job_person_name": {
+      "family": "job",
+      "calibration_from": "name n",
+      "column": "n.name",
+      "kind": "predicates",
+      "meaning": "JOB 17a person-name prefix search",
+      "predicates": [
+        "{column} LIKE 'Ba%'",
+        "{column} LIKE 'B%'",
+        "({column} LIKE 'A%' OR {column} LIKE 'B%' OR {column} LIKE 'C%' OR {column} LIKE 'D%' OR {column} LIKE 'E%' OR {column} LIKE 'F%' OR {column} LIKE 'G%' OR {column} LIKE 'H%' OR {column} LIKE 'I%' OR {column} LIKE 'J%' OR {column} LIKE 'K%' OR {column} LIKE 'L%')"
+      ],
+      "calibration": {
+        "n": 4167491,
+        "nn": 4167491,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          82278,
+          343399,
+          2244663
+        ],
+        "observed_fractions": [
+          0.019742814081662084,
+          0.08239945809121123,
+          0.5386125608909533
+        ]
+      }
+    },
+    "job_episode_range": {
+      "family": "job",
+      "calibration_from": "title t",
+      "column": "t.episode_nr",
+      "kind": "predicates",
+      "meaning": "JOB 16a episode-number interval",
+      "predicates": [
+        "{column} >= 50 AND {column} < 100",
+        "{column} >= 10 AND {column} < 100",
+        "{column} >= 1 AND {column} <= 300"
+      ],
+      "calibration": {
+        "n": 2528312,
+        "nn": 1102414,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          68245,
+          461420,
+          1025331
+        ],
+        "observed_fractions": [
+          0.026992317403864714,
+          0.18250121029366628,
+          0.40553974351266775
+        ]
+      }
+    },
+    "job_release_period": {
+      "family": "job",
+      "calibration_from": "title t",
+      "column": "t.production_year",
+      "kind": "predicates",
+      "meaning": "JOB 11a/21a release-year interval",
+      "predicates": [
+        "{column} BETWEEN 1999 AND 2000",
+        "{column} BETWEEN 1950 AND 2000",
+        "{column} BETWEEN 1950 AND 2006"
+      ],
+      "calibration": {
+        "n": 2528312,
+        "nn": 2456218,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          103577,
+          910581,
+          1387543
+        ],
+        "observed_fractions": [
+          0.04096685852062562,
+          0.36015373102686693,
+          0.5488021256870197
+        ]
+      }
+    },
+    "tpcds_return_reason": {
+      "family": "tpcds",
+      "calibration_from": "store_returns sr LEFT JOIN reason r ON sr.sr_reason_sk=r.r_reason_sk",
+      "column": "r.r_reason_desc",
+      "kind": "predicates",
+      "meaning": "TPC-DS Q93 return-reason categories",
+      "predicates": [
+        "{column} = 'reason 28'",
+        "({column} = 'reason 28' OR {column} = 'Did not fit' OR {column} = 'Wrong size' OR {column} = 'Did not like the color' OR {column} = 'Did not like the make' OR {column} = 'Did not like the model' OR {column} = 'Not the product that was ordred' OR {column} = 'Does not work with a product that I have')",
+        "({column} = 'reason 28' OR {column} = 'Did not fit' OR {column} = 'Wrong size' OR {column} = 'Did not like the color' OR {column} = 'Did not like the make' OR {column} = 'Did not like the model' OR {column} = 'Not the product that was ordred' OR {column} = 'Does not work with a product that I have' OR {column} = 'Did not get it on time' OR {column} = 'Did not like the warranty' OR {column} = 'Found a better extended warranty in a store' OR {column} = 'Found a better price in a store' OR {column} = 'Gift exchange' OR {column} = 'Lost my job' OR {column} = 'No service location in my area' OR {column} = 'Not working any more' OR {column} = 'Package was damaged' OR {column} = 'Parts missing' OR {column} = 'Stopped working' OR {column} = 'duplicate purchase' OR {column} = 'unauthoized purchase')"
+      ],
+      "calibration": {
+        "n": 287867,
+        "nn": 277759,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          7917,
+          63249,
+          166148
+        ],
+        "observed_fractions": [
+          0.027502284040893884,
+          0.2197160494256028,
+          0.5771693177752226
+        ]
+      }
+    },
+    "tpch_stock_available": {
+      "family": "tpch",
+      "calibration_from": "partsupp ps",
+      "column": "ps.ps_availqty",
+      "kind": "predicates",
+      "meaning": "SQLStorm available-stock minimum",
+      "predicates": [
+        "{column} > 9700",
+        "{column} > 7000",
+        "{column} > 4500"
+      ],
+      "calibration": {
+        "n": 800000,
+        "nn": 800000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          23966,
+          240012,
+          440290
+        ],
+        "observed_fractions": [
+          0.0299575,
+          0.300015,
+          0.5503625
+        ]
+      }
+    },
+    "tpch_order_deadline": {
+      "family": "tpch",
+      "calibration_from": "orders o",
+      "column": "o.o_orderdate",
+      "kind": "predicates",
+      "meaning": "TPC-H Q3 orders booked before a reporting deadline",
+      "predicates": [
+        "{column} < DATE '1992-03-15'",
+        "{column} < DATE '1994-01-01'",
+        "{column} < DATE '1995-03-15'"
+      ],
+      "calibration": {
+        "n": 1500000,
+        "nn": 1500000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          46128,
+          453734,
+          727305
+        ],
+        "observed_fractions": [
+          0.030752,
+          0.30248933333333333,
+          0.48487
+        ]
+      }
+    },
+    "tpch_q05_period": {
+      "family": "tpch",
+      "calibration_from": "orders o",
+      "column": "o.o_orderdate",
+      "kind": "predicates",
+      "meaning": "TPC-H Q5 order reporting period",
+      "predicates": [
+        "{column} >= DATE '1994-01-01' AND {column} < DATE '1994-03-15'",
+        "{column} >= DATE '1994-01-01' AND {column} < DATE '1995-01-01'",
+        "{column} >= DATE '1992-01-01' AND {column} < DATE '1995-08-01'"
+      ],
+      "calibration": {
+        "n": 1500000,
+        "nn": 1500000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          45542,
+          227597,
+          814425
+        ],
+        "observed_fractions": [
+          0.030361333333333334,
+          0.15173133333333333,
+          0.54295
+        ]
+      }
+    },
+    "tpch_q07_period": {
+      "family": "tpch",
+      "calibration_from": "lineitem l",
+      "column": "l.l_shipdate",
+      "kind": "predicates",
+      "meaning": "TPC-H Q7 shipment reporting period",
+      "predicates": [
+        "{column} BETWEEN DATE '1995-01-01' AND DATE '1995-03-15'",
+        "{column} BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'",
+        "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'"
+      ],
+      "calibration": {
+        "n": 6001215,
+        "nn": 6001215,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          184911,
+          1828450,
+          3271305
+        ],
+        "observed_fractions": [
+          0.030812260517245258,
+          0.30467996897294963,
+          0.5451071158090487
+        ]
+      }
+    },
+    "tpch_q08_period": {
+      "family": "tpch",
+      "calibration_from": "orders o",
+      "column": "o.o_orderdate",
+      "kind": "predicates",
+      "meaning": "TPC-H Q8 order reporting period",
+      "predicates": [
+        "{column} BETWEEN DATE '1995-01-01' AND DATE '1995-03-15'",
+        "{column} BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'",
+        "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'"
+      ],
+      "calibration": {
+        "n": 1500000,
+        "nn": 1500000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          46577,
+          457263,
+          817902
+        ],
+        "observed_fractions": [
+          0.031051333333333334,
+          0.304842,
+          0.545268
+        ]
+      }
+    },
+    "sqlstorm_shipment_period": {
+      "family": "tpch",
+      "calibration_from": "lineitem l",
+      "column": "l.l_shipdate",
+      "kind": "predicates",
+      "meaning": "SQLStorm 17751 shipment reporting period",
+      "predicates": [
+        "{column} BETWEEN DATE '1997-01-01' AND DATE '1997-03-15'",
+        "{column} BETWEEN DATE '1997-01-01' AND DATE '1997-12-31'",
+        "{column} BETWEEN DATE '1994-06-01' AND DATE '1997-12-31'"
+      ],
+      "calibration": {
+        "n": 6001215,
+        "nn": 6001215,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          185389,
+          911395,
+          3272675
+        ],
+        "observed_fractions": [
+          0.030891911054678093,
+          0.1518684133129708,
+          0.5453354029142432
+        ]
+      }
+    },
+    "sqlstorm_order_period": {
+      "family": "tpch",
+      "calibration_from": "orders o",
+      "column": "o.o_orderdate",
+      "kind": "predicates",
+      "meaning": "SQLStorm 25509 order reporting period",
+      "predicates": [
+        "{column} BETWEEN DATE '1996-01-01' AND DATE '1996-03-15'",
+        "{column} BETWEEN DATE '1996-01-01' AND DATE '1996-12-31'",
+        "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'"
+      ],
+      "calibration": {
+        "n": 1500000,
+        "nn": 1500000,
+        "target_fractions": [
+          0.03,
+          0.3,
+          0.55
+        ],
+        "qualified_rows": [
+          46671,
+          228626,
+          817902
+        ],
+        "observed_fractions": [
+          0.031114,
+          0.15241733333333332,
+          0.545268
+        ]
+      }
+    }
+  },
+  "seeds": {
+    "tpch_q05_region_sales": {
+      "profile": "tpch_q05_period",
+      "column": "o.o_orderdate",
+      "default_tier": "low",
+      "source_location": "extension/tpch/dbgen/queries/q05.sql",
+      "source_sha256": "495def7debb02ab1def31da07fbc88b4796813b754832ce15d54a35dcb104577",
+      "adaptation": "Retain Q5 half-open order-date interval, with its original 1994 calendar-year range in the middle band. Isolate this predicate rather than compounding it with the region filter."
+    },
+    "tpch_q09_supply_chain": {
+      "profile": "tpch_part_color",
+      "column": "p.p_name",
+      "default_tier": "medium",
+      "source_location": "extension/tpch/dbgen/queries/q09.sql",
+      "source_sha256": "af90ccbe30ece396209e6627c10c0086ed54208100357922ee404de8bb867e56",
+      "adaptation": "Retain Q9 p_name LIKE color matching; vary a shade, one color, and an explicit color palette. Do not substitute an unrelated price predicate."
+    },
+    "tpcds_q40_catalog_returns": {
+      "profile": "tpcds_catalog_date",
+      "column": "d.d_date",
+      "default_tier": "low",
+      "source_location": "extension/tpcds/dsdgen/queries/40.sql",
+      "source_sha256": "d30c0576b8e7de9b43f26f1fbd92381ed9eacbb2c0ad7ed343d651afba552fe1",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "tpcds_q72_fulfillment": {
+      "profile": "tpcds_inventory_stock",
+      "column": "inv.inv_quantity_on_hand",
+      "default_tier": "medium",
+      "source_location": "extension/tpcds/dsdgen/queries/72.sql",
+      "source_sha256": "8646866ad7d1ba9e888b70c7f5ccf6480f8085475381b8ca747c85c0c409a744",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "job_10a_cast_credits": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "low",
+      "source_location": "benchmark/imdb_plan_cost/queries/10a.sql",
+      "source_sha256": "dcffd7d004228d834af7bf332e365837cc5a3fb60fb3859a55235da6d1455a89",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "job_17a_movie_annotations": {
+      "profile": "job_person_name",
+      "column": "n.name",
+      "default_tier": "medium",
+      "source_location": "benchmark/imdb_plan_cost/queries/17a.sql",
+      "source_sha256": "a52d479958ec18149f197df005f183f8cee35712398524f344b9751c9dce9fe2",
+      "adaptation": "Retain JOB 17a name LIKE prefix search; broaden the source B prefix to an explicit A–M prefix set and narrow it to Ba."
+    },
+    "sqlstorm_tpch_19222": {
+      "profile": "tpch_stock_available",
+      "column": "ps.ps_availqty",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpch/19222.sql",
+      "source_sha256": "e15dda85b9d7641d92af003cee11263536477bec48d46f9ceb773f19bdeeaed5",
+      "adaptation": "The source has no WHERE; use its projected available-stock quantity to define an explicitly added minimum-stock cohort, following SQLStorm 15031. This is an added business filter, not an original source predicate."
+    },
+    "sqlstorm_tpcds_10809": {
+      "profile": "tpcds_store_date",
+      "column": "d.d_date",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/10809.sql",
+      "source_sha256": "a56c40177d28377c0be71322edce5973456095cbd730eb18f5f82460690090db",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "sqlstorm_job_15596": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/job/15596.sql",
+      "source_sha256": "f5d4cd1e5c846800351c12a8953bb5b72e9e0526c8a9c005e8234b31a80830de",
+      "adaptation": "The source has no WHERE and orders by production_year; add a release-year cohort on that same source attribute, using the year-threshold convention from the other SQLStorm JOB queries."
+    },
+    "tpch_q03_order_revenue": {
+      "profile": "tpch_order_deadline",
+      "column": "o.o_orderdate",
+      "default_tier": "low",
+      "source_location": "extension/tpch/dbgen/queries/q03.sql",
+      "source_sha256": "1f120d790d4914652cbf3fbc0fa28ed6573e4adee61ae7164a8c3d99b7c6b7fe",
+      "adaptation": "Retain Q3 order-date < deadline. Use the original March 15 1995 deadline for the broad cohort and earlier deadlines for narrower cohorts."
+    },
+    "tpch_q07_trade_flow": {
+      "profile": "tpch_q07_period",
+      "column": "l.l_shipdate",
+      "default_tier": "medium",
+      "source_location": "extension/tpch/dbgen/queries/q07.sql",
+      "source_sha256": "5e8077121a42ca8ebf5ff54e5842a614e839da945b0331e3b63d9ccad2361201",
+      "adaptation": "Retain the source calendar BETWEEN predicate; the middle band uses the source reporting years, and narrow/broad bands vary those endpoints."
+    },
+    "tpch_q08_market_share": {
+      "profile": "tpch_q08_period",
+      "column": "o.o_orderdate",
+      "default_tier": "high",
+      "source_location": "extension/tpch/dbgen/queries/q08.sql",
+      "source_sha256": "948338f54b97a2c49aea15f8c4d609ecf244d00ad7754edcea60b4748504a1ce",
+      "adaptation": "Retain the source calendar BETWEEN predicate; the middle band uses the source reporting years, and narrow/broad bands vary those endpoints."
+    },
+    "tpcds_q05_web_channel": {
+      "profile": "tpcds_web_date",
+      "column": "d.d_date",
+      "default_tier": "low",
+      "source_location": "extension/tpcds/dsdgen/queries/05.sql",
+      "source_sha256": "228fb8f1a69c0899ced8c696d0da63ea1ac712eba99c77d85b490dd76038e84f",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "tpcds_q80_store_channel": {
+      "profile": "tpcds_store_date",
+      "column": "d.d_date",
+      "default_tier": "medium",
+      "source_location": "extension/tpcds/dsdgen/queries/80.sql",
+      "source_sha256": "b05ac664972bde94ddd71accee4f7b90b43e090c3f349a08c2eb3fcb644b6fee",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "tpcds_q93_return_reason": {
+      "profile": "tpcds_return_reason",
+      "column": "r.r_reason_desc",
+      "default_tier": "high",
+      "source_location": "extension/tpcds/dsdgen/queries/93.sql",
+      "source_sha256": "b0346b477c8f528d3a948eb3fef746b68d0abfa3dbe1a96f4516b17c37e09059",
+      "adaptation": "Retain Q93 reason-description equality/category semantics: the source reason, then fit/preference reasons, then an expanded return-reason set. Count returned facts, not reason keys."
+    },
+    "tpcds_q51_channel_balance": {
+      "profile": "tpcds_web_date",
+      "column": "d.d_date",
+      "default_tier": "low",
+      "source_location": "extension/tpcds/dsdgen/queries/51.sql",
+      "source_sha256": "a68ba235faf1fec5f70e6833c0de4b82c955f17cbff8173acd76b8945e0d9fea",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "tpcds_q97_customer_item_overlap": {
+      "profile": "tpcds_store_date",
+      "column": "d.d_date",
+      "default_tier": "medium",
+      "source_location": "extension/tpcds/dsdgen/queries/97.sql",
+      "source_sha256": "431ef57c32e3d4fe8e9f675fc2dd3f8e43b75fa2fb78456c3e26b32721a263e4",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "job_01a_skeleton": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "low",
+      "source_location": "benchmark/imdb_plan_cost/queries/01a.sql",
+      "source_sha256": "53a90dac948641a2f9dd1ee12b68c66354d4c44016494d9e460b2b1879c5d7b2",
+      "adaptation": "Source join graph retained; release-year cohort replaces discrete info-category filter because its calibrated categories jump from 33% to 67%."
+    },
+    "job_06a_skeleton": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "medium",
+      "source_location": "benchmark/imdb_plan_cost/queries/06a.sql",
+      "source_sha256": "666385ab792d62acef9442fc2884282d3f9194a172a6c0741544ab92eaa029b2",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "job_11a_skeleton": {
+      "profile": "job_release_period",
+      "column": "t.production_year",
+      "default_tier": "high",
+      "source_location": "benchmark/imdb_plan_cost/queries/11a.sql",
+      "source_sha256": "b9c2b7f747fd10fff3e9078534d5578ea8b53fc9dcb4bd9330952d74ec1ece0e",
+      "adaptation": "Retain the source production_year BETWEEN interval; narrow or widen release years."
+    },
+    "job_16a_skeleton": {
+      "profile": "job_episode_range",
+      "column": "t.episode_nr",
+      "default_tier": "low",
+      "source_location": "benchmark/imdb_plan_cost/queries/16a.sql",
+      "source_sha256": "43cd687d2b4005c6b665762dbf7e5277135ebe738d82e672371571ca255902b9",
+      "adaptation": "Retain JOB 16a episode_nr range and vary its endpoints; NULL episode numbers stay outside the selected population."
+    },
+    "job_20a_skeleton": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "medium",
+      "source_location": "benchmark/imdb_plan_cost/queries/20a.sql",
+      "source_sha256": "eea79cc4c815789c64bf7f4306e8e30db85289a8938bbcd012cb22388264067f",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "job_21a_skeleton": {
+      "profile": "job_release_period",
+      "column": "t.production_year",
+      "default_tier": "high",
+      "source_location": "benchmark/imdb_plan_cost/queries/21a.sql",
+      "source_sha256": "c899a4175c318b17df6c253c53253a130efeed6e6d2230180b02e08e9dcba722",
+      "adaptation": "Retain the source production_year BETWEEN interval; narrow or widen release years."
+    },
+    "job_26a_skeleton": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "low",
+      "source_location": "benchmark/imdb_plan_cost/queries/26a.sql",
+      "source_sha256": "e68db6c6477fcd41adde48510c3eaec1765ad13fa9e6b899348dc996f6a589cc",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "job_30a_skeleton": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "medium",
+      "source_location": "benchmark/imdb_plan_cost/queries/30a.sql",
+      "source_sha256": "9ec9bb8b2521099af76e45201b970cc4373478ad8c0eb0323a4a02068751c802",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "sqlstorm_tpch_17751": {
+      "profile": "sqlstorm_shipment_period",
+      "column": "l.l_shipdate",
+      "default_tier": "low",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpch/17751.sql",
+      "source_sha256": "ddba1bb23545bcbbf2e133c833908420564e05f78eb7dc2f1e2d5ddcf5c14004",
+      "adaptation": "Retain the source calendar BETWEEN predicate; the middle band uses the source reporting years, and narrow/broad bands vary those endpoints."
+    },
+    "sqlstorm_tpch_25509": {
+      "profile": "sqlstorm_order_period",
+      "column": "o.o_orderdate",
+      "default_tier": "medium",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpch/25509.sql",
+      "source_sha256": "70b6b6d6f3caa01942bc7f6665805d0991b4cb823fe432f5193f9c446150ddab",
+      "adaptation": "Retain the source calendar BETWEEN predicate; the middle band uses the source reporting years, and narrow/broad bands vary those endpoints."
+    },
+    "sqlstorm_tpch_15031": {
+      "profile": "tpch_stock_available",
+      "column": "ps.ps_availqty",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpch/15031.sql",
+      "source_sha256": "7fda533001d7c01348d7bbe3e85ebc7a7fbefa249d530d6c5c33a70151a8bca7",
+      "adaptation": "Retain SQLStorm 15031 available-quantity > threshold; vary only the threshold."
+    },
+    "sqlstorm_tpcds_11376": {
+      "profile": "tpcds_store_date",
+      "column": "d.d_date",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/11376.sql",
+      "source_sha256": "34ba1fe358588b25902525ec20c7fdc8e892cfacf245766f2ef4df10d5062f14",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "sqlstorm_tpcds_28643": {
+      "profile": "tpcds_web_date",
+      "column": "D.d_date",
+      "default_tier": "low",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/28643.sql",
+      "source_sha256": "951f9635ce2858d90350e92edf4d90cc73b6b0dbd6ffd180a1716d988eb2040a",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "sqlstorm_tpcds_14368": {
+      "profile": "tpcds_web_date",
+      "column": "d.d_date",
+      "default_tier": "medium",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/tpcds/14368.sql",
+      "source_sha256": "3f6c10182bc8ca41c60bad3af4e61c6805934e3eff2e0f33a7f68fe6c3e1880d",
+      "adaptation": "Use one reporting-period, inventory, or monetary range on a business attribute of the retained source graph; replace the full previous filter rather than adding another conjunct."
+    },
+    "sqlstorm_job_11914": {
+      "profile": "job_release_year",
+      "column": "t.production_year",
+      "default_tier": "high",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/job/11914.sql",
+      "source_sha256": "24b58994bce48c44c258a895584683b5b1c55c36f654598888dca480ca42d1ac",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "sqlstorm_job_18930": {
+      "profile": "job_release_year",
+      "column": "m.production_year",
+      "default_tier": "low",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/job/18930.sql",
+      "source_sha256": "c70222dfd2d3ddcd481ae213824684e9a57916d46ebedc86ee264d2b1f284eac",
+      "adaptation": "Use a release-year cohort of the source title relation; JOB skeletons prioritize retaining title and source equality edges."
+    },
+    "sqlstorm_job_13193": {
+      "profile": "job_release_year",
+      "column": "m.production_year",
+      "default_tier": "medium",
+      "source_location": "auto_test/outerjoin_benchmark/sources/sqlstorm/job/13193.sql",
+      "source_sha256": "313667b84a7dad0de342357782968350b49033f14e6258d76bebe1843ba453ba",
+      "adaptation": "The source has no WHERE and orders by production_year; add a release-year cohort on that same source attribute, using the year-threshold convention from the other SQLStorm JOB queries."
+    }
+  },
+  "curation": {
+    "target_per_family": 180,
+    "target_per_family_tier": 60,
+    "timeout_seconds": 600,
+    "minimum_runtime_each_engine_exclusive": 1,
+    "minimum_speedup": 0.8,
+    "eligibility": "Only measured pairs passing target-database selectivity audit; correctness is verified or explicitly NOT-CHECKED with checks disabled. New SQL is pending measurement, never assumed eligible.",
+    "excluded_seeds": {
+      "tpcds_q72_fulfillment": "Reduced source subgraph omits sales/inventory week constraint; historical 1800s timeouts."
+    }
+  }
+}
