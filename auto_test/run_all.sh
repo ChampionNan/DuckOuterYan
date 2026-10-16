@@ -10,7 +10,7 @@
 #   2. Build the databases required by the selected benchmark strata
 #   3. Use committed queries; regenerate/verify only with --generate-queries
 #   4. Run the Original/OuterYan bare-query comparison for the corpus
-#   5. Publish statistics and figures (no LaTeX)
+#   5. Publish statistics, figures and tables.tex
 #
 # Environment overrides (all optional):
 #   GRAPH_DATASET    bitcoin (default) | epinions | google | wiki | dblp
@@ -82,7 +82,7 @@ usage() {
         '  --runs N               Positive odd timing sample count (default: 5, median)' \
         '  --timeout 600          Independent per-statement, per-engine limit; not a combined sample budget' \
         '  --check-correctness    Enable full bare-query result comparison (off by default here)' \
-        'No LaTeX is generated. Report-only without --csv replays pinned local history, if present.' \
+        'One tables.tex bundle is generated; no manuscript prose. Report-only without --csv replays pinned local history, if present.' \
         'Subset/custom runs retain harness statistics; full-cohort plots require the complete active manifest.'
 }
 
@@ -181,7 +181,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
             echo "Build release: $([ "${SKIP_BUILD:-0}" = 1 ] && echo skip || echo yes); prepare data: $([ "${SKIP_DATA:-0}" = 1 ] && echo skip || echo yes)"
             printf '%q ' bash "$SCRIPT_DIR/experiment_onoff.sh" "${EXPERIMENT_ARGS[@]}"; printf '\n'
             echo "Sequential thread counts: $THREAD_COUNTS"
-            echo "Statistics/figures: $OUTPUT_DIR (only this run's CSV; no LaTeX). Full-cohort publication=$FULL_COHORT"
+            echo "Statistics/figures: $OUTPUT_DIR (only this run's CSV; one tables.tex). Full-cohort publication=$FULL_COHORT"
         fi
     fi
     exit 0
@@ -219,7 +219,7 @@ if [ "$GENERATE_QUERIES" -eq 1 ]; then
     log "Regenerating benchmark SQL and provenance manifests"
     "$PYTHON_BIN" "$SCRIPT_DIR/gen_outerjoin_benchmark.py" 2>&1 | tee -a "$RUN_LOG"
     "$PYTHON_BIN" "$SCRIPT_DIR/verify_benchmark_reproduction.py" \
-        --output "$OUTPUT_DIR/query_reproduction.json" 2>&1 | tee -a "$RUN_LOG"
+        --output "${RUN_LOG%.log}.query_reproduction.json" 2>&1 | tee -a "$RUN_LOG"
 elif [ "$FULL_COHORT" -eq 1 ]; then
     "$PYTHON_BIN" "$SCRIPT_DIR/verify_benchmark_reproduction.py" --validate-only 2>&1 | tee -a "$RUN_LOG"
 fi
@@ -318,7 +318,7 @@ for thread_count in "${OY_THREAD_VALUES[@]}"; do
         result_txt="${RESULT_TXTS[$((${#RESULT_TXTS[@]} - 1))]}"
         publish_args=(--csv "${result_txt%.txt}.csv" --output-dir "$report_dir")
         [ "$NO_FIGURES" -eq 0 ] || publish_args+=(--no-figures)
-        log "Publishing this run's statistics and figures (no LaTeX)"
+        log "Publishing this run's statistics, figures and tables.tex"
         if "$PYTHON_BIN" "$SCRIPT_DIR/publish_plan_cohort.py" "${publish_args[@]}" 2>&1 | tee -a "$RUN_LOG"; then
             REPORT_DIRS+=("$report_dir")
         else

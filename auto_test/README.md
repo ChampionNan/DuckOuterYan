@@ -82,27 +82,16 @@ prefixed historical snapshots are preserved; the dated unprefixed statistics and
 are refreshed by `publish_plan_cohort.py`. No historical timing file is needed
 to generate the benchmark or to report an explicitly supplied new-run CSV.
 
-Independent alternatives for same-grouping queries are generated with
-`python3 auto_test/prepare_grouping_candidates.py`. They live only in
-`outerjoin_benchmark/candidates/grouping_20261014/`, not the active benchmark.
-They permute mixed join kinds over the same source relations and equality edges,
-preserving predicates and tree shape. These are new semantics, not equivalent
-rewrites. Optional `--explain` checks local plan selection only and writes a report
-under ignored `results/`; target-server correctness and performance remain untested.
-
-`outerjoin_benchmark/sources/`, `outerjoin_benchmark/revisions/`, and
-`outerjoin_query_old/` are generator dependencies. Historical SQL is retained
+`outerjoin_benchmark/sources/` and `outerjoin_benchmark/revisions/`
+are generator dependencies. Historical SQL is retained
 for reconstruction and identity checks. Do not ignore these directories or all
 JSON/CSV/TXT files: many are essential inputs. Calibration parameters describe
-fixed predicate bands; a fresh dataset audit verifies those bands on the target
-data. Runtime results and dataset audit reports remain ignored outputs.
+fixed predicate bands. Runtime results remain ignored outputs.
 
 ```bash
 # Rebuild the deterministic workload without reading results/.
 python3 auto_test/gen_outerjoin_benchmark.py
 
-# Check base-entity selectivity against existing databases; writes an ignored report.
-python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity
 ```
 
 ## Main scripts
@@ -112,30 +101,39 @@ python3 auto_test/gen_outerjoin_benchmark.py --audit-selectivity
 | `run_all.sh` | Main entry point: build/data, test committed queries, publish statistics/figures; generation is opt-in |
 | `build_db.sh` | Create or reuse Graph, TPC-H, TPC-DS, and JOB databases |
 | `experiment_onoff.sh` | Bare-query correctness, plan selection, profiling, and timing |
-| `gen_outerjoin_benchmark.py` | Generate the frozen workload or audit selectivity |
+| `gen_outerjoin_benchmark.py` | Generate the frozen workload |
 | `verify_benchmark_reproduction.py` | Regenerate twice without executing queries; check all input bytes |
+| `record_reproduction_run.py` | Called by `run_all.sh`: record source/binary/input hashes and run settings in ignored results |
 | `report_plan_cohort.py` | Explicit timeout/default reporting, with raw times preserved |
-| `publish_plan_cohort.py` | Current cohort statistics, CSV tables and figures; no LaTeX generation |
+| `publish_plan_cohort.py` | Current cohort statistics, figures and one generated table bundle |
 | `gen_experiment_result.py` | Summarize run CSVs and generate figures/tables |
-| `reprocess_experiment_logs.py` | Recover statistics from existing local run logs |
-| `check_outeryan_dp.py` | Inspect optimizer applicability and plan choice |
-| `trace_outer_yan.sh` | Execute a diagnostic query and collect optimizer traces |
-| `memory_profile.py`, `run_memory_profile.sh` | Run the separate memory observation experiment |
+| `balanced_benchmark.py` | Fixed workload construction used by the generator and byte-identity validation |
+| `aggregate_count_refresh.py` | Reconstruct pinned COUNT(*) variants; does not select new candidates |
 | `pg_plan_comparison/` | PostgreSQL comparison queries, instrumentation patch, and runners |
-| `paper_examples/` | Standalone mechanism queries and diagnostic runners |
 
 `configs.sh`, `thread_sweep.sh`, `phase_profile.sh`, `benchmark_corpus.py`,
 `balanced_benchmark.py`, `legacy_corpus.py`, and the workload transformation
-modules are shared dependencies. `test_*.py` files are regression tests.
+modules are shared dependencies. `test_*.py` files verify the retained generators,
+harness and reporting policies. `benchmark_test_fixtures.py` supplies
+their source fixtures. `graph_dataset_policy.py` validates the pinned dataset
+definitions used by Graph generation; it does not generate retest candidates.
 
-Historical reporting tools (`freeze_tpch_tuning_results.py`,
-`refresh_fixed_tpch_paper.py`, and `refresh_job_selectivity_results.py`) require
-local historical input files. These outputs are not distributed. The optional
-snapshot descriptor lives in `results/frozen_inputs/tpch_measurement_snapshot.json`
-or at `OY_MEASUREMENT_SNAPSHOT`. Use `run_all.sh --report-only --csv EXACT_RUN.csv`
-to report a complete new run under the current policy. `gen_experiment_result.py`
-retains the older complete-pair policy for legacy/subset reports; do not mix its
-headline statistics with the current cohort report. TeX templates contain placeholders.
+One-off tuning/retest launchers, old log recovery, standalone selectivity auditing,
+optimizer debug scripts, legacy corpus generation, dynamic candidate qualification,
+memory experiments, manuscript generators,
+and exploratory PG searches are retired and available in Git
+history. Frozen definitions and their reconstruction modules remain: they apply
+fixed SQL identities, not a new search or speed-up-based selection on each run.
+The obsolete `outerjoin_query_old/`, standalone `diagnostics/`, and `pg_oj_trace/`
+directories are not required. `paper_examples/` is local-only and excluded from
+version control and anonymous source exports.
+Use `run_all.sh --report-only --csv EXACT_RUN.csv` for a new complete run.
+`gen_experiment_result.py` retains the complete-pair policy for subset reports;
+do not mix its headline statistics with the current cohort report.
+
+Run-recording and reporting tools may include the caller's local paths and host
+in ignored output files. These outputs are not part of the anonymous source
+artifact. Never publish a local results directory without reviewing its metadata.
 
 ## One-command workflow
 
@@ -158,8 +156,8 @@ bash auto_test/run_all.sh --dry-run
 
 This is the complete **main benchmark** workflow. It includes the phase and
 optimizer profiles collected by the timing harness, followed by summary tables
-and both performance figures. Standalone memory profiling and PostgreSQL plan
-comparison are separate diagnostics and are not launched by this command.
+and both performance figures. PostgreSQL plan comparison is a separate experiment
+and is not launched by this command.
 
 Cold-start prerequisites: Git, Bash, curl, tar, SHA256 tooling, CMake, Ninja,
 Make and a C++17 compiler. No Python 3.10+ installation or sudo is needed with
@@ -195,7 +193,7 @@ and query lists byte-for-byte. `--prepare-only` performs only that generation an
 verification. Neither mode reads timing outputs to select query definitions. The
 frozen policy, rather than arbitrary per-family/batch parameters, defines this workload.
 Engine code generation is handled by the normal release build; `--skip-build` skips it.
-The verification artifact is `results/plots/YYYYMMDD/query_reproduction.json`
+The verification artifact is `results/run_all_TIMESTAMP.query_reproduction.json`
 (or the explicit `--output-dir`). It records the active manifest hash, all 345
 benchmark-file hashes, and the result of two independent regenerations. The
 file set includes all 321 SQLs plus their manifests and query lists. A successful
@@ -234,19 +232,17 @@ bash auto_test/run_all.sh --report-only \
 Local catalog metadata is read, read-only, to count attributes in optimization
 representatives. Set `TPCH_DB`, `TPCDS_DB`, `GRAPH_DB`, and `JOB_DB` when reporting
 on another machine. If unavailable, attribute counts are `--`, with warnings
-in `paper_statistics.json`; timings are not fabricated. Omit `--csv` only when
+in `report_metadata.json`; timings are not fabricated. Omit `--csv` only when
 replaying the locally available pinned historical observations, not on a fresh
 artifact checkout. `--no-figures` writes statistics only. The experiment and current
-cohort report pipeline has no LaTeX export option and never writes manuscript files.
-Existing manuscript fragments from earlier runs are left untouched, not refreshed.
+cohort report pipeline writes one `tables.tex` with generated tables, not manuscript
+prose. There is no separate LaTeX option or per-table TeX output.
 
-The dated report directory contains `plan_cohort_statistics.csv` (all-query and
-selected-query summaries), `current_results.csv` (per-query observations),
-`benchmark_composition.csv`, `benchmark_dimensions.csv`, `shape_statistics.csv`,
-`phase_summary.csv`, `phase_query_details.csv`, `optimization_representatives.csv`,
-and `paper_statistics.json` (machine-readable reporting metadata, not LaTeX).
-The two figures are `speedup_all_queries.pdf` and `phase_breakdown_outeryan.pdf`,
-with PNG copies. `--no-figures` skips figure rendering without skipping statistics.
+Each fresh full-cohort report contains exactly 13 files: two figures in PDF and
+PNG (four files), seven CSV data tables, one JSON file for reporting rules,
+source hashes and exclusions, and one `tables.tex`. It does not generate manuscript
+text, an overview PDF, or duplicate per-query subsets. `--no-figures` writes the
+nine table/metadata files. Existing files from older runs are not automatically deleted.
 
 Full runs automatically publish only their own complete CSV under the current
 cohort policy. Explicit subset/custom-corpus runs retain the harness's existing
@@ -260,17 +256,21 @@ All publication outputs use `auto_test/results/plots/YYYYMMDD/`:
 
 | Output | Meaning |
 |---|---|
-| `current_results.csv` | All active observations, raw profiles and separate effective-time fields |
+| `current_results.csv` | All active observations, raw profiles, effective times, stable query IDs and SQL hashes; filter `selected_plan`, `speedup_source`, `phase_summary_included`, `phase_figure_order` and `optimization_table_group` for subsets |
 | `plan_cohort_statistics.csv` | All-query and selected-only statistics; measured/capped/default counts |
-| `selected_measured_results.csv` | Complete measured selected pairs only |
 | `speedup_all_queries.pdf`, `.png` | Runtime pairs and reported ratios; timeout proxies use triangles, fallback ratios ordinary circles |
 | `phase_breakdown_outeryan.pdf`, `.png` | First two displayed queries per family from the four-query phase-diverse, faster/equal sample |
-| `phase_summary.csv`, `phase_query_details.csv` | Operator-time sums, percentages and per-query evidence |
+| `phase_summary.csv` | Operator-time sums and percentages; per-query evidence remains in `current_results.csv` |
 | `benchmark_composition.csv`, `benchmark_dimensions.csv` | Full/aggregate, tree-shape, source, size and selectivity counts |
 | `shape_statistics.csv` | Input-expression shape comparison |
-| `optimization_representatives.csv` | Twelve long-running faster/equal cases, including table/attribute counts |
-| `query_id_map.csv`, `paper_statistics.json` | Stable labels, SQL identities, source hashes, selection rules, warnings |
-| `query_reproduction.json` | Query-generation verification, only when generation is explicitly requested |
+| `optimization_representatives.csv` | Up to twelve long-running faster/equal cases, table/attribute counts and `table_group` (`main` or `appendix`) |
+| `report_metadata.json` | Reporting rules, source hashes, exclusions, selection rules and warnings |
+| `tables.tex` | One generated bundle of runtime, phase, composition and optimizer tables; no manuscript prose |
+
+Raw run CSV/TXT, logs, plan artifacts and optional generation verification stay
+under `auto_test/results/`, outside the dated report directory. They are evidence
+for reproduction, not additional paper outputs. CSV values are plain numbers,
+without LaTeX formatting; use these tables when updating the manuscript.
 
 The main runtime table includes all reportable queries. Phase tables use valid
 OuterYan-selected operator profiles, including DuckDB-only timeouts when OuterYan

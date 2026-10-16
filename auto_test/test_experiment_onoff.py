@@ -640,18 +640,6 @@ class MultiThreadExperimentTest(unittest.TestCase):
                     calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
                     self.assertEqual(len([c for c in calls if c["timing"]]), 2)
 
-    def test_timeout_metadata_round_trips_without_losing_verified_correctness(self):
-        from auto_test import reprocess_experiment_logs as recover
-        result = self.run_harness(TIMEOUT_TIMING="off")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        lines = (self.root / "result.txt").read_text().splitlines()
-        parts = [next(line.split(f"{key}: ", 1)[1] for line in lines if line.startswith(f"  {key}: "))
-                 for key in ("result", "context", "decision")]
-        parsed = recover.parse_record("sample", *parts)
-        row = self.read_row()
-        for field in ("correct", "tm_on", "tm_off", "timeout_seconds", "duckdb_status", "outeryan_status",
-                      "duckdb_timeout_stage", "duckdb_correctness_status", "outeryan_correctness_status"):
-            self.assertEqual(parsed[field], row[field], field)
 
     def test_stale_binary_cannot_publish_trace_contaminated_timings(self):
         result = self.run_harness(STALE_PROFILE_BINARY="1")

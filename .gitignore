@@ -385,12 +385,32 @@ tools/pythonpkg/duckdb_build/
 /rstk_data/
 /lsqb*/
 
-# project-local agent instructions (kept untracked)
+# Local LLM instructions, conversations, and settings are not publication sources.
+# Match nested workspaces too; retain normal source and regression-test files.
+AGENTS.md
+AGENTS.override.md
 CLAUDE.md
-/AGENTS.md
-/.claude/
-/.codex/
-/.agents/
+CLAUDE.local.md
+CODEX.md
+GEMINI.md
+llms.txt
+llms-full.txt
+.claude/
+.codex/
+.agents/
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.aider.conf.yml
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.*/
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/agents/
+.github/skills/
 
 # OuterYan test/bench artifacts (auto_test/)
 graph_db
@@ -426,14 +446,24 @@ __pycache__/
 *.trace
 *.trace.json
 *.trace.txt
+*.trace.csv
 *.profile.json
+*.profile.txt
 *.explain.json
+*.explain.txt
+*.plan.txt
 *.stdout
 *.stderr
 *.stdout.txt
 *.stderr.txt
 *.log.*
 /results/
+/profiles/
+/traces/
+/plots/
+/reports/
+/debug_output/
+/debug_dumps/
 /server-work/
 /auto_test/**/results/
 /auto_test/**/recorded_results/
@@ -441,7 +471,12 @@ __pycache__/
 /auto_test/**/traces/
 /auto_test/**/plots/
 /auto_test/**/reports/
+/auto_test/**/debug_output/
+/auto_test/**/debug_dumps/
 /auto_test/**/*.plans/
+/auto_test/**/*.profiles/
+/auto_test/**/*.optimizer/
+/auto_test/**/*_statistics/
 /auto_test/**/dataset_audit.json
 /auto_test/**/pilot_provenance.json
 /auto_test/**/local_explain_decisions.csv
@@ -452,13 +487,14 @@ __pycache__/
 /auto_test/outerjoin_benchmark/sources/*_pilot.json
 
 # Experiment narratives, manuscript drafts and rendered figures are outputs.
-/auto_test/outerjoin_benchmark/design.tex
-/auto_test/paper_examples/PAPER_EXAMPLE.md
-/auto_test/paper_examples/figures/
+*.tex
+/auto_test/paper_examples/
 /auto_test/pg_plan_comparison/paper/
 /auto_test/pg_plan_comparison/ADDITIONAL_CASES.md
 /auto_test/pg_plan_comparison/BENCHMARK_EXAMPLES.md
 /auto_test/pg_plan_comparison/LOCAL_VALIDATION.md
 /auto_test/pg_plan_comparison/NO_ORDER_LIMIT.md
 /auto_test/pg_plan_comparison/SEARCH_RESULTS_*.md
-/auto_test/pg_oj_trace/README.md
+/auto_test/pg_oj_trace/
+/auto_test/diagnostics/
+/auto_test/outerjoin_query_old/

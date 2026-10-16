@@ -17,9 +17,9 @@ import time
 
 from benchmark_pg import load_specs, query_sha256
 from datasets import fingerprint
-from measure_additional import interrupt, save, stop_private_postgres
+from postgres_runtime import interrupt, stop_private_postgres
 from plans import decision, duck_tree, nodes, replay_verified, sha256
-from run import duck_env
+from run import duck_env, write_json as save
 
 
 def main():

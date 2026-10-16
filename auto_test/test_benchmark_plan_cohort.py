@@ -1,5 +1,4 @@
 """Membership curation is exact, reproducible, and separate from new candidates."""
-from collections import Counter
 import contextlib
 import io
 from pathlib import Path
@@ -11,12 +10,29 @@ import unittest
 import balanced_benchmark as b
 import benchmark_plan_cohort as c
 from benchmark_corpus import resolve_sql_path
-import prepare_grouping_candidates as grouping
 from verify_benchmark_reproduction import snapshot
 from test_gen_outerjoin_benchmark import forbid_result_access
 
 
 class PlanCohortTest(unittest.TestCase):
+    def test_dependency_normalization_only_accepts_pinned_generator_revision(self):
+        source = c.ARCHIVE / "speedup_excluded.csv"
+        rows = b.read_manifest(b.ROOT / "benchmark/speedup_excluded.csv")
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / source.name
+            b.write_csv(target, rows)
+            self.assertTrue(c.same_dependency(source, target))
+            synthetic = next(r for r in rows
+                             if r["source_location"] == "auto_test/balanced_benchmark.py")
+            self.assertEqual(synthetic["source_sha256"], b.SYNTHETIC_SOURCE_SHA256)
+            synthetic["source_sha256"] = "0" * 64
+            b.write_csv(target, rows)
+            self.assertFalse(c.same_dependency(source, target))
+            synthetic["source_sha256"] = b.SYNTHETIC_SOURCE_SHA256
+            synthetic["source_query"] = "modified definition"
+            b.write_csv(target, rows)
+            self.assertFalse(c.same_dependency(source, target))
+
     def test_policy_retires_both_timeouts_and_excludes_small_fallbacks(self):
         spec = c.policy()
         old = {r["query_id"]: r for r in c.archived_rows(spec)}
@@ -154,24 +170,6 @@ class PlanCohortTest(unittest.TestCase):
                 self.assertEqual(b.digest(output / rows[entry["query_id"]]["path"]), sha)
                 if entry["original_query"] != entry["query_id"]:
                     self.assertNotIn(entry["original_query"], rows)
-
-    def test_candidates_are_new_semantics_not_members(self):
-        with forbid_result_access():
-            rows, contents, coverage = grouping.candidate_definitions()
-        originals = {r["query_id"]: r for r in c.archived_rows(c.policy())}
-        self.assertEqual(len(coverage), 139)
-        self.assertTrue(rows)
-        self.assertTrue({r["query_id"] for r in rows}.isdisjoint(originals))
-        self.assertEqual(len({r["sql_fingerprint"] for r in rows}), len(rows))
-        for row in rows:
-            original = originals[row["grouping_source_query"]]
-            self.assertGreater(int(row["relation_count"]), 3)
-            self.assertEqual(Counter(row["join_vector"]), Counter(original["join_vector"]))
-            self.assertNotEqual(row["join_vector"], original["join_vector"])
-            self.assertEqual(grouping.masked_structure(contents[row["path"]]),
-                             grouping.masked_structure((c.ARCHIVE / original["path"]).read_text()))
-            self.assertEqual(row["selectivity_predicate"], original["selectivity_predicate"])
-            self.assertEqual(row["qualification_status"], "PENDING_TARGET_PLAN_AND_MEASUREMENT")
 
     def test_removed_sql_resolves_to_archive(self):
         for row in c.policy()["members"]:

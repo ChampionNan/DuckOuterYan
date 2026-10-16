@@ -1,10 +1,9 @@
-"""Timeouts, including legacy substituted values, never enter performance cohorts."""
+"""Legacy complete-pair reports exclude timeouts; capped cohorts have separate tests."""
 import unittest
 from unittest.mock import patch
 import pandas as pd
 
 import gen_experiment_result as plot
-import refresh_paper_results as refresh
 
 
 class TimeoutExclusionTests(unittest.TestCase):
@@ -23,18 +22,13 @@ class TimeoutExclusionTests(unittest.TestCase):
     def test_default_preserves_partial_times_but_excludes_the_query(self):
         source = pd.DataFrame([self.row(duckdb_status="timeout", timing_status="timeout",
                                        duckdb_timeout_stage="warmup", tm_off=float("nan"))])
-        view = refresh.apply_timeout_substitution(source)
         self.assertTrue(pd.isna(source.tm_off.iloc[0]))
-        self.assertTrue(pd.isna(view.recorded_tm_off.iloc[0]))
-        self.assertEqual(view.tm_on.iloc[0], .04)
-        self.assertEqual(view.runtime_treatment.iloc[0], "excluded_timeout")
-        detail = plot.prepare_queries(view, "tm")
+        self.assertEqual(source.tm_on.iloc[0], .04)
+        detail = plot.prepare_queries(source, "tm")
         self.assertFalse(detail.valid_timing.any())
         self.assertFalse(detail.valid_speedup.any())
         self.assertTrue(detail.speedup.isna().all())
-        cohort, excluded = refresh.reporting_cohort(view)
-        self.assertTrue(cohort.empty)
-        self.assertEqual(excluded.reporting_exclusion.tolist(), ["timeout"])
+        self.assertTrue(plot.complete_runtime_rows(source).empty)
         stats = plot.summarize(detail)
         self.assertEqual(stats["counts"]["timeout_substituted"], 0)
         self.assertIsNone(stats["totals"]["off_s"])
@@ -54,7 +48,6 @@ class TimeoutExclusionTests(unittest.TestCase):
                 detail = plot.prepare_queries(frame, "tm")
                 self.assertFalse(detail.valid_speedup.any())
                 self.assertEqual(detail.exclusion_reason.tolist(), ["timeout"])
-                self.assertTrue(refresh.reporting_cohort(frame)[0].empty)
                 self.assertTrue(plot.complete_runtime_rows(frame).empty)
                 self.assertTrue(plot.selected_runtime_rows(frame).empty)
                 self.assertTrue(plot.positive_runtime_rows(frame, "tm").empty)
@@ -84,7 +77,7 @@ class TimeoutExclusionTests(unittest.TestCase):
                                        duckdb_status="timeout", timing_status="timeout")])
         self.assertTrue(plot.timeout_substitution_mask(legacy).all())
         self.assertFalse(plot.prepare_queries(legacy, "tm").valid_speedup.any())
-        self.assertTrue(refresh.reporting_cohort(refresh.apply_timeout_substitution(legacy))[0].empty)
+        self.assertTrue(plot.complete_runtime_rows(legacy).empty)
 
     def test_timeout_limit_alone_does_not_mean_timeout(self):
         frame = pd.DataFrame([self.row(tm_off=600, tm_on=2)])
@@ -95,16 +88,9 @@ class TimeoutExclusionTests(unittest.TestCase):
 
     def test_subsecond_measurements_and_slowdowns_remain(self):
         frame = pd.DataFrame([self.row(tm_off=.02, tm_on=.04)])
-        cohort, excluded = refresh.reporting_cohort(refresh.apply_timeout_substitution(frame))
-        self.assertEqual(len(cohort), 1)
-        self.assertTrue(excluded.empty)
-        self.assertEqual(plot.prepare_queries(cohort, "tm").speedup.iloc[0], .5)
-
-    def test_old_substitution_option_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "retired"):
-            refresh.apply_timeout_substitution(pd.DataFrame([self.row()]), 600)
-        with self.assertRaises(ValueError):
-            refresh.figure_includes_tex(1, 0, substitutions=1)
+        detail = plot.prepare_queries(frame, "tm")
+        self.assertTrue(detail.valid_speedup.all())
+        self.assertEqual(detail.speedup.iloc[0], .5)
 
 
 if __name__ == "__main__":

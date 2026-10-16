@@ -8,7 +8,7 @@ import shutil
 from collections import Counter
 
 import balanced_benchmark as b
-import prepare_graph_dataset_retest as retest
+from graph_dataset_policy import load_policy
 
 POLICY = b.ROOT / "sources/graph_dataset_extension_20261010.json"
 RETIREMENTS = b.ROOT / "sources/graph_timeout_retirements_20261011.json"
@@ -24,7 +24,7 @@ def candidates():
     if b.digest(CANDIDATES / "manifest.csv") != MANIFEST_SHA:
         raise ValueError("Graph extension manifest changed")
     rows = b.read_manifest(CANDIDATES / "manifest.csv")
-    pins = {r["query_id"]: r for r in retest.load_policy(POLICY)["replacements"]}
+    pins = {r["query_id"]: r for r in load_policy(POLICY)["replacements"]}
     if len(rows) != 3 or {r["graph_dataset_source_query"] for r in rows} != set(pins):
         raise ValueError("Incomplete Graph extension")
     for row in rows:
@@ -61,7 +61,7 @@ def retired_queries():
 
 def archived_rows():
     rows = b.read_manifest(ARCHIVE / "manifest.csv")
-    pins = {r["query_id"]: r for r in retest.load_policy(POLICY)["replacements"]}
+    pins = {r["query_id"]: r for r in load_policy(POLICY)["replacements"]}
     if len(rows) != 3 or {r["query_id"] for r in rows} != set(pins):
         raise ValueError("Incomplete Graph extension archive")
     for row in rows:

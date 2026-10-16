@@ -3,21 +3,21 @@
 This directory retains comparison code, query inputs, configuration, and the
 PostgreSQL instrumentation patch. It contains no distributed execution results.
 
-- `queries/`, `cases.json`, and `predicate_variants.json`: comparison inputs.
+- `queries/` and `cases.json`: the retained comparison inputs.
 - `patches/`: PostgreSQL outer-join tracing instrumentation.
 - `server.sh` / `server.py`: build, load, and run the comparison on a local server.
-- `run-local.sh`: configurable checkout launcher; set `OY_REPO_ROOT` and
-  `PG_STUDY_DIR` to override the checkout and ignored study directory.
+- `benchmark_examples.sh`: run the fixed benchmark cases listed in
+  `benchmark_examples.txt` using explicitly supplied databases and PostgreSQL paths.
 - `fair_baseline.py`, the C/C++ runners, and measurement scripts: bare-query
   correctness, plan inspection, and timing.
 - `package.py`: Linux source packaging; consult `--help` for its explicit inputs.
 
 ```bash
 python3 auto_test/pg_plan_comparison/server.py --help
-python3 auto_test/pg_plan_comparison/fair_baseline.py --help
+python3 auto_test/pg_plan_comparison/run.py --help
 ```
 
-The default local study directory is `auto_test/results/pg-plan-study`.
+The server entry point defaults to `auto_test/results/pg-plan-comparison-work`.
 Place every custom work/result directory under ignored `auto_test/results/` or
 outside the repository. PostgreSQL data directories, exported tables, EXPLAIN
 plans, traces, captures, timing CSVs, and generated paper fragments are outputs.

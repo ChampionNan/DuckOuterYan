@@ -1,4 +1,4 @@
-"""All-family exact-query screening, including threshold and archive checks."""
+"""Frozen exact-query exclusions and their archive/reconstruction checks."""
 from collections import Counter
 import contextlib
 import io
@@ -19,18 +19,6 @@ from test_gen_outerjoin_benchmark import forbid_result_access
 
 
 class BenchmarkSpeedupScreenTest(unittest.TestCase):
-    def test_strict_boundary_and_invalid_observations(self):
-        result = dict(correct="TRUE", timing_status="measured", tm_off="1", tm_on="2")
-        self.assertFalse(screen.below_threshold(result))
-        self.assertTrue(screen.below_threshold(dict(result, tm_off="0.999999999")))
-        self.assertFalse(screen.below_threshold(dict(result, tm_off="1.000000001")))
-        slower = dict(result, tm_off="0.1")
-        for changes in (dict(tm_off="nan"), dict(tm_on="inf"), dict(tm_on="0"),
-                        dict(tm_off="-1"), dict(tm_on="NA"), dict(correct="TIMEOUT"),
-                        dict(correct="FALSE"), dict(timing_status="fallback-skip")):
-            with self.subTest(changes=changes):
-                self.assertFalse(screen.below_threshold(dict(slower, **changes)))
-
     def test_exact_exclusions_and_pending_candidates(self):
         corpus = cohort.input_corpus()
         rows = b.validate(corpus)
@@ -76,17 +64,7 @@ class BenchmarkSpeedupScreenTest(unittest.TestCase):
                 self.assertIn((None, archive / "manifest.csv"), list(historical_manifests()))
         self.assertEqual(archived_ids, {r["query_id"] for r in screen.policy()["excluded"]})
 
-    def test_scoped_inclusive_boundary_and_disabled_correctness(self):
-        result = dict(correct="NOT-CHECKED", correctness_check="disabled",
-                      timing_status="measured", tm_off="0.7", tm_on="1")
-        self.assertFalse(screen.below_threshold(result, .7, inclusive=True))
-        self.assertFalse(screen.below_threshold(result, .7, allow_unchecked=True))
-        self.assertTrue(screen.below_threshold(result, .7, inclusive=True, allow_unchecked=True))
-        for change in (dict(tm_off="0.700000001"), dict(correctness_check="enabled"),
-                       dict(correct="FALSE"), dict(correct="TIMEOUT"), dict(tm_on="nan"),
-                       dict(timing_status="fallback-skip")):
-            self.assertFalse(screen.below_threshold(dict(result, **change), .7,
-                                                    inclusive=True, allow_unchecked=True))
+    def test_frozen_scoped_definitions_remain_unchanged(self):
         spec = screen.policy()
         old = json.loads((b.ROOT / "sources/speedup_screen_20261007.json").read_text())
         self.assertEqual(spec["excluded"][:len(old["excluded"])], old["excluded"])

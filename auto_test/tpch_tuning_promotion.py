@@ -3,13 +3,10 @@
 Generation is independent of measurements. The pinned policy discloses the
 post-hoc workload selection; its historical statistics are not future targets.
 """
-import argparse
 from collections import Counter
 import json
-import os
 from pathlib import Path
 import shutil
-import tempfile
 
 import balanced_benchmark as b
 
@@ -21,17 +18,6 @@ ARCHIVE = b.ROOT / "revisions" / ARCHIVE_REVISION / "benchmark"
 MARKER = "tpch_tuning_promotion.json"
 QUERY_LIST = "tpch_tuning_promoted.txt"
 PIN_FIELDS = ("query_id", "path", "family", "content_sha256", "sql_fingerprint")
-
-
-def measurement_snapshot():
-    """Load optional local reporting inputs, never during corpus generation."""
-    default = b.legacy.REPO_ROOT / "auto_test/results/frozen_inputs/tpch_measurement_snapshot.json"
-    path = Path(os.environ.get("OY_MEASUREMENT_SNAPSHOT", str(default)))
-    if not path.is_file():
-        raise FileNotFoundError(
-            "Historical reporting inputs are not distributed. Set OY_MEASUREMENT_SNAPSHOT "
-            "to a local snapshot file, or report a new run with gen_experiment_result.py.")
-    return json.loads(path.read_text())
 
 
 def policy():
@@ -91,36 +77,6 @@ def archived_rows():
                 or b.digest(ARCHIVE / row["path"]) != row["content_sha256"]):
             raise ValueError("TPC-H source archive changed")
     return rows
-
-
-def archive_sources(corpus):
-    """Archive exact source definitions before replacing any active SQL."""
-    if b.digest(corpus / "manifest.csv") != policy()["prior_manifest_sha256"]:
-        raise ValueError("Active manifest changed before TPC-H promotion")
-    rows = b.read_manifest(corpus / "manifest.csv")
-    expected = {r["tuning_replaces_query_id"]: r["tuning_replaces_sha256"] for r in replacements()}
-    selected = [r for r in rows if r["query_id"] in expected]
-    if len(selected) != 20:
-        raise ValueError("TPC-H sources missing before archive")
-    for row in selected:
-        target = ARCHIVE / row["path"]
-        if b.digest(corpus / row["path"]) != expected[row["query_id"]]:
-            raise ValueError("Locally edited TPC-H source")
-        if target.exists() and b.digest(target) != row["content_sha256"]:
-            raise ValueError("Refusing to overwrite changed TPC-H archive")
-    if (ARCHIVE / "manifest.csv").exists():
-        if b.read_manifest(ARCHIVE / "manifest.csv") != selected:
-            raise ValueError("TPC-H archive manifest changed")
-    prior = ARCHIVE / "prior_manifest.csv"
-    if prior.exists() and b.digest(prior) != policy()["prior_manifest_sha256"]:
-        raise ValueError("TPC-H prior full manifest changed")
-    for row in selected:
-        target = ARCHIVE / row["path"]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(corpus / row["path"], target)
-    b.write_csv(ARCHIVE / "manifest.csv", selected)
-    shutil.copyfile(corpus / "manifest.csv", prior)
-    return archived_rows()
 
 
 def apply(records, output):
@@ -193,53 +149,3 @@ def validate(corpus, rows):
     restored = [old[r["tuning_replaces_query_id"]] if r["query_id"] in expected else r for r in rows]
     path_map = {old[r["tuning_replaces_query_id"]]["path"]: r["path"] for r in actual}
     return restored, old_paths, path_map
-
-
-def promote(corpus):
-    """Publish only the reviewed TPC-H changes after validating a staged corpus."""
-    rows = b.validate(corpus)
-    if (corpus / MARKER).exists():
-        validate(corpus, rows)
-        print("The 20-query TPC-H setting is already fixed.")
-        return
-    archive_sources(corpus)
-    with tempfile.TemporaryDirectory(prefix="tpch-promotion-") as tmp:
-        stage = Path(tmp) / "benchmark"
-        shutil.copytree(corpus, stage)
-        updated = sorted(apply(rows, stage), key=lambda r: r["path"])
-        # Reuse generator field order so clean regeneration is byte-identical.
-        fields = list(b.read_manifest(CANDIDATES / "proposed_full_manifest.csv")[0])
-        fields.append("tpch_promotion_revision")
-        b.write_csv(stage / "manifest.csv", updated, fields)
-        summary = json.loads((stage / "design_summary.json").read_text())
-        summary["tpch_tuning_promotion"] = marker()
-        b.write_json(stage / "design_summary.json", summary)
-        b.validate(stage)
-        for source in stage.rglob("*"):
-            if not source.is_file():
-                continue
-            target = corpus / source.relative_to(stage)
-            if not target.exists() or source.read_bytes() != target.read_bytes():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
-        for old in archived_rows():
-            target = corpus / old["path"]
-            if b.digest(target) != old["content_sha256"]:
-                raise ValueError("Source changed while publishing TPC-H promotion")
-            target.unlink()
-    b.validate(corpus)
-    print("Fixed 20 TPC-H replacements; 720 queries remain. Old SQL is recoverable at " + str(ARCHIVE))
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--promote", action="store_true")
-    parser.add_argument("--validate", action="store_true")
-    args = parser.parse_args()
-    if args.promote:
-        promote(b.ROOT / "benchmark")
-    elif args.validate:
-        validate(b.ROOT / "benchmark", b.validate(b.ROOT / "benchmark"))
-        print("TPC-H promotion validated.")
-    else:
-        parser.error("Choose --promote or --validate")

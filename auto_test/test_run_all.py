@@ -232,6 +232,11 @@ class RunAllSelectionTest(unittest.TestCase):
         self.assertEqual([c["kind"] for c in self.calls()], ["generate", "verify", "experiment", "publish"])
         self.assertNotIn("--validate-only", self.calls()[1]["args"])
         self.assertNotIn("--generate-queries", self.calls()[2]["args"])
+        verify_args = self.calls()[1]["args"]
+        artifact = Path(verify_args[verify_args.index("--output") + 1])
+        self.assertEqual(artifact.parent, self.scripts / "results")
+        self.assertTrue(artifact.name.startswith("run_all_"))
+        self.assertTrue(artifact.name.endswith(".query_reproduction.json"))
 
     def test_prepare_only_does_not_test_or_publish(self):
         result = self.run_driver("--prepare-only")

@@ -1,10 +1,6 @@
 """One pinned JOB predicate update; no result access during SQL generation."""
-import argparse
 import hashlib
 import json
-from pathlib import Path
-import shutil
-import tempfile
 
 import balanced_benchmark as b
 
@@ -87,45 +83,3 @@ def validate(corpus, rows):
         raise ValueError("JOB update SQL changed")
     restored = [dict(old) if r["query_id"] == old["query_id"] else r for r in rows]
     return restored, {old["path"]: b.ROOT / spec["original_archive"]}
-
-
-def promote(corpus):
-    rows = b.validate(corpus)
-    if (corpus / MARKER).exists():
-        validate(corpus, rows)
-        return
-    if b.digest(corpus / "manifest.csv") != policy()["prior_manifest_sha256"]:
-        raise ValueError("Active benchmark changed before JOB promotion")
-    before = {str(p.relative_to(corpus)): b.digest(p) for p in corpus.glob("*/*.sql")}
-    with tempfile.TemporaryDirectory(prefix="job-promotion-") as tmp:
-        stage = Path(tmp) / "benchmark"
-        shutil.copytree(corpus, stage)
-        updated = apply(rows, stage)
-        b.write_csv(stage / "manifest.csv", updated, list(rows[0]))
-        summary = json.loads((stage / "design_summary.json").read_text())
-        summary["job_selectivity_update"] = marker()
-        b.write_json(stage / "design_summary.json", summary)
-        b.validate(stage)
-        changed = [str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_file()
-                   and (not (corpus / p.relative_to(stage)).exists()
-                        or p.read_bytes() != (corpus / p.relative_to(stage)).read_bytes())]
-        expected = {policy()["original"]["path"], "manifest.csv", "design_summary.json", MARKER}
-        if set(changed) != expected:
-            raise ValueError("Unexpected files in JOB promotion: " + repr(changed))
-        for name in changed:
-            shutil.copyfile(stage / name, corpus / name)
-    b.validate(corpus)
-    after = {str(p.relative_to(corpus)): b.digest(p) for p in corpus.glob("*/*.sql")}
-    if before.keys() != after.keys() or [k for k in before if before[k] != after[k]] != [policy()["original"]["path"]]:
-        raise ValueError("Promotion changed more than the one JOB SQL")
-    print("Updated A-J-B-04 to production_year >= 2011; all 719 other SQL files unchanged.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--promote", action="store_true")
-    args = parser.parse_args()
-    if args.promote:
-        promote(b.ROOT / "benchmark")
-    else:
-        validate(b.ROOT / "benchmark", b.validate(b.ROOT / "benchmark"))

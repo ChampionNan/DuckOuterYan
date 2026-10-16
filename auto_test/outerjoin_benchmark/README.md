@@ -31,8 +31,7 @@ retired on 2026-10-15 by explicit request: `th_real_custdist` left-deep high and
 SQLStorm 11914 bushy high COUNT. The latter's predicate update remains recoverable
 from the pinned definition but is not generated into the active workload.
 These outcome-conditioned choices do not guarantee a future 0.7x lower bound.
-Same-grouping alternatives in `candidates/grouping_20261014/` are independent,
-unpromoted queries with changed join-type assignments. They are not part of 321.
+Unpromoted tuning and grouping alternatives are retired from the source artifact.
 
 The cohort reporting rule uses a 1x policy default for unexecuted DuckDB fallbacks
 and a 600-second DuckDB timeout proxy when OuterYan completed. It does not replace
@@ -42,13 +41,11 @@ available alongside the capped results.
 
 - `sources/`: source SQL, licenses, predicate definitions, and frozen policies.
 - `revisions/`: archived SQL and manifests needed for reconstruction and checks.
-- `candidates/`: prepared alternative queries and input mappings.
+- `candidates/`: only the 20 pinned TPC-H SQL inputs and two mappings required for reconstruction.
 - `graph_dataset_retest/`: dataset-qualified SQL and input manifests.
 
 From the repository root, run `python3 auto_test/gen_outerjoin_benchmark.py` to
-regenerate. The SQL definitions are unchanged by anonymous packaging. Use
-`--audit-selectivity` to verify predicate bands against existing local databases;
-the resulting audit is an ignored output, not a source definition.
+regenerate. The SQL definitions are unchanged by anonymous packaging.
 
 Manifests, source hashes, query lists, and policy thresholds are necessary inputs.
 Measured runtimes, speedups, correctness records, profiles, local pilot reports,

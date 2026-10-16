@@ -10,17 +10,9 @@ import graph_dataset_promotion as promotion
 import graph_dataset_extension as extension
 import benchmark_plan_cohort as cohort
 from benchmark_corpus import resolve_sql_path
-from benchmark_speedup_screen import below_threshold
 
 
 class BenchmarkRetirementsTest(unittest.TestCase):
-    def test_inclusive_boundary_uses_unrounded_times(self):
-        row = dict(correct="NOT-CHECKED", correctness_check="disabled", timing_status="measured", tm_off="0.6", tm_on="1")
-        self.assertTrue(below_threshold(row, .6, inclusive=True, allow_unchecked=True))
-        self.assertFalse(below_threshold(dict(row, tm_off="0.600000001"), .6, inclusive=True, allow_unchecked=True))
-        for change in (dict(timing_status="timeout"), dict(tm_on="nan"), dict(correct="FALSE")):
-            self.assertFalse(below_threshold(dict(row, **change), .6, inclusive=True, allow_unchecked=True))
-
     def test_exact_removals_archive_and_lists(self):
         rows = b.validate(cohort.input_corpus())
         archived, paths = r.archived_rows()

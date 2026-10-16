@@ -12,7 +12,7 @@ import tempfile
 
 from datasets import assert_unchanged, export_tables, fingerprint, ident
 from fair_baseline import query_sha256 as simple_query_sha256
-from measure_additional import stop_private_postgres
+from postgres_runtime import stop_private_postgres
 from plans import pg_tree, sha256
 from run import DuckDB, write_json
 

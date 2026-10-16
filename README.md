@@ -1,223 +1,144 @@
 # DuckOuterYan
 
-## Reproduce the benchmark
-
-From the repository root on Linux, with Git, Bash, curl, tar, CMake, Ninja, Make
-and a C++17 compiler installed:
+## Reproduce
 
 ```bash
 bash auto_test/run_all.sh --bootstrap --generate-queries
 ```
 
-This installs an isolated Python environment, regenerates and verifies the
-321-query benchmark, builds DuckOuterYan, downloads/generates the datasets,
-runs the comparisons, and produces statistics and PDF/PNG figures. Defaults are
-TPC-H/TPC-DS SF50, 32 threads, five timed executions per configuration (median),
-and a 600-second limit per execution per engine. No LaTeX is generated.
+Run from the repository root on Linux to prepare the environment, rebuild the
+321-query benchmark, compile DuckOuterYan, prepare data, run experiments, and
+generate statistics and PDF/PNG figures. Requires Git, Bash, curl, tar, CMake,
+Ninja, Make, a C++17 compiler, network access, and sufficient disk space; a full
+run takes hours.
 
-Results go to `auto_test/results/`; statistics and figures go to
-`auto_test/results/plots/YYYYMMDD/`. To use the checked-in queries unchanged,
-omit `--generate-queries`. This entry point covers the main benchmark;
-the separate memory and PostgreSQL diagnostics are not run automatically.
+### Parameters
 
-## Build
+| Parameter | Effect / default |
+| --- | --- |
+| `--bootstrap` | Install isolated Python 3.11.13 and pinned reporting dependencies; no sudo or system Python changes. |
+| `--generate-queries` | Rebuild and byte-verify the fixed 321 queries; omitted by default, which uses committed SQL. |
+| `--threads N` | Execution threads; default **32**. |
+| `--runs N` | Positive odd number of unprofiled post-warmup executions; default **5**, report the median. |
+| `--timeout S` | Limit **each execution, per engine**, not all repetitions together; default **600 seconds**. |
+| `--check-correctness` | Enable full result comparison; off by default in this performance workflow. |
+| `--skip-build --skip-data` | Reuse an existing binary and independently verified databases. |
+| `--no-figures` | Generate statistics without figures. |
+| `--dry-run` | Preview stages without executing or writing files. |
 
-Use CMake, Ninja, Python 3, and a supported C++ compiler. Build a release binary
-with the benchmark data generators enabled:
+TPC-H/TPC-DS default to **SF50** (`TPCH_SF` / `TPCDS_SF`); build parallelism
+defaults to **8** (`JOBS`). Logs, CSVs, and profiles go to `auto_test/results/`;
+statistics and figures go to `auto_test/results/plots/YYYYMMDD/`.
+Each report includes one `tables.tex` containing generated tables only; no manuscript
+sections are generated. The separate PostgreSQL comparison is not run.
+
+## Step-by-step commands
+
+The sections below explain the stages separately. They are optional if you use
+the reproduction command above; run manual steps from the repository root in Bash.
+
+### 1. Prepare the environment and queries
+
+```bash
+bash auto_test/run_all.sh --bootstrap --prepare-only
+export PATH="$PWD/auto_test/results/environment/venv/bin:$PATH"
+```
+
+Installs the local Python environment, generates the benchmark, and verifies it
+against two independent regenerations; no build, dataset download, or query execution.
+
+- Generator: [gen_outerjoin_benchmark.py](auto_test/gen_outerjoin_benchmark.py), implemented in [balanced_benchmark.py](auto_test/balanced_benchmark.py).
+- SQL and manifest: [auto_test/outerjoin_benchmark/benchmark/](auto_test/outerjoin_benchmark/benchmark/).
+- Verification output: `auto_test/results/run_all_TIMESTAMP.query_reproduction.json`.
+
+The fixed workload contains SGPB **67**, TPC-H **86**, TPC-DS **61**, and JOB **107**
+queries. It was curated using historical performance, not independently sampled;
+generation uses frozen definitions and policies, never experiment outputs.
+
+### 2. Build
 
 ```bash
 BUILD_TPCH=1 BUILD_TPCDS=1 GEN=ninja make release
 ```
 
-The CLI is `build/release/duckdb`. For assertions and focused C++ tests, use
-`GEN=ninja make debug`. Performance measurements require a release build.
+Builds `build/release/duckdb` with the TPC-H/TPC-DS generators enabled.
+Use a release build for performance measurements.
 
-## Benchmark inputs
-
-The current workload contains **321 SQL queries**: SGPB 67, TPC-H 86,
-TPC-DS 61, and JOB 107. SGPB uses the internal family key `graph` (61 Bitcoin
-and 6 Epinions queries). The workload contains 227 non-aggregate result queries
-and 94 aggregation queries; input shapes are 112 left-deep, 115 right-deep,
-and 94 bushy expressions. Queries and their manifest are in
-[`auto_test/outerjoin_benchmark/benchmark/`](auto_test/outerjoin_benchmark/benchmark/).
-Source queries, historical query definitions, and declarative generation policies
-are retained because the generator uses them to reproduce the workload.
-
-This is a historically curated, performance-conditioned workload. Its fixed
-membership must not be described as an independently selected evaluation sample.
-The repository contains query definitions and selection provenance, without
-historical runtime observations or performance claims. Measure each new run
-against the exact SQL identities in its manifest.
-
-The default runner uses these committed queries unchanged. To explicitly regenerate
-and verify the workload without running experiments:
+### 3. Prepare data
 
 ```bash
-bash auto_test/run_all.sh --prepare-only
+DUCKDB_BIN="$PWD/build/release/duckdb" python3 auto_test/prepare_reproduction_data.py
 ```
 
-The frozen generation policy includes the current TPC-H replacements, including
-the approved Q-H-LD-36, A-H-RD-10, and A-H-RD-11 predicates. Regeneration preserves
-all 321 SQL identities and their current content hashes; it does not restore the
-older predicates. Definitions are pinned in
-[`cohort_selectivity_20261015.json`](auto_test/outerjoin_benchmark/sources/cohort_selectivity_20261015.json).
-The verification report is written to
-`auto_test/results/plots/YYYYMMDD/query_reproduction.json` and compares every
-published benchmark file against two independent regenerations.
+Downloads checksum-verified Bitcoin, Epinions, and JOB inputs, and generates
+TPC-H/TPC-DS databases. Matching databases with reproduction metadata are reused;
+existing files are never overwritten.
 
-The generator does not read experiment outputs. Start validation with a small
-sample before running the complete corpus:
+| Environment variable | Default |
+| --- | --- |
+| `TPCH_SF`, `TPCDS_SF` | `50` |
+| `TPCH_DB`, `TPCDS_DB` | `tpch_<SF>.duckdb`, `tpcds_<SF>.duckdb` |
+| `GRAPH_DB`, `GRAPH_EPINIONS_DB` | `graph_db`, `graph_epinions.duckdb` |
+| `JOB_DB` | `job_db` |
 
-```bash
-TPCH_SF=1 TPCDS_SF=1 bash auto_test/build_db.sh all
-bash auto_test/experiment_onoff.sh --only graph --limit 3
-```
+Keep the same overrides for preparation and execution. For legacy databases
+without `.reproduction.json` metadata, use new paths or `--skip-data` after
+independently checking their identity and scale.
 
-The default experiment scales are TPC-H SF50 and TPC-DS SF50; the first command
-explicitly requests smaller databases. Existing database files are reused.
-Set `TPCH_DB`, `TPCDS_DB`, `GRAPH_DB`, `GRAPH_EPINIONS_DB`, and `JOB_DB` to override
-paths. Dataset generation, downloads, and a complete experiment can be expensive.
-
-## One-command experiment
-
-From a clean clone on Linux (Git, Bash, curl, tar, CMake, Ninja, Make and a C++17
-compiler must be available), the complete opt-in reconstruction command is:
+### 4. Run experiments
 
 ```bash
-bash auto_test/run_all.sh --bootstrap --generate-queries
-```
-
-`--bootstrap` downloads checksum-verified uv 0.8.22 and installs CPython 3.11.13
-with pinned reporting packages under ignored `auto_test/results/environment/`.
-It needs no sudo and does not change system Python. The runner then checks exact
-query reproduction, builds release, prepares both Bitcoin and Epinions plus
-TPC-H SF50, TPC-DS SF50 and JOB, runs all 321 queries, and publishes statistics
-and PDF/PNG figures. Build parallelism defaults to 8 (`JOBS` overrides it).
-
-Alternatively, install Python 3.10+ and the report dependencies with
-`python3 -m pip install -r auto_test/report_requirements.txt`. Dataset preparation
-downloads public SNAP graph files and JOB Parquet tables when absent, and generates
-TPC-H/TPC-DS through the built-in extensions. Network access and sufficient disk
-space are required. Downloads are pinned by SHA256. Database creation is staged
-and publishes only complete databases; `.reproduction.json` sidecars record
-scale, generator binary, input-checksum manifest, row counts and primary keys.
-Existing databases with matching sidecars are validated and reused. For legacy
-databases without sidecars, choose new paths or explicitly use `--skip-data`
-after independently verifying their identity; no existing database is deleted.
-
-For an intentional complete run (potentially many hours):
-
-```bash
-bash auto_test/run_all.sh
-# Reuse existing release binary and databases, using committed queries:
 bash auto_test/run_all.sh --skip-build --skip-data
-# Explicit query code generation/verification, then build + data + test + report:
-bash auto_test/run_all.sh --generate-queries
-# Generate and verify only; no benchmark execution or downloads:
-bash auto_test/run_all.sh --prepare-only
-# Inspect the command sequence without writes or executions:
-bash auto_test/run_all.sh --dry-run
 ```
 
-The entry point validates the existing SQL/manifests without regenerating them,
-builds/reuses release and databases, runs the benchmark, and publishes statistics
-and PDF/PNG figures. It does not generate LaTeX. With `--generate-queries`, it calls
-the query generator and regenerates twice in isolated directories to verify
-byte-identical SQL/manifests/query lists before the normal build/test stages.
-This reconstructs the fixed workload; it does not select new queries from runtime
-results. Default protocol: SF50 for TPC-H/TPC-DS, 32 threads, five unprofiled
-post-warmup executions (median), separate profiles, 600 seconds **per execution
-per engine**. Full correctness comparison is off in this performance workflow;
-use `--check-correctness` to enable it. The underlying harness still defaults to
-correctness checks when invoked directly. `--threads` and `--runs` change those
-settings explicitly. Database environment overrides remain supported.
+Tests the committed queries with OuterYan disabled/enabled, then generates
+statistics and figures for this run only. Warmup and profiling are excluded
+from the five-run median; use the parameters above to override defaults.
 
-Reports are written to `auto_test/results/plots/YYYYMMDD/`. Original run CSV/TXT
-and profiles remain under `auto_test/results/`. Each new run is reported alone;
-no historical measurements are silently merged. Reprocess a completed run with:
+For a small correctness check instead of the full experiment:
+
+```bash
+bash auto_test/run_all.sh --skip-build --skip-data --only graph --limit 3 --check-correctness
+```
+
+### 5. Regenerate statistics and figures
 
 ```bash
 bash auto_test/run_all.sh --report-only --csv auto_test/results/EXACT_RUN.csv --date YYYYMMDD
 ```
 
-The current reporting rule excludes any OuterYan timeout. A DuckDB-only timeout
-uses 600 seconds only when OuterYan has a completed measurement; verified
-unexecuted native-plan fallbacks contribute a speed-up of 1x, not invented
-absolute runtimes. Measured and substituted results remain distinguishable.
-The 21 both-engine timeout definitions removed from the active set remain in
-the archived predecessor. This frozen curation does not automatically remove
-new timeouts or slow results from a future run.
+Replace `EXACT_RUN.csv` and `YYYYMMDD` with the completed run and output date.
+This does not execute queries; add `--no-figures` for statistics only.
 
-See [`auto_test/README.md`](auto_test/README.md) for configuration, subset runs,
-diagnostics, and report generation.
+Reporting excludes OuterYan timeouts; DuckDB-only timeouts use **600 seconds**
+when OuterYan completed. Verified unexecuted native-plan fallbacks contribute
+**1×**, with no invented absolute runtimes; substituted and measured results
+remain distinguishable. New runs do not automatically remove slow queries.
 
-## Correctness and plan selection
-
-OFF disables only OuterYan; ON enables the normal optimizer list:
-
-```sql
-SET disabled_optimizers = 'outer_yan'; -- OFF
-SET disabled_optimizers = '';          -- ON
-```
-
-Correctness checks execute the bare query and compare complete result multisets.
-Do not wrap queries in `CREATE TABLE AS` or `COPY`, or add `LIMIT`: those changes
-can produce a different plan. The harness also records whether OuterYan was
-selected, timed out, or fell back to DuckDB.
-
-OuterYan compares its candidate with DuckDB's normally optimized join grouping.
-An identical grouping keeps the DuckDB candidate. Cost gates, applicability
-checks, and semi-join scheduling are source-level research controls. Keep both
-reduction rounds and build/probe dependencies intact when changing the engine.
-
-## Focused checks
+## Check scripts
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s auto_test -p 'test_*.py'
-build/debug/test/unittest "[outer_yan]"
-build/debug/test/unittest test/sql/optimizer/outer_yan/bitmap_budget.test
+python3 -m unittest discover -s auto_test -p 'test_*.py'
+python3 -m unittest discover -s test/scripts -p test_anonymous_source.py
 ```
 
-Script tests exercise corpus generation and the harness without a full timed
-benchmark. Some report tests require NumPy, pandas, and Matplotlib. Upstream
-`data/` and SQL test fixtures are test inputs, not generated experiment outputs.
+Checks generation, execution/reporting scripts, and publication boundaries
+without a full timed benchmark. More options: [auto_test/README.md](auto_test/README.md).
 
-## Repository and publication policy
-
-Keep engine code, tests, benchmark SQL, required scripts/configuration/templates,
-reproduction documentation, and license notices. All experiment outputs belong
-under ignored `auto_test/results/`: logs, correctness exports, EXPLAIN plans,
-traces, profiles, timing CSVs, statistics, figures, and rendered paper fragments.
-There are no exceptions for selected results or paper examples. For a custom
-output path, use an ignored directory or a location outside the repository.
-
-Local databases, downloaded datasets, build products, caches, and agent settings
-are also ignored. Query manifests and frozen selection policies describe inputs;
-they must not embed measured runtimes, observed speedups, or machine identities.
-Report templates contain placeholders rather than recorded results.
-
-Check the publication tree and create an archive without Git history or local
-outputs using:
+## Export source
 
 ```bash
 python3 scripts/anonymous_source.py --check
 python3 scripts/anonymous_source.py --output /tmp/outeryan-source.tar.gz
 ```
 
-An existing development checkout retains its original Git history and local
-configuration. Publish the checked source archive, or create a separate release
-branch with a fresh root commit and anonymous author and committer metadata.
-Point any anonymous repository mirror at that release branch. Do not distribute
-the development checkout's `.git` directory or its historical commits. No source
-export rewrites local history.
+Exports checked source without Git history or local artifacts; the output archive
+must not already exist. Results, logs, debug/trace outputs, databases, and LLM
+helper files are ignored; source, query-generation inputs, and test fixtures remain.
 
-## Source layout and attribution
+For anonymous review, publish the checked archive or the anonymous release
+history, not the development checkout's Git history or identifying repository URL.
+DuckDB attribution and component licenses are retained: [LICENSE](LICENSE),
+[CITATION.cff](CITATION.cff).
 
-- `src/optimizer/outer_yan/`: optimizer IR, passes, and plan construction.
-- `src/execution/operator/join/`: join execution and semi-join filters.
-- `auto_test/`: benchmark generation, execution, and reporting tools.
-- `test/optimizer/outer_yan/` and `test/sql/optimizer/outer_yan/`: focused tests.
-- `benchmark/`, `extension/`, and `third_party/`: retained DuckDB components.
-
-DuckDB's upstream attribution and third-party notices remain intact. See
-[`LICENSE`](LICENSE), [`CITATION.cff`](CITATION.cff), and the component licenses.
+OpenAI Codex was used to assist in preparing the code.

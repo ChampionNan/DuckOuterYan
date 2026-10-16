@@ -175,26 +175,15 @@ def build(csv_paths=None):
         statistics=stats)
 
 
-def write_outputs(out, csv_paths=None):
-    details, retired, stats, summary = build(csv_paths)
-    out.mkdir(parents=True, exist_ok=True)
-    for name, rows in (("results", details), ("retired_both_timeouts", retired), ("statistics", stats)):
-        if rows:
-            b.write_csv(out / ("plan_cohort_" + name + ".csv"), rows)
-        else:
-            with (out / ("plan_cohort_" + name + ".csv")).open("w", newline="") as handle:
-                csv.writer(handle).writerow(list(details[0]))
-    b.write_json(out / "plan_cohort_summary.json", summary)
-    return details, stats, summary
-
-
 def main():
+    # Both reporting entry points share the same compact output contract.
+    from publish_plan_cohort import publish
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--csv", type=Path, action="append", help="Explicit complete new-run CSV; no historical mixing")
     args = parser.parse_args()
     out = args.output_dir.resolve()
-    _, stats, _ = write_outputs(out, args.csv)
+    stats = publish(out, args.csv, figures=False)["statistics"]
     display = lambda value: "NA" if value is None else f"{value:.6f}"
     for row in stats:
         print(f"{row['scope']:18s} {row['family']:7s} n={row['n']:3d} "

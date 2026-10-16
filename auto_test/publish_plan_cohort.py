@@ -17,7 +17,20 @@ import report_plan_cohort as report
 FAMILIES = ("graph", "tpch", "tpcds", "job")
 PLOT_FAMILY = dict(graph="graph", tpch="TPC-H", tpcds="TPC-DS", job="JOB")
 PHASE_KEYS = ("round1", "round2", "round3", "other")
-PHASE_SELECTION = "First two in display order from each family's four phase-diverse, faster/equal representatives; prefer Other OP <=50%"
+PHASE_SELECTION = (
+    "First two in display order from each family's four phase-diverse, faster/equal representatives; "
+    "prefer Other OP <=50%. Replace the three reviewed short-running representatives with "
+    "specified complete measured pairs having both runtimes >1 s and speed-up >1."
+)
+# Presentation-only substitutions. Never change the workload or aggregate statistics.
+PHASE_REPLACEMENTS = {
+    "graph__graph__graph_chain5_converging__left_deep__rilf__20d56999__inputcap1__sel_medium":
+        "graph__graph__graph_branch5_forward__left_deep__lirf__c23c9bae__inputcap1__sel_medium",
+    "join__tpcds__sqlstorm_tpcds_28643__left_deep__ifilr__b21fdfc2__sel_low":
+        "aggregate__tpcds__recovery__q05_right_count__lrf__e314b93a__sel_medium",
+    "join__job__job_01a_skeleton__left_deep__ilfr__01bf30c5__sel_high":
+        "join__job__job_17a_movie_annotations__left_deep__irfl__4c344f38__sel_high",
+}
 
 
 def labeled_frame(details, observations):
@@ -61,7 +74,7 @@ def runtime_plot(pdf, frame):
         empty_plot(pdf, "No eligible reported speed-ups in this run")
         return
     pairs = valid.loc[valid.effective_duckdb_s.notna()]
-    figure, (left, right) = plt.subplots(1, 2, figsize=(11.0, 3.55),
+    figure, (left, right) = plt.subplots(1, 2, figsize=(10.7, 3.25),
                                        gridspec_kw={"width_ratios": [.66, 1.42]})
     figure.subplots_adjust(left=.075, right=.99, bottom=.17, top=.90, wspace=.13)
     values = pairs[["effective_duckdb_s", "effective_outeryan_s"]].to_numpy(float).ravel()
@@ -123,6 +136,7 @@ def runtime_plot(pdf, frame):
     right.set_axisbelow(True)
     right.grid(axis="x", color=".91", linewidth=.5)
     right.tick_params(direction="in", top=True, right=True)
+    right.tick_params(axis="y", pad=2)
     # Tighten the horizontal gap without changing the coordinate limits.
     right_box = right.get_position()
     right.set_position([right_box.x0 - .0035, right_box.y0, right_box.width, right_box.height])
@@ -134,18 +148,19 @@ def runtime_plot(pdf, frame):
                            markerfacecolor=".3", label=label, markersize=5)
                 for m, label in markers]
     figure.legend(handles=handles, loc="upper center", ncol=len(handles), frameon=False,
-                  bbox_to_anchor=(.53, .98), fontsize=8.5, borderaxespad=.1,
-                  handlelength=1.3, handletextpad=.45, columnspacing=1.15)
+                  bbox_to_anchor=(.53, .98), fontsize=8.2, borderaxespad=.1,
+                  handlelength=1.3, handletextpad=.45, columnspacing=1.10)
     # Keep both captions aligned, with a small point-sized gap below x labels.
     figure.canvas.draw()
     renderer = figure.canvas.get_renderer()
     label_bottom = min(axis.xaxis.label.get_window_extent(renderer).y0 for axis in (left, right))
-    title_y = (label_bottom - 4 * figure.dpi / 72) / figure.bbox.height
+    title_y = (label_bottom - 2.5 * figure.dpi / 72) / figure.bbox.height
     for axis, title in ((left, "(a) Running Time Comparison"), (right, "(b) Speed-up Comparison")):
         box = axis.get_position()
         figure.text(box.x0 + box.width / 2, title_y, title, ha="center", va="top",
-                    fontsize=9.5, fontweight="semibold")
-    plot.save_page(pdf, figure)
+                    fontsize=9.2, fontweight="semibold")
+    with plt.rc_context({"savefig.pad_inches": .04}):
+        plot.save_page(pdf, figure)
 
 
 def empty_plot(pdf, message):
@@ -259,6 +274,104 @@ def split_optimizer_representatives(reps):
     return main, [r for r in reps if r["query"] not in main_ids]
 
 
+def write_latex_tables(out, stats, phases, workload, reps):
+    """One generated table bundle; never write manuscript prose or fragments."""
+    def text(value):
+        escapes = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%",
+                   "$": r"\$", "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
+                   "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"}
+        return "".join(escapes.get(c, c) for c in str(value))
+
+    def number(value, digits=2):
+        if value is None or not math.isfinite(float(value)):
+            return "--"
+        return r"\fix{" + f"{float(value):.{digits}f}" + "}"
+
+    sections = ["% Generated tables only. Requires booktabs and graphicx.\n"
+                r"\providecommand{\fix}[1]{#1}" + "\n"]
+
+    def table(caption, headers, rows):
+        lines = [r"\begin{table*}[t]", r"\centering\scriptsize",
+                 r"\caption{" + caption + "}", r"\resizebox{\textwidth}{!}{%",
+                 r"\begin{tabular}{" + "l" * len(headers) + "}", r"\toprule",
+                 " & ".join(headers) + r" \\", r"\midrule"]
+        lines.extend(" & ".join(row) + r" \\" for row in rows)
+        lines += [r"\bottomrule", r"\end{tabular}}", r"\end{table*}"]
+        sections.append("\n".join(lines) + "\n")
+
+    for scope, label in (("all_queries", "All eligible queries"),
+                         ("outeryan_selected", "OuterYan-selected queries")):
+        rows = [[text(r["family"]), number(r["n"], 0)] +
+                [number(r[k], 4) for k in ("geomean", "min", "median", "max")]
+                for r in stats if r["scope"] == scope]
+        table("Speed-up of OuterYan over DuckDB: " + label +
+              ". DuckDB-only timeouts use a 600 s proxy; skipped fallbacks use "
+              r"$1\times$ where included. Neither is a measured pair.",
+              ["Group", "$n$", "Geomean", "Min", "Median", "Max"], rows)
+    phase_rows = []
+    for row in phases:
+        values = [row[k + "_pct"] for k in PHASE_KEYS]
+        # Largest-remainder rounding makes the displayed percentages sum to 100.
+        if all(v is not None for v in values):
+            floors = [math.floor(v * 100) for v in values]
+            missing = 10000 - sum(floors)
+            for i in sorted(range(4), key=lambda i: (-(values[i] * 100 - floors[i]), i))[:missing]:
+                floors[i] += 1
+            values = [v / 100 for v in floors]
+        phase_rows.append([text(row["family"]), number(row["n"], 0)] +
+                          [number(v) + (r"\%" if v is not None else "") for v in values])
+    table("Execution round breakdown of OuterYan (summed operator times).",
+          ["Group", "$n$", "Round 1", "Round 2", "Round 3", "Other OP"], phase_rows)
+    table("Benchmark composition.",
+          ["Group", "$n$", "Full result", "Aggregation", "Left-deep", "Right-deep", "Bushy"],
+          [[text(r["family"])] + [number(r[k], 0) for k in
+            ("n", "full_result_queries", "aggregation_queries", "left_deep", "right_deep", "bushy")]
+           for r in workload])
+    metrics = [("Running time (s)", "duckdb_s", "outeryan_s", 3),
+               ("Optimization time (ms)", "duckdb_optimizer_ms", "outeryan_optimizer_ms", 3),
+               (r"Optimization ratio (\%)", "duckdb_optimizer_percent", "outeryan_optimizer_percent", 4)]
+    for name, chosen in zip(("Main", "Additional"), split_optimizer_representatives(reps)):
+        if not chosen:
+            continue
+        rows = [["Query statistics", r"\# Tables"] + [number(r["relation_count"], 0) for r in chosen],
+                ["", r"\# Attributes"] + [number(r.get("attribute_count"), 0) for r in chosen]]
+        for label, off, on, digits in metrics:
+            rows += [[label, "DuckDB"] + [number(r[off], digits) for r in chosen],
+                     ["", "OuterYan"] + [number(r[on], digits) for r in chosen]]
+        table(name + " optimization-time representatives.",
+              ["Category", "Metric"] + [text(r["short_query"]) for r in chosen], rows)
+    (out / "tables.tex").write_text("\n".join(sections), encoding="utf-8")
+
+
+def replace_short_phase_representatives(frame, samples):
+    """Keep other sample rows intact and apply reviewed replacements when eligible."""
+    if samples.empty or not samples["query"].isin(PHASE_REPLACEMENTS).any():
+        return samples.copy()
+    eligible, _ = plot.complete_phase_rows(frame)
+    eligible = eligible.loc[
+        eligible.speedup_source.eq("measured") & eligible.profile_status.eq("OK")
+        & eligible.tm_off.gt(1) & eligible.tm_on.gt(1) & eligible.tm_off.gt(eligible.tm_on)
+    ]
+    result = []
+    used = set(samples["query"])
+    for _, original in samples.iterrows():
+        target = PHASE_REPLACEMENTS.get(original["query"])
+        replacement = eligible.loc[eligible["query"].eq(target)]
+        if len(replacement) == 1 and target not in used and replacement.iloc[0].family == original.family:
+            row = replacement.iloc[0].copy()
+            row["baseline_time_s"] = row.tm_off
+            row["baseline_threads"] = row.get("timing_threads", row.get("profile_threads"))
+            row["_phase_other_limit"] = .5
+            row["_phase_other_limit_relaxed"] = row.profile_other_ratio > .5
+            used.remove(original["query"])
+            used.add(target)
+            result.append(row)
+        else:
+            # A new run may lack a complete, faster replacement; never fabricate one.
+            result.append(original.copy())
+    return plot.pd.DataFrame(result).reset_index(drop=True)
+
+
 def phase_figure_samples(frame):
     """Keep the first two displayed rows of the existing four-query sample."""
     samples = plot.diverse_phase_samples(frame, 4, .5)
@@ -272,39 +385,46 @@ def phase_figure_samples(frame):
         ["family", "topology", "short_query"], kind="stable",
         key=lambda column: column.map(ranks[column.name]).fillna(99) if column.name in ranks else column,
     )
-    return ordered.groupby("family", sort=False).head(2).copy()
+    samples = ordered.groupby("family", sort=False).head(2).copy()
+    return replace_short_phase_representatives(frame, samples)
 
 
 def publish(out, csv_paths=None, figures=True):
     plot.MIN_RUNTIME_SECONDS = 0
-    details, stats, summary = report.write_outputs(out, csv_paths)
+    details, retired, stats, summary = report.build(csv_paths)
+    out.mkdir(parents=True, exist_ok=True)
+    report.b.write_csv(out / "plan_cohort_statistics.csv", stats)
     _, _, observations, _ = report.load_observations(csv_paths)
     frame, manifest = labeled_frame(details, observations)
     measured = frame.loc[frame.speedup_source.eq("measured")]
     summary["measurement_protocol"] = {
         key: dict(Counter(measured[key].fillna("").astype(str))) if key in measured else {}
         for key in ("timing_samples", "timing_estimator", "warmup_runs_per_side", "correctness_check", "timing_threads")}
-    frame.to_csv(out / "current_results.csv", index=False)
-    frame.loc[frame.speedup_source.eq("measured") & frame.selected_plan.eq("OUTERYAN")].to_csv(
-        out / "selected_measured_results.csv", index=False)
-    mapping = ["query", "short_query", "family", "topology", "sql_path", "sql_content_sha256"]
-    frame[mapping].to_csv(out / "query_id_map.csv", index=False)
     complete, phases, rejected = phase_summary(frame)
     report.b.write_csv(out / "phase_summary.csv", phases)
-    complete.to_csv(out / "phase_query_details.csv", index=False)
     workload, dimensions = workload_summary(manifest)
     report.b.write_csv(out / "benchmark_composition.csv", workload)
     report.b.write_csv(out / "benchmark_dimensions.csv", dimensions)
     write_shape_results(out, details, manifest)
     reps = optimizer_representatives(frame)
+    main, appendix = split_optimizer_representatives(reps)
+    main_queries = {r["query"] for r in main}
+    for row in reps:
+        row["table_group"] = "main" if row["query"] in main_queries else "appendix"
     if reps:
         report.b.write_csv(out / "optimization_representatives.csv", reps)
     else:
-        (out / "optimization_representatives.csv").write_text("query,short_query,attribute_count\n")
-    main, appendix = split_optimizer_representatives(reps)
+        (out / "optimization_representatives.csv").write_text("query,short_query,attribute_count,table_group\n")
     selection = dict(main=[r["short_query"] for r in main], appendix=[r["short_query"] for r in appendix])
     samples = phase_figure_samples(frame)
-    samples.to_csv(out / "phase_representative_queries.csv", index=False)
+    # Keep one per-query table: subsets and plot IDs can be recovered by filtering
+    # these columns, without copying the full observations into several files.
+    frame["phase_summary_included"] = frame["query"].isin(complete["query"])
+    frame["phase_figure_order"] = frame["query"].map(
+        {query: index for index, query in enumerate(samples["query"], 1)})
+    frame["optimization_table_group"] = frame["query"].map(
+        {row["query"]: row["table_group"] for row in reps}).fillna("")
+    frame.to_csv(out / "current_results.csv", index=False)
     if figures:
         plot.write_figure_pair(out, "speedup_all_queries", lambda pdf: runtime_plot(pdf, frame))
         save = plot.save_page
@@ -323,8 +443,10 @@ def publish(out, csv_paths=None, figures=True):
         else:
             plot.write_figure_pair(out, "phase_breakdown_outeryan",
                                   lambda pdf: empty_plot(pdf, "No eligible representative phase profiles in this run"))
-    # The old selected-only snapshots remain historical; these named outputs are current.
+    # Preserve exclusions and provenance in the single metadata file, not an
+    # empty or duplicate results CSV. Existing historical files are not removed.
     summary.update(phase_profiles=len(complete), phase_rejected=rejected, figures_refreshed=figures,
+                   retired_both_timeouts=retired,
                    phase_profile_policy="Complete OuterYan-selected operator profiles, including DuckDB-only timeouts; no substituted phase times",
                    phase_duckdb_timeout_profiles=int(complete.duckdb_status.eq("timeout").sum()),
                    optimization_representatives=selection, workload=workload,
@@ -333,7 +455,8 @@ def publish(out, csv_paths=None, figures=True):
                    figure_points=dict(runtime_pairs=int(frame.effective_duckdb_s.notna().sum()),
                                       ratio_points=int(frame.speedup.notna().sum())),
                    attribute_warnings=[r["query"] for r in reps if r["attribute_status"] != "OK"])
-    report.b.write_json(out / "paper_statistics.json", summary)
+    report.b.write_json(out / "report_metadata.json", summary)
+    write_latex_tables(out, stats, phases, workload, reps)
     print(f"Published {len(frame)} query records, {len(complete)} phase profiles, {len(reps)} optimizer representatives: {out}")
     return summary
 

@@ -44,7 +44,7 @@ def inventory(root):
 
 
 def first_party(path):
-    return path in {"README.md", "AUTHORS", "code_design.md"} or path.startswith((
+    return path in {"README.md", "AUTHORS"} or path.startswith((
         "auto_test/", "src/optimizer/outer_yan/", "src/include/duckdb/optimizer/outer_yan/"))
 
 

@@ -763,13 +763,14 @@ class PlotSpeedupPhaseTest(unittest.TestCase):
             PLOT.page_phase(object(), frame, "test")
         figure = save.call_args.args[1]
         try:
-            self.assertLess(figure.get_figheight(), 4.8)
+            self.assertAlmostEqual(figure.get_figheight(), 3.27)
+            self.assertAlmostEqual(figure.get_figwidth(), 15.1)
             figure.canvas.draw()
             renderer = figure.canvas.get_renderer()
             footer = next(text for text in figure.texts if text.get_text() == PLOT.QUERY_CODE_KEY)
-            for axis in figure.axes:
-                self.assertGreater(axis.xaxis.label.get_window_extent(renderer).y0,
-                                   footer.get_window_extent(renderer).y1)
+            gaps = [axis.xaxis.label.get_window_extent(renderer).y0
+                    - footer.get_window_extent(renderer).y1 for axis in figure.axes]
+            self.assertAlmostEqual(min(gaps), 3 * figure.dpi / 72)
         finally:
             plt.close(figure)
 
@@ -1455,7 +1456,14 @@ def install_sql_metadata_fixture(testcase):
         testcase.addCleanup(patcher.stop)
 
 
-class PaperStatisticsTest(unittest.TestCase):
+class ReportMetadataTest(unittest.TestCase):
+    def test_plain_report_numbers_have_no_latex_markup(self):
+        self.assertEqual(PAPER.number(None), "--")
+        self.assertEqual(PAPER.number(math.nan), "--")
+        self.assertEqual(PAPER.number(math.inf), "--")
+        self.assertEqual(PAPER.number(1.25), "1.2500")
+        self.assertEqual(PAPER.number(12, 0), "12")
+
     def setUp(self):
         install_sql_metadata_fixture(self)
 
@@ -1489,7 +1497,7 @@ class PaperStatisticsTest(unittest.TestCase):
 
     def report(self, frame=None, **kwargs):
         frame = self.frame() if frame is None else frame
-        return PAPER.build_paper_report(frame, STATS.build_statistics(frame), **kwargs)
+        return PAPER.build_report_metadata(frame, STATS.build_statistics(frame), **kwargs)
 
     def test_all_populations_threshold_and_formulas(self):
         report = self.report()
@@ -1516,7 +1524,7 @@ class PaperStatisticsTest(unittest.TestCase):
             self.assertEqual(row["attribute_count"], 5)
         self.assertEqual(report["runtime"]["all"][-1]["counts"]["fallback_skips"], 0)
 
-    def test_unchecked_runtime_profiles_and_paper_are_not_called_verified(self):
+    def test_unchecked_runtime_profiles_remain_explicit_in_metadata(self):
         frame = self.frame().iloc[:16].copy()
         frame["correct"] = "NOT-CHECKED"
         frame["correctness_check"] = "disabled"
@@ -1525,9 +1533,7 @@ class PaperStatisticsTest(unittest.TestCase):
         self.assertEqual(report["coverage"]["unchecked_measured"], 12)
         self.assertEqual(report["phase"][-1]["profiles"], 8)
         self.assertEqual(len(report["representatives"]), 8)
-        text = PAPER.composition_tex(report)
-        self.assertIn("Result equivalence was not checked for 12", text)
-        self.assertNotIn("instance is correct", text)
+        self.assertEqual(report["coverage"]["measured"], report["coverage"]["unchecked_measured"])
 
     def test_cpu_weighting_is_not_mean_of_query_percentages(self):
         frame = self.frame().iloc[:2].copy()
@@ -1548,9 +1554,9 @@ class PaperStatisticsTest(unittest.TestCase):
         report = self.report(frame)
         self.assertEqual(report["corpus"]["total"], 3)
         self.assertEqual(report["input_corpus"]["total"], 4)
-        overview = PAPER.overall_tex(report)
-        self.assertIn(r"Across the \fix{2} valid measured query instances that apply the OuterYan plan", overview)
-        self.assertIn(r"\fix{$2.8284\times$}", overview)
+        overview = report["runtime"]["outeryan_selected"][-1]
+        self.assertEqual(overview["counts"]["valid"], 2)
+        self.assertAlmostEqual(overview["speedup"]["geomean"], math.sqrt(8))
         statistics = STATS.build_statistics(frame)
         self.assertEqual(statistics["valid_queries"], 3)
         self.assertEqual(statistics["headline"]["counts"]["valid"], 2)
@@ -1564,9 +1570,9 @@ class PaperStatisticsTest(unittest.TestCase):
         self.assertEqual([row["query"] for row in first], [row["query"] for row in second])
         frame["optimizer_profile_status"] = "ERROR"
         self.assertEqual(PAPER.representatives(frame, STATS.prepare_queries(frame, "tm"), 3), [])
-        self.assertIn("unavailable", PAPER.optimization_tex(self.report(frame)))
+        self.assertEqual(self.report(frame)["representatives"], [])
 
-    def test_output_latex_and_original_data_are_preserved(self):
+    def test_metadata_only_and_original_data_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "original.csv"
@@ -1574,38 +1580,18 @@ class PaperStatisticsTest(unittest.TestCase):
             frame.to_csv(source, index=False)
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
             out = root / "out"
-            out.mkdir()
-            for name in ("benchmark_composition", "overall_performance", "runtime_by_benchmark",
-                         "phase_by_benchmark", "shape_effect", "optimization_time"):
-                (out / f"{name}.tex").write_text("obsolete generated fragment")
-            result = PAPER.write_paper_statistics(root / "out", frame, [str(source)])
-            output = (root / "out" / "paper_statistics.tex").read_text()
-            self.assertEqual([path.name for path in out.glob("*.tex")], ["paper_statistics.tex"])
-            self.assertEqual([line for line in output.splitlines()
-                              if line.startswith(tuple(f"% {index}. " for index in range(1, 7)))], [
-                "% 1. Benchmark composition",
-                "% 2. Overall performance analysis",
-                "% 3. Runtime statistics by benchmark",
-                "% 4. Phase CPU summary",
-                "% 5. Join-tree shape effect",
-                "% 6. Representative queries and optimization overhead",
-            ])
-            self.assertNotIn("\t", output)
-            self.assertNotIn("assigned the policy default", output)
-            self.assertIn("-minute per-engine statement limit", output)
-            self.assertIn(r"\fix{1} of \fix{18}", output)
-            self.assertIn(r"\# Attributes", output)
-            self.assertIn(r"\label{tab:shape-effect}", output)
-            self.assertNotIn(r"\fix{--}", output)
-            self.assertEqual(output.count(r"\begin{table}"), 3)
-            self.assertEqual(output.count(r"\begin{table*}"), 1)
-            self.assertEqual(output.count(r"\end{table}"), 3)
+            result = PAPER.write_report_metadata(out, frame, [str(source)])
+            self.assertFalse(list(out.glob("*.tex")))
             self.assertEqual(result["sources"][0]["sha256"], digest)
             self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), digest)
-            saved = json.loads((root / "out" / "paper_statistics.json").read_text())
+            saved = json.loads((out / "report_metadata.json").read_text())
             self.assertEqual(saved["coverage"]["measured"], 12)
-            self.assertEqual(PAPER.latex_escape("query_A&B%"), r"query\_A\&B\%")
-            self.assertEqual(PAPER.number(math.nan), r"\fix{--}")
+            self.assertEqual(saved, result)
+            # Existing user-authored manuscript files are not modified or removed.
+            manuscript = out / "notes.tex"
+            manuscript.write_text("user manuscript")
+            PAPER.write_report_metadata(out, frame, [str(source)])
+            self.assertEqual(manuscript.read_text(), "user manuscript")
 
     def test_real_manifest_roles_and_distinct_dimensions(self):
         provenance = PLOT.benchmark_provenance()
@@ -1765,13 +1751,13 @@ class UnifiedResultEntryTest(unittest.TestCase):
         for run in runs:
             self.assertEqual(output[run], RESULT.DEFAULT_OUTPUT_ROOT / "20260926" / run)
 
-    def test_date_only_generates_figures_statistics_and_paper(self):
+    def test_date_only_generates_figures_statistics_and_metadata_without_latex(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             results = root / "results"
             results.mkdir()
             source = results / "experiment_onoff_benchmark_20260926_110332_t32_v1.csv"
-            frame = PaperStatisticsTest.frame().iloc[:2].copy()
+            frame = ReportMetadataTest.frame().iloc[:2].copy()
             frame["profile_threads"] = 32
             frame["profile_total_time_s"] = frame["profile_cpu_time_s"]
             for _, seconds, ratio, _ in RESULT.PHASES:
@@ -1783,9 +1769,10 @@ class UnifiedResultEntryTest(unittest.TestCase):
                 self.assertEqual(RESULT.main(["--date", "2026-09-26"]), 0)
             output = results / "plots/20260926"
             for filename in ("overview.pdf", "speedup_all_queries.pdf", "speedup_all_queries.png",
-                             "phase_breakdown_outeryan.pdf", "paper_statistics.tex", "paper_statistics.json",
+                             "phase_breakdown_outeryan.pdf", "report_metadata.json",
                              "STATISTICS.md", "statistics.json", "plot_selection.json"):
                 self.assertGreater((output / filename).stat().st_size, 0, filename)
+            self.assertFalse(list(output.glob("*.tex")))
             report = json.loads((output / "statistics.json").read_text())
             self.assertEqual(report["unique_queries"], 2)
             self.assertEqual(report["groups"][0]["counts"]["measured"], 2)
@@ -1799,7 +1786,7 @@ class UnifiedResultEntryTest(unittest.TestCase):
             blocked.mkdir()
             (blocked / "__init__.py").write_text("raise RuntimeError('Matplotlib must not be loaded')\n")
             source = root / "input.csv"
-            PaperStatisticsTest.frame().iloc[:2].to_csv(source, index=False)
+            ReportMetadataTest.frame().iloc[:2].to_csv(source, index=False)
             output = root / "statistics"
             env = dict(os.environ, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1")
             result = subprocess.run([
@@ -1814,7 +1801,7 @@ class UnifiedResultEntryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "experiment_onoff_benchmark_20261002_213551_t32.csv"
-            frame = PaperStatisticsTest.frame().iloc[[3]].copy()
+            frame = ReportMetadataTest.frame().iloc[[3]].copy()
             frame["profile_threads"] = 32
             frame["profile_total_time_s"] = frame["profile_cpu_time_s"]
             for _, seconds, ratio, _ in RESULT.PHASES:
@@ -1824,7 +1811,7 @@ class UnifiedResultEntryTest(unittest.TestCase):
             self.assertEqual(RESULT.main([str(source), "--output-dir", str(output),
                                           "--include-subsecond"]), 0)
             report = json.loads((output / "statistics.json").read_text())
-            paper = json.loads((output / "paper_statistics.json").read_text())
+            paper = json.loads((output / "report_metadata.json").read_text())
             phases = json.loads((output / "phase_queries.json").read_text())
             self.assertEqual(report["valid_queries"], 1)
             self.assertEqual(report["method"]["minimum_runtime_seconds"], 0)
@@ -1832,9 +1819,7 @@ class UnifiedResultEntryTest(unittest.TestCase):
             self.assertEqual(paper["corpus"]["total"], 1)
             self.assertEqual(len(phases["queries"]), 1)
             self.assertIn("No minimum runtime filter", phases["runtime_filter"])
-            latex = (output / "paper_statistics.tex").read_text()
-            self.assertIn("retained for review", latex)
-            self.assertNotIn("at or above $1$", latex)
+            self.assertFalse(list(output.glob("*.tex")))
             self.assertEqual(RESULT.MIN_RUNTIME_SECONDS, 1)
             self.assertEqual(RESULT.build_statistics(frame)["valid_queries"], 0)
 

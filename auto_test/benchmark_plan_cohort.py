@@ -1,16 +1,13 @@
 """Frozen plan-selection cohort; keep SQL recoverable and generation result-free.
 
-Only --freeze reads measurements. Normal generation applies pinned membership,
+Generation applies pinned membership without reading measurements and
 never promotes an unmeasured candidate or treats a fallback's 1x as a timing.
 """
 from __future__ import annotations
 
-import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
-from pathlib import Path
-import shutil
 
 import balanced_benchmark as b
 import cohort_query_updates as query_updates
@@ -85,13 +82,14 @@ def same_dependency(source, target):
         return True
     if source.name != "speedup_excluded.csv":
         return False
-    # The earlier screen also records the synthetic generator's whole-file hash.
+    # The earlier screen records an older synthetic-generator source revision.
+    # Normalize only the pinned successor revision; all other fields must match.
     old, new = b.read_manifest(source), b.read_manifest(target)
     if len(old) != len(new):
         return False
     for expected, generated in zip(old, new):
         if (generated.get("source_location") == "auto_test/balanced_benchmark.py"
-                and generated.get("source_sha256") == b.digest(Path(b.__file__))):
+                and generated.get("source_sha256") == b.SYNTHETIC_SOURCE_SHA256):
             generated["source_sha256"] = expected["source_sha256"]
     return old == new
 
@@ -145,102 +143,6 @@ def deduplicate_tpcds_controls(controls):
     return sorted(retained, key=lambda row: row["query_id"])
 
 
-def freeze(source_csv, extra_csvs=()):
-    """One-time explicit import. Source hashes retained, runtime values excluded."""
-    if POLICY.exists() or ARCHIVE.exists():
-        raise ValueError("Frozen cohort already exists; refusing to overwrite")
-    corpus = b.ROOT / "benchmark"
-    rows = b.validate(corpus)
-    if len(rows) != 720:
-        raise ValueError("Expected the current full 720-query benchmark")
-    references = b.read_manifest(source_csv)
-    by_id = {r["query"]: r for r in references}
-    if len(by_id) != len(references) or set(by_id) != {r["query_id"] for r in rows}:
-        raise ValueError("Reference must cover exactly the active query identities")
-    extra_by_sha = {}
-    for path in extra_csvs:
-        for row in b.read_manifest(path):
-            if row.get("sql_content_sha256"):
-                extra_by_sha.setdefault(row["sql_content_sha256"], []).append((path, row))
-    decisions, evidence = {}, []
-    for row in rows:
-        reference = by_id[row["query_id"]]
-        source, reference_id = source_csv, reference["query"]
-        if reference.get("sql_content_sha256") != row["content_sha256"]:
-            matches = extra_by_sha.get(row["content_sha256"], [])
-            if len(matches) != 1:
-                raise ValueError("Missing exact-SQL decision for " + row["query_id"])
-            source, reference = matches[0]
-            reference_id = reference["query"]
-        if reference["selected_plan"] not in ("DUCKDB", "OUTERYAN"):
-            raise ValueError("Unknown selection: " + row["query_id"])
-        decisions[row["query_id"]] = reference
-        evidence.append(dict(query_id=row["query_id"], decision_source=str(source.relative_to(b.legacy.REPO_ROOT)),
-                             decision_query=reference_id))
-    selected = {q for q, r in decisions.items() if r["selected_plan"] == "OUTERYAN"}
-    if len(selected) != 306:
-        raise ValueError("Expected all 306 selected queries, including timeouts")
-    initial_controls = choose_controls(rows, decisions)
-    controls = {r["query_id"] for r in deduplicate_tpcds_controls(initial_controls)}
-    deduplicated = {r["query_id"] for r in initial_controls} - controls
-    retired = {q for q in selected if decisions[q].get("duckdb_status") == "timeout"
-               and decisions[q].get("outeryan_status") == "timeout"}
-    if len(retired) != RETIRED_BOTH_TIMEOUTS:
-        raise ValueError("Expected 21 selected queries with both engines timed out")
-    selected -= retired
-    selected.remove(RETIRED_JOB_QUERY)
-    selected -= RETIRED_FAMILY_MINIMA
-    members = []
-    for row, ref in zip(rows, evidence):
-        q = row["query_id"]
-        reason = decisions[q]["decision_reason"]
-        role = "selected" if q in selected else "cost_control" if q in controls else "removed"
-        removal = ""
-        if role == "removed":
-            removal = ("both_engines_timeout" if q in retired else
-                       JOB_RETIREMENT_REASON if q == RETIRED_JOB_QUERY else
-                       FAMILY_MINIMUM_RETIREMENT_REASON if q in RETIRED_FAMILY_MINIMA else
-                       DEDUP_REMOVAL_REASON if q in deduplicated else
-                       "three_relation_fallback" if int(row["relation_count"]) == 3 else
-                       "same_grouping" if reason == "DUCKDB_PLAN" else
-                       "inapplicable" if reason == "INAPPLICABLE" else
-                       "uncertainty_guard" if reason == "COST_UNCERTAIN_FILTER_AMPLIFICATION" else
-                       "cost_control_quota")
-        members.append(dict(identity(row), role=role, reference_selected_plan=decisions[q]["selected_plan"],
-                            reference_decision_reason=reason, removal_reason=removal, **{
-                                k: v for k, v in ref.items() if k != "query_id"}))
-    spec = dict(revision=REVISION, representation="frozen_workload_definition",
-                archive="revisions/pre_plan_cohort_20261014/benchmark",
-                input_manifest_sha256=b.digest(corpus / "manifest.csv"),
-                source_files=[dict(path=str(p.relative_to(b.legacy.REPO_ROOT)), sha256=b.digest(p))
-                              for p in (source_csv, *extra_csvs)],
-                reporting_rule=REPORTING_RULE,
-                control_deduplication=dict(revision=DEDUP_REVISION,
-                                           group_by=["source_seed", "tree_shape"],
-                                           before=42, retained=16, removed=26),
-                selection="Start with all 306 historically selected plans, then retire the 21 with both engines timed out. "
-                          "Retire the user-specified JOB 10a right-deep COUNT query after its measured speedup remained below 0.7x. "
-                          "Also retire the user-specified minimum-speedup query from TPC-H and JOB. "
-                          "Keep 282 selected plans, including six three-table queries and four DuckDB-only timeouts. "
-                          "Start with 65 COST_DUCKDB_BETTER controls chosen by family, tier, shape, source, size and query type. "
-                          "Keep all 23 non-TPC-DS controls; reduce TPC-DS controls from 42 to 16, one per source_seed/tree_shape. "
-                          "Consider smaller groups first, balance semantic tiers and use stable SHA256 query-ID tie-breaks. "
-                          "Do not use measured speedup or runtime to select these controls. "
-                          "Other fallbacks, including uncertainty guards, are archived. "
-                          "This is plan-selection-conditioned curation, not an unbiased workload sample.",
-                expected_counts_before=dict(Counter(r["family"] for r in rows)),
-                expected_counts_after=dict(Counter(r["family"] for r in members if r["role"] != "removed")),
-                control_counts=dict(Counter(r["family"] for r in members if r["role"] == "cost_control")),
-                members=members)
-    ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(corpus, ARCHIVE)
-    if b.digest(ARCHIVE / "manifest.csv") != spec["input_manifest_sha256"]:
-        raise ValueError("Archive copy changed")
-    b.write_json(POLICY, spec)
-    policy()
-    print("Frozen membership:", spec["expected_counts_after"], "controls:", spec["control_counts"])
-
-
 def marker(spec):
     roles = Counter(r["role"] for r in spec["members"])
     return dict(revision=spec["revision"], policy_sha256=b.digest(POLICY),
@@ -272,13 +174,13 @@ def apply(rows, output):
     old = archived_rows(spec)
     fields = list(old[0])
     normalized = {r["query_id"]: {k: str(r.get(k, "")) for k in fields} for r in rows}
-    # Synthetic graph seeds historically hashed the entire generator. Adding
-    # this membership stage changes that file, not the frozen seed or its SQL.
+    # Synthetic graph seeds historically hashed the entire generator. Its
+    # pinned successor revision has the same frozen seed definitions and SQL.
     # Preserve predecessor provenance after verifying the emitted SQL below.
     for row in old:
         generated = normalized.get(row["query_id"], {})
         if (generated.get("source_location") == "auto_test/balanced_benchmark.py"
-                and generated.get("source_sha256") == b.digest(Path(b.__file__))):
+                and generated.get("source_sha256") == b.SYNTHETIC_SOURCE_SHA256):
             generated["source_sha256"] = row["source_sha256"]
     if len(rows) != len(old) or normalized != {r["query_id"]: r for r in old}:
         raise ValueError("Cohort input differs from the frozen predecessor")
@@ -346,17 +248,3 @@ def validate(corpus):
     if summary["counts"] != spec["expected_counts_after"] or summary.get("plan_cohort") != marker(spec):
         raise ValueError("Cohort summary changed")
     return rows
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--freeze", type=Path, help="Explicit historical CSV import, once only")
-    parser.add_argument("--extra-results", type=Path, action="append", default=[])
-    parser.add_argument("--promote", action="store_true")
-    args = parser.parse_args()
-    if args.freeze:
-        freeze(args.freeze.resolve(), tuple(p.resolve() for p in args.extra_results))
-    if args.promote:
-        b.generate()
-    if not args.freeze and not args.promote:
-        print("Validated", len(validate(b.ROOT / "benchmark")), "active queries")

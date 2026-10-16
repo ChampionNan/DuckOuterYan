@@ -2,7 +2,7 @@
 """Deterministic, historically screened candidates; never invent measured eligibility.
 
 Frozen evidence is explicit research curation, not an unbiased benchmark sample.
-Generation never reads results/. Server-side qualification is a separate operation.
+Generation never reads results/. Definitions and historical exclusions are frozen inputs.
 """
 from __future__ import annotations
 
@@ -13,12 +13,9 @@ import csv
 import hashlib
 import itertools
 import json
-import math
-import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 
 import gen_outerjoin_benchmark as legacy
@@ -36,6 +33,9 @@ TARGET = 180
 QUALIFICATION_TIMEOUT_SECONDS = 600
 GRAPH_RELATION_WEIGHTS = {4: 7, 5: 3}
 GRAPH_FILTER_REVISION = "inputcap1"
+# Provenance of the frozen synthetic definitions, not a hash of this maintained
+# script. Dead-code cleanup must not alter the published benchmark metadata.
+SYNTHETIC_SOURCE_SHA256 = "fcd7ff713a225e463a48d880ff3ef2afff4094219c2bf53395acef233b7cc20b"
 HISTORICAL_ROLE = "historical_slow_baseline_case"
 HISTORICAL_CASES = {
     "q80_alt": ("derived__ojb_tpcds_q80_store_channel_alt",
@@ -150,120 +150,6 @@ def archive_current(root=ROOT):
         shutil.copytree(source, target)
 
 
-def freeze_history(root=ROOT):
-    """Explicit one-time evidence import; the portable generator uses only this pin."""
-    archive_current(root)
-    result_root = legacy.SCRIPT_DIR / "results"
-    source_paths = sorted(result_root.glob("experiment_onoff_benchmark_20260926_*_t32_*.csv"))
-    source_paths += [result_root / "experiment_onoff_benchmark_20260929_222836_t32.csv"]
-    old = root / "revisions/pre_semantic_20260925"
-    scopes = {"v1": "benchmark", "v2": "v2/benchmark", "v3_aggregation": "v3/benchmark",
-              "v3_selectivity_stress": "v3/selectivity_stress"}
-    excluded, sources = [], []
-    for path in source_paths:
-        if not path.exists():
-            raise FileNotFoundError(path)
-        logfile = path.with_suffix(".txt")
-        if not logfile.exists():
-            logfile = result_root / "server_snapshot_20260926/auto_test/results" / logfile.name
-        timeout = None
-        if logfile.exists():
-            match = re.search(r"# timeout: hard (\d+)s/statement", logfile.read_text())
-            timeout = int(match.group(1)) if match else None
-        sources.append({"csv": path.name, "sha256": digest(path), "timeout_seconds": timeout})
-        for row in read_manifest(path):
-            reason = None
-            speed = None
-            try:
-                off, on = float(row["tm_off"]), float(row["tm_on"])
-                if row["correct"] == "TRUE" and all(math.isfinite(t) and t > 0 for t in (off, on)):
-                    speed = off / on
-                    if speed < .8:
-                        reason = "measured_speedup_below_0.8"
-            except (ValueError, KeyError):
-                pass
-            if "TIMEOUT" in row.get("note", "") and timeout == 1800:
-                reason = "timeout_at_1800s"
-            if not reason:
-                continue
-            scope = scopes.get(row.get("workload_category"))
-            sqlpath = (old / scope if scope else root / "revisions" / ARCHIVE / "benchmark") / row["sql_path"]
-            sql = sqlpath.read_text(encoding="utf-8")
-            excluded.append({"family": row["family"], "query": row["query"],
-                             "source_csv": path.name, "reason": reason,
-                             "sql_fingerprint": sql_fingerprint(sql, row["family"]),
-                             "expression_fingerprint": expression_key(sql, row["family"]),
-                             "sql_path": str(sqlpath.relative_to(root)),
-                             "content_sha256": digest(sqlpath)})
-    write_json(root / "sources/balanced_exclusions.json", {
-        "policy": "Conservative exclusion of exact SQL and unchanged join expressions across all filter tiers. "
-                  "Corrected composite-key expressions are new candidates, not historical performance claims. "
-                  "600s timeouts are not treated as proven 1800s timeouts.",
-        "sources": sources, "excluded": excluded})
-    print(f"Pinned {len(excluded)} exclusion observations")
-
-
-def bootstrap_design(binary, root=ROOT):
-    """Retune high-band literals and recount base entities; no workload execution."""
-    design = json.loads((root / "sources/semantic_filter_design.json").read_text())
-    # Keep the explicit graph input-cap design when refreshing business cohorts.
-    current = json.loads(DESIGN.read_text())
-    design["profiles"]["graph_aux_source_range"] = current["profiles"]["graph_aux_source_range"]
-    design["source_adaptations"]["graph"] = current["source_adaptations"]["graph"]
-    design["revision"] = REVISION
-    design["calibration_policy"] = "Three base-entity bands (0,5%), [5,40%), [40,60%]; " \
-        "frozen local counts, mandatory target-server audit. This is a historically screened candidate corpus."
-    design["tiers"][2]["upper_bound"] = .6
-    high = {
-        "job_person_name": "(" + " OR ".join("{column} LIKE '" + c + "%'" for c in "ABCDEFGHIJKL") + ")",
-        "job_release_period": "{column} BETWEEN 1950 AND 2006",
-        "tpch_stock_available": "{column} > 4500",
-        "tpch_q05_period": "{column} >= DATE '1992-01-01' AND {column} < DATE '1995-08-01'",
-        "tpch_q07_period": "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'",
-        "tpch_q08_period": "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'",
-        "sqlstorm_shipment_period": "{column} BETWEEN DATE '1994-06-01' AND DATE '1997-12-31'",
-        "sqlstorm_order_period": "{column} BETWEEN DATE '1993-06-01' AND DATE '1996-12-31'",
-    }
-    # Three discrete info categories jump from 33% to 67%; do not claim 40–60%.
-    design["profiles"].pop("job_info_category")
-    spec = design["seeds"]["job_01a_skeleton"]
-    spec.update(profile="job_release_year", column="t.production_year",
-                adaptation="Source join graph retained; release-year cohort replaces discrete info-category "
-                           "filter because its calibrated categories jump from 33% to 67%.")
-    for name, predicate in high.items():
-        profile = design["profiles"][name]
-        profile["predicates"][2] = predicate
-        predicates = [p.format(column=profile["column"]) for p in profile["predicates"]]
-        sql = "SELECT COUNT(*) AS n," + ",".join(
-            f"COUNT(*) FILTER (WHERE {p}) AS c{i}" for i, p in enumerate(predicates))
-        sql += " FROM " + profile["calibration_from"]
-        database = Path(os.environ.get(profile["family"].upper() + "_DB",
-                                       legacy.REPO_ROOT / (profile["family"] + "_db")))
-        result = subprocess.run([str(binary), "-readonly", "-no-init", "-bail", "-json", str(database),
-                                 "-c", "SET disabled_optimizers='outer_yan'; SET threads=4; " + sql],
-                                capture_output=True, text=True, check=True, timeout=120)
-        counts = json.loads(result.stdout)[0]
-        calibration = profile["calibration"]
-        calibration.update(n=counts["n"], qualified_rows=[counts[f"c{i}"] for i in range(3)],
-                           observed_fractions=[counts[f"c{i}"]/counts["n"] for i in range(3)])
-        if not all(legacy.fraction_in_band(f, tier) for f, tier in
-                   zip(calibration["observed_fractions"], design["tiers"])):
-            raise ValueError(f"New calibration outside band: {name}: {calibration}")
-        print(name, calibration["observed_fractions"], flush=True)
-    design["curation"] = {
-        "target_per_family": TARGET, "target_per_family_tier": TARGET // 3,
-        "timeout_seconds": QUALIFICATION_TIMEOUT_SECONDS, "minimum_runtime_each_engine_exclusive": 1,
-        "minimum_speedup": .8, "target_host": "cpu9",
-        "target_repository": ".",
-        "eligibility": "Only measured pairs passing target-database selectivity audit; "
-                       "correctness is verified or explicitly NOT-CHECKED with checks disabled. "
-                       "New SQL is pending measurement, never assumed eligible.",
-        "excluded_seeds": {"tpcds_q72_fulfillment":
-            "Reduced source subgraph omits sales/inventory week constraint; historical 1800s timeouts."},
-    }
-    write_json(root / "sources/balanced_design.json", design)
-
-
 def profile_metadata(design, profile_id, column, tier):
     """Reuse formatting without changing the legacy generator's frozen design."""
     profile = design["profiles"][profile_id]
@@ -356,7 +242,7 @@ def graph_seeds():
                 predicates = tuple(f"R{parent}.dst = R{i}.{'src' if direction == 'forward' else 'dst'}"
                                    for i, parent in enumerate(parents, 2))
                 seeds.append(legacy.Seed("graph", f"graph_{topology}{n}_{direction}", "Synthetic Graph",
-                    REVISION, f"{topology}/{n}/{direction}", "auto_test/balanced_benchmark.py", digest(Path(__file__)),
+                    REVISION, f"{topology}/{n}/{direction}", "auto_test/balanced_benchmark.py", SYNTHETIC_SOURCE_SHA256,
                     topology, "Synthetic acyclic graph control; independently enumerated structure.",
                     tuple(f"R{i} R{i}" for i in range(1,n+1)), predicates, "*", tuple("ILRF"[i%4] for i in range(n-1))))
     return seeds
@@ -793,19 +679,11 @@ def validate(benchmark):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--freeze-history",action="store_true")
-    parser.add_argument("--bootstrap-design",action="store_true")
     parser.add_argument("--root",type=Path,default=ROOT)
     parser.add_argument("--per-family",type=int,default=180)
     parser.add_argument("--batch",type=int,default=0)
-    parser.add_argument("--duckdb",type=Path,default=legacy.REPO_ROOT/"build/release/duckdb")
     args=parser.parse_args()
-    if args.freeze_history:
-        freeze_history(args.root)
-    elif args.bootstrap_design:
-        bootstrap_design(args.duckdb,args.root)
-    else:
-        generate(args.root,args.per_family,args.batch)
+    generate(args.root,args.per_family,args.batch)
 
 
 if __name__=="__main__":

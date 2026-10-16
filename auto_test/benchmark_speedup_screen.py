@@ -1,29 +1,12 @@
 """Pinned, exact-SQL performance exclusions for the primary benchmark batch."""
 from collections import Counter
 import json
-import math
 
 import balanced_benchmark as b
 from workload_policy import validate_pins
 
 POLICY = b.ROOT / "sources/speedup_screen_20261008.json"
 MARKER = "speedup_screen.json"
-
-
-def below_threshold(result, threshold=.5, *, inclusive=False, allow_unchecked=False):
-    """Compare complete measurements, without mistaking disabled checks for proof."""
-    correctness_eligible = result.get("correct") == "TRUE" or (
-        allow_unchecked and result.get("correct") == "NOT-CHECKED"
-        and result.get("correctness_check") == "disabled")
-    if not correctness_eligible or result.get("timing_status") != "measured":
-        return False
-    try:
-        off, on = float(result["tm_off"]), float(result["tm_on"])
-    except (KeyError, TypeError, ValueError):
-        return False
-    if not all(math.isfinite(t) and t > 0 for t in (off, on)):
-        return False
-    return off / on <= threshold if inclusive else off / on < threshold
 
 
 def policy():

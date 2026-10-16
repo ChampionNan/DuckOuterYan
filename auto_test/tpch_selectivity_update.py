@@ -1,10 +1,6 @@
 """Pinned predicate updates for two TPC-H slots; generation never reads results."""
-import argparse
 import hashlib
 import json
-from pathlib import Path
-import shutil
-import tempfile
 
 import balanced_benchmark as b
 
@@ -107,47 +103,3 @@ def validate(corpus, rows):
     if len(paths) != 2:
         raise ValueError("Missing TPC-H replacement slot")
     return restored, paths
-
-
-def promote(corpus):
-    rows = b.validate(corpus)
-    if (corpus / MARKER).exists():
-        validate(corpus, rows)
-        return
-    original_manifest = b.digest(corpus / "manifest.csv")
-    targets = {e["original"]["path"] for e in policy()["replacements"]}
-    before = {str(p.relative_to(corpus)): b.digest(p) for p in corpus.glob("*/*.sql")}
-    with tempfile.TemporaryDirectory(prefix="tpch-selectivity-promotion-") as temporary:
-        stage = Path(temporary) / "benchmark"
-        shutil.copytree(corpus, stage)
-        updated = apply(rows, stage)
-        b.write_csv(stage / "manifest.csv", updated, list(rows[0]))
-        summary = json.loads((stage / "design_summary.json").read_text())
-        summary["tpch_selectivity_update"] = marker()
-        b.write_json(stage / "design_summary.json", summary)
-        b.validate(stage)
-        changed = {str(p.relative_to(stage)) for p in stage.rglob("*") if p.is_file()
-                   and (not (corpus / p.relative_to(stage)).exists()
-                        or p.read_bytes() != (corpus / p.relative_to(stage)).read_bytes())}
-        if changed != targets | {"manifest.csv", "design_summary.json", MARKER}:
-            raise ValueError("Unexpected files in TPC-H promotion: " + repr(changed))
-        if b.digest(corpus / "manifest.csv") != original_manifest or any(
-                b.digest(corpus / name) != sha for name, sha in before.items()):
-            raise ValueError("Active corpus changed during staging")
-        for name in sorted(changed):
-            shutil.copyfile(stage / name, corpus / name)
-    b.validate(corpus)
-    after = {str(p.relative_to(corpus)): b.digest(p) for p in corpus.glob("*/*.sql")}
-    if before.keys() != after.keys() or {k for k in before if before[k] != after[k]} != targets:
-        raise ValueError("Promotion changed unrelated SQL")
-    print("Updated G-H-LD-03 and G-H-LD-05; all 718 other SQL files unchanged.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--promote", action="store_true")
-    args = parser.parse_args()
-    if args.promote:
-        promote(b.ROOT / "benchmark")
-    else:
-        validate(b.ROOT / "benchmark", b.validate(b.ROOT / "benchmark"))

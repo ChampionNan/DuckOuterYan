@@ -49,6 +49,55 @@ class AnonymousSourceTest(unittest.TestCase):
             self.assertTrue(any("tm_off" in e for e in errors))
             self.assertTrue(any("personal absolute path" in e for e in errors))
 
+    def test_llm_files_and_diagnostic_outputs_are_ignored(self):
+        ignored = [
+            "AGENTS.md", "auto_test/AGENTS.override.md", "src/CLAUDE.md",
+            "CLAUDE.local.md", "CODEX.md", "GEMINI.md", "llms.txt", "llms-full.txt",
+            ".claude/settings.local.json", "auto_test/.codex/session.jsonl",
+            ".agents/skills/example/SKILL.md", ".cursor/rules/example.mdc",
+            ".cursorrules", ".windsurf/rules/example.md", ".windsurfrules",
+            ".aider.conf.yml", ".aider.chat.history.md", ".aider.input.history",
+            ".aider.tags.cache.v3/entry", ".github/copilot-instructions.md",
+            ".github/instructions/example.instructions.md", ".github/prompts/example.prompt.md",
+            ".github/agents/example.agent.md", ".github/skills/example/SKILL.md",
+            "auto_test/candidates/run.profiles/query.json",
+            "auto_test/candidates/run.optimizer/profile.json",
+            "auto_test/candidates/run.plans/query.txt",
+            "auto_test/candidates/run_statistics/summary.csv",
+            "auto_test/candidates/debug_output/dump.txt",
+            "auto_test/candidates/debug_dumps/plan.json",
+            "profiles/query.json", "traces/query.txt", "plots/figure.svg",
+            "reports/summary.csv", "debug_output/query.txt", "debug_dumps/plan.json",
+            "query.trace.csv", "query.profile.txt", "query.explain.txt", "query.plan.txt",
+            "paper.tex", "auto_test/paper_results_fixed_template.tex",
+            "auto_test/outerjoin_benchmark/design.tex",
+            "results/run.csv", "auto_test/results/run.csv",
+            "auto_test/nested/results/run.json",
+            "auto_test/paper_examples/README.md", "auto_test/paper_examples/run_example.py",
+            "auto_test/paper_examples/tpch/query.sql",
+            "auto_test/pg_oj_trace/witnesses.sql",
+            "auto_test/diagnostics/check.sql", "auto_test/outerjoin_query_old/tpch/query.sql",
+        ]
+        retained = [
+            "auto_test/record_reproduction_run.py", "auto_test/phase_profile.sh",
+            "src/optimizer/outer_yan/common/outer_yan_trace.cpp",
+            "src/main/query_profiler.cpp", "src/common/stacktrace.cpp",
+            "tools/shell/tests/test_prompt.py", "data/csv/auto/titlebasicsdebug.tsv",
+            "test/sql/aggregate/distinct/grouped/results/fixture.csv",
+            "auto_test/outerjoin_benchmark/benchmark/manifest.csv",
+            "auto_test/outerjoin_benchmark/sources/policy.json",
+            "auto_test/outerjoin_benchmark/benchmark/tpch/query.sql",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / ".gitignore").write_bytes((REPO / ".gitignore").read_bytes())
+            result = subprocess.run(
+                ["git", "-C", str(root), "check-ignore", "--no-index", "--stdin"],
+                input="\n".join(ignored + retained) + "\n", text=True,
+                capture_output=True, check=True)
+            self.assertEqual(set(result.stdout.splitlines()), set(ignored))
+
     def test_public_dataset_attribution_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

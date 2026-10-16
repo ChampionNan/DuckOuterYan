@@ -1,4 +1,4 @@
-"""Statistics and figures must describe one population without authoring LaTeX."""
+"""Statistics, figures and the single table bundle describe one population."""
 import json
 import math
 from pathlib import Path
@@ -10,6 +10,16 @@ import publish_plan_cohort as publish
 import report_plan_cohort as report
 import verify_benchmark_reproduction as reproduce
 from test_gen_outerjoin_benchmark import forbid_result_access
+
+TABLE_OUTPUTS = {
+    "current_results.csv", "plan_cohort_statistics.csv", "phase_summary.csv",
+    "benchmark_composition.csv", "benchmark_dimensions.csv", "shape_statistics.csv",
+    "optimization_representatives.csv", "report_metadata.json", "tables.tex",
+}
+FIGURE_OUTPUTS = {
+    stem + suffix for stem in ("speedup_all_queries", "phase_breakdown_outeryan")
+    for suffix in (".pdf", ".png")
+}
 
 
 class CohortPublicationTest(unittest.TestCase):
@@ -39,22 +49,33 @@ class CohortPublicationTest(unittest.TestCase):
             self.assertEqual(result["figure_points"], dict(runtime_pairs=282, ratio_points=321))
             self.assertEqual(result["phase_profiles"], 282)
             self.assertEqual(result["phase_duckdb_timeout_profiles"], 4)
-            samples = report.b.read_manifest(out / "phase_representative_queries.csv")
+            details = report.b.read_manifest(out / "current_results.csv")
+            samples = sorted((row for row in details if row["phase_figure_order"]),
+                             key=lambda row: float(row["phase_figure_order"]))
             self.assertEqual([row["short_query"] for row in samples], [
                 "G-G-LD-06", "G-G-RD-06", "A-H-LD-10", "Q-H-LD-24",
-                "A-D-LD-05", "Q-D-LD-13", "Q-J-LD-01", "A-J-RD-08",
+                "A-D-LD-05", "A-D-RD-06", "Q-J-LD-24", "A-J-RD-08",
             ])
             self.assertEqual(sum(r["n"] for r in result["workload"][:-1]), 321)
             ids = result["optimization_representatives"]
             self.assertEqual((len(ids["main"]), len(ids["appendix"])), (3, 9))
             self.assertFalse(set(ids["main"]) & set(ids["appendix"]))
-            self.assertEqual([p.name for p in out.glob("*.tex")], ["existing_manuscript.tex"])
+            self.assertEqual({p.name for p in out.glob("*.tex")}, {"existing_manuscript.tex", "tables.tex"})
+            tex = (out / "tables.tex").read_text()
+            self.assertEqual(tex.count(r"\begin{table*}"), 6)
+            self.assertNotIn(r"\paragraph", tex)
+            self.assertIn(r"\# Attributes", tex)
+            self.assertIn("600 s proxy", tex)
             self.assertEqual((out / "existing_manuscript.tex").read_text(), "Keep this manuscript unchanged.\n")
             self.assertFalse((out / "PAPER_UPDATE_CHECKLIST.txt").exists())
+            self.assertEqual({p.name for p in out.iterdir()}, TABLE_OUTPUTS | {"existing_manuscript.tex"})
             for r in report.b.read_manifest(out / "phase_summary.csv"):
                 self.assertAlmostEqual(sum(float(r[k + "_pct"]) for k in publish.PHASE_KEYS), 100)
             details = report.b.read_manifest(out / "current_results.csv")
             self.assertEqual(len(details), 321)
+            self.assertEqual(sum(r["phase_summary_included"] == "True" for r in details), 282)
+            reps = report.b.read_manifest(out / "optimization_representatives.csv")
+            self.assertEqual(sum(r["table_group"] == "main" for r in reps), 3)
             for r in details:
                 if r["speedup_source"] == "duckdb_timeout_600s":
                     self.assertEqual(r["duckdb_status"], "timeout")
@@ -87,6 +108,33 @@ class CohortPublicationTest(unittest.TestCase):
             reproduce.main(["--validate-only"])
             verify.assert_not_called()
 
+    def test_phase_substitutions_preserve_other_rows_and_require_measured_speedup(self):
+        original_id, replacement_id = next(iter(publish.PHASE_REPLACEMENTS.items()))
+
+        def row(query, off=3., on=2.):
+            return dict(query=query, short_query=query, family="graph", topology="left-deep",
+                        selected_plan="OUTERYAN", correct="TRUE", profile_status="OK",
+                        speedup_source="measured", tm_off=off, tm_on=on, profile_threads=32,
+                        timing_threads=32, profile_total_time_s=10., profile_cpu_time_s=10.,
+                        profile_wall_time_s=2., profile_round1_operator_s=1.,
+                        profile_round2_operator_s=2., profile_round3_operator_s=3.,
+                        profile_other_elapsed_s=4., profile_round1_ratio=.1,
+                        profile_round2_ratio=.2, profile_round3_ratio=.3, profile_other_ratio=.4)
+
+        samples = publish.plot.pd.DataFrame([row("unchanged"), row(original_id)])
+        for changes, expected in [({}, replacement_id), ({"tm_on": .1}, original_id),
+                                  ({"tm_on": 4.}, original_id),
+                                  ({"speedup_source": "duckdb_timeout_600s"}, original_id),
+                                  ({"profile_status": "ERROR"}, original_id)]:
+            candidate = row(replacement_id)
+            candidate.update(changes)
+            frame = publish.plot.pd.DataFrame([candidate])
+            result = publish.replace_short_phase_representatives(frame, samples)
+            self.assertEqual(result["query"].tolist(), ["unchanged", expected])
+            self.assertEqual(result.iloc[0].tm_on, samples.iloc[0].tm_on)
+        result = publish.replace_short_phase_representatives(samples, samples)
+        self.assertEqual(result["query"].tolist(), samples["query"].tolist())
+
     def test_plot_markers_and_panel_spacing(self):
         publish.plot._load_plotting()
         from matplotlib.collections import PathCollection
@@ -102,7 +150,7 @@ class CohortPublicationTest(unittest.TestCase):
         try:
             self.assertAlmostEqual(figure.subplotpars.wspace, .13)
             self.assertAlmostEqual(figure.subplotpars.top, .90)
-            publish.plot.np.testing.assert_allclose(figure.get_size_inches(), [11, 3.55])
+            publish.plot.np.testing.assert_allclose(figure.get_size_inches(), [10.7, 3.25])
             left, right = figure.axes[:2]
             self.assertEqual(left.get_aspect(), "auto")
             self.assertEqual(left.get_xlim(), left.get_ylim())
@@ -113,7 +161,7 @@ class CohortPublicationTest(unittest.TestCase):
             self.assertAlmostEqual(right.get_position().x0, original.x0 - .0035)
             self.assertAlmostEqual(right.get_position().width, original.width)
             self.assertAlmostEqual(right.get_position().height, original.height)
-            self.assertEqual([title.get_fontsize() for title in figure.texts], [9.5, 9.5])
+            self.assertEqual([title.get_fontsize() for title in figure.texts], [9.2, 9.2])
             self.assertEqual(figure.texts[0].get_position()[1], figure.texts[1].get_position()[1])
             self.assertEqual(left.xaxis.label.get_fontsize(), 10)
             self.assertEqual(right.get_yticklabels()[0].get_fontsize(), 9)
@@ -141,7 +189,7 @@ class CohortPublicationTest(unittest.TestCase):
             self.assertLessEqual(legend_box.x1, figure.bbox.width)
             for axis, title in zip((left, right), figure.texts):
                 self.assertGreaterEqual(axis.xaxis.label.get_window_extent(renderer).y0
-                                        - title.get_window_extent(renderer).y1, 3.9 * figure.dpi / 72)
+                                        - title.get_window_extent(renderer).y1, 2.4 * figure.dpi / 72)
             points = [c for c in figure.axes[1].collections if isinstance(c, PathCollection)]
             measured, timeout, fallback = points[:3]
             publish.plot.np.testing.assert_array_equal(measured.get_paths()[0].vertices,
@@ -208,7 +256,9 @@ class CohortPublicationTest(unittest.TestCase):
             self.assertEqual(result["phase_profiles"], 0)
             self.assertEqual(result["figure_points"]["ratio_points"], 321)
             self.assertTrue((Path(temp) / "report/speedup_all_queries.pdf").is_file())
-            self.assertFalse(list((Path(temp) / "report").glob("*.tex")))
+            self.assertEqual([p.name for p in (Path(temp) / "report").glob("*.tex")], ["tables.tex"])
+            self.assertEqual({p.name for p in (Path(temp) / "report").iterdir()},
+                             TABLE_OUTPUTS | FIGURE_OUTPUTS)
 
 
 if __name__ == "__main__":

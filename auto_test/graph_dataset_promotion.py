@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 import balanced_benchmark as b
-import prepare_graph_dataset_retest as retest
+from graph_dataset_policy import load_policy
 from benchmark_corpus import graph_query_dataset as query_dataset
 
 MARKER = "graph_dataset_promotion.json"
@@ -27,7 +27,7 @@ def candidates():
     if b.digest(CANDIDATES / "manifest.csv") != MANIFEST_SHA:
         raise ValueError("Epinions candidate manifest changed")
     rows = b.read_manifest(CANDIDATES / "manifest.csv")
-    pins = {r["query_id"]: r for r in retest.load_policy()["replacements"]}
+    pins = {r["query_id"]: r for r in load_policy()["replacements"]}
     if len(rows) != 16 or {r["graph_dataset_source_query"] for r in rows} != set(pins):
         raise ValueError("Incomplete Epinions promotion cohort")
     for row in rows:
@@ -53,36 +53,9 @@ def marker():
                 result_csv_sha256="5b054ef96e1dc6a4cbe4329f5919d6abebd98d31563eef4d415b766e1b654e05")
 
 
-def archive_sources(corpus):
-    pins = {r["query_id"]: r for r in retest.load_policy()["replacements"]}
-    rows = [r for r in b.read_manifest(corpus / "manifest.csv") if r["query_id"] in pins]
-    if not rows and (ARCHIVE / "manifest.csv").exists():
-        return archived_rows()
-    if len(rows) != len(pins):
-        raise ValueError("Missing Bitcoin promotion sources")
-    for row in rows:
-        if any(row[k] != pins[row["query_id"]][k] for k in PIN_FIELDS):
-            raise ValueError("Bitcoin metadata changed before archive")
-        if b.digest(corpus / row["path"]) != row["content_sha256"]:
-            raise ValueError("Bitcoin SQL changed before archive")
-        target = ARCHIVE / row["path"]
-        if target.exists() and b.digest(target) != row["content_sha256"]:
-            raise ValueError("Refusing to overwrite changed archived SQL")
-    if (ARCHIVE / "manifest.csv").exists():
-        if b.read_manifest(ARCHIVE / "manifest.csv") != rows:
-            raise ValueError("Refusing to overwrite changed archive manifest")
-    else:
-        for row in rows:
-            target = ARCHIVE / row["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(corpus / row["path"], target)
-        b.write_csv(ARCHIVE / "manifest.csv", rows)
-    return archived_rows()
-
-
 def archived_rows():
     rows = b.read_manifest(ARCHIVE / "manifest.csv")
-    pins = {r["query_id"]: r for r in retest.load_policy()["replacements"]}
+    pins = {r["query_id"]: r for r in load_policy()["replacements"]}
     if len(rows) != len(pins) or {r["query_id"] for r in rows} != set(pins):
         raise ValueError("Incomplete Bitcoin archive")
     for row in rows:
@@ -160,17 +133,3 @@ def validate(benchmark, rows):
     restored = [old[r["graph_dataset_source_query"]] if r["query_id"] in expected else r for r in rows]
     restored.append(old[retired["graph_dataset_source_query"]])
     return restored, {r["path"]: ARCHIVE / r["path"] for r in old.values()}
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive-sources", type=Path)
-    parser.add_argument("--query-dataset", nargs=3, metavar=("CORPUS", "PATH", "DEFAULT"))
-    args = parser.parse_args()
-    if args.archive_sources:
-        archive_sources(args.archive_sources)
-    elif args.query_dataset:
-        print(query_dataset(*args.query_dataset))
-    else:
-        parser.error("Choose --archive-sources or --query-dataset")
