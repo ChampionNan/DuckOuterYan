@@ -1,4 +1,4 @@
-# DuckOuterYan benchmark tools
+# DuckYanOuter benchmark tools
 
 Run commands from the repository root. This directory contains reusable scripts,
 benchmark SQL, input manifests, and configuration. Experimental outputs are local

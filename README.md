@@ -1,4 +1,4 @@
-# DuckOuterYan
+# DuckYanOuter
 
 ## Reproduce
 
